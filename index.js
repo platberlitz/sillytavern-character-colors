@@ -356,7 +356,16 @@ JSON:`;
                     setTimeout(() => processAll(true), 5000);
                 }
             });
-            eventSource.on(event_types.CHAT_CHANGED, () => { characterColors = {}; saveData(); updateCharacterList(); });
+            eventSource.on(event_types.CHAT_CHANGED, () => { 
+                characterColors = {}; 
+                saveData(); 
+                updateCharacterList();
+                // Clear processed flags on all messages
+                document.querySelectorAll('.mes_text').forEach(el => {
+                    delete el.dataset.ccProcessed;
+                    delete el.dataset.ccLlmDone;
+                });
+            });
         }
         
         setInterval(() => processAll(false), 2000);
