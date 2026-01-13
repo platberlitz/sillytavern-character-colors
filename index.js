@@ -1,7 +1,6 @@
 (() => {
     'use strict';
 
-    const extensionName = 'character-colors';
     let characterColors = {};
     let settings = {
         theme: 'auto',
@@ -15,10 +14,10 @@
     };
 
     let colorIndex = 0;
+    let pendingMessages = new Set();
 
     function detectTheme() {
-        const body = document.body;
-        const bg = getComputedStyle(body).backgroundColor;
+        const bg = getComputedStyle(document.body).backgroundColor;
         const rgb = bg.match(/\d+/g);
         if (rgb) {
             const brightness = (parseInt(rgb[0]) * 299 + parseInt(rgb[1]) * 587 + parseInt(rgb[2]) * 114) / 1000;
@@ -28,11 +27,8 @@
     }
 
     function getThemeColors() {
-        if (settings.theme === 'custom' && settings.customColors.length > 0) {
-            return settings.customColors;
-        }
-        const theme = settings.theme === 'auto' ? detectTheme() : settings.theme;
-        return themeColors[theme] || themeColors.dark;
+        if (settings.theme === 'custom' && settings.customColors.length > 0) return settings.customColors;
+        return themeColors[settings.theme === 'auto' ? detectTheme() : settings.theme] || themeColors.dark;
     }
 
     function getCharacterColor(name) {
@@ -40,113 +36,119 @@
             const colors = getThemeColors();
             characterColors[name] = colors[colorIndex % colors.length];
             colorIndex++;
-            saveCharacterColors();
+            saveData();
             updateCharacterList();
         }
         return characterColors[name];
     }
 
-    function setCharacterColor(name, color) {
-        characterColors[name] = color;
-        saveCharacterColors();
-        reprocessAllMessages();
-        updateCharacterList();
-    }
-
-    function saveCharacterColors() {
-        localStorage.setItem('cc_character_colors', JSON.stringify(characterColors));
-    }
-
-    function loadCharacterColors() {
-        const saved = localStorage.getItem('cc_character_colors');
-        if (saved) {
-            characterColors = JSON.parse(saved);
-            colorIndex = Object.keys(characterColors).length;
-        }
-    }
-
-    function saveSettings() {
+    function saveData() {
+        localStorage.setItem('cc_colors', JSON.stringify(characterColors));
         localStorage.setItem('cc_settings', JSON.stringify(settings));
     }
 
-    function loadSettings() {
-        const saved = localStorage.getItem('cc_settings');
-        if (saved) {
-            settings = { ...settings, ...JSON.parse(saved) };
+    function loadData() {
+        try {
+            const colors = localStorage.getItem('cc_colors');
+            const saved = localStorage.getItem('cc_settings');
+            if (colors) characterColors = JSON.parse(colors);
+            if (saved) settings = { ...settings, ...JSON.parse(saved) };
+            colorIndex = Object.keys(characterColors).length;
+        } catch (e) {}
+    }
+
+    async function extractNamesWithLLM(text) {
+        const prompt = `Extract ONLY character names (proper nouns of people/characters) from this text. Return as JSON array of strings. If none found, return []. Text:\n\n${text.substring(0, 2000)}`;
+        
+        try {
+            const response = await fetch('/api/backends/chat/completions', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    messages: [{ role: 'user', content: prompt }],
+                    max_tokens: 100,
+                    temperature: 0
+                })
+            });
+            
+            if (!response.ok) throw new Error('API failed');
+            
+            const data = await response.json();
+            const content = data.choices?.[0]?.message?.content || '[]';
+            const match = content.match(/\[.*?\]/s);
+            if (match) {
+                return JSON.parse(match[0]);
+            }
+        } catch (e) {
+            console.log('CC: LLM extraction failed, using fallback');
         }
+        
+        // Fallback: simple capitalized word detection
+        const names = [];
+        const pattern = /\b([A-Z][a-z]{2,})\b/g;
+        let m;
+        while ((m = pattern.exec(text)) !== null) {
+            const word = m[1];
+            if (!['The', 'This', 'That', 'Then', 'There', 'They', 'What', 'When', 'Where', 'Which', 'While', 'With', 'Would', 'Could', 'Should', 'Have', 'Has', 'Had', 'But', 'And', 'For', 'Not', 'You', 'Your', 'His', 'Her', 'Its', 'Our', 'Their', 'She', 'He'].includes(word)) {
+                names.push(word);
+            }
+        }
+        return [...new Set(names)];
     }
 
-    function applyColorToElement(element, color) {
-        element.style.setProperty('color', color, 'important');
-        element.style.setProperty('font-weight', 'bold', 'important');
-        element.classList.add('cc-colored');
-    }
-
-    function colorizeMessage(messageElement) {
-        if (messageElement.hasAttribute('data-cc-processed')) return;
+    function applyColorsToMessage(messageElement, names) {
+        if (!names.length) return;
         
         let html = messageElement.innerHTML;
-        if (!html) return;
-
-        // Dialogue attribution patterns: "said John", "John said", "John asked", "whispered Mary", etc.
-        const dialogueVerbs = 'said|says|asked|asks|replied|replies|whispered|whispers|shouted|shouts|muttered|mutters|exclaimed|exclaims|answered|answers|called|calls|cried|cries|murmured|murmurs|growled|growls|sighed|sighs|laughed|laughs|smiled|smiles|grinned|grins|nodded|nods|spoke|speaks|added|adds|continued|continues|began|begins|started|starts|finished|finishes|responded|responds|questioned|questions|demanded|demands|pleaded|pleads|begged|begs|offered|offers|suggested|suggests|admitted|admits|agreed|agrees|announced|announces|declared|declares|explained|explains|insisted|insists|mentioned|mentions|noted|notes|observed|observes|pointed|points|promised|promises|reassured|reassures|recalled|recalls|remarked|remarks|repeated|repeats|reported|reports|revealed|reveals|stated|states|thought|thinks|warned|warns|wondered|wonders';
         
-        // Pattern: "Name said" or "said Name" or "Name, said" etc.
-        const namePattern = new RegExp(`\\b([A-Z][a-z]+(?:\\s[A-Z][a-z]+)?)\\s+(?:${dialogueVerbs})|(?:${dialogueVerbs})\\s+([A-Z][a-z]+(?:\\s[A-Z][a-z]+)?)\\b`, 'g');
-        
-        const foundNames = new Set();
-        let match;
-        while ((match = namePattern.exec(html)) !== null) {
-            const name = match[1] || match[2];
-            if (name) foundNames.add(name);
-        }
-        
-        // Color each found name throughout the message
-        for (const name of foundNames) {
+        for (const name of names) {
             const color = getCharacterColor(name);
-            const nameRegex = new RegExp(`\\b(${name})\\b`, 'g');
-            html = html.replace(nameRegex, `<span class="cc-name" style="color: ${color} !important; font-weight: bold !important;">$1</span>`);
+            const regex = new RegExp(`\\b(${name})\\b`, 'g');
+            html = html.replace(regex, `<span class="cc-name" style="color:${color}!important;font-weight:bold!important">$1</span>`);
         }
         
-        // Color thoughts if enabled and we found at least one character
-        if (settings.colorThoughts && foundNames.size > 0) {
-            const firstChar = [...foundNames][0];
-            const color = getCharacterColor(firstChar);
-            
-            // *asterisk thoughts*
-            html = html.replace(
-                /\*([^*]+)\*/g,
-                `<span class="cc-thought" style="color: ${color} !important; opacity: 0.85 !important;">*$1*</span>`
-            );
-            // 『Japanese thoughts』
-            html = html.replace(
-                /『([^』]+)』/g,
-                `<span class="cc-thought" style="color: ${color} !important; opacity: 0.85 !important;">『$1』</span>`
-            );
+        if (settings.colorThoughts) {
+            const color = getCharacterColor(names[0]);
+            html = html.replace(/\*([^*]+)\*/g, `<span class="cc-thought" style="color:${color}!important;opacity:0.85!important">*$1*</span>`);
+            html = html.replace(/『([^』]+)』/g, `<span class="cc-thought" style="color:${color}!important;opacity:0.85!important">『$1』</span>`);
         }
         
         messageElement.innerHTML = html;
-        messageElement.setAttribute('data-cc-processed', 'true');
+        messageElement.setAttribute('data-cc-done', 'true');
+    }
+
+    async function processMessage(messageElement) {
+        if (messageElement.hasAttribute('data-cc-done')) return;
+        
+        const text = messageElement.textContent;
+        if (!text || text.length < 10) return;
+        
+        const msgId = messageElement.closest('.mes')?.getAttribute('mesid');
+        if (msgId && pendingMessages.has(msgId)) return;
+        if (msgId) pendingMessages.add(msgId);
+        
+        const names = await extractNamesWithLLM(text);
+        applyColorsToMessage(messageElement, names);
+        
+        if (msgId) pendingMessages.delete(msgId);
     }
 
     function processAllMessages() {
-        document.querySelectorAll('.mes_text, .mes_block .mes_text').forEach(msg => {
-            colorizeMessage(msg);
+        document.querySelectorAll('.mes_text:not([data-cc-done])').forEach(msg => {
+            processMessage(msg);
         });
     }
 
-    function reprocessAllMessages() {
-        document.querySelectorAll('[data-cc-processed]').forEach(el => {
-            el.removeAttribute('data-cc-processed');
-        });
+    function reprocessAll() {
+        document.querySelectorAll('[data-cc-done]').forEach(el => el.removeAttribute('data-cc-done'));
         processAllMessages();
     }
 
-    function clearAllColors() {
+    function clearColors() {
         characterColors = {};
         colorIndex = 0;
-        saveCharacterColors();
-        reprocessAllMessages();
+        saveData();
+        reprocessAll();
         updateCharacterList();
     }
 
@@ -155,165 +157,115 @@
         if (!list) return;
         
         list.innerHTML = '';
-        
-        if (Object.keys(characterColors).length === 0) {
-            list.innerHTML = '<div class="cc-no-chars">No characters detected yet</div>';
+        if (!Object.keys(characterColors).length) {
+            list.innerHTML = '<div class="cc-empty">No characters detected yet</div>';
             return;
         }
         
         for (const [name, color] of Object.entries(characterColors)) {
             const item = document.createElement('div');
-            item.className = 'cc-char-item';
+            item.className = 'cc-item';
             item.innerHTML = `
-                <span class="cc-char-name" style="color: ${color} !important;">${name}</span>
-                <input type="color" class="cc-color-picker" value="${color}" data-name="${name}">
-                <span class="cc-hex-display">${color}</span>
+                <span class="cc-name-display" style="color:${color}!important">${name}</span>
+                <input type="color" value="${color}" data-name="${name}">
+                <span class="cc-hex">${color}</span>
             `;
             list.appendChild(item);
         }
         
-        list.querySelectorAll('.cc-color-picker').forEach(picker => {
+        list.querySelectorAll('input[type="color"]').forEach(picker => {
             picker.addEventListener('input', (e) => {
                 const name = e.target.dataset.name;
-                const newColor = e.target.value.toUpperCase();
-                setCharacterColor(name, newColor);
-                e.target.nextElementSibling.textContent = newColor;
-                e.target.previousElementSibling.style.setProperty('color', newColor, 'important');
+                const color = e.target.value.toUpperCase();
+                characterColors[name] = color;
+                saveData();
+                e.target.previousElementSibling.style.color = color;
+                e.target.nextElementSibling.textContent = color;
+                reprocessAll();
             });
         });
     }
 
-    function createSettingsUI() {
+    function createUI() {
         const html = `
-            <div class="character-colors-settings">
-                <div class="cc-header">
-                    <h3>Character Dialogue Colors</h3>
-                </div>
-                
-                <div class="cc-section">
-                    <label class="cc-label">Color Theme</label>
+            <div class="cc-settings">
+                <h3>Character Dialogue Colors</h3>
+                <div class="cc-row">
+                    <label>Theme</label>
                     <select id="cc-theme">
-                        <option value="auto">Auto-detect</option>
-                        <option value="dark">Dark Mode Colors</option>
-                        <option value="light">Light Mode Colors</option>
-                        <option value="custom">Custom Palette</option>
+                        <option value="auto">Auto</option>
+                        <option value="dark">Dark</option>
+                        <option value="light">Light</option>
+                        <option value="custom">Custom</option>
                     </select>
                 </div>
-                
-                <div id="cc-custom-section" class="cc-section" style="display: none;">
-                    <label class="cc-label">Custom Colors (comma-separated hex)</label>
-                    <input type="text" id="cc-custom-input" placeholder="#FF0000, #00FF00, #0000FF">
+                <div id="cc-custom-row" class="cc-row" style="display:none">
+                    <label>Custom Colors</label>
+                    <input type="text" id="cc-custom" placeholder="#FF0000, #00FF00">
                 </div>
-                
-                <div class="cc-section">
-                    <label class="cc-checkbox-label">
-                        <input type="checkbox" id="cc-color-thoughts">
-                        <span>Color inner thoughts (*text* and 『text』)</span>
-                    </label>
+                <div class="cc-row">
+                    <label><input type="checkbox" id="cc-thoughts"> Color thoughts (*text* / 『text』)</label>
                 </div>
-                
-                <div class="cc-section">
-                    <label class="cc-label">Character Colors</label>
-                    <div class="cc-char-list-header">
-                        <span>Click color to change</span>
-                        <button id="cc-clear-all" class="cc-btn">Clear All</button>
-                    </div>
-                    <div id="cc-character-list" class="cc-character-list"></div>
+                <div class="cc-row">
+                    <label>Characters</label>
+                    <button id="cc-clear">Clear All</button>
                 </div>
+                <div id="cc-character-list"></div>
             </div>
         `;
         
-        const container = document.getElementById('extensions_settings');
-        if (container) {
-            container.insertAdjacentHTML('beforeend', html);
-        }
+        document.getElementById('extensions_settings')?.insertAdjacentHTML('beforeend', html);
         
-        // Theme selector
-        const themeSelect = document.getElementById('cc-theme');
-        themeSelect.value = settings.theme;
-        themeSelect.addEventListener('change', (e) => {
+        const theme = document.getElementById('cc-theme');
+        theme.value = settings.theme;
+        theme.onchange = (e) => {
             settings.theme = e.target.value;
-            document.getElementById('cc-custom-section').style.display = 
-                e.target.value === 'custom' ? 'block' : 'none';
-            saveSettings();
-        });
+            document.getElementById('cc-custom-row').style.display = e.target.value === 'custom' ? 'block' : 'none';
+            saveData();
+        };
+        if (settings.theme === 'custom') document.getElementById('cc-custom-row').style.display = 'block';
         
-        if (settings.theme === 'custom') {
-            document.getElementById('cc-custom-section').style.display = 'block';
-        }
+        const custom = document.getElementById('cc-custom');
+        custom.value = settings.customColors.join(', ');
+        custom.onchange = (e) => {
+            settings.customColors = e.target.value.split(',').map(c => c.trim().toUpperCase()).filter(c => /^#[0-9A-F]{6}$/.test(c));
+            saveData();
+        };
         
-        // Custom colors input
-        const customInput = document.getElementById('cc-custom-input');
-        customInput.value = settings.customColors.join(', ');
-        customInput.addEventListener('change', (e) => {
-            settings.customColors = e.target.value
-                .split(',')
-                .map(c => c.trim().toUpperCase())
-                .filter(c => /^#[0-9A-F]{6}$/.test(c));
-            saveSettings();
-        });
-        
-        // Thoughts checkbox
-        const thoughtsCheck = document.getElementById('cc-color-thoughts');
-        thoughtsCheck.checked = settings.colorThoughts;
-        thoughtsCheck.addEventListener('change', (e) => {
+        const thoughts = document.getElementById('cc-thoughts');
+        thoughts.checked = settings.colorThoughts;
+        thoughts.onchange = (e) => {
             settings.colorThoughts = e.target.checked;
-            saveSettings();
-            reprocessAllMessages();
-        });
+            saveData();
+            reprocessAll();
+        };
         
-        // Clear all button
-        document.getElementById('cc-clear-all').addEventListener('click', clearAllColors);
-        
+        document.getElementById('cc-clear').onclick = clearColors;
         updateCharacterList();
     }
 
     function init() {
-        loadSettings();
-        loadCharacterColors();
+        loadData();
         
-        // Create settings UI when extensions panel exists
-        const checkUI = setInterval(() => {
+        const waitUI = setInterval(() => {
             if (document.getElementById('extensions_settings')) {
-                clearInterval(checkUI);
-                createSettingsUI();
+                clearInterval(waitUI);
+                createUI();
             }
         }, 500);
         
-        // Process messages
-        processAllMessages();
+        // Process on new messages
+        const observer = new MutationObserver(() => setTimeout(processAllMessages, 200));
+        observer.observe(document.body, { childList: true, subtree: true });
         
-        // Watch for new messages
-        const observer = new MutationObserver((mutations) => {
-            let shouldProcess = false;
-            for (const mutation of mutations) {
-                if (mutation.addedNodes.length > 0) {
-                    shouldProcess = true;
-                    break;
-                }
-            }
-            if (shouldProcess) {
-                setTimeout(processAllMessages, 100);
-            }
-        });
+        // Initial + periodic processing
+        setTimeout(processAllMessages, 1000);
+        setInterval(processAllMessages, 3000);
         
-        observer.observe(document.body, {
-            childList: true,
-            subtree: true
-        });
-        
-        // Reprocess on chat load
-        if (typeof eventSource !== 'undefined') {
-            eventSource.on('chatLoaded', () => {
-                clearAllColors();
-            });
-        }
-        
-        // Periodic check for unprocessed messages
-        setInterval(processAllMessages, 2000);
+        // Clear on new chat
+        $(document).on('chatLoaded', clearColors);
     }
 
-    // Start when DOM ready
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', init);
     } else {
