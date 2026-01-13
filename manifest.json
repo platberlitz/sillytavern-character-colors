@@ -6,7 +6,7 @@
   "js": "index.js",
   "css": "style.css",
   "author": "platberlitz",
-  "version": "4.0.0",
+  "version": "5.0.0",
   "homePage": "https://github.com/platberlitz/sillytavern-character-colors",
-  "description": "Color character dialogue using Author's Note - no generation interruption"
+  "description": "Color dialogue via prompt injection with font tags"
 }

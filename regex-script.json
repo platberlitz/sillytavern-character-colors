@@ -1,0 +1,14 @@
+{
+  "scriptName": "Strip Font Color Tags from Context",
+  "findRegex": "<\\/?font[^>]*>",
+  "replaceString": "",
+  "trimStrings": [],
+  "placement": [2],
+  "disabled": false,
+  "markdownOnly": false,
+  "promptOnly": true,
+  "runOnEdit": false,
+  "substituteRegex": false,
+  "minDepth": null,
+  "maxDepth": null
+}
