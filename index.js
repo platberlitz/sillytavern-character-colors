@@ -373,21 +373,31 @@ JSON:`;
         if (typeof eventSource !== 'undefined' && typeof event_types !== 'undefined') {
             eventSource.on(event_types.GENERATION_ENDED, () => {
                 if (settings.autoRefresh) {
-                    setTimeout(() => processAll(true), 1500);
+                    console.log('CC: Auto-refresh triggered');
+                    const btn = document.getElementById('cc-input-btn');
+                    if (btn) btn.style.color = 'orange';
+                    
+                    setTimeout(() => {
+                        processAll(true);
+                        if (btn) btn.style.color = '';
+                    }, 1500);
                     setTimeout(() => processAll(true), 3000);
                     setTimeout(() => processAll(true), 5000);
                 }
             });
             eventSource.on(event_types.CHAT_CHANGED, () => { 
+                console.log('CC: Chat changed, clearing colors');
                 characterColors = {}; 
                 saveData(); 
                 updateCharacterList();
-                // Clear processed flags on all messages
                 document.querySelectorAll('.mes_text').forEach(el => {
                     delete el.dataset.ccProcessed;
                     delete el.dataset.ccLlmDone;
                 });
             });
+            console.log('CC: Event listeners registered');
+        } else {
+            console.log('CC: eventSource not available');
         }
         
         setInterval(() => processAll(false), 2000);
