@@ -2,56 +2,20 @@
     'use strict';
 
     let characterColors = {};
-    let settings = { 
-        colorThoughts: true,
-        themeMode: 'auto' // 'auto', 'dark', 'light', 'custom'
-    };
-    let detectedThemeColor = null;
-
-    function detectThemeColor() {
-        // Try to detect the main theme color from SillyTavern
-        const root = document.documentElement;
-        const styles = getComputedStyle(root);
-        
-        // Try various ST theme variables
-        const themeColor = styles.getPropertyValue('--SmartThemeBodyColor') ||
-                          styles.getPropertyValue('--ac-color') ||
-                          styles.getPropertyValue('--mes-bg') ||
-                          '#1a1a2e';
-        
-        detectedThemeColor = themeColor.trim();
-        
-        // Detect if dark or light
-        const bg = getComputedStyle(document.body).backgroundColor;
-        const rgb = bg.match(/\d+/g);
-        if (rgb) {
-            const brightness = (parseInt(rgb[0]) * 299 + parseInt(rgb[1]) * 587 + parseInt(rgb[2]) * 114) / 1000;
-            return brightness < 128 ? 'dark' : 'light';
-        }
-        return 'dark';
-    }
+    let settings = { colorThoughts: true, themeMode: 'auto' };
 
     function generateColor(index) {
-        const mode = settings.themeMode === 'auto' ? detectThemeColor() : settings.themeMode;
-        const isDark = mode === 'dark' || mode === 'auto';
-        
-        // Generate colors that work well with the theme
-        const goldenRatio = 0.618033988749895;
-        const hue = ((index * goldenRatio) % 1) * 360;
-        const saturation = 70 + (index % 3) * 10;
-        const lightness = isDark ? 60 + (index % 4) * 5 : 35 + (index % 4) * 5;
-        
-        return `hsl(${Math.round(hue)}, ${saturation}%, ${lightness}%)`;
+        const hue = (index * 137.508) % 360; // Golden angle
+        const isDark = settings.themeMode === 'dark' || 
+            (settings.themeMode === 'auto' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        const lightness = isDark ? 65 : 40;
+        return `hsl(${Math.round(hue)}, 75%, ${lightness}%)`;
     }
 
     function getCharacterColor(name) {
         const key = name.toLowerCase().trim();
         if (!characterColors[key]) {
-            const index = Object.keys(characterColors).length;
-            characterColors[key] = { 
-                color: generateColor(index), 
-                displayName: name 
-            };
+            characterColors[key] = { color: generateColor(Object.keys(characterColors).length), displayName: name };
             saveData();
             updateCharacterList();
         }
@@ -65,98 +29,71 @@
 
     function loadData() {
         try {
-            const colors = localStorage.getItem('cc_colors');
-            const saved = localStorage.getItem('cc_settings');
-            if (colors) characterColors = JSON.parse(colors);
-            if (saved) settings = { ...settings, ...JSON.parse(saved) };
+            const c = localStorage.getItem('cc_colors');
+            const s = localStorage.getItem('cc_settings');
+            if (c) characterColors = JSON.parse(c);
+            if (s) settings = { ...settings, ...JSON.parse(s) };
         } catch (e) {}
     }
 
-    async function extractDialogueMapWithLLM(text) {
+    async function extractDialogueMap(text) {
         if (typeof SillyTavern === 'undefined' || !SillyTavern.getContext) return null;
-        const context = SillyTavern.getContext();
-        if (!context.generateRaw) return null;
-
-        const prompt = `Analyze this roleplay text. For each piece of dialogue in "quotes", identify who said it.
-
-Return JSON: {"dialogue text": "character name", ...}
-Only include spoken dialogue in quotes, not thoughts.
-
-Text:
-${text.substring(0, 2000)}
-
-JSON:`;
+        const ctx = SillyTavern.getContext();
+        if (!ctx.generateRaw) return null;
 
         try {
-            const response = await context.generateRaw(prompt, null, false, false, '', 250);
-            const match = response.match(/\{[\s\S]*\}/);
+            const prompt = `List characters who speak dialogue in this text. Return JSON: {"quote": "speaker"}\nText: ${text.substring(0, 1500)}\nJSON:`;
+            const resp = await ctx.generateRaw(prompt, null, false, false, '', 200);
+            const match = resp.match(/\{[\s\S]*\}/);
             if (match) return JSON.parse(match[0]);
-        } catch (e) {
-            console.log('CC: LLM failed:', e);
-        }
+        } catch (e) {}
         return null;
     }
 
-    function applyColorsToElement(mesText, dialogueMap) {
-        // Get main character for thoughts
+    function applyColors(mesText, dialogueMap) {
         const mesBlock = mesText.closest('.mes');
-        let mainChar = null;
-        if (mesBlock) {
-            const nameEl = mesBlock.querySelector('.name_text');
-            if (nameEl) mainChar = nameEl.textContent.trim();
-        }
+        const mainChar = mesBlock?.querySelector('.name_text')?.textContent?.trim();
 
-        // Color thoughts in em/i tags (Japanese quotes are usually italicized)
+        // Color thoughts in em/i tags (『...』 and *...*)
         if (settings.colorThoughts && mainChar) {
             const color = getCharacterColor(mainChar);
             mesText.querySelectorAll('em, i').forEach(el => {
-                const text = el.textContent;
-                if (text.includes('『') || text.includes('*')) {
+                if (!el.dataset.ccDone) {
                     el.style.color = color;
-                    el.style.opacity = '0.8';
-                    el.classList.add('cc-thought');
+                    el.style.opacity = '0.85';
+                    el.dataset.ccDone = '1';
                 }
             });
         }
 
-        // Color dialogue quotes via text nodes
+        // Color dialogue in quotes
         const walk = document.createTreeWalker(mesText, NodeFilter.SHOW_TEXT);
-        const textNodes = [];
-        while (walk.nextNode()) textNodes.push(walk.currentNode);
+        const nodes = [];
+        while (walk.nextNode()) nodes.push(walk.currentNode);
 
-        for (const node of textNodes) {
-            const nodeText = node.nodeValue;
-            if (!/"/.test(nodeText) && !/"/.test(nodeText)) continue;
+        for (const node of nodes) {
+            const text = node.nodeValue;
+            if (!/"/.test(text) && !/"/.test(text)) continue;
 
-            const regex = /("[^"]*"|"[^"]*")/g;
-            const parts = nodeText.split(regex);
+            const parts = text.split(/("[^"]+"|"[^"]+")/g);
             if (parts.length <= 1) continue;
 
             const frag = document.createDocumentFragment();
-            
             for (const part of parts) {
                 if (!part) continue;
-                
-                const isQuote = /^"[^"]*"$/.test(part) || /^"[^"]*"$/.test(part);
-
-                if (isQuote && dialogueMap) {
-                    const innerText = part.slice(1, -1);
+                if (/^[""][^""]+[""]$/.test(part) && dialogueMap) {
+                    const inner = part.slice(1, -1).toLowerCase();
                     let speaker = null;
-                    
-                    for (const [dialogue, char] of Object.entries(dialogueMap)) {
-                        const d = dialogue.toLowerCase();
-                        const i = innerText.toLowerCase();
-                        if (i.includes(d.substring(0, 15)) || d.includes(i.substring(0, 15))) {
-                            speaker = char;
+                    for (const [d, c] of Object.entries(dialogueMap)) {
+                        if (inner.includes(d.toLowerCase().substring(0, 12)) || d.toLowerCase().includes(inner.substring(0, 12))) {
+                            speaker = c;
                             break;
                         }
                     }
-                    
                     if (speaker) {
-                        const color = getCharacterColor(speaker);
                         const span = document.createElement('span');
                         span.className = 'cc-dialogue';
-                        span.style.color = color;
+                        span.style.color = getCharacterColor(speaker);
                         span.textContent = part;
                         frag.appendChild(span);
                         continue;
@@ -164,180 +101,75 @@ JSON:`;
                 }
                 frag.appendChild(document.createTextNode(part));
             }
-            
             node.parentNode.replaceChild(frag, node);
         }
     }
 
-    async function processMessage(mesText, useLLM = false) {
-        if (mesText.dataset.ccDone) return;
-        mesText.dataset.ccDone = 'true';
-
-        const text = mesText.textContent;
-        if (!text || text.length < 20) return;
-
-        let dialogueMap = null;
-        
-        if (useLLM) {
-            dialogueMap = await extractDialogueMapWithLLM(text);
-            console.log('CC: Dialogue map:', dialogueMap);
-        }
-
-        applyColorsToElement(mesText, dialogueMap);
+    async function processMessage(el, useLLM) {
+        if (el.dataset.ccProcessed) return;
+        el.dataset.ccProcessed = '1';
+        const map = useLLM ? await extractDialogueMap(el.textContent) : null;
+        applyColors(el, map);
     }
 
-    function processAllMessages(useLLM = false) {
-        document.querySelectorAll('.mes_text:not([data-cc-done])').forEach(el => {
-            processMessage(el, useLLM);
-        });
+    function processAll(useLLM = false) {
+        document.querySelectorAll('.mes_text:not([data-cc-processed])').forEach(el => processMessage(el, useLLM));
     }
 
-    function reprocessAll() {
+    function reprocess() {
         document.querySelectorAll('.mes_text').forEach(el => {
-            delete el.dataset.ccDone;
-            el.querySelectorAll('.cc-dialogue, .cc-thought').forEach(span => {
-                span.replaceWith(document.createTextNode(span.textContent));
-            });
-            el.normalize();
+            delete el.dataset.ccProcessed;
+            el.querySelectorAll('[data-cc-done]').forEach(e => { e.style.color = ''; e.style.opacity = ''; delete e.dataset.ccDone; });
+            el.querySelectorAll('.cc-dialogue').forEach(s => s.replaceWith(document.createTextNode(s.textContent)));
         });
-        processAllMessages(true);
+        processAll(true);
     }
 
     function clearColors() {
         characterColors = {};
         saveData();
-        reprocessAll();
-        updateCharacterList();
+        reprocess();
     }
 
     function updateCharacterList() {
         const list = document.getElementById('cc-char-list');
         if (!list) return;
-        
-        list.innerHTML = '';
-        const entries = Object.entries(characterColors);
-        
-        if (!entries.length) {
-            list.innerHTML = '<small style="color:var(--SmartThemeEmColor)">No characters detected yet</small>';
-            return;
-        }
-        
-        for (const [key, data] of entries) {
-            const div = document.createElement('div');
-            div.className = 'cc-char-item';
-            div.innerHTML = `
-                <span class="cc-char-name" style="color:${data.color}">${data.displayName}</span>
-                <input type="color" value="${data.color.startsWith('hsl') ? '#888888' : data.color}" data-key="${key}">
-                <span class="cc-char-hex">${data.color}</span>
-            `;
-            list.appendChild(div);
-        }
-        
-        list.querySelectorAll('input[type="color"]').forEach(inp => {
-            inp.oninput = () => {
-                characterColors[inp.dataset.key].color = inp.value;
-                saveData();
-                reprocessAll();
-            };
-        });
+        list.innerHTML = Object.entries(characterColors).map(([k, v]) =>
+            `<div class="cc-char-item"><span style="color:${v.color}">${v.displayName}</span><input type="color" value="${v.color.startsWith('hsl')?'#888':v.color}" data-key="${k}"></div>`
+        ).join('') || '<small>No characters yet</small>';
+        list.querySelectorAll('input').forEach(i => i.oninput = () => { characterColors[i.dataset.key].color = i.value; saveData(); reprocess(); });
     }
 
     function createUI() {
-        if (document.getElementById('cc-extension')) return;
-        
-        const html = `
-        <div id="cc-extension" class="inline-drawer">
-            <div class="inline-drawer-toggle inline-drawer-header">
-                <b>Character Dialogue Colors</b>
-                <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
-            </div>
+        if (document.getElementById('cc-ext')) return;
+        const html = `<div id="cc-ext" class="inline-drawer">
+            <div class="inline-drawer-toggle inline-drawer-header"><b>Dialogue Colors</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
             <div class="inline-drawer-content">
-                <div class="cc-setting">
-                    <label>Color Mode</label>
-                    <select id="cc-theme-mode">
-                        <option value="auto">Auto (detect theme)</option>
-                        <option value="dark">Dark Mode</option>
-                        <option value="light">Light Mode</option>
-                    </select>
-                </div>
-                <div class="cc-setting">
-                    <label class="checkbox_label">
-                        <input type="checkbox" id="cc-thoughts">
-                        <span>Color inner thoughts (『』 and *asterisks*)</span>
-                    </label>
-                </div>
-                <div class="cc-setting cc-buttons">
-                    <input type="button" id="cc-refresh" class="menu_button" value="Refresh (LLM)">
-                    <input type="button" id="cc-clear" class="menu_button" value="Clear All">
-                </div>
-                <hr>
-                <div class="cc-setting">
-                    <label>Detected Characters</label>
-                    <div id="cc-char-list" class="cc-char-list"></div>
-                </div>
-            </div>
-        </div>`;
-        
-        const target = document.getElementById('extensions_settings');
-        if (target) {
-            target.insertAdjacentHTML('beforeend', html);
-            
-            // Theme mode
-            const themeSelect = document.getElementById('cc-theme-mode');
-            themeSelect.value = settings.themeMode;
-            themeSelect.onchange = (e) => {
-                settings.themeMode = e.target.value;
-                saveData();
-            };
-            
-            // Thoughts checkbox
-            const thoughtsCheck = document.getElementById('cc-thoughts');
-            thoughtsCheck.checked = settings.colorThoughts;
-            thoughtsCheck.onchange = (e) => {
-                settings.colorThoughts = e.target.checked;
-                saveData();
-                reprocessAll();
-            };
-            
-            // Buttons
-            document.getElementById('cc-refresh').onclick = reprocessAll;
-            document.getElementById('cc-clear').onclick = clearColors;
-            
-            updateCharacterList();
-        }
+                <label class="checkbox_label"><input type="checkbox" id="cc-thoughts" ${settings.colorThoughts?'checked':''}><span>Color thoughts (『』/*text*)</span></label>
+                <select id="cc-theme"><option value="auto">Auto</option><option value="dark">Dark</option><option value="light">Light</option></select>
+                <div><button id="cc-refresh" class="menu_button">Refresh</button><button id="cc-clear" class="menu_button">Clear</button></div>
+                <div id="cc-char-list"></div>
+            </div></div>`;
+        document.getElementById('extensions_settings')?.insertAdjacentHTML('beforeend', html);
+        document.getElementById('cc-thoughts').onchange = e => { settings.colorThoughts = e.target.checked; saveData(); reprocess(); };
+        document.getElementById('cc-theme').value = settings.themeMode;
+        document.getElementById('cc-theme').onchange = e => { settings.themeMode = e.target.value; saveData(); };
+        document.getElementById('cc-refresh').onclick = reprocess;
+        document.getElementById('cc-clear').onclick = clearColors;
+        updateCharacterList();
     }
 
     function init() {
-        console.log('CC: Character Dialogue Colors loaded');
         loadData();
-        detectThemeColor();
-
-        const uiCheck = setInterval(() => {
-            if (document.getElementById('extensions_settings')) {
-                clearInterval(uiCheck);
-                createUI();
-            }
-        }, 500);
-
-        // Hook into ST events
+        const wait = setInterval(() => { if (document.getElementById('extensions_settings')) { clearInterval(wait); createUI(); } }, 500);
         if (typeof eventSource !== 'undefined' && typeof event_types !== 'undefined') {
-            eventSource.on(event_types.MESSAGE_RECEIVED, () => {
-                setTimeout(() => processAllMessages(true), 500);
-            });
-            eventSource.on(event_types.CHAT_CHANGED, () => {
-                characterColors = {};
-                saveData();
-                updateCharacterList();
-            });
+            eventSource.on(event_types.MESSAGE_RECEIVED, () => setTimeout(() => processAll(true), 500));
+            eventSource.on(event_types.CHAT_CHANGED, () => { characterColors = {}; saveData(); updateCharacterList(); });
         }
-
-        setInterval(() => processAllMessages(false), 2000);
-        setTimeout(() => processAllMessages(false), 1000);
+        setInterval(() => processAll(false), 2000);
+        setTimeout(() => processAll(false), 1000);
     }
 
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', init);
-    } else {
-        init();
-    }
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+    else init();
 })();
