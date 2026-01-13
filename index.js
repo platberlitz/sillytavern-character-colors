@@ -6,8 +6,7 @@
     let settings = { 
         enabled: true,
         colorThoughts: true,
-        themeMode: 'auto',
-        minColorDistance: 40
+        themeMode: 'auto'
     };
 
     function hslToHex(h, s, l) {
@@ -21,47 +20,12 @@
         return `#${f(0)}${f(8)}${f(4)}`;
     }
 
-    function hexToHsl(hex) {
-        const r = parseInt(hex.slice(1, 3), 16) / 255;
-        const g = parseInt(hex.slice(3, 5), 16) / 255;
-        const b = parseInt(hex.slice(5, 7), 16) / 255;
-        const max = Math.max(r, g, b), min = Math.min(r, g, b);
-        let h, s, l = (max + min) / 2;
-        if (max === min) {
-            h = s = 0;
-        } else {
-            const d = max - min;
-            s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
-            switch (max) {
-                case r: h = ((g - b) / d + (g < b ? 6 : 0)) / 6; break;
-                case g: h = ((b - r) / d + 2) / 6; break;
-                case b: h = ((r - g) / d + 4) / 6; break;
-            }
-        }
-        return [h * 360, s * 100, l * 100];
-    }
-
-    function colorDistance(c1, c2) {
-        const [h1, s1, l1] = hexToHsl(c1);
-        const [h2, s2, l2] = hexToHsl(c2);
-        const dh = Math.min(Math.abs(h1 - h2), 360 - Math.abs(h1 - h2));
-        return Math.sqrt(dh * dh * 0.5 + (s1 - s2) * (s1 - s2) + (l1 - l2) * (l1 - l2));
-    }
-
     function generateColor() {
         const hue = Math.random() * 360;
         const sat = 65 + Math.random() * 20;
         const mode = settings.themeMode === 'auto' ? detectTheme() : settings.themeMode;
         const light = mode === 'dark' ? 60 + Math.random() * 15 : 35 + Math.random() * 15;
-        const color = hslToHex(hue, sat, light);
-        
-        const existingColors = Object.values(characterColors).map(c => c.color);
-        let attempts = 0;
-        while (attempts < 20 && existingColors.some(c => colorDistance(color, c) < settings.minColorDistance)) {
-            const newHue = (hue + 30 + Math.random() * 60) % 360;
-            return hslToHex(newHue, sat, light);
-        }
-        return color;
+        return hslToHex(hue, sat, light);
     }
 
     function detectTheme() {
