@@ -1,56 +1,86 @@
 (() => {
     'use strict';
 
-    const extensionName = 'character-colors';
     let characterColors = {};
-    let settings = { colorThoughts: true };
-    let isProcessing = false;
+    let settings = { 
+        colorThoughts: true,
+        themeMode: 'auto' // 'auto', 'dark', 'light', 'custom'
+    };
+    let detectedThemeColor = null;
 
-    function generateRandomColor() {
-        const hue = Math.floor(Math.random() * 360);
-        return `hsl(${hue}, 80%, 65%)`;
+    function detectThemeColor() {
+        // Try to detect the main theme color from SillyTavern
+        const root = document.documentElement;
+        const styles = getComputedStyle(root);
+        
+        // Try various ST theme variables
+        const themeColor = styles.getPropertyValue('--SmartThemeBodyColor') ||
+                          styles.getPropertyValue('--ac-color') ||
+                          styles.getPropertyValue('--mes-bg') ||
+                          '#1a1a2e';
+        
+        detectedThemeColor = themeColor.trim();
+        
+        // Detect if dark or light
+        const bg = getComputedStyle(document.body).backgroundColor;
+        const rgb = bg.match(/\d+/g);
+        if (rgb) {
+            const brightness = (parseInt(rgb[0]) * 299 + parseInt(rgb[1]) * 587 + parseInt(rgb[2]) * 114) / 1000;
+            return brightness < 128 ? 'dark' : 'light';
+        }
+        return 'dark';
+    }
+
+    function generateColor(index) {
+        const mode = settings.themeMode === 'auto' ? detectThemeColor() : settings.themeMode;
+        const isDark = mode === 'dark' || mode === 'auto';
+        
+        // Generate colors that work well with the theme
+        const goldenRatio = 0.618033988749895;
+        const hue = ((index * goldenRatio) % 1) * 360;
+        const saturation = 70 + (index % 3) * 10;
+        const lightness = isDark ? 60 + (index % 4) * 5 : 35 + (index % 4) * 5;
+        
+        return `hsl(${Math.round(hue)}, ${saturation}%, ${lightness}%)`;
     }
 
     function getCharacterColor(name) {
         const key = name.toLowerCase().trim();
         if (!characterColors[key]) {
-            characterColors[key] = { color: generateRandomColor(), displayName: name };
-            saveColors();
+            const index = Object.keys(characterColors).length;
+            characterColors[key] = { 
+                color: generateColor(index), 
+                displayName: name 
+            };
+            saveData();
             updateCharacterList();
         }
         return characterColors[key].color;
     }
 
-    function saveColors() {
-        localStorage.setItem('cc_character_colors', JSON.stringify(characterColors));
+    function saveData() {
+        localStorage.setItem('cc_colors', JSON.stringify(characterColors));
+        localStorage.setItem('cc_settings', JSON.stringify(settings));
     }
 
-    function loadColors() {
+    function loadData() {
         try {
-            const saved = localStorage.getItem('cc_character_colors');
-            if (saved) characterColors = JSON.parse(saved);
+            const colors = localStorage.getItem('cc_colors');
+            const saved = localStorage.getItem('cc_settings');
+            if (colors) characterColors = JSON.parse(colors);
+            if (saved) settings = { ...settings, ...JSON.parse(saved) };
         } catch (e) {}
     }
 
-    // Use SillyTavern's generateRaw to ask LLM for character names AND their dialogue
-    async function extractCharactersWithLLM(text) {
-        if (typeof SillyTavern === 'undefined' || !SillyTavern.getContext) {
-            console.log('CC: SillyTavern context not available');
-            return null;
-        }
-
+    async function extractDialogueMapWithLLM(text) {
+        if (typeof SillyTavern === 'undefined' || !SillyTavern.getContext) return null;
         const context = SillyTavern.getContext();
-        if (!context.generateRaw) {
-            console.log('CC: generateRaw not available');
-            return null;
-        }
+        if (!context.generateRaw) return null;
 
-        const prompt = `Analyze this roleplay text and identify which character speaks each piece of dialogue (in quotes).
+        const prompt = `Analyze this roleplay text. For each piece of dialogue in "quotes", identify who said it.
 
-Return a JSON object mapping each dialogue quote to the character who said it.
-Format: {"dialogue text": "character name", ...}
-
-Only include actual spoken dialogue in "quotes", not thoughts in 『』 or *asterisks*.
+Return JSON: {"dialogue text": "character name", ...}
+Only include spoken dialogue in quotes, not thoughts.
 
 Text:
 ${text.substring(0, 2000)}
@@ -58,39 +88,13 @@ ${text.substring(0, 2000)}
 JSON:`;
 
         try {
-            const response = await context.generateRaw(prompt, null, false, false, '', 200);
-            console.log('CC: LLM response:', response);
-            
-            // Extract JSON object from response
-            const match = response.match(/\{[\s\S]*?\}/);
-            if (match) {
-                return JSON.parse(match[0]);
-            }
+            const response = await context.generateRaw(prompt, null, false, false, '', 250);
+            const match = response.match(/\{[\s\S]*\}/);
+            if (match) return JSON.parse(match[0]);
         } catch (e) {
-            console.log('CC: LLM extraction failed:', e);
+            console.log('CC: LLM failed:', e);
         }
-        
         return null;
-    }
-
-    // Fallback: simple pattern-based extraction
-    function extractCharactersFallback(text) {
-        const names = new Set();
-        const patterns = [
-            /\b([A-Z][a-z]{2,})\s+(?:said|says|asked|whispered|replied|called|shouted|murmured|added|continued)/gi,
-            /(?:said|asked|whispered|replied)\s+([A-Z][a-z]{2,})\b/gi,
-            /\b([A-Z][a-z]{2,})'s\s+voice\b/gi,
-        ];
-        
-        const exclude = ['The', 'This', 'That', 'Then', 'There', 'They', 'What', 'When', 'Where', 'Which', 'While', 'With', 'Would', 'Could', 'Should', 'Have', 'Just', 'But', 'And', 'For', 'Not', 'You', 'Your', 'His', 'Her', 'Its', 'Our', 'Their', 'She', 'God', 'Yes', 'Now', 'Good'];
-        
-        for (const p of patterns) {
-            let m;
-            while ((m = p.exec(text)) !== null) {
-                if (m[1] && !exclude.includes(m[1])) names.add(m[1]);
-            }
-        }
-        return [...names];
     }
 
     function applyColorsToElement(mesText, dialogueMap) {
@@ -108,8 +112,9 @@ JSON:`;
 
         for (const node of textNodes) {
             const nodeText = node.nodeValue;
-            if (!nodeText.match(/[""]|『|\*/)) continue;
+            if (!nodeText.match(/[""『\*]/)) continue;
 
+            // Split on quotes, Japanese quotes, and asterisks
             const parts = nodeText.split(/("[^"]*"|"[^"]*"|『[^』]*』|\*[^\*]+\*)/g);
             if (parts.length <= 1) continue;
 
@@ -120,7 +125,7 @@ JSON:`;
                 
                 const isQuote = /^[""][^""]*[""]$/.test(part);
                 const isJpQuote = /^『[^』]*』$/.test(part);
-                const isThought = /^\*[^\*]+\*$/.test(part);
+                const isAsterisk = /^\*[^\*]+\*$/.test(part);
 
                 if (isQuote) {
                     // Find speaker from dialogueMap
@@ -128,9 +133,10 @@ JSON:`;
                     let speaker = null;
                     
                     if (dialogueMap) {
-                        // Look for matching dialogue in map
                         for (const [dialogue, char] of Object.entries(dialogueMap)) {
-                            if (innerText.includes(dialogue.substring(0, 20)) || dialogue.includes(innerText.substring(0, 20))) {
+                            const d = dialogue.toLowerCase();
+                            const i = innerText.toLowerCase();
+                            if (i.includes(d.substring(0, 15)) || d.includes(i.substring(0, 15))) {
                                 speaker = char;
                                 break;
                             }
@@ -147,15 +153,19 @@ JSON:`;
                     } else {
                         frag.appendChild(document.createTextNode(part));
                     }
-                } else if ((isJpQuote || isThought) && settings.colorThoughts && mainChar) {
-                    // Thoughts use main character (message sender) color
-                    const color = getCharacterColor(mainChar);
-                    const span = document.createElement('span');
-                    span.className = 'cc-thought';
-                    span.style.color = color;
-                    span.style.opacity = '0.85';
-                    span.textContent = part;
-                    frag.appendChild(span);
+                } else if (isJpQuote || isAsterisk) {
+                    // Thoughts - use main character color
+                    if (settings.colorThoughts && mainChar) {
+                        const color = getCharacterColor(mainChar);
+                        const span = document.createElement('span');
+                        span.className = 'cc-thought';
+                        span.style.color = color;
+                        span.style.opacity = '0.8';
+                        span.textContent = part;
+                        frag.appendChild(span);
+                    } else {
+                        frag.appendChild(document.createTextNode(part));
+                    }
                 } else {
                     frag.appendChild(document.createTextNode(part));
                 }
@@ -175,25 +185,11 @@ JSON:`;
         let dialogueMap = null;
         
         if (useLLM) {
-            dialogueMap = await extractCharactersWithLLM(text);
-            console.log('CC: LLM dialogue map:', dialogueMap);
-        }
-        
-        if (!dialogueMap) {
-            // Fallback: use pattern matching to build a simple map
-            const characters = extractCharactersFallback(text);
-            console.log('CC: Fallback found characters:', characters);
-            if (characters.length) {
-                dialogueMap = {};
-                // Simple fallback: attribute all dialogue to first found character
-                const quotes = text.match(/"[^"]+"|"[^"]+"/g) || [];
-                quotes.forEach(q => dialogueMap[q.slice(1,-1)] = characters[0]);
-            }
+            dialogueMap = await extractDialogueMapWithLLM(text);
+            console.log('CC: Dialogue map:', dialogueMap);
         }
 
-        if (dialogueMap && Object.keys(dialogueMap).length) {
-            applyColorsToElement(mesText, dialogueMap);
-        }
+        applyColorsToElement(mesText, dialogueMap);
     }
 
     function processAllMessages(useLLM = false) {
@@ -215,7 +211,7 @@ JSON:`;
 
     function clearColors() {
         characterColors = {};
-        saveColors();
+        saveData();
         reprocessAll();
         updateCharacterList();
     }
@@ -228,16 +224,17 @@ JSON:`;
         const entries = Object.entries(characterColors);
         
         if (!entries.length) {
-            list.innerHTML = '<div style="color:#888;font-style:italic">No characters yet</div>';
+            list.innerHTML = '<small style="color:var(--SmartThemeEmColor)">No characters detected yet</small>';
             return;
         }
         
         for (const [key, data] of entries) {
             const div = document.createElement('div');
-            div.style.cssText = 'display:flex;align-items:center;gap:8px;margin:4px 0';
+            div.className = 'cc-char-item';
             div.innerHTML = `
-                <span style="color:${data.color};font-weight:bold">${data.displayName}</span>
-                <input type="color" value="${data.color.startsWith('hsl') ? '#888' : data.color}" data-key="${key}" style="width:30px;height:24px">
+                <span class="cc-char-name" style="color:${data.color}">${data.displayName}</span>
+                <input type="color" value="${data.color.startsWith('hsl') ? '#888888' : data.color}" data-key="${key}">
+                <span class="cc-char-hex">${data.color}</span>
             `;
             list.appendChild(div);
         }
@@ -245,46 +242,82 @@ JSON:`;
         list.querySelectorAll('input[type="color"]').forEach(inp => {
             inp.oninput = () => {
                 characterColors[inp.dataset.key].color = inp.value;
-                saveColors();
+                saveData();
                 reprocessAll();
             };
         });
     }
 
     function createUI() {
-        if (document.getElementById('cc-panel')) return;
+        if (document.getElementById('cc-extension')) return;
         
         const html = `
-        <div id="cc-panel" class="cc-settings" style="margin:10px 0;padding:10px;border:1px solid #444;border-radius:5px">
-            <h4 style="margin:0 0 10px 0">Character Dialogue Colors</h4>
-            <label style="display:block;margin:5px 0">
-                <input type="checkbox" id="cc-thoughts" checked> Color thoughts
-            </label>
-            <div style="margin:10px 0">
-                <button id="cc-clear" style="margin-right:5px">Clear</button>
-                <button id="cc-refresh">Refresh (LLM)</button>
+        <div id="cc-extension" class="inline-drawer">
+            <div class="inline-drawer-toggle inline-drawer-header">
+                <b>Character Dialogue Colors</b>
+                <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
             </div>
-            <div id="cc-char-list" style="max-height:150px;overflow-y:auto"></div>
+            <div class="inline-drawer-content">
+                <div class="cc-setting">
+                    <label>Color Mode</label>
+                    <select id="cc-theme-mode">
+                        <option value="auto">Auto (detect theme)</option>
+                        <option value="dark">Dark Mode</option>
+                        <option value="light">Light Mode</option>
+                    </select>
+                </div>
+                <div class="cc-setting">
+                    <label class="checkbox_label">
+                        <input type="checkbox" id="cc-thoughts">
+                        <span>Color inner thoughts (『』 and *asterisks*)</span>
+                    </label>
+                </div>
+                <div class="cc-setting cc-buttons">
+                    <input type="button" id="cc-refresh" class="menu_button" value="Refresh (LLM)">
+                    <input type="button" id="cc-clear" class="menu_button" value="Clear All">
+                </div>
+                <hr>
+                <div class="cc-setting">
+                    <label>Detected Characters</label>
+                    <div id="cc-char-list" class="cc-char-list"></div>
+                </div>
+            </div>
         </div>`;
         
         const target = document.getElementById('extensions_settings');
         if (target) {
             target.insertAdjacentHTML('beforeend', html);
-            document.getElementById('cc-clear').onclick = clearColors;
-            document.getElementById('cc-refresh').onclick = () => reprocessAll();
-            document.getElementById('cc-thoughts').onchange = (e) => {
+            
+            // Theme mode
+            const themeSelect = document.getElementById('cc-theme-mode');
+            themeSelect.value = settings.themeMode;
+            themeSelect.onchange = (e) => {
+                settings.themeMode = e.target.value;
+                saveData();
+            };
+            
+            // Thoughts checkbox
+            const thoughtsCheck = document.getElementById('cc-thoughts');
+            thoughtsCheck.checked = settings.colorThoughts;
+            thoughtsCheck.onchange = (e) => {
                 settings.colorThoughts = e.target.checked;
+                saveData();
                 reprocessAll();
             };
+            
+            // Buttons
+            document.getElementById('cc-refresh').onclick = reprocessAll;
+            document.getElementById('cc-clear').onclick = clearColors;
+            
             updateCharacterList();
         }
     }
 
     function init() {
-        console.log('CC: Character Dialogue Colors extension loaded');
-        loadColors();
+        console.log('CC: Character Dialogue Colors loaded');
+        loadData();
+        detectThemeColor();
 
-        // Wait for extensions panel
         const uiCheck = setInterval(() => {
             if (document.getElementById('extensions_settings')) {
                 clearInterval(uiCheck);
@@ -292,31 +325,19 @@ JSON:`;
             }
         }, 500);
 
-        // Hook into SillyTavern events if available
+        // Hook into ST events
         if (typeof eventSource !== 'undefined' && typeof event_types !== 'undefined') {
-            console.log('CC: Hooking into SillyTavern events');
-            
-            // Process new messages
-            eventSource.on(event_types.MESSAGE_RECEIVED, async (messageId) => {
-                console.log('CC: MESSAGE_RECEIVED event', messageId);
+            eventSource.on(event_types.MESSAGE_RECEIVED, () => {
                 setTimeout(() => processAllMessages(true), 500);
             });
-            
-            // Clear on chat change
             eventSource.on(event_types.CHAT_CHANGED, () => {
-                console.log('CC: CHAT_CHANGED event');
                 characterColors = {};
-                saveColors();
+                saveData();
                 updateCharacterList();
             });
-        } else {
-            console.log('CC: SillyTavern events not available, using polling');
         }
 
-        // Fallback: periodic processing
         setInterval(() => processAllMessages(false), 2000);
-        
-        // Initial processing
         setTimeout(() => processAllMessages(false), 1000);
     }
 

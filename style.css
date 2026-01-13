@@ -1,102 +1,103 @@
-/* Character Colors - CSS Only Styling */
+/* Character Dialogue Colors - SillyTavern Extension Styles */
 
-.cc-dialogue {
-    text-shadow: 1px 1px 2px rgba(0,0,0,0.4) !important;
+#cc-extension {
+    margin: 0;
 }
 
-.cc-thought {
-    text-shadow: 1px 1px 2px rgba(0,0,0,0.4) !important;
-    font-style: italic !important;
+#cc-extension .inline-drawer-content {
+    padding: 10px;
 }
 
-.cc-settings {
-    margin: 10px 0;
-    padding: 15px;
-    border: 1px solid var(--SmartThemeBorderColor, #444);
-    border-radius: 8px;
-    background: var(--SmartThemeBlurTintColor, rgba(0,0,0,0.3));
+.cc-setting {
+    margin: 8px 0;
 }
 
-.cc-settings h3 {
-    margin: 0 0 12px 0;
-    color: var(--SmartThemeBodyColor, #fff);
-}
-
-.cc-row {
-    margin: 10px 0;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-}
-
-.cc-row label {
-    color: var(--SmartThemeBodyColor, #ccc);
+.cc-setting label {
+    display: block;
+    margin-bottom: 4px;
+    color: var(--SmartThemeEmColor);
     font-size: 0.9em;
 }
 
-.cc-row select, .cc-row input[type="text"] {
-    flex: 1;
-    padding: 6px 10px;
-    border: 1px solid var(--SmartThemeBorderColor, #555);
-    border-radius: 4px;
-    background: var(--SmartThemeBlurTintColor, rgba(0,0,0,0.5));
-    color: var(--SmartThemeBodyColor, #fff);
+.cc-setting select {
+    width: 100%;
+    padding: 6px 8px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 5px;
+    background: var(--SmartThemeBlurTintColor);
+    color: var(--SmartThemeBodyColor);
 }
 
-.cc-row button {
-    padding: 5px 12px;
-    border: 1px solid var(--SmartThemeBorderColor, #555);
-    border-radius: 4px;
-    background: rgba(0,0,0,0.3);
-    color: var(--SmartThemeBodyColor, #ccc);
-    cursor: pointer;
-}
-
-.cc-row button:hover { background: rgba(255,255,255,0.1); }
-
-#cc-character-list {
-    max-height: 180px;
-    overflow-y: auto;
-    border: 1px solid var(--SmartThemeBorderColor, #444);
-    border-radius: 4px;
-    margin-top: 10px;
-}
-
-.cc-item {
+.cc-setting .checkbox_label {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 8px 10px;
-    border-bottom: 1px solid var(--SmartThemeBorderColor, #333);
-}
-
-.cc-item:last-child { border-bottom: none; }
-
-.cc-name-display {
-    flex: 1;
-    font-weight: bold;
-    text-shadow: 1px 1px 2px rgba(0,0,0,0.5);
-}
-
-.cc-item input[type="color"] {
-    width: 28px;
-    height: 28px;
-    padding: 0;
-    border: 2px solid var(--SmartThemeBorderColor, #555);
-    border-radius: 4px;
     cursor: pointer;
 }
 
-.cc-hex {
-    font-family: monospace;
-    font-size: 0.8em;
-    color: var(--SmartThemeBodyColor, #888);
-    width: 65px;
+.cc-setting .checkbox_label span {
+    color: var(--SmartThemeBodyColor);
 }
 
-.cc-empty {
-    padding: 12px;
-    text-align: center;
-    color: #666;
+.cc-buttons {
+    display: flex;
+    gap: 8px;
+}
+
+.cc-buttons .menu_button {
+    flex: 1;
+}
+
+.cc-char-list {
+    max-height: 150px;
+    overflow-y: auto;
+    margin-top: 5px;
+    padding: 5px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 5px;
+    background: var(--SmartThemeBlurTintColor);
+}
+
+.cc-char-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0;
+    border-bottom: 1px solid var(--SmartThemeBorderColor);
+}
+
+.cc-char-item:last-child {
+    border-bottom: none;
+}
+
+.cc-char-name {
+    flex: 1;
+    font-weight: bold;
+}
+
+.cc-char-item input[type="color"] {
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 4px;
+    cursor: pointer;
+    background: none;
+}
+
+.cc-char-hex {
+    font-size: 0.75em;
+    color: var(--SmartThemeEmColor);
+    font-family: monospace;
+    min-width: 80px;
+}
+
+/* Dialogue and thought styling */
+.cc-dialogue {
+    text-shadow: 0 0 1px rgba(0,0,0,0.3);
+}
+
+.cc-thought {
+    text-shadow: 0 0 1px rgba(0,0,0,0.3);
     font-style: italic;
 }
