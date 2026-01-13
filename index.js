@@ -5,12 +5,7 @@
     let settings = {
         theme: 'auto',
         customColors: [],
-        colorThoughts: false
-    };
-
-    const themeColors = {
-        dark: ['#FF6B35', '#FF1493', '#00CED1', '#32CD32', '#FFD700', '#FF69B4', '#8A2BE2', '#FF4500'],
-        light: ['#CC4400', '#CC0066', '#006699', '#228B22', '#B8860B', '#C71585', '#6A1B9A', '#D2691E']
+        colorThoughts: true
     };
 
     function detectTheme() {
@@ -25,20 +20,14 @@
 
     function generateRandomColor() {
         const isDark = settings.theme === 'dark' || (settings.theme === 'auto' && detectTheme() === 'dark');
-        
-        // Generate vibrant colors that work on the current theme
         const hue = Math.floor(Math.random() * 360);
-        const saturation = 70 + Math.floor(Math.random() * 30); // 70-100%
-        const lightness = isDark 
-            ? 55 + Math.floor(Math.random() * 25)  // 55-80% for dark themes
-            : 30 + Math.floor(Math.random() * 25); // 30-55% for light themes
-        
+        const saturation = 70 + Math.floor(Math.random() * 30);
+        const lightness = isDark ? 55 + Math.floor(Math.random() * 25) : 30 + Math.floor(Math.random() * 25);
         return hslToHex(hue, saturation, lightness);
     }
     
     function hslToHex(h, s, l) {
-        s /= 100;
-        l /= 100;
+        s /= 100; l /= 100;
         const a = s * Math.min(l, 1 - l);
         const f = n => {
             const k = (n + h / 30) % 12;
@@ -51,12 +40,8 @@
     function getCharacterColor(name) {
         const key = name.toLowerCase().trim();
         if (!characterColors[key]) {
-            const color = (settings.theme === 'custom' && settings.customColors.length > 0)
-                ? settings.customColors[Object.keys(characterColors).length % settings.customColors.length]
-                : generateRandomColor();
-            
             characterColors[key] = {
-                color: color,
+                color: generateRandomColor(),
                 displayName: name
             };
             saveData();
@@ -82,13 +67,12 @@
     function extractNames(text) {
         const names = new Set();
         const patterns = [
-            /\b([A-Z][a-z]{2,})\s+(?:said|says|asked|asks|replied|whispered|shouted|muttered|exclaimed|answered|called|murmured|growled|sighed|spoke|added|continued|responded|demanded|offered|suggested|admitted|agreed|announced|declared|explained|insisted|mentioned|noted|remarked|stated|thought|warned|wondered)\b/g,
-            /\b(?:said|says|asked|asks|replied|whispered|shouted|muttered|exclaimed|answered|called|murmured|growled|sighed|spoke|added|continued|responded|demanded|offered|suggested|admitted|agreed|announced|declared|explained|insisted|mentioned|noted|remarked|stated|thought|warned|wondered)\s+([A-Z][a-z]{2,})\b/g,
-            /\b([A-Z][a-z]{2,})'s\s+(?:voice|words|tone|grip|hand|eyes|face|lips|mouth|thumb|fingers|head)\b/g,
-            /\b([A-Z][a-z]{2,})\s+(?:shrugs|nods|smiles|grins|laughs|sighs|looks|turns|moves|steps|reaches|grabs|holds|pulls|pushes|tilts|doesn't|doesn't)\b/g
+            /\b([A-Z][a-z]{2,})\s+(?:said|says|asked|asks|replied|whispered|shouted|muttered|exclaimed|answered|called|murmured|growled|sighed|spoke|added|continued|responded|shrugs|nods|smiles|grins|laughs|sighs|looks|turns|moves|steps|tilts|doesn't|doesn't|leans|towers|lets|drops|gets)\b/gi,
+            /\b([A-Z][a-z]{2,})'s\s+(?:voice|words|tone|grip|hand|eyes|face|lips|mouth|thumb|fingers|head|wrist|breath|ear)\b/gi,
+            /\b([A-Z][a-z]{2,})\s+(?:has|had|is|was|can|could|will|would)\b/gi
         ];
         
-        const exclude = ['The', 'This', 'That', 'Then', 'There', 'They', 'What', 'When', 'Where', 'Which', 'While', 'With', 'Would', 'Could', 'Should', 'Have', 'Just', 'But', 'And', 'For', 'Not', 'You', 'Your', 'His', 'Her', 'Its', 'Our', 'Their', 'She', 'God', 'Yes', 'Now', 'Good', 'Shy'];
+        const exclude = ['The', 'This', 'That', 'Then', 'There', 'They', 'What', 'When', 'Where', 'Which', 'While', 'With', 'Would', 'Could', 'Should', 'Have', 'Just', 'But', 'And', 'For', 'Not', 'You', 'Your', 'His', 'Her', 'Its', 'Our', 'Their', 'She', 'God', 'Yes', 'Now', 'Good', 'Shy', 'Easy', 'Look', 'Someone', 'Quiet'];
         
         for (const pattern of patterns) {
             let match;
@@ -102,6 +86,18 @@
         return [...names];
     }
 
+    function findPrimarySpeaker(text, names) {
+        // Look for who is speaking/acting with dialogue
+        for (const name of names) {
+            // Check if this name is associated with speech actions
+            const speechPattern = new RegExp(`${name}(?:'s)?\\s+(?:voice|grip|thumb|leans|tilts|towers)|His\\s+voice|He\\s+(?:tilts|leans|shrugs)`, 'i');
+            if (speechPattern.test(text)) {
+                return name;
+            }
+        }
+        return names[0] || null;
+    }
+
     function applyColorsToMessage(messageElement) {
         if (messageElement.hasAttribute('data-cc-done')) return;
         messageElement.setAttribute('data-cc-done', 'true');
@@ -110,154 +106,38 @@
         if (!text || text.length < 10) return;
         
         const names = extractNames(text);
-        if (!names.length) return;
+        const primarySpeaker = findPrimarySpeaker(text, names);
         
-        // Build a map of which character is "active" at each position
-        // by finding action verbs associated with names
-        const activeRanges = [];
-        const actionPatterns = [
-            /\b([A-Z][a-z]{2,})\s+(?:said|says|asked|asks|replied|whispered|shouted|muttered|exclaimed|answered|called|murmured|growled|sighed|spoke|added|continued|responded|shrugs|nods|smiles|grins|laughs|sighs|looks|turns|moves|steps|tilts|doesn't)\b/gi,
-            /\b([A-Z][a-z]{2,})'s\s+(?:voice|words|tone|grip|hand|eyes|face|lips|mouth|thumb|fingers|head)\b/gi,
-            /\bHe\s+(?:shrugs|said|says|asked|tilts|doesn't|looks|turns|smiles|grins|nods)/gi,
-            /\bShe\s+(?:shrugs|said|says|asked|tilts|doesn't|looks|turns|smiles|grins|nods)/gi,
-            /\bHis\s+(?:voice|words|tone|grip|hand|eyes|face|lips|thumb|fingers)/gi,
-            /\bHer\s+(?:voice|words|tone|grip|hand|eyes|face|lips|thumb|fingers)/gi
-        ];
+        if (!primarySpeaker) return;
         
-        // Find the primary speaker for this message block
-        let primarySpeaker = null;
-        for (const name of names) {
-            const pattern = new RegExp(`\\b${name}\\b.*?(?:said|says|asked|shrugs|nods|smiles|tilts)|\\b${name}'s\\s+voice`, 'i');
-            if (pattern.test(text)) {
-                primarySpeaker = name;
-                break;
-            }
-        }
+        const color = getCharacterColor(primarySpeaker);
         
-        // If we find "He/His" actions, attribute to the primary male character mentioned
-        if (!primarySpeaker && /\b(?:He|His)\s+/i.test(text) && names.length > 0) {
-            primarySpeaker = names[0];
-        }
+        // Process the HTML to color dialogue and thoughts
+        let html = messageElement.innerHTML;
         
-        if (!primarySpeaker && names.length > 0) {
-            primarySpeaker = names[0];
-        }
+        // Color text in straight quotes "..."
+        html = html.replace(/"([^"]+)"/g, (match, inner) => {
+            return `"<span class="cc-dialogue" style="color: ${color} !important;">${inner}</span>"`;
+        });
         
-        // Work with text nodes directly
-        const walker = document.createTreeWalker(
-            messageElement,
-            NodeFilter.SHOW_TEXT,
-            null,
-            false
-        );
+        // Color text in curly quotes "..."
+        html = html.replace(/"([^"]+)"/g, (match, inner) => {
+            return `"<span class="cc-dialogue" style="color: ${color} !important;">${inner}</span>"`;
+        });
         
-        const textNodes = [];
-        let node;
-        while (node = walker.nextNode()) {
-            if (node.textContent.includes('"')) {
-                textNodes.push(node);
-            }
-        }
-        
-        for (const textNode of textNodes) {
-            const content = textNode.textContent;
-            const parts = [];
-            let lastIndex = 0;
-            const regex = /"([^"]+)"/g;
-            let match;
+        // Color thoughts in 『...』
+        if (settings.colorThoughts) {
+            html = html.replace(/『([^』]+)』/g, (match, inner) => {
+                return `『<span class="cc-thought" style="color: ${color} !important; opacity: 0.85 !important;">${inner}</span>』`;
+            });
             
-            while ((match = regex.exec(content)) !== null) {
-                if (match.index > lastIndex) {
-                    parts.push({ type: 'text', content: content.substring(lastIndex, match.index) });
-                }
-                
-                // Use primary speaker for all dialogue in this message
-                const speaker = primarySpeaker || names[0];
-                
-                parts.push({ 
-                    type: 'dialogue', 
-                    content: match[1], 
-                    color: getCharacterColor(speaker)
-                });
-                
-                lastIndex = match.index + match[0].length;
-            }
-            
-            if (lastIndex < content.length) {
-                parts.push({ type: 'text', content: content.substring(lastIndex) });
-            }
-            
-            if (parts.some(p => p.type === 'dialogue')) {
-                const fragment = document.createDocumentFragment();
-                for (const part of parts) {
-                    if (part.type === 'text') {
-                        fragment.appendChild(document.createTextNode(part.content));
-                    } else {
-                        fragment.appendChild(document.createTextNode('"'));
-                        const span = document.createElement('span');
-                        span.className = 'cc-dialogue';
-                        span.style.cssText = `color: ${part.color} !important;`;
-                        span.textContent = part.content;
-                        fragment.appendChild(span);
-                        fragment.appendChild(document.createTextNode('"'));
-                    }
-                }
-                textNode.parentNode.replaceChild(fragment, textNode);
-            }
+            // Color thoughts in *...*
+            html = html.replace(/\*([^*]+)\*/g, (match, inner) => {
+                return `*<span class="cc-thought" style="color: ${color} !important; opacity: 0.85 !important;">${inner}</span>*`;
+            });
         }
         
-        // Color thoughts if enabled
-        if (settings.colorThoughts && names.length > 0) {
-            const color = getCharacterColor(primarySpeaker || names[0]);
-            colorThoughts(messageElement, color);
-        }
-    }
-    
-    function colorThoughts(element, color) {
-        const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT, null, false);
-        const textNodes = [];
-        let node;
-        while (node = walker.nextNode()) {
-            if (node.textContent.match(/\*[^*]+\*|『[^』]+』/)) {
-                textNodes.push(node);
-            }
-        }
-        
-        for (const textNode of textNodes) {
-            const content = textNode.textContent;
-            const parts = [];
-            let lastIndex = 0;
-            const regex = /(\*[^*]+\*|『[^』]+』)/g;
-            let match;
-            
-            while ((match = regex.exec(content)) !== null) {
-                if (match.index > lastIndex) {
-                    parts.push({ type: 'text', content: content.substring(lastIndex, match.index) });
-                }
-                parts.push({ type: 'thought', content: match[1] });
-                lastIndex = match.index + match[0].length;
-            }
-            
-            if (lastIndex < content.length) {
-                parts.push({ type: 'text', content: content.substring(lastIndex) });
-            }
-            
-            if (parts.some(p => p.type === 'thought')) {
-                const fragment = document.createDocumentFragment();
-                for (const part of parts) {
-                    if (part.type === 'text') {
-                        fragment.appendChild(document.createTextNode(part.content));
-                    } else {
-                        const span = document.createElement('span');
-                        span.className = 'cc-thought';
-                        span.style.cssText = `color: ${color} !important; opacity: 0.85 !important;`;
-                        span.textContent = part.content;
-                        fragment.appendChild(span);
-                    }
-                }
-                textNode.parentNode.replaceChild(fragment, textNode);
-            }
-        }
+        messageElement.innerHTML = html;
     }
 
     function processAllMessages() {
@@ -267,7 +147,8 @@
     function reprocessAll() {
         document.querySelectorAll('[data-cc-done]').forEach(el => el.removeAttribute('data-cc-done'));
         document.querySelectorAll('.cc-dialogue, .cc-thought').forEach(el => {
-            el.replaceWith(document.createTextNode(el.textContent));
+            const text = el.textContent;
+            el.replaceWith(document.createTextNode(text));
         });
         processAllMessages();
     }
@@ -324,12 +205,7 @@
                         <option value="auto">Auto</option>
                         <option value="dark">Dark</option>
                         <option value="light">Light</option>
-                        <option value="custom">Custom</option>
                     </select>
-                </div>
-                <div id="cc-custom-row" class="cc-row" style="display:none">
-                    <label>Custom Colors</label>
-                    <input type="text" id="cc-custom" placeholder="#FF0000, #00FF00">
                 </div>
                 <div class="cc-row">
                     <label><input type="checkbox" id="cc-thoughts"> Color thoughts (*text* / 『text』)</label>
@@ -337,6 +213,7 @@
                 <div class="cc-row">
                     <label>Characters</label>
                     <button id="cc-clear">Clear All</button>
+                    <button id="cc-reprocess">Reprocess</button>
                 </div>
                 <div id="cc-character-list"></div>
             </div>
@@ -349,20 +226,6 @@
             theme.value = settings.theme;
             theme.onchange = (e) => {
                 settings.theme = e.target.value;
-                document.getElementById('cc-custom-row').style.display = e.target.value === 'custom' ? 'block' : 'none';
-                saveData();
-            };
-        }
-        if (settings.theme === 'custom') {
-            const customRow = document.getElementById('cc-custom-row');
-            if (customRow) customRow.style.display = 'block';
-        }
-        
-        const custom = document.getElementById('cc-custom');
-        if (custom) {
-            custom.value = settings.customColors.join(', ');
-            custom.onchange = (e) => {
-                settings.customColors = e.target.value.split(',').map(c => c.trim().toUpperCase()).filter(c => /^#[0-9A-F]{6}$/.test(c));
                 saveData();
             };
         }
@@ -378,6 +241,7 @@
         }
         
         document.getElementById('cc-clear')?.addEventListener('click', clearColors);
+        document.getElementById('cc-reprocess')?.addEventListener('click', reprocessAll);
         updateCharacterList();
     }
 
@@ -394,7 +258,7 @@
         const observer = new MutationObserver(() => setTimeout(processAllMessages, 100));
         observer.observe(document.body, { childList: true, subtree: true });
         
-        // Clear old processing flags and reprocess on load
+        // Auto-process on load
         setTimeout(() => {
             document.querySelectorAll('[data-cc-done]').forEach(el => el.removeAttribute('data-cc-done'));
             processAllMessages();
