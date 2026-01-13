@@ -36,7 +36,25 @@
         } catch (e) {}
     }
 
+    function isGenerationInProgress() {
+        // Check SillyTavern's generation state
+        if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
+            const ctx = SillyTavern.getContext();
+            if (ctx.is_send_press || ctx.isGenerating?.()) return true;
+        }
+        // Also check global
+        if (typeof is_send_press !== 'undefined' && is_send_press) return true;
+        if (typeof isGenerating !== 'undefined' && isGenerating()) return true;
+        return false;
+    }
+
     async function extractDialogueMap(text) {
+        // Don't run if generation is in progress
+        if (isGenerationInProgress()) {
+            console.log('CC: Skipping LLM - generation in progress');
+            return null;
+        }
+        
         if (typeof SillyTavern === 'undefined' || !SillyTavern.getContext) return null;
         const ctx = SillyTavern.getContext();
         if (!ctx.generateRaw) return null;
@@ -122,13 +140,22 @@
         });
     }
 
-    function reprocess() {
+    async function reprocess() {
+        // Don't reprocess if generation is in progress
+        if (isGenerationInProgress()) {
+            console.log('CC: Cannot reprocess - generation in progress');
+            return;
+        }
+        
         document.querySelectorAll('.mes_text').forEach(el => {
             delete el.dataset.ccProcessed;
             el.querySelectorAll('[data-cc-done]').forEach(e => { e.style.color = ''; e.style.opacity = ''; delete e.dataset.ccDone; });
             el.querySelectorAll('.cc-dialogue').forEach(s => s.replaceWith(document.createTextNode(s.textContent)));
         });
-        processAll(true);
+        
+        for (const el of document.querySelectorAll('.mes_text')) {
+            await processMessage(el, true);
+        }
     }
 
     function clearColors() {
