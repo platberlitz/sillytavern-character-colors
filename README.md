@@ -1,15 +1,16 @@
-# SillyTavern Character Colors (Client-Side)
+# SillyTavern Dialogue Colors
 
-Automatically colors character dialogue and inner thoughts entirely client-side - no context impact!
+Automatically colors character dialogue and thoughts entirely client-side - detects speakers within messages!
 
 ## Features
 
 - **Client-Side Only**: No prompt injection, zero token usage
-- **Dialogue Coloring**: Colors all quoted dialogue ("text", 'text', «text»)
+- **Speaker Detection**: Detects character names appearing before dialogue quotes
+- **Dialogue Coloring**: Colors all quoted dialogue based on speaker
 - **Thought Coloring**: Inner thoughts in *asterisks* are colored
 - **Theme Modes**: Auto/Light/Dark - generates appropriate colors
 - **Session Storage**: Colors stored in memory only, cleared on chat change
-- **Color Distance**: Ensures distinct colors for different characters
+- **Multi-Character Support**: Handles multiple speakers within a single message
 
 ## Installation
 
@@ -18,11 +19,14 @@ Automatically colors character dialogue and inner thoughts entirely client-side 
 
 ## How It Works
 
-- Detects character names from message blocks
-- Generates distinct colors per character (pastel for dark theme, muted for light)
-- Parses dialogue quotes and wraps them with colored spans client-side
-- Parses *asterisked thoughts* and colors them
-- Colors reset when switching chats (session-scoped only)
+The extension detects speakers using these patterns before dialogue quotes:
+- `Name: "Dialogue"`
+- `Name says "Dialogue"`
+- `Name said "Dialogue"` (and other speech verbs: asks, asked, replied, answers, etc.)
+
+Each detected speaker gets a unique color that persists within the chat session. If no speaker is detected before a quote, the message owner's color is used.
+
+Thoughts (*text*) are colored based on the message owner.
 
 ## Usage
 
@@ -31,4 +35,13 @@ Automatically colors character dialogue and inner thoughts entirely client-side 
 3. Click the droplet icon (next to send button) to refresh colors
 4. Use "Clear Colors" to reset and regenerate colors
 
-No regex scripts needed - this is pure client-side processing!
+## Example
+
+```
+John: "Hello there!"
+Mary said: "Hi John!"
+"Nice to see you both!" -> Uses message owner's color (no speaker detected)
+*She smiled warmly.* -> Colored with message owner's color
+```
+
+Colors reset when switching chats (session-scoped only).

@@ -1,9 +1,7 @@
-/* Dialogue Colors Extension (Client-Side) */
+# Dialogue Colors Extension
 #cc-ext .inline-drawer-content { font-size: 0.9em; }
 .cc-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
 .cc-row select { flex: 1; padding: 4px; }
 .cc-char-item { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
 .cc-char-item input[type="color"] { width: 24px; height: 24px; padding: 0; border: 1px solid var(--SmartThemeBorderColor); }
-.cc-dialogue { text-shadow: 0 0 1px rgba(0,0,0,0.2); }
-.cc-thought { font-style: italic !important; }
 #cc-input-btn:hover { opacity: 1 !important; }

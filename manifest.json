@@ -1,12 +1,12 @@
 {
-  "display_name": "Dialogue Colors (Client-Side)",
+  "display_name": "Dialogue Colors",
   "loading_order": 100,
   "requires": [],
   "optional": [],
   "js": "index.js",
   "css": "style.css",
   "author": "platberlitz",
-  "version": "6.0.0",
+  "version": "1.0.0",
   "homePage": "https://github.com/platberlitz/sillytavern-character-colors",
-  "description": "Client-side dialogue and thought coloring - no context impact"
+  "description": "Client-side dialogue and thought coloring - detects speakers within messages"
 }

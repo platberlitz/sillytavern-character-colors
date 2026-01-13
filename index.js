@@ -1,7 +1,7 @@
 (() => {
     'use strict';
 
-    const MODULE_NAME = 'character-colors';
+    const MODULE_NAME = 'dialogue-colors';
     let characterColors = {};
     let settings = { 
         enabled: true,
@@ -47,25 +47,61 @@
         return characterColors[key].color;
     }
 
+    function detectSpeaker(text, position) {
+        const beforeQuote = text.substring(0, position);
+        
+        const patterns = [
+            /([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s*:/,
+            /([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+(says|said|asks|asked|replied|answers|answered|whispers|whispered|shouted|yelled|exclaimed|murmured|muttered|remarked|noted|commented|added|continued|interrupted)\s*$/i
+        ];
+        
+        for (const pattern of patterns) {
+            const matches = [...beforeQuote.matchAll(new RegExp(pattern.source, 'gi'))];
+            if (matches.length > 0) {
+                const lastMatch = matches[matches.length - 1];
+                const matchText = text.substring(lastMatch.index, lastMatch.index + lastMatch[0].length);
+                const distanceFromQuote = position - lastMatch.index - lastMatch[0].length;
+                
+                if (distanceFromQuote <= 50) {
+                    return matchText.match(/([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/)[0];
+                }
+            }
+        }
+        
+        return null;
+    }
+
     function applyDisplayColors() {
         document.querySelectorAll('.mes').forEach(mesBlock => {
-            const charName = mesBlock.querySelector('.name_text')?.textContent?.trim();
             const mesText = mesBlock.querySelector('.mes_text');
+            if (!mesText || mesText.dataset.ccDone) return;
             
-            if (!charName || !mesText || mesText.dataset.ccDone) return;
+            const defaultColor = mesBlock.querySelector('.name_text')?.textContent?.trim();
+            let processedHTML = mesText.innerHTML;
             
-            const color = getCharColor(charName);
-            
-            mesText.innerHTML = mesText.innerHTML.replace(/(".*?"|'.*?'|«.*?»|".*"|'.*')/g, (match) => {
-                return `<font color="${color}">${match}</font>`;
+            processedHTML = processedHTML.replace(/(".*?"|'.*?'|«.*?»)/g, (match) => {
+                const tempText = processedHTML;
+                const matchIndex = tempText.indexOf(match);
+                const speaker = detectSpeaker(tempText, matchIndex);
+                
+                if (speaker) {
+                    return `<font color="${getCharColor(speaker)}">${match}</font>`;
+                } else if (defaultColor) {
+                    return `<font color="${getCharColor(defaultColor)}">${match}</font>`;
+                }
+                return match;
             });
 
             if (settings.colorThoughts) {
-                mesText.innerHTML = mesText.innerHTML.replace(/\*([^*]+)\*/g, (match, content) => {
-                    return `<font color="${color}" style="opacity:0.85;font-style:italic;">*${content}*</font>`;
+                processedHTML = processedHTML.replace(/\*([^*]+)\*/g, (match, content) => {
+                    if (defaultColor) {
+                        return `<font color="${getCharColor(defaultColor)}" style="opacity:0.85;font-style:italic;">*${content}*</font>`;
+                    }
+                    return match;
                 });
             }
             
+            mesText.innerHTML = processedHTML;
             mesText.dataset.ccDone = '1';
         });
     }
@@ -73,9 +109,7 @@
     function clearDisplayColors() {
         document.querySelectorAll('.mes_text').forEach(el => {
             if (el.dataset.ccDone) {
-                const originalHTML = el.innerHTML
-                    .replace(/<font[^>]*color="[^"]*"[^>]*>([^<]*)<\/font>/g, '$1');
-                el.innerHTML = originalHTML;
+                el.innerHTML = el.innerHTML.replace(/<font[^>]*color="[^"]*"[^>]*>([^<]*)<\/font>/g, '$1');
                 delete el.dataset.ccDone;
             }
         });
@@ -98,6 +132,8 @@
             i.oninput = () => { 
                 characterColors[i.dataset.key].color = i.value; 
                 i.nextElementSibling.style.color = i.value;
+                clearDisplayColors();
+                applyDisplayColors();
             };
         });
         
