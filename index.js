@@ -376,10 +376,25 @@
         const observer = new MutationObserver(() => setTimeout(processAllMessages, 100));
         observer.observe(document.body, { childList: true, subtree: true });
         
-        setTimeout(processAllMessages, 1000);
+        // Clear old processing flags and reprocess on load
+        setTimeout(() => {
+            document.querySelectorAll('[data-cc-done]').forEach(el => el.removeAttribute('data-cc-done'));
+            processAllMessages();
+        }, 500);
+        
         setInterval(processAllMessages, 2000);
         
-        $(document).on('chatLoaded', clearColors);
+        $(document).on('chatLoaded', () => {
+            characterColors = {};
+            colorIndex = 0;
+            saveData();
+            document.querySelectorAll('[data-cc-done]').forEach(el => el.removeAttribute('data-cc-done'));
+            document.querySelectorAll('.cc-dialogue, .cc-thought').forEach(el => {
+                el.replaceWith(document.createTextNode(el.textContent));
+            });
+            setTimeout(processAllMessages, 300);
+            updateCharacterList();
+        });
     }
 
     if (document.readyState === 'loading') {
