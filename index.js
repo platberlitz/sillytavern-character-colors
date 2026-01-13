@@ -14,7 +14,6 @@
     };
 
     let colorIndex = 0;
-    let pendingMessages = new Set();
 
     function detectTheme() {
         const bg = getComputedStyle(document.body).backgroundColor;
@@ -32,14 +31,18 @@
     }
 
     function getCharacterColor(name) {
-        if (!characterColors[name]) {
+        const normalizedName = name.toLowerCase().trim();
+        if (!characterColors[normalizedName]) {
             const colors = getThemeColors();
-            characterColors[name] = colors[colorIndex % colors.length];
+            characterColors[normalizedName] = {
+                color: colors[colorIndex % colors.length],
+                displayName: name
+            };
             colorIndex++;
             saveData();
             updateCharacterList();
         }
-        return characterColors[name];
+        return characterColors[normalizedName].color;
     }
 
     function saveData() {
@@ -57,54 +60,48 @@
         } catch (e) {}
     }
 
-    async function extractNamesWithLLM(text) {
-        const prompt = `Extract ONLY character names (proper nouns of people/characters) from this text. Return as JSON array of strings. If none found, return []. Text:\n\n${text.substring(0, 2000)}`;
+    function extractNames(text) {
+        // Simple extraction: capitalized words that appear near dialogue verbs or quotes
+        const names = new Set();
         
-        try {
-            const response = await fetch('/api/backends/chat/completions', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    messages: [{ role: 'user', content: prompt }],
-                    max_tokens: 100,
-                    temperature: 0
-                })
-            });
-            
-            if (!response.ok) throw new Error('API failed');
-            
-            const data = await response.json();
-            const content = data.choices?.[0]?.message?.content || '[]';
-            const match = content.match(/\[.*?\]/s);
-            if (match) {
-                return JSON.parse(match[0]);
-            }
-        } catch (e) {
-            console.log('CC: LLM extraction failed, using fallback');
-        }
+        // Pattern: Name + dialogue verb, or dialogue verb + Name
+        const patterns = [
+            /\b([A-Z][a-z]{2,})\s+(?:said|says|asked|asks|replied|whispered|shouted|muttered|exclaimed|answered|called|murmured|growled|sighed|spoke|added|continued|responded|demanded|offered|suggested|admitted|agreed|announced|declared|explained|insisted|mentioned|noted|remarked|stated|thought|warned|wondered)\b/gi,
+            /\b(?:said|says|asked|asks|replied|whispered|shouted|muttered|exclaimed|answered|called|murmured|growled|sighed|spoke|added|continued|responded|demanded|offered|suggested|admitted|agreed|announced|declared|explained|insisted|mentioned|noted|remarked|stated|thought|warned|wondered)\s+([A-Z][a-z]{2,})\b/gi,
+            // Name's (possessive) near action
+            /\b([A-Z][a-z]{2,})'s\s+(?:voice|words|tone|grip|hand|eyes|face|lips|mouth)\b/gi,
+            // Name + verb (action)
+            /\b([A-Z][a-z]{2,})\s+(?:shrugs|nods|smiles|grins|laughs|sighs|looks|turns|moves|steps|reaches|grabs|holds|pulls|pushes)\b/gi
+        ];
         
-        // Fallback: simple capitalized word detection
-        const names = [];
-        const pattern = /\b([A-Z][a-z]{2,})\b/g;
-        let m;
-        while ((m = pattern.exec(text)) !== null) {
-            const word = m[1];
-            if (!['The', 'This', 'That', 'Then', 'There', 'They', 'What', 'When', 'Where', 'Which', 'While', 'With', 'Would', 'Could', 'Should', 'Have', 'Has', 'Had', 'But', 'And', 'For', 'Not', 'You', 'Your', 'His', 'Her', 'Its', 'Our', 'Their', 'She', 'He'].includes(word)) {
-                names.push(word);
+        for (const pattern of patterns) {
+            let match;
+            while ((match = pattern.exec(text)) !== null) {
+                const name = match[1];
+                if (name && !['The', 'This', 'That', 'Then', 'There', 'They', 'What', 'When', 'Where', 'Which', 'While', 'With', 'Would', 'Could', 'Should', 'Have', 'Just', 'But', 'And', 'For', 'Not', 'You', 'Your', 'His', 'Her', 'Its', 'Our', 'Their', 'She', 'God', 'Yes', 'Now'].includes(name)) {
+                    names.add(name);
+                }
             }
         }
-        return [...new Set(names)];
+        
+        return [...names];
     }
 
-    function applyColorsToMessage(messageElement, names) {
-        if (!names.length) return;
+    function applyColorsToMessage(messageElement) {
+        if (messageElement.hasAttribute('data-cc-done')) return;
+        
+        const text = messageElement.textContent;
+        if (!text || text.length < 10) return;
+        
+        const names = extractNames(text);
+        if (!names.length) {
+            messageElement.setAttribute('data-cc-done', 'true');
+            return;
+        }
         
         let html = messageElement.innerHTML;
         
-        // Color dialogue in quotes based on nearby character names
-        // Pattern: find "dialogue" and associate with nearest character name
-        
-        // First, find all dialogue segments and their positions
+        // Find dialogue and associate with nearest character
         const dialoguePattern = /"([^"]+)"/g;
         let match;
         let segments = [];
@@ -113,29 +110,35 @@
             segments.push({
                 start: match.index,
                 end: match.index + match[0].length,
-                text: match[0],
+                full: match[0],
                 inner: match[1]
             });
         }
         
-        // For each dialogue segment, find the nearest character name
-        for (const seg of segments.reverse()) { // reverse to not mess up indices
+        // Process in reverse to preserve indices
+        for (const seg of segments.reverse()) {
+            // Find nearest character name to this dialogue
             let nearestName = null;
             let nearestDist = Infinity;
             
+            const textBefore = html.substring(Math.max(0, seg.start - 200), seg.start);
+            const textAfter = html.substring(seg.end, Math.min(html.length, seg.end + 200));
+            
             for (const name of names) {
-                // Look for name before or after the dialogue
-                const beforePattern = new RegExp(`\\b${name}\\b`, 'g');
-                let nameMatch;
-                while ((nameMatch = beforePattern.exec(html)) !== null) {
-                    const dist = Math.min(
-                        Math.abs(nameMatch.index - seg.start),
-                        Math.abs(nameMatch.index - seg.end)
-                    );
+                // Check before
+                const beforeIdx = textBefore.lastIndexOf(name);
+                if (beforeIdx !== -1) {
+                    const dist = textBefore.length - beforeIdx;
                     if (dist < nearestDist) {
                         nearestDist = dist;
                         nearestName = name;
                     }
+                }
+                // Check after
+                const afterIdx = textAfter.indexOf(name);
+                if (afterIdx !== -1 && afterIdx < nearestDist) {
+                    nearestDist = afterIdx;
+                    nearestName = name;
                 }
             }
             
@@ -148,35 +151,17 @@
         
         // Color thoughts if enabled
         if (settings.colorThoughts && names.length > 0) {
-            const defaultColor = getCharacterColor(names[0]);
-            html = html.replace(/\*([^*]+)\*/g, `<span class="cc-thought" style="color:${defaultColor}!important;opacity:0.85!important">*$1*</span>`);
-            html = html.replace(/『([^』]+)』/g, `<span class="cc-thought" style="color:${defaultColor}!important;opacity:0.85!important">『$1』</span>`);
+            const color = getCharacterColor(names[0]);
+            html = html.replace(/\*([^*]+)\*/g, `<span class="cc-thought" style="color:${color}!important;opacity:0.85!important">*$1*</span>`);
+            html = html.replace(/『([^』]+)』/g, `<span class="cc-thought" style="color:${color}!important;opacity:0.85!important">『$1』</span>`);
         }
         
         messageElement.innerHTML = html;
         messageElement.setAttribute('data-cc-done', 'true');
     }
 
-    async function processMessage(messageElement) {
-        if (messageElement.hasAttribute('data-cc-done')) return;
-        
-        const text = messageElement.textContent;
-        if (!text || text.length < 10) return;
-        
-        const msgId = messageElement.closest('.mes')?.getAttribute('mesid');
-        if (msgId && pendingMessages.has(msgId)) return;
-        if (msgId) pendingMessages.add(msgId);
-        
-        const names = await extractNamesWithLLM(text);
-        applyColorsToMessage(messageElement, names);
-        
-        if (msgId) pendingMessages.delete(msgId);
-    }
-
     function processAllMessages() {
-        document.querySelectorAll('.mes_text:not([data-cc-done])').forEach(msg => {
-            processMessage(msg);
-        });
+        document.querySelectorAll('.mes_text:not([data-cc-done])').forEach(applyColorsToMessage);
     }
 
     function reprocessAll() {
@@ -197,27 +182,28 @@
         if (!list) return;
         
         list.innerHTML = '';
-        if (!Object.keys(characterColors).length) {
+        const entries = Object.entries(characterColors);
+        if (!entries.length) {
             list.innerHTML = '<div class="cc-empty">No characters detected yet</div>';
             return;
         }
         
-        for (const [name, color] of Object.entries(characterColors)) {
+        for (const [key, data] of entries) {
             const item = document.createElement('div');
             item.className = 'cc-item';
             item.innerHTML = `
-                <span class="cc-name-display" style="color:${color}!important">${name}</span>
-                <input type="color" value="${color}" data-name="${name}">
-                <span class="cc-hex">${color}</span>
+                <span class="cc-name-display" style="color:${data.color}!important">${data.displayName}</span>
+                <input type="color" value="${data.color}" data-key="${key}">
+                <span class="cc-hex">${data.color}</span>
             `;
             list.appendChild(item);
         }
         
         list.querySelectorAll('input[type="color"]').forEach(picker => {
             picker.addEventListener('input', (e) => {
-                const name = e.target.dataset.name;
+                const key = e.target.dataset.key;
                 const color = e.target.value.toUpperCase();
-                characterColors[name] = color;
+                characterColors[key].color = color;
                 saveData();
                 e.target.previousElementSibling.style.color = color;
                 e.target.nextElementSibling.textContent = color;
@@ -257,30 +243,39 @@
         document.getElementById('extensions_settings')?.insertAdjacentHTML('beforeend', html);
         
         const theme = document.getElementById('cc-theme');
-        theme.value = settings.theme;
-        theme.onchange = (e) => {
-            settings.theme = e.target.value;
-            document.getElementById('cc-custom-row').style.display = e.target.value === 'custom' ? 'block' : 'none';
-            saveData();
-        };
-        if (settings.theme === 'custom') document.getElementById('cc-custom-row').style.display = 'block';
+        if (theme) {
+            theme.value = settings.theme;
+            theme.onchange = (e) => {
+                settings.theme = e.target.value;
+                document.getElementById('cc-custom-row').style.display = e.target.value === 'custom' ? 'block' : 'none';
+                saveData();
+            };
+        }
+        if (settings.theme === 'custom') {
+            const customRow = document.getElementById('cc-custom-row');
+            if (customRow) customRow.style.display = 'block';
+        }
         
         const custom = document.getElementById('cc-custom');
-        custom.value = settings.customColors.join(', ');
-        custom.onchange = (e) => {
-            settings.customColors = e.target.value.split(',').map(c => c.trim().toUpperCase()).filter(c => /^#[0-9A-F]{6}$/.test(c));
-            saveData();
-        };
+        if (custom) {
+            custom.value = settings.customColors.join(', ');
+            custom.onchange = (e) => {
+                settings.customColors = e.target.value.split(',').map(c => c.trim().toUpperCase()).filter(c => /^#[0-9A-F]{6}$/.test(c));
+                saveData();
+            };
+        }
         
         const thoughts = document.getElementById('cc-thoughts');
-        thoughts.checked = settings.colorThoughts;
-        thoughts.onchange = (e) => {
-            settings.colorThoughts = e.target.checked;
-            saveData();
-            reprocessAll();
-        };
+        if (thoughts) {
+            thoughts.checked = settings.colorThoughts;
+            thoughts.onchange = (e) => {
+                settings.colorThoughts = e.target.checked;
+                saveData();
+                reprocessAll();
+            };
+        }
         
-        document.getElementById('cc-clear').onclick = clearColors;
+        document.getElementById('cc-clear')?.addEventListener('click', clearColors);
         updateCharacterList();
     }
 
@@ -294,15 +289,12 @@
             }
         }, 500);
         
-        // Process on new messages
-        const observer = new MutationObserver(() => setTimeout(processAllMessages, 200));
+        const observer = new MutationObserver(() => setTimeout(processAllMessages, 100));
         observer.observe(document.body, { childList: true, subtree: true });
         
-        // Initial + periodic processing
         setTimeout(processAllMessages, 1000);
-        setInterval(processAllMessages, 3000);
+        setInterval(processAllMessages, 2000);
         
-        // Clear on new chat
         $(document).on('chatLoaded', clearColors);
     }
 
