@@ -93,7 +93,38 @@
         const names = extractNames(text);
         if (!names.length) return;
         
-        // Work with text nodes directly to avoid HTML corruption
+        // Build a map of which character is "active" at each position
+        // by finding action verbs associated with names
+        const activeRanges = [];
+        const actionPatterns = [
+            /\b([A-Z][a-z]{2,})\s+(?:said|says|asked|asks|replied|whispered|shouted|muttered|exclaimed|answered|called|murmured|growled|sighed|spoke|added|continued|responded|shrugs|nods|smiles|grins|laughs|sighs|looks|turns|moves|steps|tilts|doesn't)\b/gi,
+            /\b([A-Z][a-z]{2,})'s\s+(?:voice|words|tone|grip|hand|eyes|face|lips|mouth|thumb|fingers|head)\b/gi,
+            /\bHe\s+(?:shrugs|said|says|asked|tilts|doesn't|looks|turns|smiles|grins|nods)/gi,
+            /\bShe\s+(?:shrugs|said|says|asked|tilts|doesn't|looks|turns|smiles|grins|nods)/gi,
+            /\bHis\s+(?:voice|words|tone|grip|hand|eyes|face|lips|thumb|fingers)/gi,
+            /\bHer\s+(?:voice|words|tone|grip|hand|eyes|face|lips|thumb|fingers)/gi
+        ];
+        
+        // Find the primary speaker for this message block
+        let primarySpeaker = null;
+        for (const name of names) {
+            const pattern = new RegExp(`\\b${name}\\b.*?(?:said|says|asked|shrugs|nods|smiles|tilts)|\\b${name}'s\\s+voice`, 'i');
+            if (pattern.test(text)) {
+                primarySpeaker = name;
+                break;
+            }
+        }
+        
+        // If we find "He/His" actions, attribute to the primary male character mentioned
+        if (!primarySpeaker && /\b(?:He|His)\s+/i.test(text) && names.length > 0) {
+            primarySpeaker = names[0];
+        }
+        
+        if (!primarySpeaker && names.length > 0) {
+            primarySpeaker = names[0];
+        }
+        
+        // Work with text nodes directly
         const walker = document.createTreeWalker(
             messageElement,
             NodeFilter.SHOW_TEXT,
@@ -111,60 +142,32 @@
         
         for (const textNode of textNodes) {
             const content = textNode.textContent;
-            
-            // Find quoted dialogue in this text node
             const parts = [];
             let lastIndex = 0;
             const regex = /"([^"]+)"/g;
             let match;
             
             while ((match = regex.exec(content)) !== null) {
-                // Add text before quote
                 if (match.index > lastIndex) {
                     parts.push({ type: 'text', content: content.substring(lastIndex, match.index) });
                 }
                 
-                // Find nearest character name in surrounding context
-                const fullText = messageElement.textContent;
-                const quotePos = fullText.indexOf(match[0]);
-                let nearestName = names[0]; // default to first found
-                let nearestDist = Infinity;
-                
-                for (const name of names) {
-                    const beforeIdx = fullText.lastIndexOf(name, quotePos);
-                    const afterIdx = fullText.indexOf(name, quotePos);
-                    
-                    if (beforeIdx !== -1) {
-                        const dist = quotePos - beforeIdx;
-                        if (dist < nearestDist) {
-                            nearestDist = dist;
-                            nearestName = name;
-                        }
-                    }
-                    if (afterIdx !== -1) {
-                        const dist = afterIdx - quotePos;
-                        if (dist < nearestDist) {
-                            nearestDist = dist;
-                            nearestName = name;
-                        }
-                    }
-                }
+                // Use primary speaker for all dialogue in this message
+                const speaker = primarySpeaker || names[0];
                 
                 parts.push({ 
                     type: 'dialogue', 
                     content: match[1], 
-                    color: getCharacterColor(nearestName)
+                    color: getCharacterColor(speaker)
                 });
                 
                 lastIndex = match.index + match[0].length;
             }
             
-            // Add remaining text
             if (lastIndex < content.length) {
                 parts.push({ type: 'text', content: content.substring(lastIndex) });
             }
             
-            // Only replace if we found dialogue
             if (parts.some(p => p.type === 'dialogue')) {
                 const fragment = document.createDocumentFragment();
                 for (const part of parts) {
@@ -186,7 +189,7 @@
         
         // Color thoughts if enabled
         if (settings.colorThoughts && names.length > 0) {
-            const color = getCharacterColor(names[0]);
+            const color = getCharacterColor(primarySpeaker || names[0]);
             colorThoughts(messageElement, color);
         }
     }
