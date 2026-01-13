@@ -231,9 +231,12 @@ JSON:`;
     }
 
     function addInputButton() {
-        // Add button near the input area
-        const sendForm = document.getElementById('send_form') || document.getElementById('form_sheld');
-        if (!sendForm || document.getElementById('cc-input-btn')) return;
+        if (document.getElementById('cc-input-btn')) return;
+        
+        // Find the right side area with hamburger/wand buttons
+        const rightArea = document.getElementById('rightSendForm') || document.querySelector('#send_form .right_menu_buttons');
+        
+        if (!rightArea) return;
         
         const btn = document.createElement('div');
         btn.id = 'cc-input-btn';
@@ -248,14 +251,8 @@ JSON:`;
             });
         };
         
-        // Find the left side icons area
-        const leftIcons = sendForm.querySelector('.mes_buttons, #leftSendForm') || sendForm;
-        if (leftIcons.id === 'leftSendForm') {
-            leftIcons.appendChild(btn);
-        } else {
-            // Insert at beginning of send form
-            sendForm.insertBefore(btn, sendForm.firstChild);
-        }
+        // Insert at the beginning of right area
+        rightArea.insertBefore(btn, rightArea.firstChild);
     }
 
     function createUI() {
