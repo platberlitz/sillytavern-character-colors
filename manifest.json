@@ -6,7 +6,7 @@
   "js": "index.js",
   "css": "style.css",
   "author": "platberlitz",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "homePage": "https://github.com/platberlitz/sillytavern-character-colors",
-  "description": "Client-side dialogue and thought coloring - detects speakers within messages"
+  "description": "LLM-powered dialogue and thought coloring with persistent per-chat colors"
 }

@@ -3,6 +3,7 @@
 
     const MODULE_NAME = 'dialogue-colors';
     let characterColors = {};
+    let currentChatId = null;
     let settings = { 
         enabled: true,
         colorThoughts: true,
@@ -20,14 +21,6 @@
         return `#${f(0)}${f(8)}${f(4)}`;
     }
 
-    function generateColor() {
-        const hue = Math.random() * 360;
-        const sat = 65 + Math.random() * 20;
-        const mode = settings.themeMode === 'auto' ? detectTheme() : settings.themeMode;
-        const light = mode === 'dark' ? 60 + Math.random() * 15 : 35 + Math.random() * 15;
-        return hslToHex(hue, sat, light);
-    }
-
     function detectTheme() {
         const bg = getComputedStyle(document.body).backgroundColor;
         const m = bg.match(/\d+/g);
@@ -38,81 +31,109 @@
         return 'dark';
     }
 
-    function getCharColor(name) {
-        const key = name.toLowerCase().trim();
-        if (!characterColors[key]) {
-            characterColors[key] = { color: generateColor(), name };
-            updateCharList();
-        }
-        return characterColors[key].color;
+    function getStorageKey() {
+        return `cc_${currentChatId}`;
     }
 
-    function detectSpeaker(text, position) {
-        const beforeQuote = text.substring(0, position);
-        
-        const patterns = [
-            /([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s*:/,
-            /([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+(says|said|asks|asked|replied|answers|answered|whispers|whispered|shouted|yelled|exclaimed|murmured|muttered|remarked|noted|commented|added|continued|interrupted)\s*$/i
-        ];
-        
-        for (const pattern of patterns) {
-            const matches = [...beforeQuote.matchAll(new RegExp(pattern.source, 'gi'))];
-            if (matches.length > 0) {
-                const lastMatch = matches[matches.length - 1];
-                const matchText = text.substring(lastMatch.index, lastMatch.index + lastMatch[0].length);
-                const distanceFromQuote = position - lastMatch.index - lastMatch[0].length;
-                
-                if (distanceFromQuote <= 50) {
-                    return matchText.match(/([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/)[0];
-                }
-            }
+    function saveData() {
+        if (currentChatId) {
+            localStorage.setItem(getStorageKey(), JSON.stringify({ colors: characterColors }));
         }
-        
+    }
+
+    function loadData() {
+        if (currentChatId) {
+            try {
+                const data = JSON.parse(localStorage.getItem(getStorageKey()));
+                if (data?.colors) {
+                    characterColors = data.colors;
+                }
+            } catch (e) {}
+        }
+    }
+
+    function getChatId() {
+        if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
+            const ctx = SillyTavern.getContext();
+            return ctx.chatId || ctx.chatID || null;
+        }
         return null;
     }
 
-    function applyDisplayColors() {
-        document.querySelectorAll('.mes').forEach(mesBlock => {
-            const mesText = mesBlock.querySelector('.mes_text');
-            if (!mesText || mesText.dataset.ccDone) return;
-            
-            const defaultColor = mesBlock.querySelector('.name_text')?.textContent?.trim();
-            let processedHTML = mesText.innerHTML;
-            
-            processedHTML = processedHTML.replace(/(".*?"|'.*?'|«.*?»)/g, (match) => {
-                const tempText = processedHTML;
-                const matchIndex = tempText.indexOf(match);
-                const speaker = detectSpeaker(tempText, matchIndex);
-                
-                if (speaker) {
-                    return `<font color="${getCharColor(speaker)}">${match}</font>`;
-                } else if (defaultColor) {
-                    return `<font color="${getCharColor(defaultColor)}">${match}</font>`;
-                }
-                return match;
-            });
-
-            if (settings.colorThoughts) {
-                processedHTML = processedHTML.replace(/\*([^*]+)\*/g, (match, content) => {
-                    if (defaultColor) {
-                        return `<font color="${getCharColor(defaultColor)}" style="opacity:0.85;font-style:italic;">*${content}*</font>`;
-                    }
-                    return match;
-                });
-            }
-            
-            mesText.innerHTML = processedHTML;
-            mesText.dataset.ccDone = '1';
-        });
+    function buildPromptInstruction() {
+        if (!settings.enabled) return '';
+        
+        const mode = settings.themeMode === 'auto' ? detectTheme() : settings.themeMode;
+        const themeHint = mode === 'dark' 
+            ? 'Use LIGHT/PASTEL colors (high lightness 60-75%) for dark background.' 
+            : 'Use DARK/MUTED colors (low lightness 30-45%) for light background.';
+        
+        const colorList = Object.entries(characterColors).length > 0
+            ? `Established character colors: ${Object.entries(characterColors).map(([k, v]) => `${v.name}: ${v.color}`).join(', ')}. `
+            : '';
+        
+        return `[IMPORTANT: Wrap all character dialogue ("speech") and inner thoughts (*thoughts*) in <font color=#RRGGBB> tags. ${themeHint}
+${colorList}
+Assign a UNIQUE color to each named character/speaker. When a character speaks, ALWAYS use the same color for them. 
+REUSE existing colors for established characters. Only generate NEW colors for characters not in the established list.
+Format: <font color=#abc123>"Dialogue here"</font> <font color=#def456>*Thought here*</font>
+The color should be a hex code like #RRGGBB (6 characters). Each character must have their own consistent color.]`;
     }
 
-    function clearDisplayColors() {
-        document.querySelectorAll('.mes_text').forEach(el => {
-            if (el.dataset.ccDone) {
-                el.innerHTML = el.innerHTML.replace(/<font[^>]*color="[^"]*"[^>]*>([^<]*)<\/font>/g, '$1');
-                delete el.dataset.ccDone;
+    function injectPrompt() {
+        if (typeof SillyTavern === 'undefined' || !SillyTavern.getContext) {
+            return;
+        }
+        const ctx = SillyTavern.getContext();
+        if (!ctx.setExtensionPrompt) {
+            return;
+        }
+
+        const prompt = settings.enabled ? buildPromptInstruction() : '';
+        ctx.setExtensionPrompt(MODULE_NAME, prompt, 1, 0, false, 0);
+    }
+
+    function extractColorsFromHTML(html) {
+        const colorRegex = /<font\s+color="#([a-fA-F0-9]{6})"[^>]*>/g;
+        const colors = [];
+        let match;
+        while ((match = colorRegex.exec(html)) !== null) {
+            if (!colors.includes(match[1])) {
+                colors.push(match[1]);
+            }
+        }
+        return colors;
+    }
+
+    function detectCharacterFromContext(mesBlock, color) {
+        const nameEl = mesBlock.querySelector('.name_text');
+        if (nameEl) {
+            return nameEl.textContent.trim();
+        }
+        return null;
+    }
+
+    function scanMessagesForColors() {
+        document.querySelectorAll('.mes').forEach(mesBlock => {
+            const mesText = mesBlock.querySelector('.mes_text');
+            if (!mesText) return;
+            
+            const colors = extractColorsFromHTML(mesText.innerHTML);
+            const charName = mesBlock.querySelector('.name_text')?.textContent?.trim();
+            
+            if (charName && colors.length > 0) {
+                const key = charName.toLowerCase();
+                if (!characterColors[key]) {
+                    characterColors[key] = { 
+                        color: colors[0], 
+                        name: charName 
+                    };
+                    updateCharList();
+                }
             }
         });
+        
+        saveData();
     }
 
     function updateCharList() {
@@ -132,16 +153,16 @@
             i.oninput = () => { 
                 characterColors[i.dataset.key].color = i.value; 
                 i.nextElementSibling.style.color = i.value;
-                clearDisplayColors();
-                applyDisplayColors();
+                saveData();
+                injectPrompt();
             };
         });
         
         list.querySelectorAll('.cc-del').forEach(btn => {
             btn.onclick = () => {
                 delete characterColors[btn.dataset.key];
-                clearDisplayColors();
-                applyDisplayColors();
+                saveData();
+                injectPrompt();
                 updateCharList();
             };
         });
@@ -155,12 +176,12 @@
         const btn = document.createElement('div');
         btn.id = 'cc-input-btn';
         btn.className = 'fa-solid fa-droplet interactable';
-        btn.title = 'Refresh Dialogue Colors';
+        btn.title = 'Scan Messages for Colors';
         btn.style.cssText = 'cursor:pointer;padding:5px;font-size:1.2em;opacity:0.7;';
         btn.onclick = () => {
-            clearDisplayColors();
-            applyDisplayColors();
-            toastr?.success?.('Display colors refreshed!');
+            scanMessagesForColors();
+            injectPrompt();
+            toastr?.success?.('Colors scanned and prompt updated!');
         };
         rightArea.insertBefore(btn, rightArea.firstChild);
     }
@@ -175,7 +196,7 @@
                 <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
             </div>
             <div class="inline-drawer-content" style="padding:10px;display:flex;flex-direction:column;gap:8px;">
-                <label class="checkbox_label"><input type="checkbox" id="cc-enabled"><span>Enable coloring</span></label>
+                <label class="checkbox_label"><input type="checkbox" id="cc-enabled"><span>Enable color injection</span></label>
                 <div class="cc-row">
                     <label>Theme Mode</label>
                     <select id="cc-theme">
@@ -188,9 +209,9 @@
                 <hr>
                 <div style="display:flex;gap:5px;">
                     <button id="cc-clear" class="menu_button" style="flex:1">Clear Colors</button>
-                    <button id="cc-refresh" class="menu_button" style="flex:1">Refresh</button>
+                    <button id="cc-scan" class="menu_button" style="flex:1">Scan</button>
                 </div>
-                <small>Characters (session only):</small>
+                <small>Characters (per chat):</small>
                 <div id="cc-char-list" style="max-height:100px;overflow-y:auto;"></div>
             </div>
         </div>`;
@@ -201,44 +222,49 @@
         enabledCheck.checked = settings.enabled;
         enabledCheck.onchange = e => { 
             settings.enabled = e.target.checked; 
-            if (!settings.enabled) clearDisplayColors();
-            else applyDisplayColors();
+            saveData();
+            injectPrompt();
         };
         
         const themeSelect = document.getElementById('cc-theme');
         themeSelect.value = settings.themeMode;
         themeSelect.onchange = e => { 
             settings.themeMode = e.target.value; 
+            saveData();
+            injectPrompt();
         };
         
         const thoughtsCheck = document.getElementById('cc-thoughts');
         thoughtsCheck.checked = settings.colorThoughts;
         thoughtsCheck.onchange = e => { 
             settings.colorThoughts = e.target.checked; 
-            clearDisplayColors();
-            applyDisplayColors();
+            saveData();
         };
         
         document.getElementById('cc-clear').onclick = () => {
-            clearDisplayColors();
             characterColors = {};
+            saveData();
+            injectPrompt();
             updateCharList();
         };
         
-        document.getElementById('cc-refresh').onclick = () => {
-            clearDisplayColors();
-            applyDisplayColors();
+        document.getElementById('cc-scan').onclick = () => {
+            scanMessagesForColors();
+            injectPrompt();
         };
         
         updateCharList();
     }
 
     function init() {
+        currentChatId = getChatId();
+        loadData();
+        
         const wait = setInterval(() => {
             if (document.getElementById('extensions_settings')) {
                 clearInterval(wait);
                 createUI();
-                if (settings.enabled) setTimeout(applyDisplayColors, 500);
+                setTimeout(injectPrompt, 500);
             }
         }, 500);
         
@@ -250,25 +276,28 @@
         }, 500);
         
         if (typeof eventSource !== 'undefined' && typeof event_types !== 'undefined') {
+            eventSource.on(event_types.GENERATION_STARTED, () => {
+                injectPrompt();
+            });
+            
+            if (event_types.GENERATE_BEFORE_COMBINE_PROMPTS) {
+                eventSource.on(event_types.GENERATE_BEFORE_COMBINE_PROMPTS, () => {
+                    injectPrompt();
+                });
+            }
+            
             eventSource.on(event_types.MESSAGE_RECEIVED, () => {
-                if (settings.enabled) setTimeout(applyDisplayColors, 300);
+                setTimeout(scanMessagesForColors, 500);
             });
             
             eventSource.on(event_types.CHAT_CHANGED, () => {
-                clearDisplayColors();
+                currentChatId = getChatId();
                 characterColors = {};
+                loadData();
                 updateCharList();
-                if (settings.enabled) setTimeout(applyDisplayColors, 500);
-            });
-            
-            eventSource.on(event_types.USER_MESSAGE_RENDERED, () => {
-                if (settings.enabled) setTimeout(applyDisplayColors, 300);
+                setTimeout(injectPrompt, 500);
             });
         }
-        
-        setInterval(() => {
-            if (settings.enabled) applyDisplayColors();
-        }, 3000);
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
