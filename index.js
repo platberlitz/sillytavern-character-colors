@@ -37,22 +37,37 @@
     }
 
     async function extractDialogueMap(text) {
-        if (typeof SillyTavern === 'undefined' || !SillyTavern.getContext) return null;
-        const ctx = SillyTavern.getContext();
-        if (!ctx.generateRaw) return null;
+        // Disabled LLM extraction - use pattern matching only
+        return null;
+    }
 
-        try {
-            const prompt = `List characters who speak dialogue in this text. Return JSON: {"quote": "speaker"}\nText: ${text.substring(0, 1500)}\nJSON:`;
-            const resp = await ctx.generateRaw(prompt, null, false, false, '', 200);
-            const match = resp.match(/\{[\s\S]*\}/);
-            if (match) return JSON.parse(match[0]);
-        } catch (e) {}
+    function extractSpeakerFromContext(text, quote) {
+        // Find speaker near the quote using patterns
+        const idx = text.indexOf(quote);
+        const before = text.substring(Math.max(0, idx - 100), idx);
+        const after = text.substring(idx + quote.length, idx + quote.length + 100);
+        
+        const patterns = [
+            /\b([A-Z][a-z]{2,})\s+(?:said|says|asked|whispered|replied|murmured|called)\s*[,.]?\s*$/i,
+            /\b([A-Z][a-z]{2,})'s\s+voice/i,
+            /^\s*(?:said|asked|whispered|replied)\s+([A-Z][a-z]{2,})/i,
+        ];
+        
+        for (const p of patterns) {
+            const m = before.match(p);
+            if (m?.[1]) return m[1];
+        }
+        for (const p of patterns) {
+            const m = after.match(p);
+            if (m?.[1]) return m[1];
+        }
         return null;
     }
 
     function applyColors(mesText, dialogueMap) {
         const mesBlock = mesText.closest('.mes');
         const mainChar = mesBlock?.querySelector('.name_text')?.textContent?.trim();
+        const fullText = mesText.textContent;
 
         // Color thoughts in em/i tags (『...』 and *...*)
         if (settings.colorThoughts && mainChar) {
@@ -81,15 +96,11 @@
             const frag = document.createDocumentFragment();
             for (const part of parts) {
                 if (!part) continue;
-                if (/^[""][^""]+[""]$/.test(part) && dialogueMap) {
-                    const inner = part.slice(1, -1).toLowerCase();
-                    let speaker = null;
-                    for (const [d, c] of Object.entries(dialogueMap)) {
-                        if (inner.includes(d.toLowerCase().substring(0, 12)) || d.toLowerCase().includes(inner.substring(0, 12))) {
-                            speaker = c;
-                            break;
-                        }
-                    }
+                if (/^[""][^""]+[""]$/.test(part)) {
+                    const inner = part.slice(1, -1);
+                    let speaker = extractSpeakerFromContext(fullText, inner);
+                    if (!speaker) speaker = mainChar;
+                    
                     if (speaker) {
                         const span = document.createElement('span');
                         span.className = 'cc-dialogue';
@@ -108,8 +119,7 @@
     async function processMessage(el, useLLM) {
         if (el.dataset.ccProcessed) return;
         el.dataset.ccProcessed = '1';
-        const map = useLLM ? await extractDialogueMap(el.textContent) : null;
-        applyColors(el, map);
+        applyColors(el, null);
     }
 
     function processAll(useLLM = false) {
