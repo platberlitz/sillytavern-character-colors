@@ -115,16 +115,29 @@ JSON:`;
     }
 
     async function processMessage(el, useLLM) {
+        // Skip if already processed with LLM, unless forcing
+        if (el.dataset.ccLlmDone && useLLM) return;
         if (el.dataset.ccProcessed && !useLLM) return;
+        
         el.dataset.ccProcessed = '1';
-        const map = useLLM ? await extractDialogueMap(el.textContent) : null;
+        
+        const text = el.textContent;
+        if (!text || text.length < 20) return;
+        
+        const map = useLLM ? await extractDialogueMap(text) : null;
+        if (useLLM && map) el.dataset.ccLlmDone = '1';
+        
         applyColors(el, map);
     }
 
     function processAll(useLLM = false) {
         document.querySelectorAll('.mes_text').forEach(el => {
-            if (useLLM || !el.dataset.ccProcessed) {
-                processMessage(el, useLLM);
+            // For LLM: only process if not already LLM-processed
+            // For non-LLM: only process if not processed at all
+            if (useLLM && !el.dataset.ccLlmDone) {
+                processMessage(el, true);
+            } else if (!useLLM && !el.dataset.ccProcessed) {
+                processMessage(el, false);
             }
         });
     }
@@ -196,7 +209,12 @@ JSON:`;
         const wait = setInterval(() => { if (document.getElementById('extensions_settings')) { clearInterval(wait); createUI(); } }, 500);
         
         if (typeof eventSource !== 'undefined' && typeof event_types !== 'undefined') {
-            eventSource.on(event_types.GENERATION_ENDED, () => setTimeout(() => processAll(true), 1000));
+            // Multiple delayed attempts for thinking models
+            eventSource.on(event_types.GENERATION_ENDED, () => {
+                setTimeout(() => processAll(true), 1500);
+                setTimeout(() => processAll(true), 3000);
+                setTimeout(() => processAll(true), 5000);
+            });
             eventSource.on(event_types.CHAT_CHANGED, () => { characterColors = {}; saveData(); updateCharacterList(); });
         }
         
