@@ -236,7 +236,7 @@ JSON:`;
         
         const btn = document.createElement('div');
         btn.id = 'cc-input-btn';
-        btn.className = 'fa-solid fa-palette interactable';
+        btn.className = 'fa-solid fa-droplet interactable';
         btn.title = 'Refresh Dialogue Colors';
         btn.style.cssText = 'cursor:pointer;padding:5px;font-size:1.2em;opacity:0.7;';
         btn.onclick = () => {
