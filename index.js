@@ -98,10 +98,6 @@ JSON:`;
     }
 
     function applyColorsToElement(mesText, dialogueMap) {
-        const walk = document.createTreeWalker(mesText, NodeFilter.SHOW_TEXT);
-        const textNodes = [];
-        while (walk.nextNode()) textNodes.push(walk.currentNode);
-
         // Get main character for thoughts
         const mesBlock = mesText.closest('.mes');
         let mainChar = null;
@@ -110,20 +106,40 @@ JSON:`;
             if (nameEl) mainChar = nameEl.textContent.trim();
         }
 
-        console.log('CC: Processing message, mainChar:', mainChar, 'colorThoughts:', settings.colorThoughts);
+        console.log('CC: Processing message, mainChar:', mainChar);
+
+        // First pass: color Japanese quotes and asterisks (they might be in <em> tags)
+        if (settings.colorThoughts && mainChar) {
+            const color = getCharacterColor(mainChar);
+            
+            // Find all text containing 『』
+            mesText.querySelectorAll('em, i').forEach(el => {
+                if (el.textContent.includes('『') || el.textContent.includes('』')) {
+                    console.log('CC: Found thought in em/i tag:', el.textContent);
+                    el.style.color = color;
+                    el.classList.add('cc-thought');
+                }
+            });
+            
+            // Also check direct text nodes for 『』
+            const allText = mesText.innerHTML;
+            if (allText.includes('『')) {
+                console.log('CC: Found 『 in message');
+                mesText.innerHTML = allText.replace(/(『[^』]*』)/g, `<span class="cc-thought" style="color:${color};opacity:0.8">$1</span>`);
+            }
+        }
+
+        // Second pass: color dialogue quotes
+        const walk = document.createTreeWalker(mesText, NodeFilter.SHOW_TEXT);
+        const textNodes = [];
+        while (walk.nextNode()) textNodes.push(walk.currentNode);
 
         for (const node of textNodes) {
             const nodeText = node.nodeValue;
             
-            // Check if this node has any quotes or thoughts
-            if (!/"/.test(nodeText) && !/"/.test(nodeText) && !/『/.test(nodeText) && !/\*/.test(nodeText)) {
-                continue;
-            }
+            if (!/"/.test(nodeText) && !/"/.test(nodeText)) continue;
 
-            console.log('CC: Processing node:', nodeText.substring(0, 50));
-
-            // Split on quotes, Japanese quotes, and asterisks
-            const regex = /("[^"]*"|"[^"]*"|『[^』]*』|\*[^\*]+\*)/g;
+            const regex = /("[^"]*"|"[^"]*")/g;
             const parts = nodeText.split(regex);
             
             if (parts.length <= 1) continue;
@@ -134,10 +150,6 @@ JSON:`;
                 if (!part) continue;
                 
                 const isQuote = /^"[^"]*"$/.test(part) || /^"[^"]*"$/.test(part);
-                const isJpQuote = /^『[^』]*』$/.test(part);
-                const isAsterisk = /^\*[^\*]+\*$/.test(part);
-
-                console.log('CC: Part:', part.substring(0, 30), 'isQuote:', isQuote, 'isJpQuote:', isJpQuote, 'isAsterisk:', isAsterisk);
 
                 if (isQuote) {
                     const innerText = part.slice(1, -1);
@@ -159,20 +171,6 @@ JSON:`;
                         const span = document.createElement('span');
                         span.className = 'cc-dialogue';
                         span.style.color = color;
-                        span.textContent = part;
-                        frag.appendChild(span);
-                    } else {
-                        frag.appendChild(document.createTextNode(part));
-                    }
-                } else if (isJpQuote || isAsterisk) {
-                    console.log('CC: Found thought, colorThoughts:', settings.colorThoughts, 'mainChar:', mainChar);
-                    if (settings.colorThoughts && mainChar) {
-                        const color = getCharacterColor(mainChar);
-                        console.log('CC: Coloring thought with:', color);
-                        const span = document.createElement('span');
-                        span.className = 'cc-thought';
-                        span.style.color = color;
-                        span.style.opacity = '0.8';
                         span.textContent = part;
                         frag.appendChild(span);
                     } else {
