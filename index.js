@@ -2,14 +2,11 @@
     'use strict';
 
     let characterColors = {};
-    let settings = { colorThoughts: true, themeMode: 'auto' };
+    let settings = { colorThoughts: true };
 
     function generateColor(index) {
-        const hue = (index * 137.508) % 360; // Golden angle
-        const isDark = settings.themeMode === 'dark' || 
-            (settings.themeMode === 'auto' && window.matchMedia('(prefers-color-scheme: dark)').matches);
-        const lightness = isDark ? 65 : 40;
-        return `hsl(${Math.round(hue)}, 75%, ${lightness}%)`;
+        const hue = (index * 137.508) % 360;
+        return `hsl(${Math.round(hue)}, 75%, 65%)`;
     }
 
     function getCharacterColor(name) {
@@ -36,174 +33,152 @@
         } catch (e) {}
     }
 
-    function isGenerationInProgress() {
-        // Check SillyTavern's generation state
-        if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
-            const ctx = SillyTavern.getContext();
-            if (ctx.is_send_press || ctx.isGenerating?.()) return true;
-        }
-        // Also check global
-        if (typeof is_send_press !== 'undefined' && is_send_press) return true;
-        if (typeof isGenerating !== 'undefined' && isGenerating()) return true;
-        return false;
-    }
-
-    async function extractDialogueMap(text) {
-        // Don't run if generation is in progress
-        if (isGenerationInProgress()) {
-            console.log('CC: Skipping LLM - generation in progress');
-            return null;
-        }
+    // Convert <color=Name>text</color> tags to colored spans
+    function processColorTags(mesText) {
+        if (mesText.dataset.ccProcessed) return;
+        mesText.dataset.ccProcessed = '1';
         
-        if (typeof SillyTavern === 'undefined' || !SillyTavern.getContext) return null;
-        const ctx = SillyTavern.getContext();
-        if (!ctx.generateRaw) return null;
-
-        try {
-            const prompt = `List characters who speak dialogue in this text. Return JSON: {"quote": "speaker"}\nText: ${text.substring(0, 1500)}\nJSON:`;
-            const resp = await ctx.generateRaw(prompt, null, false, false, '', 200);
-            const match = resp.match(/\{[\s\S]*\}/);
-            if (match) return JSON.parse(match[0]);
-        } catch (e) {}
-        return null;
-    }
-
-    function applyColors(mesText, dialogueMap) {
-        const mesBlock = mesText.closest('.mes');
-        const mainChar = mesBlock?.querySelector('.name_text')?.textContent?.trim();
-
-        // Color thoughts in em/i tags (『...』 and *...*)
-        if (settings.colorThoughts && mainChar) {
-            const color = getCharacterColor(mainChar);
-            mesText.querySelectorAll('em, i').forEach(el => {
-                if (!el.dataset.ccDone) {
-                    el.style.color = color;
-                    el.style.opacity = '0.85';
-                    el.dataset.ccDone = '1';
-                }
-            });
-        }
-
-        // Color dialogue in quotes (only if we have dialogueMap from LLM)
-        if (!dialogueMap) return;
-        
-        const walk = document.createTreeWalker(mesText, NodeFilter.SHOW_TEXT);
-        const nodes = [];
-        while (walk.nextNode()) nodes.push(walk.currentNode);
-
-        for (const node of nodes) {
-            const text = node.nodeValue;
-            if (!/"/.test(text) && !/"/.test(text)) continue;
-
-            const parts = text.split(/("[^"]+"|"[^"]+")/g);
-            if (parts.length <= 1) continue;
-
-            const frag = document.createDocumentFragment();
-            for (const part of parts) {
-                if (!part) continue;
-                if (/^[""][^""]+[""]$/.test(part)) {
-                    const inner = part.slice(1, -1).toLowerCase();
-                    let speaker = null;
-                    for (const [d, c] of Object.entries(dialogueMap)) {
-                        if (inner.includes(d.toLowerCase().substring(0, 12)) || d.toLowerCase().includes(inner.substring(0, 12))) {
-                            speaker = c;
-                            break;
-                        }
-                    }
-                    if (speaker) {
-                        const span = document.createElement('span');
-                        span.className = 'cc-dialogue';
-                        span.style.color = getCharacterColor(speaker);
-                        span.textContent = part;
-                        frag.appendChild(span);
-                        continue;
-                    }
-                }
-                frag.appendChild(document.createTextNode(part));
-            }
-            node.parentNode.replaceChild(frag, node);
-        }
-    }
-
-    async function processMessage(el, useLLM) {
-        if (el.dataset.ccProcessed && !useLLM) return;
-        el.dataset.ccProcessed = '1';
-        const map = useLLM ? await extractDialogueMap(el.textContent) : null;
-        applyColors(el, map);
-    }
-
-    function processAll(useLLM = false) {
-        document.querySelectorAll('.mes_text').forEach(el => {
-            if (useLLM || !el.dataset.ccProcessed) {
-                processMessage(el, useLLM);
-            }
+        const html = mesText.innerHTML;
+        // Match <color=CharacterName>dialogue</color>
+        const newHtml = html.replace(/<color=([^>]+)>([^<]*)<\/color>/gi, (match, name, text) => {
+            const color = getCharacterColor(name);
+            return `<span class="cc-dialogue" style="color:${color}">${text}</span>`;
         });
+        
+        if (newHtml !== html) {
+            mesText.innerHTML = newHtml;
+        }
     }
 
-    async function reprocess() {
-        // Don't reprocess if generation is in progress
-        if (isGenerationInProgress()) {
-            console.log('CC: Cannot reprocess - generation in progress');
-            return;
-        }
-        
+    function processAll() {
+        document.querySelectorAll('.mes_text:not([data-cc-processed])').forEach(processColorTags);
+    }
+
+    function reprocess() {
         document.querySelectorAll('.mes_text').forEach(el => {
             delete el.dataset.ccProcessed;
-            el.querySelectorAll('[data-cc-done]').forEach(e => { e.style.color = ''; e.style.opacity = ''; delete e.dataset.ccDone; });
-            el.querySelectorAll('.cc-dialogue').forEach(s => s.replaceWith(document.createTextNode(s.textContent)));
         });
-        
-        for (const el of document.querySelectorAll('.mes_text')) {
-            await processMessage(el, true);
-        }
+        processAll();
     }
 
     function clearColors() {
         characterColors = {};
         saveData();
-        reprocess();
+        updateCharacterList();
     }
 
     function updateCharacterList() {
         const list = document.getElementById('cc-char-list');
         if (!list) return;
-        list.innerHTML = Object.entries(characterColors).map(([k, v]) =>
-            `<div class="cc-char-item"><span style="color:${v.color}">${v.displayName}</span><input type="color" value="${v.color.startsWith('hsl')?'#888':v.color}" data-key="${k}"></div>`
-        ).join('') || '<small>No characters yet</small>';
-        list.querySelectorAll('input').forEach(i => i.oninput = () => { characterColors[i.dataset.key].color = i.value; saveData(); reprocess(); });
+        
+        const entries = Object.entries(characterColors);
+        if (!entries.length) {
+            list.innerHTML = '<small>No characters yet. Colors are assigned when the AI uses color tags.</small>';
+            return;
+        }
+        
+        list.innerHTML = entries.map(([k, v]) =>
+            `<div class="cc-char-item">
+                <span style="color:${v.color};font-weight:bold">${v.displayName}</span>
+                <input type="color" value="${v.color.startsWith('hsl')?'#888888':v.color}" data-key="${k}">
+            </div>`
+        ).join('');
+        
+        list.querySelectorAll('input').forEach(i => {
+            i.oninput = () => {
+                characterColors[i.dataset.key].color = i.value;
+                saveData();
+                reprocess();
+            };
+        });
+    }
+
+    function getAuthorNoteText() {
+        return `[System: Wrap all spoken dialogue in color tags using the format <color=CharacterName>dialogue here</color>. Use the character's name who is speaking. For inner thoughts, use <color=CharacterName>*thought here*</color>. Example: <color=John>"Hello!"</color> he said. <color=Mary>"Hi there,"</color> Mary replied. <color=John>*She seems nice.*</color>]`;
+    }
+
+    function copyAuthorNote() {
+        navigator.clipboard.writeText(getAuthorNoteText()).then(() => {
+            toastr?.success?.('Author\'s Note copied to clipboard!') || alert('Copied!');
+        });
+    }
+
+    function getRegexScript() {
+        return {
+            scriptName: "Dialogue Color Tags",
+            findRegex: "/<color=([^>]+)>([^<]*)<\\/color>/gi",
+            replaceString: "{{match}}",
+            trimStrings: ["<color=", "</color>"],
+            placement: [1], // AI Response
+            disabled: false,
+            markdownOnly: false,
+            promptOnly: false,
+            runOnEdit: true,
+            substituteRegex: 0
+        };
     }
 
     function createUI() {
         if (document.getElementById('cc-ext')) return;
-        const html = `<div id="cc-ext" class="inline-drawer">
-            <div class="inline-drawer-toggle inline-drawer-header"><b>Dialogue Colors</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
-            <div class="inline-drawer-content">
-                <label class="checkbox_label"><input type="checkbox" id="cc-thoughts" ${settings.colorThoughts?'checked':''}><span>Color thoughts (『』/*text*)</span></label>
-                <select id="cc-theme"><option value="auto">Auto</option><option value="dark">Dark</option><option value="light">Light</option></select>
-                <div><button id="cc-refresh" class="menu_button">Refresh</button><button id="cc-clear" class="menu_button">Clear</button></div>
-                <div id="cc-char-list"></div>
-            </div></div>`;
+        
+        const html = `
+        <div id="cc-ext" class="inline-drawer">
+            <div class="inline-drawer-toggle inline-drawer-header">
+                <b>Dialogue Colors</b>
+                <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+            </div>
+            <div class="inline-drawer-content" style="padding:10px;display:flex;flex-direction:column;gap:10px;">
+                <div style="background:var(--SmartThemeBlurTintColor);padding:10px;border-radius:5px;font-size:0.85em;">
+                    <b>Setup Instructions:</b><br>
+                    1. Click "Copy Author's Note" below<br>
+                    2. Paste it into your Author's Note (depth 4 recommended)<br>
+                    3. The AI will add color tags to dialogue<br>
+                    4. Colors appear automatically!
+                </div>
+                <button id="cc-copy-note" class="menu_button">📋 Copy Author's Note</button>
+                <button id="cc-refresh" class="menu_button">🔄 Refresh Colors</button>
+                <button id="cc-clear" class="menu_button">🗑️ Clear All Characters</button>
+                <hr>
+                <label style="font-weight:bold">Character Colors:</label>
+                <div id="cc-char-list" style="max-height:150px;overflow-y:auto;"></div>
+            </div>
+        </div>`;
+        
         document.getElementById('extensions_settings')?.insertAdjacentHTML('beforeend', html);
-        document.getElementById('cc-thoughts').onchange = e => { settings.colorThoughts = e.target.checked; saveData(); reprocess(); };
-        document.getElementById('cc-theme').value = settings.themeMode;
-        document.getElementById('cc-theme').onchange = e => { settings.themeMode = e.target.value; saveData(); };
+        
+        document.getElementById('cc-copy-note').onclick = copyAuthorNote;
         document.getElementById('cc-refresh').onclick = reprocess;
         document.getElementById('cc-clear').onclick = clearColors;
+        
         updateCharacterList();
     }
 
     function init() {
         loadData();
-        const wait = setInterval(() => { if (document.getElementById('extensions_settings')) { clearInterval(wait); createUI(); } }, 500);
         
-        // NO automatic processing - only manual Refresh button
-        // This prevents any interference with streaming
+        const wait = setInterval(() => {
+            if (document.getElementById('extensions_settings')) {
+                clearInterval(wait);
+                createUI();
+            }
+        }, 500);
+        
+        // Process color tags periodically (lightweight, no LLM calls)
+        setInterval(processAll, 1000);
         
         if (typeof eventSource !== 'undefined' && typeof event_types !== 'undefined') {
-            eventSource.on(event_types.CHAT_CHANGED, () => { characterColors = {}; saveData(); updateCharacterList(); });
+            eventSource.on(event_types.MESSAGE_RECEIVED, () => setTimeout(processAll, 100));
+            eventSource.on(event_types.CHAT_CHANGED, () => {
+                characterColors = {};
+                saveData();
+                updateCharacterList();
+            });
         }
     }
 
-    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
-    else init();
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
 })();
