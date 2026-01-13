@@ -94,7 +94,7 @@ JSON:`;
             
             if (!resp && ctx.generateRaw) {
                 console.log('CC: Using default generateRaw');
-                resp = await ctx.generateRaw(prompt, null, false, false, '', 250);
+                resp = await ctx.generateRaw(prompt, null, false, false, '', 500);
             }
             
             if (!resp) return null;
@@ -151,7 +151,7 @@ JSON:`;
             // Check if we can use generateQuietPrompt with model override
             if (ctx.generateQuietPrompt) {
                 console.log('CC: Trying generateQuietPrompt');
-                const resp = await ctx.generateQuietPrompt(prompt, false, false, '', settings.customModel);
+                const resp = await ctx.generateQuietPrompt(prompt, false, false, '', settings.customModel, 500);
                 return resp;
             }
             
@@ -199,7 +199,7 @@ JSON:`;
             });
         }
 
-        if (!dialogueMap) return;
+        if (!dialogueMap || Object.keys(dialogueMap).length === 0) return;
 
         const walk = document.createTreeWalker(mesText, NodeFilter.SHOW_TEXT);
         const nodes = [];
@@ -216,15 +216,33 @@ JSON:`;
             for (const part of parts) {
                 if (!part) continue;
                 if (/^[""][^""]+[""]$/.test(part)) {
-                    const inner = part.slice(1, -1).toLowerCase();
+                    const inner = part.slice(1, -1);
+                    const innerLower = inner.toLowerCase();
                     let speaker = null;
+                    
+                    // Try exact match first
                     for (const [d, c] of Object.entries(dialogueMap)) {
-                        const dl = d.toLowerCase();
-                        if (inner.includes(dl.substring(0, 15)) || dl.includes(inner.substring(0, 15))) {
+                        if (d.toLowerCase() === innerLower) {
                             speaker = c;
                             break;
                         }
                     }
+                    
+                    // Try partial match
+                    if (!speaker) {
+                        for (const [d, c] of Object.entries(dialogueMap)) {
+                            const dl = d.toLowerCase();
+                            // Match if either contains a significant portion of the other
+                            if (innerLower.length > 10 && (innerLower.includes(dl.substring(0, 20)) || dl.includes(innerLower.substring(0, 20)))) {
+                                speaker = c;
+                                break;
+                            } else if (innerLower.length <= 10 && (innerLower.includes(dl) || dl.includes(innerLower))) {
+                                speaker = c;
+                                break;
+                            }
+                        }
+                    }
+                    
                     if (speaker) {
                         const span = document.createElement('span');
                         span.className = 'cc-dialogue';
