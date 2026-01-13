@@ -13,8 +13,6 @@
         light: ['#CC4400', '#CC0066', '#006699', '#228B22', '#B8860B', '#C71585', '#6A1B9A', '#D2691E']
     };
 
-    let colorIndex = 0;
-
     function detectTheme() {
         const bg = getComputedStyle(document.body).backgroundColor;
         const rgb = bg.match(/\d+/g);
@@ -25,20 +23,42 @@
         return 'dark';
     }
 
-    function getThemeColors() {
-        if (settings.theme === 'custom' && settings.customColors.length > 0) return settings.customColors;
-        return themeColors[settings.theme === 'auto' ? detectTheme() : settings.theme] || themeColors.dark;
+    function generateRandomColor() {
+        const isDark = settings.theme === 'dark' || (settings.theme === 'auto' && detectTheme() === 'dark');
+        
+        // Generate vibrant colors that work on the current theme
+        const hue = Math.floor(Math.random() * 360);
+        const saturation = 70 + Math.floor(Math.random() * 30); // 70-100%
+        const lightness = isDark 
+            ? 55 + Math.floor(Math.random() * 25)  // 55-80% for dark themes
+            : 30 + Math.floor(Math.random() * 25); // 30-55% for light themes
+        
+        return hslToHex(hue, saturation, lightness);
+    }
+    
+    function hslToHex(h, s, l) {
+        s /= 100;
+        l /= 100;
+        const a = s * Math.min(l, 1 - l);
+        const f = n => {
+            const k = (n + h / 30) % 12;
+            const color = l - a * Math.max(Math.min(k - 3, 9 - k, 1), -1);
+            return Math.round(255 * color).toString(16).padStart(2, '0');
+        };
+        return `#${f(0)}${f(8)}${f(4)}`.toUpperCase();
     }
 
     function getCharacterColor(name) {
         const key = name.toLowerCase().trim();
         if (!characterColors[key]) {
-            const colors = getThemeColors();
+            const color = (settings.theme === 'custom' && settings.customColors.length > 0)
+                ? settings.customColors[Object.keys(characterColors).length % settings.customColors.length]
+                : generateRandomColor();
+            
             characterColors[key] = {
-                color: colors[colorIndex % colors.length],
+                color: color,
                 displayName: name
             };
-            colorIndex++;
             saveData();
             updateCharacterList();
         }
@@ -56,7 +76,6 @@
             const saved = localStorage.getItem('cc_settings');
             if (colors) characterColors = JSON.parse(colors);
             if (saved) settings = { ...settings, ...JSON.parse(saved) };
-            colorIndex = Object.keys(characterColors).length;
         } catch (e) {}
     }
 
@@ -255,7 +274,6 @@
 
     function clearColors() {
         characterColors = {};
-        colorIndex = 0;
         saveData();
         reprocessAll();
         updateCharacterList();
@@ -386,7 +404,6 @@
         
         $(document).on('chatLoaded', () => {
             characterColors = {};
-            colorIndex = 0;
             saveData();
             document.querySelectorAll('[data-cc-done]').forEach(el => el.removeAttribute('data-cc-done'));
             document.querySelectorAll('.cc-dialogue, .cc-thought').forEach(el => {
