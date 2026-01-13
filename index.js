@@ -4,7 +4,6 @@
     let characterColors = {};
     let settings = {
         theme: 'auto',
-        customColors: [],
         colorThoughts: true
     };
 
@@ -40,10 +39,7 @@
     function getCharacterColor(name) {
         const key = name.toLowerCase().trim();
         if (!characterColors[key]) {
-            characterColors[key] = {
-                color: generateRandomColor(),
-                displayName: name
-            };
+            characterColors[key] = { color: generateRandomColor(), displayName: name };
             saveData();
             updateCharacterList();
         }
@@ -67,90 +63,116 @@
     function extractNames(text) {
         const names = new Set();
         const patterns = [
-            /\b([A-Z][a-z]{2,})\s+(?:said|says|asked|asks|replied|whispered|shouted|muttered|exclaimed|answered|called|murmured|growled|sighed|spoke|added|continued|responded|shrugs|nods|smiles|grins|laughs|sighs|looks|turns|moves|steps|tilts|doesn't|doesn't|leans|towers|lets|drops|gets)\b/gi,
-            /\b([A-Z][a-z]{2,})'s\s+(?:voice|words|tone|grip|hand|eyes|face|lips|mouth|thumb|fingers|head|wrist|breath|ear)\b/gi,
-            /\b([A-Z][a-z]{2,})\s+(?:has|had|is|was|can|could|will|would)\b/gi
+            /\b([A-Z][a-z]{2,})\s+(?:said|says|asked|asks|replied|whispered|shouted|muttered|exclaimed|answered|called|murmured|growled|sighed|spoke|added|continued|responded|shrugs|nods|smiles|grins|laughs|sighs|looks|turns|moves|steps|tilts|doesn't|leans|towers|lets|drops|gets)\b/gi,
+            /\b([A-Z][a-z]{2,})'s\s+(?:voice|words|tone|grip|hand|eyes|face|lips|mouth|thumb|fingers|head|wrist|breath|ear)\b/gi
         ];
-        
         const exclude = ['The', 'This', 'That', 'Then', 'There', 'They', 'What', 'When', 'Where', 'Which', 'While', 'With', 'Would', 'Could', 'Should', 'Have', 'Just', 'But', 'And', 'For', 'Not', 'You', 'Your', 'His', 'Her', 'Its', 'Our', 'Their', 'She', 'God', 'Yes', 'Now', 'Good', 'Shy', 'Easy', 'Look', 'Someone', 'Quiet'];
         
         for (const pattern of patterns) {
             let match;
             while ((match = pattern.exec(text)) !== null) {
-                const name = match[1];
-                if (name && !exclude.includes(name)) {
-                    names.add(name);
-                }
+                if (match[1] && !exclude.includes(match[1])) names.add(match[1]);
             }
         }
         return [...names];
     }
 
     function findPrimarySpeaker(text, names) {
-        // Look for who is speaking/acting with dialogue
         for (const name of names) {
-            // Check if this name is associated with speech actions
-            const speechPattern = new RegExp(`${name}(?:'s)?\\s+(?:voice|grip|thumb|leans|tilts|towers)|His\\s+voice|He\\s+(?:tilts|leans|shrugs)`, 'i');
-            if (speechPattern.test(text)) {
+            if (new RegExp(`${name}(?:'s)?\\s+(?:voice|grip|thumb|leans|tilts|towers)|He\\s+(?:tilts|leans|shrugs)`, 'i').test(text)) {
                 return name;
             }
         }
         return names[0] || null;
     }
 
-    function applyColorsToMessage(messageElement) {
-        if (messageElement.hasAttribute('data-cc-done')) return;
-        messageElement.setAttribute('data-cc-done', 'true');
+    function processMessage(el) {
+        if (el.hasAttribute('data-cc-done')) return;
         
-        const text = messageElement.textContent;
+        const text = el.textContent;
         if (!text || text.length < 10) return;
         
         const names = extractNames(text);
-        const primarySpeaker = findPrimarySpeaker(text, names);
+        const speaker = findPrimarySpeaker(text, names);
+        if (!speaker) return;
         
-        if (!primarySpeaker) return;
+        const color = getCharacterColor(speaker);
         
-        const color = getCharacterColor(primarySpeaker);
+        // Walk text nodes only
+        const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null, false);
+        const nodes = [];
+        let node;
+        while (node = walker.nextNode()) nodes.push(node);
         
-        // Process the HTML to color dialogue and thoughts
-        let html = messageElement.innerHTML;
-        
-        // Color text in straight quotes "..."
-        html = html.replace(/"([^"]+)"/g, (match, inner) => {
-            return `"<span class="cc-dialogue" style="color: ${color} !important;">${inner}</span>"`;
-        });
-        
-        // Color text in curly quotes "..."
-        html = html.replace(/"([^"]+)"/g, (match, inner) => {
-            return `"<span class="cc-dialogue" style="color: ${color} !important;">${inner}</span>"`;
-        });
-        
-        // Color thoughts in 『...』
-        if (settings.colorThoughts) {
-            html = html.replace(/『([^』]+)』/g, (match, inner) => {
-                return `『<span class="cc-thought" style="color: ${color} !important; opacity: 0.85 !important;">${inner}</span>』`;
-            });
+        for (const textNode of nodes) {
+            const txt = textNode.textContent;
+            if (!txt.match(/[""]|『|』|\*/)) continue;
             
-            // Color thoughts in *...*
-            html = html.replace(/\*([^*]+)\*/g, (match, inner) => {
-                return `*<span class="cc-thought" style="color: ${color} !important; opacity: 0.85 !important;">${inner}</span>*`;
-            });
+            const frag = document.createDocumentFragment();
+            let remaining = txt;
+            
+            // Match quotes and thoughts
+            const regex = /("[^"]+"|"[^"]+"|『[^』]+』|\*[^*]+\*)/g;
+            let lastIdx = 0;
+            let m;
+            
+            while ((m = regex.exec(txt)) !== null) {
+                // Text before match
+                if (m.index > lastIdx) {
+                    frag.appendChild(document.createTextNode(txt.slice(lastIdx, m.index)));
+                }
+                
+                const matched = m[0];
+                const isThought = matched.startsWith('『') || matched.startsWith('*');
+                
+                if (isThought && !settings.colorThoughts) {
+                    frag.appendChild(document.createTextNode(matched));
+                } else {
+                    // Extract wrapper and inner content
+                    let open, close, inner;
+                    if (matched.startsWith('"')) { open = '"'; close = '"'; inner = matched.slice(1, -1); }
+                    else if (matched.startsWith('"')) { open = '"'; close = '"'; inner = matched.slice(1, -1); }
+                    else if (matched.startsWith('『')) { open = '『'; close = '』'; inner = matched.slice(1, -1); }
+                    else { open = '*'; close = '*'; inner = matched.slice(1, -1); }
+                    
+                    frag.appendChild(document.createTextNode(open));
+                    const span = document.createElement('span');
+                    span.className = isThought ? 'cc-thought' : 'cc-dialogue';
+                    span.style.cssText = `color: ${color} !important;` + (isThought ? ' opacity: 0.85 !important;' : '');
+                    span.textContent = inner;
+                    frag.appendChild(span);
+                    frag.appendChild(document.createTextNode(close));
+                }
+                
+                lastIdx = m.index + matched.length;
+            }
+            
+            // Remaining text
+            if (lastIdx < txt.length) {
+                frag.appendChild(document.createTextNode(txt.slice(lastIdx)));
+            }
+            
+            if (frag.childNodes.length > 0 && lastIdx > 0) {
+                textNode.parentNode.replaceChild(frag, textNode);
+            }
         }
         
-        messageElement.innerHTML = html;
+        el.setAttribute('data-cc-done', 'true');
     }
 
-    function processAllMessages() {
-        document.querySelectorAll('.mes_text:not([data-cc-done])').forEach(applyColorsToMessage);
+    function processAll() {
+        document.querySelectorAll('.mes_text:not([data-cc-done])').forEach(processMessage);
     }
 
     function reprocessAll() {
-        document.querySelectorAll('[data-cc-done]').forEach(el => el.removeAttribute('data-cc-done'));
-        document.querySelectorAll('.cc-dialogue, .cc-thought').forEach(el => {
-            const text = el.textContent;
-            el.replaceWith(document.createTextNode(text));
+        // Remove all our spans and flags
+        document.querySelectorAll('.mes_text[data-cc-done]').forEach(el => {
+            el.removeAttribute('data-cc-done');
+            el.querySelectorAll('.cc-dialogue, .cc-thought').forEach(span => {
+                span.replaceWith(document.createTextNode(span.textContent));
+            });
         });
-        processAllMessages();
+        processAll();
     }
 
     function clearColors() {
@@ -174,71 +196,31 @@
         for (const [key, data] of entries) {
             const item = document.createElement('div');
             item.className = 'cc-item';
-            item.innerHTML = `
-                <span class="cc-name-display" style="color:${data.color}!important">${data.displayName}</span>
-                <input type="color" value="${data.color}" data-key="${key}">
-                <span class="cc-hex">${data.color}</span>
-            `;
+            item.innerHTML = `<span class="cc-name-display" style="color:${data.color}!important">${data.displayName}</span><input type="color" value="${data.color}" data-key="${key}"><span class="cc-hex">${data.color}</span>`;
             list.appendChild(item);
         }
         
         list.querySelectorAll('input[type="color"]').forEach(picker => {
             picker.addEventListener('input', (e) => {
                 const key = e.target.dataset.key;
-                const color = e.target.value.toUpperCase();
-                characterColors[key].color = color;
+                characterColors[key].color = e.target.value.toUpperCase();
                 saveData();
-                e.target.previousElementSibling.style.color = color;
-                e.target.nextElementSibling.textContent = color;
+                e.target.previousElementSibling.style.color = e.target.value;
+                e.target.nextElementSibling.textContent = e.target.value.toUpperCase();
                 reprocessAll();
             });
         });
     }
 
     function createUI() {
-        const html = `
-            <div class="cc-settings">
-                <h3>Character Dialogue Colors</h3>
-                <div class="cc-row">
-                    <label>Theme</label>
-                    <select id="cc-theme">
-                        <option value="auto">Auto</option>
-                        <option value="dark">Dark</option>
-                        <option value="light">Light</option>
-                    </select>
-                </div>
-                <div class="cc-row">
-                    <label><input type="checkbox" id="cc-thoughts"> Color thoughts (*text* / 『text』)</label>
-                </div>
-                <div class="cc-row">
-                    <label>Characters</label>
-                    <button id="cc-clear">Clear All</button>
-                    <button id="cc-reprocess">Reprocess</button>
-                </div>
-                <div id="cc-character-list"></div>
-            </div>
-        `;
-        
+        const html = `<div class="cc-settings"><h3>Character Dialogue Colors</h3><div class="cc-row"><label>Theme</label><select id="cc-theme"><option value="auto">Auto</option><option value="dark">Dark</option><option value="light">Light</option></select></div><div class="cc-row"><label><input type="checkbox" id="cc-thoughts"> Color thoughts</label></div><div class="cc-row"><label>Characters</label><button id="cc-clear">Clear</button><button id="cc-reprocess">Refresh</button></div><div id="cc-character-list"></div></div>`;
         document.getElementById('extensions_settings')?.insertAdjacentHTML('beforeend', html);
         
         const theme = document.getElementById('cc-theme');
-        if (theme) {
-            theme.value = settings.theme;
-            theme.onchange = (e) => {
-                settings.theme = e.target.value;
-                saveData();
-            };
-        }
+        if (theme) { theme.value = settings.theme; theme.onchange = (e) => { settings.theme = e.target.value; saveData(); }; }
         
         const thoughts = document.getElementById('cc-thoughts');
-        if (thoughts) {
-            thoughts.checked = settings.colorThoughts;
-            thoughts.onchange = (e) => {
-                settings.colorThoughts = e.target.checked;
-                saveData();
-                reprocessAll();
-            };
-        }
+        if (thoughts) { thoughts.checked = settings.colorThoughts; thoughts.onchange = (e) => { settings.colorThoughts = e.target.checked; saveData(); reprocessAll(); }; }
         
         document.getElementById('cc-clear')?.addEventListener('click', clearColors);
         document.getElementById('cc-reprocess')?.addEventListener('click', reprocessAll);
@@ -247,40 +229,26 @@
 
     function init() {
         loadData();
+        const waitUI = setInterval(() => { if (document.getElementById('extensions_settings')) { clearInterval(waitUI); createUI(); } }, 500);
         
-        const waitUI = setInterval(() => {
-            if (document.getElementById('extensions_settings')) {
-                clearInterval(waitUI);
-                createUI();
-            }
-        }, 500);
-        
-        const observer = new MutationObserver(() => setTimeout(processAllMessages, 100));
+        const observer = new MutationObserver(() => setTimeout(processAll, 150));
         observer.observe(document.body, { childList: true, subtree: true });
         
-        // Auto-process on load
-        setTimeout(() => {
-            document.querySelectorAll('[data-cc-done]').forEach(el => el.removeAttribute('data-cc-done'));
-            processAllMessages();
-        }, 500);
-        
-        setInterval(processAllMessages, 2000);
+        setTimeout(processAll, 500);
+        setInterval(processAll, 3000);
         
         $(document).on('chatLoaded', () => {
             characterColors = {};
             saveData();
-            document.querySelectorAll('[data-cc-done]').forEach(el => el.removeAttribute('data-cc-done'));
-            document.querySelectorAll('.cc-dialogue, .cc-thought').forEach(el => {
-                el.replaceWith(document.createTextNode(el.textContent));
+            document.querySelectorAll('.mes_text').forEach(el => {
+                el.removeAttribute('data-cc-done');
+                el.querySelectorAll('.cc-dialogue, .cc-thought').forEach(span => span.replaceWith(document.createTextNode(span.textContent)));
             });
-            setTimeout(processAllMessages, 300);
+            setTimeout(processAll, 300);
             updateCharacterList();
         });
     }
 
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', init);
-    } else {
-        init();
-    }
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+    else init();
 })();
