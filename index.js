@@ -76,15 +76,20 @@ JSON:`;
         try {
             let resp;
             if (settings.useCustomModel && settings.customModel) {
-                // Use custom model via fetch
+                console.log('CC: Using custom model:', settings.customModel);
                 resp = await callCustomModel(prompt);
-            } else if (ctx.generateRaw) {
-                resp = await ctx.generateRaw(prompt, null, false, false, '', 250);
-            } else {
-                return null;
             }
             
-            const match = resp?.match(/\{[\s\S]*\}/);
+            // Fall back to default if custom failed or not enabled
+            if (!resp && ctx.generateRaw) {
+                console.log('CC: Using default generateRaw');
+                resp = await ctx.generateRaw(prompt, null, false, false, '', 250);
+            }
+            
+            if (!resp) return null;
+            
+            console.log('CC: Response received, length:', resp.length);
+            const match = resp.match(/\{[\s\S]*\}/);
             if (match) return JSON.parse(match[0]);
         } catch (e) {
             console.log('CC: LLM extraction failed:', e);
@@ -93,25 +98,42 @@ JSON:`;
     }
 
     async function callCustomModel(prompt) {
-        const ctx = SillyTavern.getContext();
-        
-        // Try to use the same API but with custom model
+        // Use generateRaw but try to override model via SillyTavern's context
         try {
+            const ctx = SillyTavern.getContext();
+            
+            // Check if we can use generateQuietPrompt with model override
+            if (ctx.generateQuietPrompt) {
+                console.log('CC: Trying generateQuietPrompt');
+                const resp = await ctx.generateQuietPrompt(prompt, false, false, '', settings.customModel);
+                return resp;
+            }
+            
+            // Try direct API call
             const response = await fetch('/api/backends/chat-completions/generate', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 
+                    'Content-Type': 'application/json'
+                },
                 body: JSON.stringify({
                     messages: [{ role: 'user', content: prompt }],
                     model: settings.customModel,
                     max_tokens: 250,
-                    temperature: 0.1
+                    temperature: 0
                 })
             });
-            const data = await response.json();
-            return data.choices?.[0]?.message?.content || data.content || '';
+            
+            if (response.ok) {
+                const data = await response.json();
+                console.log('CC: Direct API response:', data);
+                return data.choices?.[0]?.message?.content || data.content || '';
+            }
+            
+            console.log('CC: Direct API failed, status:', response.status);
+            return null;
         } catch (e) {
-            console.log('CC: Custom model failed, falling back:', e);
-            return ctx.generateRaw?.(prompt, null, false, false, '', 250);
+            console.log('CC: Custom model error:', e);
+            return null;
         }
     }
 
