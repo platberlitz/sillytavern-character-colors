@@ -57,14 +57,12 @@
             const color = getCharColor(charName);
             
             mesText.innerHTML = mesText.innerHTML.replace(/(".*?"|'.*?'|«.*?»|".*"|'.*')/g, (match) => {
-                const escapedColor = color.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-                return `<span class="cc-dialogue" style="color:${escapedColor}">${match}</span>`;
+                return `<font color="${color}">${match}</font>`;
             });
 
             if (settings.colorThoughts) {
                 mesText.innerHTML = mesText.innerHTML.replace(/\*([^*]+)\*/g, (match, content) => {
-                    const escapedColor = color.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-                    return `<span class="cc-thought" style="color:${escapedColor};opacity:0.85;font-style:italic;">*${content}*</span>`;
+                    return `<font color="${color}" style="opacity:0.85;font-style:italic;">*${content}*</font>`;
                 });
             }
             
@@ -76,8 +74,7 @@
         document.querySelectorAll('.mes_text').forEach(el => {
             if (el.dataset.ccDone) {
                 const originalHTML = el.innerHTML
-                    .replace(/<span class="cc-dialogue"[^>]*>([^<]*)<\/span>/g, '$1')
-                    .replace(/<span class="cc-thought"[^>]*>\*([^<]*)\*<\/span>/g, '*$1*');
+                    .replace(/<font[^>]*color="[^"]*"[^>]*>([^<]*)<\/font>/g, '$1');
                 el.innerHTML = originalHTML;
                 delete el.dataset.ccDone;
             }
