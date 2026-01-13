@@ -110,12 +110,22 @@ JSON:`;
             if (nameEl) mainChar = nameEl.textContent.trim();
         }
 
+        console.log('CC: Processing message, mainChar:', mainChar, 'colorThoughts:', settings.colorThoughts);
+
         for (const node of textNodes) {
             const nodeText = node.nodeValue;
-            if (!nodeText.match(/[""『\*]/)) continue;
+            
+            // Check if this node has any quotes or thoughts
+            if (!/"/.test(nodeText) && !/"/.test(nodeText) && !/『/.test(nodeText) && !/\*/.test(nodeText)) {
+                continue;
+            }
+
+            console.log('CC: Processing node:', nodeText.substring(0, 50));
 
             // Split on quotes, Japanese quotes, and asterisks
-            const parts = nodeText.split(/("[^"]*"|"[^"]*"|『[^』]*』|\*[^\*]+\*)/g);
+            const regex = /("[^"]*"|"[^"]*"|『[^』]*』|\*[^\*]+\*)/g;
+            const parts = nodeText.split(regex);
+            
             if (parts.length <= 1) continue;
 
             const frag = document.createDocumentFragment();
@@ -123,12 +133,13 @@ JSON:`;
             for (const part of parts) {
                 if (!part) continue;
                 
-                const isQuote = /^[""][^""]*[""]$/.test(part);
+                const isQuote = /^"[^"]*"$/.test(part) || /^"[^"]*"$/.test(part);
                 const isJpQuote = /^『[^』]*』$/.test(part);
                 const isAsterisk = /^\*[^\*]+\*$/.test(part);
 
+                console.log('CC: Part:', part.substring(0, 30), 'isQuote:', isQuote, 'isJpQuote:', isJpQuote, 'isAsterisk:', isAsterisk);
+
                 if (isQuote) {
-                    // Find speaker from dialogueMap
                     const innerText = part.slice(1, -1);
                     let speaker = null;
                     
@@ -154,9 +165,10 @@ JSON:`;
                         frag.appendChild(document.createTextNode(part));
                     }
                 } else if (isJpQuote || isAsterisk) {
-                    // Thoughts - use main character color
+                    console.log('CC: Found thought, colorThoughts:', settings.colorThoughts, 'mainChar:', mainChar);
                     if (settings.colorThoughts && mainChar) {
                         const color = getCharacterColor(mainChar);
+                        console.log('CC: Coloring thought with:', color);
                         const span = document.createElement('span');
                         span.className = 'cc-thought';
                         span.style.color = color;
