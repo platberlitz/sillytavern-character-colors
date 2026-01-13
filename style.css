@@ -1,13 +1,33 @@
 /* Character Dialogue Colors Extension Styles */
 
+/* High priority character name coloring */
 .character-name-colored {
-    font-weight: bold;
-    text-shadow: 0 0 2px rgba(0,0,0,0.3);
+    font-weight: bold !important;
+    text-shadow: 0 0 2px rgba(0,0,0,0.3) !important;
 }
 
-/* Ensure colors remain visible in dark themes */
-.mes_text span[style*="color"] {
-    text-shadow: 0 0 1px rgba(0,0,0,0.5);
+.character-thought-colored {
+    text-shadow: 0 0 1px rgba(0,0,0,0.3) !important;
+}
+
+/* Ensure colors remain visible and override theme colors */
+.mes_text .character-name-colored,
+.message_text .character-name-colored,
+.mes .character-name-colored {
+    color: inherit !important;
+    font-weight: bold !important;
+}
+
+.mes_text .character-thought-colored,
+.message_text .character-thought-colored,
+.mes .character-thought-colored {
+    color: inherit !important;
+    opacity: 0.8 !important;
+}
+
+/* Override any existing character name styling */
+.mes_text span[style*="color"]:not(.character-name-colored):not(.character-thought-colored) {
+    color: inherit !important;
 }
 
 /* Settings UI - Native SillyTavern Integration */

@@ -97,10 +97,10 @@
             
             let innerHTML = messageElement.innerHTML;
             
-            // Color the character name
+            // Color the character name with !important for priority
             innerHTML = innerHTML.replace(
                 new RegExp(`^(${characterName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'i'),
-                `<span style="color: ${color}; font-weight: bold;">$1</span>`
+                `<span class="character-name-colored" style="color: ${color} !important; font-weight: bold !important;">$1</span>`
             );
             
             // Color thoughts if enabled
@@ -108,12 +108,12 @@
                 // Color *thoughts* 
                 innerHTML = innerHTML.replace(
                     /(\*[^*]+\*)/g,
-                    `<span style="color: ${color}; opacity: 0.8;">$1</span>`
+                    `<span class="character-thought-colored" style="color: ${color} !important; opacity: 0.8 !important;">$1</span>`
                 );
                 // Color 『thoughts』
                 innerHTML = innerHTML.replace(
                     /(『[^』]+』)/g,
-                    `<span style="color: ${color}; opacity: 0.8;">$1</span>`
+                    `<span class="character-thought-colored" style="color: ${color} !important; opacity: 0.8 !important;">$1</span>`
                 );
             }
             
@@ -123,7 +123,7 @@
 
     function processMessages() {
         resetColorsForNewChat();
-        const messages = document.querySelectorAll('.mes_text:not([data-colored])');
+        const messages = document.querySelectorAll('.mes_text:not([data-colored]), .message_text:not([data-colored]), .mes:not([data-colored]) .mes_text');
         messages.forEach(msg => {
             colorizeMessage(msg);
             msg.setAttribute('data-colored', 'true');
@@ -216,6 +216,14 @@
 
         // Listen for chat changes
         $(document).on('chat_changed', resetColorsForNewChat);
+        
+        // Force initial processing after a delay to ensure DOM is ready
+        setTimeout(() => {
+            document.querySelectorAll('.mes_text[data-colored]').forEach(el => {
+                el.removeAttribute('data-colored');
+            });
+            processMessages();
+        }, 1000);
     }
 
     jQuery(() => {
