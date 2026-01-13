@@ -65,11 +65,14 @@
     function buildPromptInstruction() {
         if (!settings.enabled) return '';
         
+        const mode = settings.themeMode === 'auto' ? detectTheme() : settings.themeMode;
+        const themeHint = mode === 'dark' ? 'Use LIGHT/PASTEL colors (high lightness) for dark background.' : 'Use DARK/MUTED colors (low lightness) for light background.';
+        
         const colorList = Object.keys(characterColors).length > 0
             ? `Established colors: ${Object.values(characterColors).map(c => `${c.name}: ${c.color}`).join(', ')}. `
             : '';
         
-        return `[Enhance clarity by wrapping all character and NPC dialogue ("spoken words") and inner thoughts (*inner thoughts*) in unique, legible <font color=######> tags, closing with </font>. Assign a distinct PASTEL color to each speaker. ${colorList}Always reuse established colors. Example dialogue: <font color=#abc123>"Wow!"</font> Example thoughts: <font color=#abc123>*Wow!*</font>]`;
+        return `[Wrap all dialogue ("speech") and inner thoughts (*thoughts*) in <font color=#RRGGBB> tags. ${themeHint} ${colorList}Assign distinct color per speaker. Reuse established colors. Example: <font color=#abc123>"Hello!"</font> <font color=#abc123>*thinking*</font>]`;
     }
 
     function injectPrompt() {
