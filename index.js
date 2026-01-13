@@ -19,31 +19,43 @@
         return characterColors[key].color;
     }
 
-    function extractSpeaker(text, mesElement) {
-        // First, try to get the character name from the message element itself
-        const mesBlock = mesElement?.closest('.mes');
-        if (mesBlock) {
-            const nameEl = mesBlock.querySelector('.name_text');
-            if (nameEl) {
-                const charName = nameEl.textContent.trim();
-                if (charName && charName.length > 0) {
-                    return charName;
-                }
-            }
-        }
+    function findSpeakerForQuote(text, quoteStart) {
+        // Look backwards and forwards from the quote to find who said it
+        const before = text.substring(Math.max(0, quoteStart - 150), quoteStart);
+        const after = text.substring(quoteStart, Math.min(text.length, quoteStart + 200));
         
-        // Fallback: Look for patterns that indicate who is SPEAKING
-        const speechPatterns = [
+        // Patterns: "Name said", "said Name", "Name's voice", "Name whispered", etc.
+        const patterns = [
+            // Before quote: Name said, "
+            /\b([A-Z][a-z]{2,})\s+(?:said|says|asked|asks|whispered|whispers|murmured|replied|called|shouted|added|continued|answered)\s*[,.]?\s*$/i,
+            // Before quote: Name's voice
             /\b([A-Z][a-z]{2,})'s\s+voice\b/i,
-            /\b([A-Z][a-z]{2,})\s+(?:said|says|asked|asks|whispered|whispers|murmured|murmurs)\b/i,
+            // After quote: " said Name
+            /^[^"]*[""]?\s*(?:said|says|asked|asks|whispered|murmured|replied)\s+([A-Z][a-z]{2,})\b/i,
         ];
         
-        for (const p of speechPatterns) {
-            const m = text.match(p);
+        // Check before
+        for (const p of patterns.slice(0, 2)) {
+            const m = before.match(p);
             if (m && m[1]) return m[1];
         }
         
-        return null;
+        // Check after
+        const afterMatch = after.match(patterns[2]);
+        if (afterMatch && afterMatch[1]) return afterMatch[1];
+        
+        // Look for nearest name with action in surrounding context
+        const context = before + after;
+        const nameActions = /\b([A-Z][a-z]{2,})(?:'s)?\s+(?:voice|lips|eyes|gaze|smile|smirk|fingers|thumb|grip|hand)\b/gi;
+        const names = [];
+        let m;
+        while ((m = nameActions.exec(context)) !== null) {
+            if (!['The', 'This', 'That', 'His', 'Her', 'They'].includes(m[1])) {
+                names.push(m[1]);
+            }
+        }
+        
+        return names[0] || null;
     }
 
     function processMessage(mesText) {
@@ -51,11 +63,14 @@
         mesText.dataset.ccProcessed = 'true';
 
         const fullText = mesText.textContent;
-        const speaker = extractSpeaker(fullText, mesText);
-        if (!speaker) return;
-
-        const color = getCharacterColor(speaker);
-        console.log('CC: Found speaker', speaker, 'with color', color);
+        
+        // Get the main character (message sender) as fallback
+        const mesBlock = mesText.closest('.mes');
+        let mainChar = null;
+        if (mesBlock) {
+            const nameEl = mesBlock.querySelector('.name_text');
+            if (nameEl) mainChar = nameEl.textContent.trim();
+        }
 
         // Find and process text nodes
         const walk = document.createTreeWalker(mesText, NodeFilter.SHOW_TEXT);
@@ -70,6 +85,8 @@
             if (parts.length <= 1) continue;
 
             const frag = document.createDocumentFragment();
+            let pos = 0;
+            
             for (const part of parts) {
                 if (!part) continue;
                 
@@ -77,15 +94,39 @@
                 const isJpQuote = /^『[^』]*』$/.test(part);
                 const isThought = /^\*[^\*]+\*$/.test(part);
 
-                if (isQuote || isJpQuote || (isThought && settings.colorThoughts)) {
-                    const span = document.createElement('span');
-                    span.style.color = color;
-                    span.textContent = part;
-                    if (isThought || isJpQuote) span.style.opacity = '0.85';
-                    frag.appendChild(span);
+                if (isQuote) {
+                    // Find who said this quote
+                    const quotePos = fullText.indexOf(part);
+                    let speaker = findSpeakerForQuote(fullText, quotePos);
+                    if (!speaker) speaker = mainChar;
+                    
+                    if (speaker) {
+                        const color = getCharacterColor(speaker);
+                        console.log('CC: Quote by', speaker, ':', part.substring(0, 30) + '...');
+                        const span = document.createElement('span');
+                        span.style.color = color;
+                        span.textContent = part;
+                        frag.appendChild(span);
+                    } else {
+                        frag.appendChild(document.createTextNode(part));
+                    }
+                } else if ((isJpQuote || isThought) && settings.colorThoughts) {
+                    // Thoughts use main character color
+                    if (mainChar) {
+                        const color = getCharacterColor(mainChar);
+                        const span = document.createElement('span');
+                        span.style.color = color;
+                        span.style.opacity = '0.85';
+                        span.textContent = part;
+                        frag.appendChild(span);
+                    } else {
+                        frag.appendChild(document.createTextNode(part));
+                    }
                 } else {
                     frag.appendChild(document.createTextNode(part));
                 }
+                
+                pos += part.length;
             }
             node.parentNode.replaceChild(frag, node);
         }
@@ -98,12 +139,10 @@
     function reprocessAll() {
         document.querySelectorAll('.mes_text').forEach(el => {
             delete el.dataset.ccProcessed;
-            // Remove colored spans
             el.querySelectorAll('span[style*="color"]').forEach(span => {
                 if (span.closest('.cc-settings')) return;
                 span.replaceWith(document.createTextNode(span.textContent));
             });
-            // Normalize text nodes
             el.normalize();
         });
         processAll();
@@ -168,7 +207,6 @@
             if (saved) characterColors = JSON.parse(saved);
         } catch(e) {}
 
-        // Wait for UI
         const uiInterval = setInterval(() => {
             if (document.getElementById('extensions_settings')) {
                 clearInterval(uiInterval);
@@ -176,14 +214,11 @@
             }
         }, 500);
 
-        // Process messages
         setInterval(processAll, 1000);
         
-        // Observe for new messages
         new MutationObserver(() => setTimeout(processAll, 200))
             .observe(document.body, { childList: true, subtree: true });
 
-        // Initial process
         setTimeout(processAll, 1000);
     }
 
