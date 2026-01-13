@@ -85,37 +85,47 @@
     function colorizeMessage(messageElement) {
         if (messageElement.hasAttribute('data-cc-processed')) return;
         
-        const html = messageElement.innerHTML;
+        let html = messageElement.innerHTML;
         if (!html) return;
 
-        // Pattern: "Name:" at start of message
-        const nameMatch = html.match(/^(\s*)([A-Za-z][A-Za-z0-9\s]{0,30}?)(\s*:\s*)/);
+        // Dialogue attribution patterns: "said John", "John said", "John asked", "whispered Mary", etc.
+        const dialogueVerbs = 'said|says|asked|asks|replied|replies|whispered|whispers|shouted|shouts|muttered|mutters|exclaimed|exclaims|answered|answers|called|calls|cried|cries|murmured|murmurs|growled|growls|sighed|sighs|laughed|laughs|smiled|smiles|grinned|grins|nodded|nods|spoke|speaks|added|adds|continued|continues|began|begins|started|starts|finished|finishes|responded|responds|questioned|questions|demanded|demands|pleaded|pleads|begged|begs|offered|offers|suggested|suggests|admitted|admits|agreed|agrees|announced|announces|declared|declares|explained|explains|insisted|insists|mentioned|mentions|noted|notes|observed|observes|pointed|points|promised|promises|reassured|reassures|recalled|recalls|remarked|remarks|repeated|repeats|reported|reports|revealed|reveals|stated|states|thought|thinks|warned|warns|wondered|wonders';
         
-        if (nameMatch) {
-            const characterName = nameMatch[2].trim();
-            const color = getCharacterColor(characterName);
-            
-            let newHtml = html.replace(
-                /^(\s*)([A-Za-z][A-Za-z0-9\s]{0,30}?)(\s*:\s*)/,
-                `$1<span class="cc-name" style="color: ${color} !important; font-weight: bold !important;">$2</span>$3`
-            );
-            
-            if (settings.colorThoughts) {
-                // *asterisk thoughts*
-                newHtml = newHtml.replace(
-                    /\*([^*]+)\*/g,
-                    `<span class="cc-thought" style="color: ${color} !important; opacity: 0.85 !important;">*$1*</span>`
-                );
-                // 『Japanese thoughts』
-                newHtml = newHtml.replace(
-                    /『([^』]+)』/g,
-                    `<span class="cc-thought" style="color: ${color} !important; opacity: 0.85 !important;">『$1』</span>`
-                );
-            }
-            
-            messageElement.innerHTML = newHtml;
+        // Pattern: "Name said" or "said Name" or "Name, said" etc.
+        const namePattern = new RegExp(`\\b([A-Z][a-z]+(?:\\s[A-Z][a-z]+)?)\\s+(?:${dialogueVerbs})|(?:${dialogueVerbs})\\s+([A-Z][a-z]+(?:\\s[A-Z][a-z]+)?)\\b`, 'g');
+        
+        const foundNames = new Set();
+        let match;
+        while ((match = namePattern.exec(html)) !== null) {
+            const name = match[1] || match[2];
+            if (name) foundNames.add(name);
         }
         
+        // Color each found name throughout the message
+        for (const name of foundNames) {
+            const color = getCharacterColor(name);
+            const nameRegex = new RegExp(`\\b(${name})\\b`, 'g');
+            html = html.replace(nameRegex, `<span class="cc-name" style="color: ${color} !important; font-weight: bold !important;">$1</span>`);
+        }
+        
+        // Color thoughts if enabled and we found at least one character
+        if (settings.colorThoughts && foundNames.size > 0) {
+            const firstChar = [...foundNames][0];
+            const color = getCharacterColor(firstChar);
+            
+            // *asterisk thoughts*
+            html = html.replace(
+                /\*([^*]+)\*/g,
+                `<span class="cc-thought" style="color: ${color} !important; opacity: 0.85 !important;">*$1*</span>`
+            );
+            // 『Japanese thoughts』
+            html = html.replace(
+                /『([^』]+)』/g,
+                `<span class="cc-thought" style="color: ${color} !important; opacity: 0.85 !important;">『$1』</span>`
+            );
+        }
+        
+        messageElement.innerHTML = html;
         messageElement.setAttribute('data-cc-processed', 'true');
     }
 
