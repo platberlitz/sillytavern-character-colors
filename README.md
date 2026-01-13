@@ -13,6 +13,7 @@ This extension enhances SillyTavern by automatically applying consistent colors 
 - **Per-chat reset**: Each new chat starts with fresh color assignments
 - **Custom color support**: Define your own color palette
 - **Auto-detection**: Automatically detects your current theme
+- **Thought coloring**: Optional coloring for *asterisked thoughts* and 『Japanese quote thoughts』
 
 ## Installation
 
@@ -28,6 +29,9 @@ This extension enhances SillyTavern by automatically applying consistent colors 
 - **Dark Mode**: Optimized colors for dark backgrounds
 - **Light Mode**: Optimized colors for light backgrounds  
 - **Custom Colors**: Define your own hex color palette
+
+### Additional Options
+- **Color thoughts**: Enable coloring for *asterisked thoughts* and 『Japanese quote thoughts』 (appears slightly transparent)
 
 ### Default Color Palettes
 

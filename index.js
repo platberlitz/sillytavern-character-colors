@@ -4,7 +4,8 @@
     let characterColors = new Map();
     let settings = {
         theme: 'auto', // auto, dark, light, custom
-        customColors: []
+        customColors: [],
+        colorThoughts: false // Include *thoughts* and 『thoughts』 in coloring
     };
 
     const themeColors = {
@@ -94,12 +95,29 @@
             const characterName = match[1].trim();
             const color = getCharacterColor(characterName);
             
-            const innerHTML = messageElement.innerHTML;
-            const coloredHTML = innerHTML.replace(
+            let innerHTML = messageElement.innerHTML;
+            
+            // Color the character name
+            innerHTML = innerHTML.replace(
                 new RegExp(`^(${characterName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'i'),
                 `<span style="color: ${color}; font-weight: bold;">$1</span>`
             );
-            messageElement.innerHTML = coloredHTML;
+            
+            // Color thoughts if enabled
+            if (settings.colorThoughts) {
+                // Color *thoughts* 
+                innerHTML = innerHTML.replace(
+                    /(\*[^*]+\*)/g,
+                    `<span style="color: ${color}; opacity: 0.8;">$1</span>`
+                );
+                // Color 『thoughts』
+                innerHTML = innerHTML.replace(
+                    /(『[^』]+』)/g,
+                    `<span style="color: ${color}; opacity: 0.8;">$1</span>`
+                );
+            }
+            
+            messageElement.innerHTML = innerHTML;
         }
     }
 
@@ -136,6 +154,12 @@
                         <option value="custom">Custom Colors</option>
                     </select>
                 </div>
+                <div class="setting-group">
+                    <label>
+                        <input type="checkbox" id="cc-color-thoughts"> 
+                        Color thoughts (*text* and 『text』)
+                    </label>
+                </div>
                 <div id="cc-custom-colors" style="display: none;">
                     <label>Custom Colors (hex codes, comma-separated):</label>
                     <input type="text" id="cc-custom-input" placeholder="#FF0000, #00FF00, #0000FF">
@@ -151,6 +175,15 @@
             saveSettings();
             characterColors.clear();
             colorIndex = 0;
+            processMessages();
+        });
+        
+        $('#cc-color-thoughts').prop('checked', settings.colorThoughts).on('change', function() {
+            settings.colorThoughts = this.checked;
+            saveSettings();
+            document.querySelectorAll('.mes_text[data-colored]').forEach(el => {
+                el.removeAttribute('data-colored');
+            });
             processMessages();
         });
         
