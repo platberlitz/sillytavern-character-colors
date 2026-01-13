@@ -195,14 +195,13 @@
     function init() {
         loadData();
         const wait = setInterval(() => { if (document.getElementById('extensions_settings')) { clearInterval(wait); createUI(); } }, 500);
+        
+        // NO automatic processing - only manual Refresh button
+        // This prevents any interference with streaming
+        
         if (typeof eventSource !== 'undefined' && typeof event_types !== 'undefined') {
-            // Only color thoughts automatically, NOT dialogue (to avoid interrupting generation)
-            eventSource.on(event_types.MESSAGE_RECEIVED, () => setTimeout(() => processAll(false), 500));
             eventSource.on(event_types.CHAT_CHANGED, () => { characterColors = {}; saveData(); updateCharacterList(); });
         }
-        // Auto-process thoughts only (no LLM)
-        setInterval(() => processAll(false), 3000);
-        setTimeout(() => processAll(false), 1000);
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
