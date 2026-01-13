@@ -417,9 +417,20 @@ JSON:`;
         }, 500);
         
         if (typeof eventSource !== 'undefined' && typeof event_types !== 'undefined') {
-            eventSource.on(event_types.GENERATION_ENDED, () => {
+            // Try multiple event types for generation end
+            const genEndEvents = [
+                event_types.GENERATION_ENDED,
+                event_types.GENERATION_STOPPED,
+                event_types.MESSAGE_RECEIVED,
+                event_types.MESSAGE_SENT
+            ].filter(Boolean);
+            
+            console.log('CC: Available generation events:', genEndEvents);
+            
+            // Use MESSAGE_RECEIVED as it's most reliable
+            eventSource.on(event_types.MESSAGE_RECEIVED, (msgId) => {
                 if (settings.autoRefresh) {
-                    console.log('CC: Auto-refresh triggered');
+                    console.log('CC: MESSAGE_RECEIVED, auto-refresh triggered');
                     const btn = document.getElementById('cc-input-btn');
                     if (btn) btn.style.color = 'orange';
                     
@@ -431,6 +442,7 @@ JSON:`;
                     setTimeout(() => processAll(true), 5000);
                 }
             });
+            
             eventSource.on(event_types.CHAT_CHANGED, () => { 
                 console.log('CC: Chat changed, clearing colors');
                 characterColors = {}; 
