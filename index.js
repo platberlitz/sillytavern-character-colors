@@ -64,6 +64,18 @@
         if (typeof SillyTavern === 'undefined' || !SillyTavern.getContext) return null;
         const ctx = SillyTavern.getContext();
         
+        // First, check if we can match all dialogue with known characters
+        const knownNames = Object.values(characterColors).map(c => c.displayName);
+        if (knownNames.length > 0) {
+            const simpleMap = tryMatchWithKnownCharacters(text, knownNames);
+            if (simpleMap) {
+                console.log('CC: Using known characters, no LLM needed');
+                return simpleMap;
+            }
+        }
+        
+        // Need LLM to identify new characters
+        console.log('CC: Calling LLM to identify characters');
         const prompt = `Analyze this roleplay text. For each quoted dialogue, identify the speaker.
 Return JSON mapping dialogue to speaker: {"quote text": "character name", ...}
 Only include spoken dialogue in "quotes", not thoughts.
@@ -80,7 +92,6 @@ JSON:`;
                 resp = await callCustomModel(prompt);
             }
             
-            // Fall back to default if custom failed or not enabled
             if (!resp && ctx.generateRaw) {
                 console.log('CC: Using default generateRaw');
                 resp = await ctx.generateRaw(prompt, null, false, false, '', 250);
@@ -95,6 +106,41 @@ JSON:`;
             console.log('CC: LLM extraction failed:', e);
         }
         return null;
+    }
+
+    function tryMatchWithKnownCharacters(text, knownNames) {
+        // Try to match dialogue with known characters using proximity
+        const quotes = text.match(/"[^"]+"|"[^"]+"/g);
+        if (!quotes) return null;
+        
+        const dialogueMap = {};
+        let allMatched = true;
+        
+        for (const quote of quotes) {
+            const inner = quote.slice(1, -1);
+            const quoteIdx = text.indexOf(quote);
+            const context = text.substring(Math.max(0, quoteIdx - 150), quoteIdx + quote.length + 150);
+            
+            let foundSpeaker = null;
+            for (const name of knownNames) {
+                // Check if name appears near this quote
+                const nameRegex = new RegExp(`\\b${name}\\b`, 'i');
+                if (nameRegex.test(context)) {
+                    foundSpeaker = name;
+                    break;
+                }
+            }
+            
+            if (foundSpeaker) {
+                dialogueMap[inner] = foundSpeaker;
+            } else {
+                // Unknown speaker - need LLM
+                allMatched = false;
+                break;
+            }
+        }
+        
+        return allMatched ? dialogueMap : null;
     }
 
     async function callCustomModel(prompt) {
