@@ -32,41 +32,45 @@
         } catch (e) {}
     }
 
-    // Use SillyTavern's generateRaw to ask LLM for character names
+    // Use SillyTavern's generateRaw to ask LLM for character names AND their dialogue
     async function extractCharactersWithLLM(text) {
         if (typeof SillyTavern === 'undefined' || !SillyTavern.getContext) {
             console.log('CC: SillyTavern context not available');
-            return [];
+            return null;
         }
 
         const context = SillyTavern.getContext();
         if (!context.generateRaw) {
             console.log('CC: generateRaw not available');
-            return [];
+            return null;
         }
 
-        const prompt = `List only the character names (proper nouns of people) who speak dialogue in this text. Return ONLY a JSON array of names, nothing else. Example: ["John", "Mary"]
+        const prompt = `Analyze this roleplay text and identify which character speaks each piece of dialogue (in quotes).
+
+Return a JSON object mapping each dialogue quote to the character who said it.
+Format: {"dialogue text": "character name", ...}
+
+Only include actual spoken dialogue in "quotes", not thoughts in 『』 or *asterisks*.
 
 Text:
-${text.substring(0, 1500)}
+${text.substring(0, 2000)}
 
-JSON array of character names:`;
+JSON:`;
 
         try {
-            const response = await context.generateRaw(prompt, null, false, false, '', 100);
+            const response = await context.generateRaw(prompt, null, false, false, '', 200);
             console.log('CC: LLM response:', response);
             
-            // Extract JSON array from response
-            const match = response.match(/\[[\s\S]*?\]/);
+            // Extract JSON object from response
+            const match = response.match(/\{[\s\S]*?\}/);
             if (match) {
-                const names = JSON.parse(match[0]);
-                return names.filter(n => typeof n === 'string' && n.length > 1);
+                return JSON.parse(match[0]);
             }
         } catch (e) {
             console.log('CC: LLM extraction failed:', e);
         }
         
-        return [];
+        return null;
     }
 
     // Fallback: simple pattern-based extraction
@@ -89,15 +93,18 @@ JSON array of character names:`;
         return [...names];
     }
 
-    function applyColorsToElement(mesText, characters) {
-        if (!characters.length) return;
-        
-        const text = mesText.textContent;
-        
-        // Build character position map - find which character is nearest to each quote
+    function applyColorsToElement(mesText, dialogueMap) {
         const walk = document.createTreeWalker(mesText, NodeFilter.SHOW_TEXT);
         const textNodes = [];
         while (walk.nextNode()) textNodes.push(walk.currentNode);
+
+        // Get main character for thoughts
+        const mesBlock = mesText.closest('.mes');
+        let mainChar = null;
+        if (mesBlock) {
+            const nameEl = mesBlock.querySelector('.name_text');
+            if (nameEl) mainChar = nameEl.textContent.trim();
+        }
 
         for (const node of textNodes) {
             const nodeText = node.nodeValue;
@@ -115,42 +122,40 @@ JSON array of character names:`;
                 const isJpQuote = /^『[^』]*』$/.test(part);
                 const isThought = /^\*[^\*]+\*$/.test(part);
 
-                if (isQuote || isJpQuote) {
-                    // Find which character said this by looking at surrounding text
-                    const quoteIdx = text.indexOf(part);
-                    const before = text.substring(Math.max(0, quoteIdx - 100), quoteIdx);
-                    const after = text.substring(quoteIdx, Math.min(text.length, quoteIdx + part.length + 100));
-                    
+                if (isQuote) {
+                    // Find speaker from dialogueMap
+                    const innerText = part.slice(1, -1);
                     let speaker = null;
-                    for (const char of characters) {
-                        // Check if character name appears near this quote
-                        const charPattern = new RegExp(`\\b${char}\\b`, 'i');
-                        if (charPattern.test(before) || charPattern.test(after)) {
-                            speaker = char;
-                            break;
+                    
+                    if (dialogueMap) {
+                        // Look for matching dialogue in map
+                        for (const [dialogue, char] of Object.entries(dialogueMap)) {
+                            if (innerText.includes(dialogue.substring(0, 20)) || dialogue.includes(innerText.substring(0, 20))) {
+                                speaker = char;
+                                break;
+                            }
                         }
                     }
                     
-                    if (!speaker) speaker = characters[0];
-                    
-                    const color = getCharacterColor(speaker);
-                    const span = document.createElement('span');
-                    span.className = 'cc-dialogue';
-                    span.style.color = color;
-                    span.textContent = part;
-                    frag.appendChild(span);
-                } else if (isThought && settings.colorThoughts) {
-                    const color = characters.length ? getCharacterColor(characters[0]) : null;
-                    if (color) {
+                    if (speaker) {
+                        const color = getCharacterColor(speaker);
                         const span = document.createElement('span');
-                        span.className = 'cc-thought';
+                        span.className = 'cc-dialogue';
                         span.style.color = color;
-                        span.style.opacity = '0.85';
                         span.textContent = part;
                         frag.appendChild(span);
                     } else {
                         frag.appendChild(document.createTextNode(part));
                     }
+                } else if ((isJpQuote || isThought) && settings.colorThoughts && mainChar) {
+                    // Thoughts use main character (message sender) color
+                    const color = getCharacterColor(mainChar);
+                    const span = document.createElement('span');
+                    span.className = 'cc-thought';
+                    span.style.color = color;
+                    span.style.opacity = '0.85';
+                    span.textContent = part;
+                    frag.appendChild(span);
                 } else {
                     frag.appendChild(document.createTextNode(part));
                 }
@@ -167,20 +172,27 @@ JSON array of character names:`;
         const text = mesText.textContent;
         if (!text || text.length < 20) return;
 
-        let characters = [];
+        let dialogueMap = null;
         
         if (useLLM) {
-            characters = await extractCharactersWithLLM(text);
-            console.log('CC: LLM found characters:', characters);
+            dialogueMap = await extractCharactersWithLLM(text);
+            console.log('CC: LLM dialogue map:', dialogueMap);
         }
         
-        if (!characters.length) {
-            characters = extractCharactersFallback(text);
+        if (!dialogueMap) {
+            // Fallback: use pattern matching to build a simple map
+            const characters = extractCharactersFallback(text);
             console.log('CC: Fallback found characters:', characters);
+            if (characters.length) {
+                dialogueMap = {};
+                // Simple fallback: attribute all dialogue to first found character
+                const quotes = text.match(/"[^"]+"|"[^"]+"/g) || [];
+                quotes.forEach(q => dialogueMap[q.slice(1,-1)] = characters[0]);
+            }
         }
 
-        if (characters.length) {
-            applyColorsToElement(mesText, characters);
+        if (dialogueMap && Object.keys(dialogueMap).length) {
+            applyColorsToElement(mesText, dialogueMap);
         }
     }
 
