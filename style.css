@@ -1,7 +1,10 @@
-/* Character Dialogue Colors */
-#cc-ext .inline-drawer-content { padding: 10px; display: flex; flex-direction: column; gap: 8px; }
-#cc-ext select, #cc-ext button { padding: 5px 10px; }
-#cc-ext .checkbox_label { display: flex; align-items: center; gap: 8px; }
-.cc-char-item { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
-.cc-char-item input { width: 24px; height: 24px; }
-.cc-dialogue { text-shadow: 0 0 1px rgba(0,0,0,0.3); }
+/* Dialogue Colors Extension */
+#cc-ext .inline-drawer-content { font-size: 0.9em; }
+.cc-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.cc-row select { flex: 1; padding: 4px; }
+.cc-char-item { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
+.cc-char-item input[type="color"] { width: 24px; height: 24px; padding: 0; border: 1px solid var(--SmartThemeBorderColor); }
+.cc-dialogue { text-shadow: 0 0 1px rgba(0,0,0,0.2); }
+#cc-input-btn:hover { opacity: 1 !important; }
+#cc-model-row { margin-top: 5px; }
+#cc-model-name { border: 1px solid var(--SmartThemeBorderColor); border-radius: 4px; background: var(--SmartThemeBlurTintColor); color: var(--SmartThemeBodyColor); }

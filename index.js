@@ -2,17 +2,43 @@
     'use strict';
 
     let characterColors = {};
-    let settings = { colorThoughts: true, themeMode: 'auto' };
+    let settings = { 
+        colorThoughts: true, 
+        themeMode: 'auto',
+        useCustomModel: false,
+        customModel: ''
+    };
 
-    function generateColor(index) {
-        const hue = (index * 137.508) % 360;
-        return `hsl(${Math.round(hue)}, 75%, 65%)`;
+    // Generate truly random color based on theme
+    function generateRandomColor() {
+        const hue = Math.random() * 360;
+        const saturation = 65 + Math.random() * 20; // 65-85%
+        
+        let lightness;
+        const mode = settings.themeMode === 'auto' ? detectTheme() : settings.themeMode;
+        if (mode === 'dark') {
+            lightness = 60 + Math.random() * 15; // 60-75% for dark
+        } else {
+            lightness = 35 + Math.random() * 15; // 35-50% for light
+        }
+        
+        return `hsl(${Math.round(hue)}, ${Math.round(saturation)}%, ${Math.round(lightness)}%)`;
+    }
+
+    function detectTheme() {
+        const bg = getComputedStyle(document.body).backgroundColor;
+        const match = bg.match(/\d+/g);
+        if (match) {
+            const brightness = (parseInt(match[0]) * 299 + parseInt(match[1]) * 587 + parseInt(match[2]) * 114) / 1000;
+            return brightness < 128 ? 'dark' : 'light';
+        }
+        return 'dark';
     }
 
     function getCharacterColor(name) {
         const key = name.toLowerCase().trim();
         if (!characterColors[key]) {
-            characterColors[key] = { color: generateColor(Object.keys(characterColors).length), displayName: name };
+            characterColors[key] = { color: generateRandomColor(), displayName: name };
             saveData();
             updateCharacterList();
         }
@@ -36,10 +62,8 @@
     async function extractDialogueMap(text) {
         if (typeof SillyTavern === 'undefined' || !SillyTavern.getContext) return null;
         const ctx = SillyTavern.getContext();
-        if (!ctx.generateRaw) return null;
-
-        try {
-            const prompt = `Analyze this roleplay text. For each quoted dialogue, identify the speaker.
+        
+        const prompt = `Analyze this roleplay text. For each quoted dialogue, identify the speaker.
 Return JSON mapping dialogue to speaker: {"quote text": "character name", ...}
 Only include spoken dialogue in "quotes", not thoughts.
 
@@ -47,13 +71,47 @@ Text:
 ${text.substring(0, 2000)}
 
 JSON:`;
-            const resp = await ctx.generateRaw(prompt, null, false, false, '', 250);
-            const match = resp.match(/\{[\s\S]*\}/);
+
+        try {
+            let resp;
+            if (settings.useCustomModel && settings.customModel) {
+                // Use custom model via fetch
+                resp = await callCustomModel(prompt);
+            } else if (ctx.generateRaw) {
+                resp = await ctx.generateRaw(prompt, null, false, false, '', 250);
+            } else {
+                return null;
+            }
+            
+            const match = resp?.match(/\{[\s\S]*\}/);
             if (match) return JSON.parse(match[0]);
         } catch (e) {
             console.log('CC: LLM extraction failed:', e);
         }
         return null;
+    }
+
+    async function callCustomModel(prompt) {
+        const ctx = SillyTavern.getContext();
+        
+        // Try to use the same API but with custom model
+        try {
+            const response = await fetch('/api/backends/chat-completions/generate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    messages: [{ role: 'user', content: prompt }],
+                    model: settings.customModel,
+                    max_tokens: 250,
+                    temperature: 0.1
+                })
+            });
+            const data = await response.json();
+            return data.choices?.[0]?.message?.content || data.content || '';
+        } catch (e) {
+            console.log('CC: Custom model failed, falling back:', e);
+            return ctx.generateRaw?.(prompt, null, false, false, '', 250);
+        }
     }
 
     function applyColors(mesText, dialogueMap) {
@@ -72,7 +130,6 @@ JSON:`;
             });
         }
 
-        // Color dialogue quotes
         if (!dialogueMap) return;
 
         const walk = document.createTreeWalker(mesText, NodeFilter.SHOW_TEXT);
@@ -115,7 +172,6 @@ JSON:`;
     }
 
     async function processMessage(el, useLLM) {
-        // Skip if already processed with LLM, unless forcing
         if (el.dataset.ccLlmDone && useLLM) return;
         if (el.dataset.ccProcessed && !useLLM) return;
         
@@ -132,8 +188,6 @@ JSON:`;
 
     function processAll(useLLM = false) {
         document.querySelectorAll('.mes_text').forEach(el => {
-            // For LLM: only process if not already LLM-processed
-            // For non-LLM: only process if not processed at all
             if (useLLM && !el.dataset.ccLlmDone) {
                 processMessage(el, true);
             } else if (!useLLM && !el.dataset.ccProcessed) {
@@ -145,6 +199,7 @@ JSON:`;
     async function reprocess() {
         document.querySelectorAll('.mes_text').forEach(el => {
             delete el.dataset.ccProcessed;
+            delete el.dataset.ccLlmDone;
             el.querySelectorAll('[data-cc-done]').forEach(e => { e.style.color = ''; e.style.opacity = ''; delete e.dataset.ccDone; });
             el.querySelectorAll('.cc-dialogue').forEach(s => s.replaceWith(document.createTextNode(s.textContent)));
         });
@@ -174,6 +229,34 @@ JSON:`;
         });
     }
 
+    function addInputButton() {
+        // Add button near the input area
+        const sendForm = document.getElementById('send_form') || document.getElementById('form_sheld');
+        if (!sendForm || document.getElementById('cc-input-btn')) return;
+        
+        const btn = document.createElement('div');
+        btn.id = 'cc-input-btn';
+        btn.className = 'fa-solid fa-palette interactable';
+        btn.title = 'Refresh Dialogue Colors';
+        btn.style.cssText = 'cursor:pointer;padding:5px;font-size:1.2em;opacity:0.7;';
+        btn.onclick = () => {
+            btn.style.opacity = '0.3';
+            reprocess().then(() => {
+                btn.style.opacity = '0.7';
+                toastr?.success?.('Dialogue colors refreshed!');
+            });
+        };
+        
+        // Find the left side icons area
+        const leftIcons = sendForm.querySelector('.mes_buttons, #leftSendForm') || sendForm;
+        if (leftIcons.id === 'leftSendForm') {
+            leftIcons.appendChild(btn);
+        } else {
+            // Insert at beginning of send form
+            sendForm.insertBefore(btn, sendForm.firstChild);
+        }
+    }
+
     function createUI() {
         if (document.getElementById('cc-ext')) return;
         
@@ -184,20 +267,59 @@ JSON:`;
                 <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
             </div>
             <div class="inline-drawer-content" style="padding:10px;display:flex;flex-direction:column;gap:8px;">
-                <label class="checkbox_label"><input type="checkbox" id="cc-thoughts" ${settings.colorThoughts?'checked':''}><span>Color thoughts (『』/*text*)</span></label>
-                <div style="display:flex;gap:5px;">
-                    <button id="cc-refresh" class="menu_button" style="flex:1">🔄 Refresh (LLM)</button>
-                    <button id="cc-clear" class="menu_button">Clear</button>
+                <div class="cc-row">
+                    <label>Theme Mode</label>
+                    <select id="cc-theme">
+                        <option value="auto">Auto</option>
+                        <option value="dark">Dark</option>
+                        <option value="light">Light</option>
+                    </select>
+                </div>
+                <label class="checkbox_label"><input type="checkbox" id="cc-thoughts"><span>Color thoughts (『』/*text*)</span></label>
+                <hr>
+                <label class="checkbox_label"><input type="checkbox" id="cc-custom-model"><span>Use custom model for detection</span></label>
+                <div id="cc-model-row" style="display:none;">
+                    <input type="text" id="cc-model-name" placeholder="Model name (e.g. gpt-4o-mini)" style="width:100%;padding:5px;">
                 </div>
                 <hr>
+                <div style="display:flex;gap:5px;">
+                    <button id="cc-refresh" class="menu_button" style="flex:1">🔄 Refresh</button>
+                    <button id="cc-clear" class="menu_button">Clear</button>
+                </div>
                 <small>Characters:</small>
-                <div id="cc-char-list" style="max-height:120px;overflow-y:auto;"></div>
+                <div id="cc-char-list" style="max-height:100px;overflow-y:auto;"></div>
             </div>
         </div>`;
         
         document.getElementById('extensions_settings')?.insertAdjacentHTML('beforeend', html);
         
-        document.getElementById('cc-thoughts').onchange = e => { settings.colorThoughts = e.target.checked; saveData(); reprocess(); };
+        // Theme
+        const themeSelect = document.getElementById('cc-theme');
+        themeSelect.value = settings.themeMode;
+        themeSelect.onchange = e => { settings.themeMode = e.target.value; saveData(); };
+        
+        // Thoughts
+        const thoughtsCheck = document.getElementById('cc-thoughts');
+        thoughtsCheck.checked = settings.colorThoughts;
+        thoughtsCheck.onchange = e => { settings.colorThoughts = e.target.checked; saveData(); reprocess(); };
+        
+        // Custom model
+        const customCheck = document.getElementById('cc-custom-model');
+        const modelRow = document.getElementById('cc-model-row');
+        const modelInput = document.getElementById('cc-model-name');
+        
+        customCheck.checked = settings.useCustomModel;
+        modelInput.value = settings.customModel || '';
+        modelRow.style.display = settings.useCustomModel ? 'block' : 'none';
+        
+        customCheck.onchange = e => {
+            settings.useCustomModel = e.target.checked;
+            modelRow.style.display = e.target.checked ? 'block' : 'none';
+            saveData();
+        };
+        modelInput.onchange = e => { settings.customModel = e.target.value; saveData(); };
+        
+        // Buttons
         document.getElementById('cc-refresh').onclick = reprocess;
         document.getElementById('cc-clear').onclick = clearColors;
         
@@ -206,10 +328,23 @@ JSON:`;
 
     function init() {
         loadData();
-        const wait = setInterval(() => { if (document.getElementById('extensions_settings')) { clearInterval(wait); createUI(); } }, 500);
+        
+        const wait = setInterval(() => {
+            if (document.getElementById('extensions_settings')) {
+                clearInterval(wait);
+                createUI();
+            }
+        }, 500);
+        
+        // Add input button
+        const btnWait = setInterval(() => {
+            if (document.getElementById('send_form') || document.getElementById('form_sheld')) {
+                clearInterval(btnWait);
+                addInputButton();
+            }
+        }, 500);
         
         if (typeof eventSource !== 'undefined' && typeof event_types !== 'undefined') {
-            // Multiple delayed attempts for thinking models
             eventSource.on(event_types.GENERATION_ENDED, () => {
                 setTimeout(() => processAll(true), 1500);
                 setTimeout(() => processAll(true), 3000);
@@ -218,7 +353,6 @@ JSON:`;
             eventSource.on(event_types.CHAT_CHANGED, () => { characterColors = {}; saveData(); updateCharacterList(); });
         }
         
-        // Process thoughts automatically (no LLM)
         setInterval(() => processAll(false), 2000);
         setTimeout(() => processAll(false), 1000);
     }
