@@ -76,13 +76,20 @@
     }
 
     function injectPrompt() {
-        if (typeof SillyTavern === 'undefined' || !SillyTavern.getContext) return;
+        if (typeof SillyTavern === 'undefined' || !SillyTavern.getContext) {
+            console.log('CC: SillyTavern context not available');
+            return;
+        }
         const ctx = SillyTavern.getContext();
-        if (!ctx.setExtensionPrompt) return;
+        if (!ctx.setExtensionPrompt) {
+            console.log('CC: setExtensionPrompt not available');
+            return;
+        }
 
         const prompt = settings.enabled ? buildPromptInstruction() : '';
-        // IN_CHAT = 1, depth 1 = just before last message, SYSTEM role = 0
-        ctx.setExtensionPrompt(MODULE_NAME, prompt, 1, 1, false, 0);
+        console.log('CC: Injecting prompt:', prompt.substring(0, 100) + '...');
+        // IN_CHAT = 1, depth 0 = at the end (closest to generation), SYSTEM role = 0
+        ctx.setExtensionPrompt(MODULE_NAME, prompt, 1, 0, false, 0);
     }
 
     function applyDisplayColors() {
@@ -229,6 +236,8 @@
             if (document.getElementById('extensions_settings')) {
                 clearInterval(wait);
                 createUI();
+                // Inject prompt once UI is ready
+                setTimeout(injectPrompt, 500);
             }
         }, 500);
         
@@ -242,8 +251,17 @@
         if (typeof eventSource !== 'undefined' && typeof event_types !== 'undefined') {
             // Inject prompt before generation
             eventSource.on(event_types.GENERATION_STARTED, () => {
+                console.log('CC: GENERATION_STARTED event');
                 injectPrompt();
             });
+            
+            // Also try GENERATE_BEFORE_COMBINE_PROMPTS if available
+            if (event_types.GENERATE_BEFORE_COMBINE_PROMPTS) {
+                eventSource.on(event_types.GENERATE_BEFORE_COMBINE_PROMPTS, () => {
+                    console.log('CC: GENERATE_BEFORE_COMBINE_PROMPTS event');
+                    injectPrompt();
+                });
+            }
             
             // Apply display colors after message received
             eventSource.on(event_types.MESSAGE_RECEIVED, () => {
@@ -252,11 +270,24 @@
             
             eventSource.on(event_types.CHAT_CHANGED, () => {
                 clearDisplayColors();
+                setTimeout(injectPrompt, 500);
             });
+            
+            console.log('CC: Event listeners registered');
+        } else {
+            console.log('CC: eventSource not available yet, retrying...');
+            setTimeout(() => {
+                if (typeof eventSource !== 'undefined') {
+                    eventSource.on(event_types.GENERATION_STARTED, injectPrompt);
+                }
+            }, 2000);
         }
         
         setInterval(applyDisplayColors, 2000);
         setTimeout(applyDisplayColors, 1000);
+        
+        // Keep prompt injected
+        setTimeout(injectPrompt, 2000);
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
