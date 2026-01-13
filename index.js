@@ -106,42 +106,30 @@ JSON:`;
             if (nameEl) mainChar = nameEl.textContent.trim();
         }
 
-        console.log('CC: Processing message, mainChar:', mainChar);
-
-        // First pass: color Japanese quotes and asterisks (they might be in <em> tags)
+        // Color thoughts in em/i tags (Japanese quotes are usually italicized)
         if (settings.colorThoughts && mainChar) {
             const color = getCharacterColor(mainChar);
-            
-            // Find all text containing 『』
             mesText.querySelectorAll('em, i').forEach(el => {
-                if (el.textContent.includes('『') || el.textContent.includes('』')) {
-                    console.log('CC: Found thought in em/i tag:', el.textContent);
+                const text = el.textContent;
+                if (text.includes('『') || text.includes('*')) {
                     el.style.color = color;
+                    el.style.opacity = '0.8';
                     el.classList.add('cc-thought');
                 }
             });
-            
-            // Also check direct text nodes for 『』
-            const allText = mesText.innerHTML;
-            if (allText.includes('『')) {
-                console.log('CC: Found 『 in message');
-                mesText.innerHTML = allText.replace(/(『[^』]*』)/g, `<span class="cc-thought" style="color:${color};opacity:0.8">$1</span>`);
-            }
         }
 
-        // Second pass: color dialogue quotes
+        // Color dialogue quotes via text nodes
         const walk = document.createTreeWalker(mesText, NodeFilter.SHOW_TEXT);
         const textNodes = [];
         while (walk.nextNode()) textNodes.push(walk.currentNode);
 
         for (const node of textNodes) {
             const nodeText = node.nodeValue;
-            
             if (!/"/.test(nodeText) && !/"/.test(nodeText)) continue;
 
             const regex = /("[^"]*"|"[^"]*")/g;
             const parts = nodeText.split(regex);
-            
             if (parts.length <= 1) continue;
 
             const frag = document.createDocumentFragment();
@@ -151,18 +139,16 @@ JSON:`;
                 
                 const isQuote = /^"[^"]*"$/.test(part) || /^"[^"]*"$/.test(part);
 
-                if (isQuote) {
+                if (isQuote && dialogueMap) {
                     const innerText = part.slice(1, -1);
                     let speaker = null;
                     
-                    if (dialogueMap) {
-                        for (const [dialogue, char] of Object.entries(dialogueMap)) {
-                            const d = dialogue.toLowerCase();
-                            const i = innerText.toLowerCase();
-                            if (i.includes(d.substring(0, 15)) || d.includes(i.substring(0, 15))) {
-                                speaker = char;
-                                break;
-                            }
+                    for (const [dialogue, char] of Object.entries(dialogueMap)) {
+                        const d = dialogue.toLowerCase();
+                        const i = innerText.toLowerCase();
+                        if (i.includes(d.substring(0, 15)) || d.includes(i.substring(0, 15))) {
+                            speaker = char;
+                            break;
                         }
                     }
                     
@@ -173,12 +159,10 @@ JSON:`;
                         span.style.color = color;
                         span.textContent = part;
                         frag.appendChild(span);
-                    } else {
-                        frag.appendChild(document.createTextNode(part));
+                        continue;
                     }
-                } else {
-                    frag.appendChild(document.createTextNode(part));
                 }
+                frag.appendChild(document.createTextNode(part));
             }
             
             node.parentNode.replaceChild(frag, node);
