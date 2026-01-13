@@ -19,15 +19,30 @@
         return characterColors[key].color;
     }
 
-    function extractSpeaker(text) {
-        const patterns = [
-            /\b([A-Z][a-z]{2,})'s\s+(?:voice|grip|thumb|hand|eyes|breath|ear|wrist)/i,
-            /\b([A-Z][a-z]{2,})\s+(?:said|says|asked|whispered|shrugs|nods|leans|tilts|towers|turns|looks|smiles)/i
+    function extractSpeaker(text, mesElement) {
+        // First, try to get the character name from the message element itself
+        const mesBlock = mesElement?.closest('.mes');
+        if (mesBlock) {
+            const nameEl = mesBlock.querySelector('.name_text');
+            if (nameEl) {
+                const charName = nameEl.textContent.trim();
+                if (charName && charName.length > 0) {
+                    return charName;
+                }
+            }
+        }
+        
+        // Fallback: Look for patterns that indicate who is SPEAKING
+        const speechPatterns = [
+            /\b([A-Z][a-z]{2,})'s\s+voice\b/i,
+            /\b([A-Z][a-z]{2,})\s+(?:said|says|asked|asks|whispered|whispers|murmured|murmurs)\b/i,
         ];
-        for (const p of patterns) {
+        
+        for (const p of speechPatterns) {
             const m = text.match(p);
             if (m && m[1]) return m[1];
         }
+        
         return null;
     }
 
@@ -36,7 +51,7 @@
         mesText.dataset.ccProcessed = 'true';
 
         const fullText = mesText.textContent;
-        const speaker = extractSpeaker(fullText);
+        const speaker = extractSpeaker(fullText, mesText);
         if (!speaker) return;
 
         const color = getCharacterColor(speaker);
