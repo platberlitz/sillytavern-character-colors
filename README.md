@@ -2,6 +2,10 @@
 
 Automatically colors character names in dialogue with theme-aware colors and character card storage.
 
+## About
+
+This extension enhances SillyTavern by automatically applying consistent colors to character names in chat messages. Unlike manual HTML coloring, this works seamlessly without modifying your chat context or prompts. Colors are intelligently chosen based on your theme (dark/light mode) and saved to character cards for persistence across sessions. Each new chat starts fresh, ensuring optimal color distribution among active characters.
+
 ## Features
 
 - **Theme-aware colors**: Automatically adjusts colors for dark/light modes
