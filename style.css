@@ -9,3 +9,40 @@
 .mes_text span[style*="color"] {
     text-shadow: 0 0 1px rgba(0,0,0,0.5);
 }
+
+/* Settings UI */
+.character-colors-settings {
+    margin: 10px 0;
+    padding: 15px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 5px;
+    background: var(--SmartThemeBodyColor);
+}
+
+.character-colors-settings h3 {
+    margin-top: 0;
+    color: var(--SmartThemeEmColor);
+}
+
+.setting-group {
+    margin: 10px 0;
+}
+
+.setting-group label {
+    display: block;
+    margin-bottom: 5px;
+    font-weight: bold;
+}
+
+#cc-theme, #cc-custom-input {
+    width: 100%;
+    padding: 5px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 3px;
+    background: var(--SmartThemeBodyColor);
+    color: var(--SmartThemeEmColor);
+}
+
+#cc-custom-colors {
+    margin-top: 10px;
+}
