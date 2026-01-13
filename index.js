@@ -31,10 +31,10 @@
     }
 
     function getCharacterColor(name) {
-        const normalizedName = name.toLowerCase().trim();
-        if (!characterColors[normalizedName]) {
+        const key = name.toLowerCase().trim();
+        if (!characterColors[key]) {
             const colors = getThemeColors();
-            characterColors[normalizedName] = {
+            characterColors[key] = {
                 color: colors[colorIndex % colors.length],
                 displayName: name
             };
@@ -42,7 +42,7 @@
             saveData();
             updateCharacterList();
         }
-        return characterColors[normalizedName].color;
+        return characterColors[key].color;
     }
 
     function saveData() {
@@ -61,103 +61,181 @@
     }
 
     function extractNames(text) {
-        // Simple extraction: capitalized words that appear near dialogue verbs or quotes
         const names = new Set();
-        
-        // Pattern: Name + dialogue verb, or dialogue verb + Name
         const patterns = [
-            /\b([A-Z][a-z]{2,})\s+(?:said|says|asked|asks|replied|whispered|shouted|muttered|exclaimed|answered|called|murmured|growled|sighed|spoke|added|continued|responded|demanded|offered|suggested|admitted|agreed|announced|declared|explained|insisted|mentioned|noted|remarked|stated|thought|warned|wondered)\b/gi,
-            /\b(?:said|says|asked|asks|replied|whispered|shouted|muttered|exclaimed|answered|called|murmured|growled|sighed|spoke|added|continued|responded|demanded|offered|suggested|admitted|agreed|announced|declared|explained|insisted|mentioned|noted|remarked|stated|thought|warned|wondered)\s+([A-Z][a-z]{2,})\b/gi,
-            // Name's (possessive) near action
-            /\b([A-Z][a-z]{2,})'s\s+(?:voice|words|tone|grip|hand|eyes|face|lips|mouth)\b/gi,
-            // Name + verb (action)
-            /\b([A-Z][a-z]{2,})\s+(?:shrugs|nods|smiles|grins|laughs|sighs|looks|turns|moves|steps|reaches|grabs|holds|pulls|pushes)\b/gi
+            /\b([A-Z][a-z]{2,})\s+(?:said|says|asked|asks|replied|whispered|shouted|muttered|exclaimed|answered|called|murmured|growled|sighed|spoke|added|continued|responded|demanded|offered|suggested|admitted|agreed|announced|declared|explained|insisted|mentioned|noted|remarked|stated|thought|warned|wondered)\b/g,
+            /\b(?:said|says|asked|asks|replied|whispered|shouted|muttered|exclaimed|answered|called|murmured|growled|sighed|spoke|added|continued|responded|demanded|offered|suggested|admitted|agreed|announced|declared|explained|insisted|mentioned|noted|remarked|stated|thought|warned|wondered)\s+([A-Z][a-z]{2,})\b/g,
+            /\b([A-Z][a-z]{2,})'s\s+(?:voice|words|tone|grip|hand|eyes|face|lips|mouth|thumb|fingers|head)\b/g,
+            /\b([A-Z][a-z]{2,})\s+(?:shrugs|nods|smiles|grins|laughs|sighs|looks|turns|moves|steps|reaches|grabs|holds|pulls|pushes|tilts|doesn't|doesn't)\b/g
         ];
+        
+        const exclude = ['The', 'This', 'That', 'Then', 'There', 'They', 'What', 'When', 'Where', 'Which', 'While', 'With', 'Would', 'Could', 'Should', 'Have', 'Just', 'But', 'And', 'For', 'Not', 'You', 'Your', 'His', 'Her', 'Its', 'Our', 'Their', 'She', 'God', 'Yes', 'Now', 'Good', 'Shy'];
         
         for (const pattern of patterns) {
             let match;
             while ((match = pattern.exec(text)) !== null) {
                 const name = match[1];
-                if (name && !['The', 'This', 'That', 'Then', 'There', 'They', 'What', 'When', 'Where', 'Which', 'While', 'With', 'Would', 'Could', 'Should', 'Have', 'Just', 'But', 'And', 'For', 'Not', 'You', 'Your', 'His', 'Her', 'Its', 'Our', 'Their', 'She', 'God', 'Yes', 'Now'].includes(name)) {
+                if (name && !exclude.includes(name)) {
                     names.add(name);
                 }
             }
         }
-        
         return [...names];
     }
 
     function applyColorsToMessage(messageElement) {
         if (messageElement.hasAttribute('data-cc-done')) return;
+        messageElement.setAttribute('data-cc-done', 'true');
         
         const text = messageElement.textContent;
         if (!text || text.length < 10) return;
         
         const names = extractNames(text);
-        if (!names.length) {
-            messageElement.setAttribute('data-cc-done', 'true');
-            return;
+        if (!names.length) return;
+        
+        // Work with text nodes directly to avoid HTML corruption
+        const walker = document.createTreeWalker(
+            messageElement,
+            NodeFilter.SHOW_TEXT,
+            null,
+            false
+        );
+        
+        const textNodes = [];
+        let node;
+        while (node = walker.nextNode()) {
+            if (node.textContent.includes('"')) {
+                textNodes.push(node);
+            }
         }
         
-        let html = messageElement.innerHTML;
-        
-        // Find dialogue and associate with nearest character
-        const dialoguePattern = /"([^"]+)"/g;
-        let match;
-        let segments = [];
-        
-        while ((match = dialoguePattern.exec(html)) !== null) {
-            segments.push({
-                start: match.index,
-                end: match.index + match[0].length,
-                full: match[0],
-                inner: match[1]
-            });
-        }
-        
-        // Process in reverse to preserve indices
-        for (const seg of segments.reverse()) {
-            // Find nearest character name to this dialogue
-            let nearestName = null;
-            let nearestDist = Infinity;
+        for (const textNode of textNodes) {
+            const content = textNode.textContent;
             
-            const textBefore = html.substring(Math.max(0, seg.start - 200), seg.start);
-            const textAfter = html.substring(seg.end, Math.min(html.length, seg.end + 200));
+            // Find quoted dialogue in this text node
+            const parts = [];
+            let lastIndex = 0;
+            const regex = /"([^"]+)"/g;
+            let match;
             
-            for (const name of names) {
-                // Check before
-                const beforeIdx = textBefore.lastIndexOf(name);
-                if (beforeIdx !== -1) {
-                    const dist = textBefore.length - beforeIdx;
-                    if (dist < nearestDist) {
-                        nearestDist = dist;
-                        nearestName = name;
+            while ((match = regex.exec(content)) !== null) {
+                // Add text before quote
+                if (match.index > lastIndex) {
+                    parts.push({ type: 'text', content: content.substring(lastIndex, match.index) });
+                }
+                
+                // Find nearest character name in surrounding context
+                const fullText = messageElement.textContent;
+                const quotePos = fullText.indexOf(match[0]);
+                let nearestName = names[0]; // default to first found
+                let nearestDist = Infinity;
+                
+                for (const name of names) {
+                    const beforeIdx = fullText.lastIndexOf(name, quotePos);
+                    const afterIdx = fullText.indexOf(name, quotePos);
+                    
+                    if (beforeIdx !== -1) {
+                        const dist = quotePos - beforeIdx;
+                        if (dist < nearestDist) {
+                            nearestDist = dist;
+                            nearestName = name;
+                        }
+                    }
+                    if (afterIdx !== -1) {
+                        const dist = afterIdx - quotePos;
+                        if (dist < nearestDist) {
+                            nearestDist = dist;
+                            nearestName = name;
+                        }
                     }
                 }
-                // Check after
-                const afterIdx = textAfter.indexOf(name);
-                if (afterIdx !== -1 && afterIdx < nearestDist) {
-                    nearestDist = afterIdx;
-                    nearestName = name;
-                }
+                
+                parts.push({ 
+                    type: 'dialogue', 
+                    content: match[1], 
+                    color: getCharacterColor(nearestName)
+                });
+                
+                lastIndex = match.index + match[0].length;
             }
             
-            if (nearestName) {
-                const color = getCharacterColor(nearestName);
-                const colored = `"<span class="cc-dialogue" style="color:${color}!important">${seg.inner}</span>"`;
-                html = html.substring(0, seg.start) + colored + html.substring(seg.end);
+            // Add remaining text
+            if (lastIndex < content.length) {
+                parts.push({ type: 'text', content: content.substring(lastIndex) });
+            }
+            
+            // Only replace if we found dialogue
+            if (parts.some(p => p.type === 'dialogue')) {
+                const fragment = document.createDocumentFragment();
+                for (const part of parts) {
+                    if (part.type === 'text') {
+                        fragment.appendChild(document.createTextNode(part.content));
+                    } else {
+                        fragment.appendChild(document.createTextNode('"'));
+                        const span = document.createElement('span');
+                        span.className = 'cc-dialogue';
+                        span.style.cssText = `color: ${part.color} !important;`;
+                        span.textContent = part.content;
+                        fragment.appendChild(span);
+                        fragment.appendChild(document.createTextNode('"'));
+                    }
+                }
+                textNode.parentNode.replaceChild(fragment, textNode);
             }
         }
         
         // Color thoughts if enabled
         if (settings.colorThoughts && names.length > 0) {
             const color = getCharacterColor(names[0]);
-            html = html.replace(/\*([^*]+)\*/g, `<span class="cc-thought" style="color:${color}!important;opacity:0.85!important">*$1*</span>`);
-            html = html.replace(/『([^』]+)』/g, `<span class="cc-thought" style="color:${color}!important;opacity:0.85!important">『$1』</span>`);
+            colorThoughts(messageElement, color);
+        }
+    }
+    
+    function colorThoughts(element, color) {
+        const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT, null, false);
+        const textNodes = [];
+        let node;
+        while (node = walker.nextNode()) {
+            if (node.textContent.match(/\*[^*]+\*|『[^』]+』/)) {
+                textNodes.push(node);
+            }
         }
         
-        messageElement.innerHTML = html;
-        messageElement.setAttribute('data-cc-done', 'true');
+        for (const textNode of textNodes) {
+            const content = textNode.textContent;
+            const parts = [];
+            let lastIndex = 0;
+            const regex = /(\*[^*]+\*|『[^』]+』)/g;
+            let match;
+            
+            while ((match = regex.exec(content)) !== null) {
+                if (match.index > lastIndex) {
+                    parts.push({ type: 'text', content: content.substring(lastIndex, match.index) });
+                }
+                parts.push({ type: 'thought', content: match[1] });
+                lastIndex = match.index + match[0].length;
+            }
+            
+            if (lastIndex < content.length) {
+                parts.push({ type: 'text', content: content.substring(lastIndex) });
+            }
+            
+            if (parts.some(p => p.type === 'thought')) {
+                const fragment = document.createDocumentFragment();
+                for (const part of parts) {
+                    if (part.type === 'text') {
+                        fragment.appendChild(document.createTextNode(part.content));
+                    } else {
+                        const span = document.createElement('span');
+                        span.className = 'cc-thought';
+                        span.style.cssText = `color: ${color} !important; opacity: 0.85 !important;`;
+                        span.textContent = part.content;
+                        fragment.appendChild(span);
+                    }
+                }
+                textNode.parentNode.replaceChild(fragment, textNode);
+            }
+        }
     }
 
     function processAllMessages() {
@@ -166,6 +244,9 @@
 
     function reprocessAll() {
         document.querySelectorAll('[data-cc-done]').forEach(el => el.removeAttribute('data-cc-done'));
+        document.querySelectorAll('.cc-dialogue, .cc-thought').forEach(el => {
+            el.replaceWith(document.createTextNode(el.textContent));
+        });
         processAllMessages();
     }
 
