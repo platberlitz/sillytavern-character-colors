@@ -10,39 +10,76 @@
     text-shadow: 0 0 1px rgba(0,0,0,0.5);
 }
 
-/* Settings UI */
+/* Settings UI - Native SillyTavern Integration */
 .character-colors-settings {
     margin: 10px 0;
     padding: 15px;
-    border: 1px solid var(--SmartThemeBorderColor);
-    border-radius: 5px;
-    background: var(--SmartThemeBodyColor);
+    border: 1px solid var(--grey30);
+    border-radius: var(--border-radius-small);
+    background-color: var(--black30alpha);
+    backdrop-filter: blur(var(--blur-strength));
 }
 
 .character-colors-settings h3 {
-    margin-top: 0;
-    color: var(--SmartThemeEmColor);
+    margin: 0 0 15px 0;
+    color: var(--grey90);
+    font-size: 1.1em;
+    font-weight: 600;
 }
 
 .setting-group {
-    margin: 10px 0;
+    margin: 12px 0;
 }
 
 .setting-group label {
     display: block;
-    margin-bottom: 5px;
-    font-weight: bold;
+    margin-bottom: 6px;
+    font-weight: 500;
+    color: var(--grey70);
+    font-size: 0.95em;
+}
+
+.setting-group label input[type="checkbox"] {
+    margin-right: 8px;
+    accent-color: var(--SmartThemeQuoteColor);
 }
 
 #cc-theme, #cc-custom-input {
     width: 100%;
-    padding: 5px;
-    border: 1px solid var(--SmartThemeBorderColor);
-    border-radius: 3px;
-    background: var(--SmartThemeBodyColor);
-    color: var(--SmartThemeEmColor);
+    padding: 8px 12px;
+    border: 1px solid var(--grey30);
+    border-radius: var(--border-radius-small);
+    background-color: var(--black70alpha);
+    color: var(--grey90);
+    font-size: 0.9em;
+    transition: border-color 0.2s ease;
+}
+
+#cc-theme:focus, #cc-custom-input:focus {
+    outline: none;
+    border-color: var(--SmartThemeQuoteColor);
+    box-shadow: 0 0 0 2px var(--SmartThemeQuoteColor)25;
+}
+
+#cc-theme option {
+    background-color: var(--black70alpha);
+    color: var(--grey90);
 }
 
 #cc-custom-colors {
-    margin-top: 10px;
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--grey30);
+}
+
+/* Checkbox styling for better theme integration */
+.setting-group label {
+    display: flex;
+    align-items: center;
+    cursor: pointer;
+    user-select: none;
+}
+
+.setting-group label:hover {
+    color: var(--grey90);
 }
