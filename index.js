@@ -125,14 +125,28 @@
         
         const entries = Object.entries(characterColors);
         list.innerHTML = entries.length ? entries.map(([k, v]) =>
-            `<div class="cc-char-item"><span style="color:${v.color};font-weight:bold">${v.name}</span><input type="color" value="${v.color}" data-key="${k}"></div>`
+            `<div class="cc-char-item" style="display:flex;align-items:center;gap:5px;margin:2px 0;">
+                <input type="color" value="${v.color}" data-key="${k}" style="width:24px;height:24px;padding:0;border:none;">
+                <span style="color:${v.color};font-weight:bold;flex:1">${v.name}</span>
+                <button class="cc-del menu_button" data-key="${k}" style="padding:2px 6px;font-size:0.8em;">×</button>
+            </div>`
         ).join('') : '<small>No characters yet</small>';
         
-        list.querySelectorAll('input').forEach(i => {
+        list.querySelectorAll('input[type="color"]').forEach(i => {
             i.oninput = () => { 
                 characterColors[i.dataset.key].color = i.value; 
+                i.nextElementSibling.style.color = i.value;
                 saveData(); 
                 injectPrompt();
+            };
+        });
+        
+        list.querySelectorAll('.cc-del').forEach(btn => {
+            btn.onclick = () => {
+                delete characterColors[btn.dataset.key];
+                saveData();
+                injectPrompt();
+                updateCharList();
             };
         });
     }
