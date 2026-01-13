@@ -163,11 +163,13 @@
         loadData();
         const wait = setInterval(() => { if (document.getElementById('extensions_settings')) { clearInterval(wait); createUI(); } }, 500);
         if (typeof eventSource !== 'undefined' && typeof event_types !== 'undefined') {
-            eventSource.on(event_types.MESSAGE_RECEIVED, () => setTimeout(() => processAll(true), 500));
+            // Use GENERATION_ENDED instead of MESSAGE_RECEIVED to avoid interrupting streaming
+            eventSource.on(event_types.GENERATION_ENDED, () => setTimeout(() => processAll(true), 1000));
             eventSource.on(event_types.CHAT_CHANGED, () => { characterColors = {}; saveData(); updateCharacterList(); });
         }
-        setInterval(() => processAll(false), 2000);
-        setTimeout(() => processAll(false), 1000);
+        // Only do non-LLM processing periodically (just colors em/i tags)
+        setInterval(() => processAll(false), 3000);
+        setTimeout(() => processAll(false), 1500);
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
