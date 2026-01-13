@@ -1,232 +1,312 @@
 (() => {
     'use strict';
 
-    let characterColors = new Map();
+    const extensionName = 'character-colors';
+    let characterColors = {};
     let settings = {
-        theme: 'auto', // auto, dark, light, custom
+        theme: 'auto',
         customColors: [],
-        colorThoughts: false // Include *thoughts* and 『thoughts』 in coloring
+        colorThoughts: false
     };
 
     const themeColors = {
         dark: ['#FF6B35', '#FF1493', '#00CED1', '#32CD32', '#FFD700', '#FF69B4', '#8A2BE2', '#FF4500'],
-        light: ['#CC4400', '#CC0066', '#006699', '#228B22', '#B8860B', '#C71585', '#6A1B9A', '#D2691E'],
-        auto: [] // Will be set based on detected theme
+        light: ['#CC4400', '#CC0066', '#006699', '#228B22', '#B8860B', '#C71585', '#6A1B9A', '#D2691E']
     };
 
     let colorIndex = 0;
-    let currentChatId = null;
 
     function detectTheme() {
-        const isDark = document.body.classList.contains('dark') || 
-                      getComputedStyle(document.body).backgroundColor === 'rgb(0, 0, 0)' ||
-                      window.matchMedia('(prefers-color-scheme: dark)').matches;
-        return isDark ? 'dark' : 'light';
+        const body = document.body;
+        const bg = getComputedStyle(body).backgroundColor;
+        const rgb = bg.match(/\d+/g);
+        if (rgb) {
+            const brightness = (parseInt(rgb[0]) * 299 + parseInt(rgb[1]) * 587 + parseInt(rgb[2]) * 114) / 1000;
+            return brightness < 128 ? 'dark' : 'light';
+        }
+        return 'dark';
     }
 
     function getThemeColors() {
         if (settings.theme === 'custom' && settings.customColors.length > 0) {
             return settings.customColors;
         }
-        if (settings.theme === 'auto') {
-            return themeColors[detectTheme()];
-        }
-        return themeColors[settings.theme] || themeColors.dark;
-    }
-
-    function saveCharacterColor(charName, color) {
-        if (window.characters && window.this_chid !== undefined) {
-            const char = window.characters[window.this_chid];
-            if (char) {
-                if (!char.data.extensions) char.data.extensions = {};
-                if (!char.data.extensions.character_colors) char.data.extensions.character_colors = {};
-                char.data.extensions.character_colors[charName] = color;
-                window.saveCharacterDebounced();
-            }
-        }
-    }
-
-    function loadCharacterColor(charName) {
-        if (window.characters && window.this_chid !== undefined) {
-            const char = window.characters[window.this_chid];
-            if (char?.data?.extensions?.character_colors?.[charName]) {
-                return char.data.extensions.character_colors[charName];
-            }
-        }
-        return null;
+        const theme = settings.theme === 'auto' ? detectTheme() : settings.theme;
+        return themeColors[theme] || themeColors.dark;
     }
 
     function getCharacterColor(name) {
-        if (!characterColors.has(name)) {
-            let color = loadCharacterColor(name);
-            if (!color) {
-                const colors = getThemeColors();
-                color = colors[colorIndex % colors.length];
-                colorIndex++;
-                saveCharacterColor(name, color);
-            }
-            characterColors.set(name, color);
+        if (!characterColors[name]) {
+            const colors = getThemeColors();
+            characterColors[name] = colors[colorIndex % colors.length];
+            colorIndex++;
+            saveCharacterColors();
+            updateCharacterList();
         }
-        return characterColors.get(name);
+        return characterColors[name];
     }
 
-    function resetColorsForNewChat() {
-        const newChatId = window.selected_group || window.this_chid;
-        if (newChatId !== currentChatId) {
-            characterColors.clear();
-            colorIndex = 0;
-            currentChatId = newChatId;
-            // Re-process all messages
-            document.querySelectorAll('.mes_text[data-colored]').forEach(el => {
-                el.removeAttribute('data-colored');
-            });
-            processMessages();
-        }
+    function setCharacterColor(name, color) {
+        characterColors[name] = color;
+        saveCharacterColors();
+        reprocessAllMessages();
+        updateCharacterList();
     }
 
-    function colorizeMessage(messageElement) {
-        const textContent = messageElement.textContent || messageElement.innerText;
-        if (!textContent) return;
+    function saveCharacterColors() {
+        localStorage.setItem('cc_character_colors', JSON.stringify(characterColors));
+    }
 
-        const namePattern = /^([A-Za-z][A-Za-z0-9\s]*?)(?:\s*[:]\s*)/;
-        const match = textContent.match(namePattern);
-        
-        if (match) {
-            const characterName = match[1].trim();
-            const color = getCharacterColor(characterName);
-            
-            let innerHTML = messageElement.innerHTML;
-            
-            // Color the character name with !important for priority
-            innerHTML = innerHTML.replace(
-                new RegExp(`^(${characterName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'i'),
-                `<span class="character-name-colored" style="color: ${color} !important; font-weight: bold !important;">$1</span>`
-            );
-            
-            // Color thoughts if enabled
-            if (settings.colorThoughts) {
-                // Color *thoughts* 
-                innerHTML = innerHTML.replace(
-                    /(\*[^*]+\*)/g,
-                    `<span class="character-thought-colored" style="color: ${color} !important; opacity: 0.8 !important;">$1</span>`
-                );
-                // Color 『thoughts』
-                innerHTML = innerHTML.replace(
-                    /(『[^』]+』)/g,
-                    `<span class="character-thought-colored" style="color: ${color} !important; opacity: 0.8 !important;">$1</span>`
-                );
-            }
-            
-            messageElement.innerHTML = innerHTML;
+    function loadCharacterColors() {
+        const saved = localStorage.getItem('cc_character_colors');
+        if (saved) {
+            characterColors = JSON.parse(saved);
+            colorIndex = Object.keys(characterColors).length;
         }
     }
 
-    function processMessages() {
-        resetColorsForNewChat();
-        const messages = document.querySelectorAll('.mes_text:not([data-colored]), .message_text:not([data-colored]), .mes:not([data-colored]) .mes_text');
-        messages.forEach(msg => {
-            colorizeMessage(msg);
-            msg.setAttribute('data-colored', 'true');
-        });
+    function saveSettings() {
+        localStorage.setItem('cc_settings', JSON.stringify(settings));
     }
 
     function loadSettings() {
-        const saved = localStorage.getItem('character_colors_settings');
+        const saved = localStorage.getItem('cc_settings');
         if (saved) {
             settings = { ...settings, ...JSON.parse(saved) };
         }
     }
 
-    function saveSettings() {
-        localStorage.setItem('character_colors_settings', JSON.stringify(settings));
+    function applyColorToElement(element, color) {
+        element.style.setProperty('color', color, 'important');
+        element.style.setProperty('font-weight', 'bold', 'important');
+        element.classList.add('cc-colored');
+    }
+
+    function colorizeMessage(messageElement) {
+        if (messageElement.hasAttribute('data-cc-processed')) return;
+        
+        const html = messageElement.innerHTML;
+        if (!html) return;
+
+        // Pattern: "Name:" at start of message
+        const nameMatch = html.match(/^(\s*)([A-Za-z][A-Za-z0-9\s]{0,30}?)(\s*:\s*)/);
+        
+        if (nameMatch) {
+            const characterName = nameMatch[2].trim();
+            const color = getCharacterColor(characterName);
+            
+            let newHtml = html.replace(
+                /^(\s*)([A-Za-z][A-Za-z0-9\s]{0,30}?)(\s*:\s*)/,
+                `$1<span class="cc-name" style="color: ${color} !important; font-weight: bold !important;">$2</span>$3`
+            );
+            
+            if (settings.colorThoughts) {
+                // *asterisk thoughts*
+                newHtml = newHtml.replace(
+                    /\*([^*]+)\*/g,
+                    `<span class="cc-thought" style="color: ${color} !important; opacity: 0.85 !important;">*$1*</span>`
+                );
+                // 『Japanese thoughts』
+                newHtml = newHtml.replace(
+                    /『([^』]+)』/g,
+                    `<span class="cc-thought" style="color: ${color} !important; opacity: 0.85 !important;">『$1』</span>`
+                );
+            }
+            
+            messageElement.innerHTML = newHtml;
+        }
+        
+        messageElement.setAttribute('data-cc-processed', 'true');
+    }
+
+    function processAllMessages() {
+        document.querySelectorAll('.mes_text, .mes_block .mes_text').forEach(msg => {
+            colorizeMessage(msg);
+        });
+    }
+
+    function reprocessAllMessages() {
+        document.querySelectorAll('[data-cc-processed]').forEach(el => {
+            el.removeAttribute('data-cc-processed');
+        });
+        processAllMessages();
+    }
+
+    function clearAllColors() {
+        characterColors = {};
+        colorIndex = 0;
+        saveCharacterColors();
+        reprocessAllMessages();
+        updateCharacterList();
+    }
+
+    function updateCharacterList() {
+        const list = document.getElementById('cc-character-list');
+        if (!list) return;
+        
+        list.innerHTML = '';
+        
+        if (Object.keys(characterColors).length === 0) {
+            list.innerHTML = '<div class="cc-no-chars">No characters detected yet</div>';
+            return;
+        }
+        
+        for (const [name, color] of Object.entries(characterColors)) {
+            const item = document.createElement('div');
+            item.className = 'cc-char-item';
+            item.innerHTML = `
+                <span class="cc-char-name" style="color: ${color} !important;">${name}</span>
+                <input type="color" class="cc-color-picker" value="${color}" data-name="${name}">
+                <span class="cc-hex-display">${color}</span>
+            `;
+            list.appendChild(item);
+        }
+        
+        list.querySelectorAll('.cc-color-picker').forEach(picker => {
+            picker.addEventListener('input', (e) => {
+                const name = e.target.dataset.name;
+                const newColor = e.target.value.toUpperCase();
+                setCharacterColor(name, newColor);
+                e.target.nextElementSibling.textContent = newColor;
+                e.target.previousElementSibling.style.setProperty('color', newColor, 'important');
+            });
+        });
     }
 
     function createSettingsUI() {
         const html = `
             <div class="character-colors-settings">
-                <h3>Character Dialogue Colors</h3>
-                <div class="setting-group">
-                    <label>Theme:</label>
+                <div class="cc-header">
+                    <h3>Character Dialogue Colors</h3>
+                </div>
+                
+                <div class="cc-section">
+                    <label class="cc-label">Color Theme</label>
                     <select id="cc-theme">
                         <option value="auto">Auto-detect</option>
-                        <option value="dark">Dark Mode</option>
-                        <option value="light">Light Mode</option>
-                        <option value="custom">Custom Colors</option>
+                        <option value="dark">Dark Mode Colors</option>
+                        <option value="light">Light Mode Colors</option>
+                        <option value="custom">Custom Palette</option>
                     </select>
                 </div>
-                <div class="setting-group">
-                    <label>
-                        <input type="checkbox" id="cc-color-thoughts"> 
-                        Color thoughts (*text* and 『text』)
+                
+                <div id="cc-custom-section" class="cc-section" style="display: none;">
+                    <label class="cc-label">Custom Colors (comma-separated hex)</label>
+                    <input type="text" id="cc-custom-input" placeholder="#FF0000, #00FF00, #0000FF">
+                </div>
+                
+                <div class="cc-section">
+                    <label class="cc-checkbox-label">
+                        <input type="checkbox" id="cc-color-thoughts">
+                        <span>Color inner thoughts (*text* and 『text』)</span>
                     </label>
                 </div>
-                <div id="cc-custom-colors" style="display: none;">
-                    <label>Custom Colors (hex codes, comma-separated):</label>
-                    <input type="text" id="cc-custom-input" placeholder="#FF0000, #00FF00, #0000FF">
+                
+                <div class="cc-section">
+                    <label class="cc-label">Character Colors</label>
+                    <div class="cc-char-list-header">
+                        <span>Click color to change</span>
+                        <button id="cc-clear-all" class="cc-btn">Clear All</button>
+                    </div>
+                    <div id="cc-character-list" class="cc-character-list"></div>
                 </div>
             </div>
         `;
         
-        $('#extensions_settings').append(html);
+        const container = document.getElementById('extensions_settings');
+        if (container) {
+            container.insertAdjacentHTML('beforeend', html);
+        }
         
-        $('#cc-theme').val(settings.theme).on('change', function() {
-            settings.theme = this.value;
-            $('#cc-custom-colors').toggle(this.value === 'custom');
-            saveSettings();
-            characterColors.clear();
-            colorIndex = 0;
-            processMessages();
-        });
-        
-        $('#cc-color-thoughts').prop('checked', settings.colorThoughts).on('change', function() {
-            settings.colorThoughts = this.checked;
-            saveSettings();
-            document.querySelectorAll('.mes_text[data-colored]').forEach(el => {
-                el.removeAttribute('data-colored');
-            });
-            processMessages();
-        });
-        
-        $('#cc-custom-input').val(settings.customColors.join(', ')).on('input', function() {
-            const colors = this.value.split(',').map(c => c.trim()).filter(c => /^#[0-9A-Fa-f]{6}$/.test(c));
-            settings.customColors = colors;
+        // Theme selector
+        const themeSelect = document.getElementById('cc-theme');
+        themeSelect.value = settings.theme;
+        themeSelect.addEventListener('change', (e) => {
+            settings.theme = e.target.value;
+            document.getElementById('cc-custom-section').style.display = 
+                e.target.value === 'custom' ? 'block' : 'none';
             saveSettings();
         });
         
         if (settings.theme === 'custom') {
-            $('#cc-custom-colors').show();
+            document.getElementById('cc-custom-section').style.display = 'block';
         }
+        
+        // Custom colors input
+        const customInput = document.getElementById('cc-custom-input');
+        customInput.value = settings.customColors.join(', ');
+        customInput.addEventListener('change', (e) => {
+            settings.customColors = e.target.value
+                .split(',')
+                .map(c => c.trim().toUpperCase())
+                .filter(c => /^#[0-9A-F]{6}$/.test(c));
+            saveSettings();
+        });
+        
+        // Thoughts checkbox
+        const thoughtsCheck = document.getElementById('cc-color-thoughts');
+        thoughtsCheck.checked = settings.colorThoughts;
+        thoughtsCheck.addEventListener('change', (e) => {
+            settings.colorThoughts = e.target.checked;
+            saveSettings();
+            reprocessAllMessages();
+        });
+        
+        // Clear all button
+        document.getElementById('cc-clear-all').addEventListener('click', clearAllColors);
+        
+        updateCharacterList();
     }
 
     function init() {
         loadSettings();
-        createSettingsUI();
-        currentChatId = window.selected_group || window.this_chid;
+        loadCharacterColors();
         
-        processMessages();
+        // Create settings UI when extensions panel exists
+        const checkUI = setInterval(() => {
+            if (document.getElementById('extensions_settings')) {
+                clearInterval(checkUI);
+                createSettingsUI();
+            }
+        }, 500);
         
-        const observer = new MutationObserver(() => {
-            processMessages();
+        // Process messages
+        processAllMessages();
+        
+        // Watch for new messages
+        const observer = new MutationObserver((mutations) => {
+            let shouldProcess = false;
+            for (const mutation of mutations) {
+                if (mutation.addedNodes.length > 0) {
+                    shouldProcess = true;
+                    break;
+                }
+            }
+            if (shouldProcess) {
+                setTimeout(processAllMessages, 100);
+            }
         });
         
         observer.observe(document.body, {
             childList: true,
             subtree: true
         });
-
-        // Listen for chat changes
-        $(document).on('chat_changed', resetColorsForNewChat);
         
-        // Force initial processing after a delay to ensure DOM is ready
-        setTimeout(() => {
-            document.querySelectorAll('.mes_text[data-colored]').forEach(el => {
-                el.removeAttribute('data-colored');
+        // Reprocess on chat load
+        if (typeof eventSource !== 'undefined') {
+            eventSource.on('chatLoaded', () => {
+                clearAllColors();
             });
-            processMessages();
-        }, 1000);
+        }
+        
+        // Periodic check for unprocessed messages
+        setInterval(processAllMessages, 2000);
     }
 
-    jQuery(() => {
+    // Start when DOM ready
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
         init();
-    });
+    }
 })();

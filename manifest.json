@@ -1,12 +1,12 @@
 {
   "display_name": "Character Dialogue Colors",
-  "loading_order": 50,
+  "loading_order": 100,
   "requires": [],
   "optional": [],
   "js": "index.js",
   "css": "style.css",
   "author": "platberlitz",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "homePage": "https://github.com/platberlitz/sillytavern-character-colors",
-  "description": "Theme-aware character dialogue coloring with character card storage and per-chat reset"
+  "description": "Theme-aware character dialogue coloring with color picker and character management"
 }
