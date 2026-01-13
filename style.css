@@ -1,0 +1,11 @@
+/* Character Dialogue Colors Extension Styles */
+
+.character-name-colored {
+    font-weight: bold;
+    text-shadow: 0 0 2px rgba(0,0,0,0.3);
+}
+
+/* Ensure colors remain visible in dark themes */
+.mes_text span[style*="color"] {
+    text-shadow: 0 0 1px rgba(0,0,0,0.5);
+}
