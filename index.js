@@ -37,37 +37,22 @@
     }
 
     async function extractDialogueMap(text) {
-        // Disabled LLM extraction - use pattern matching only
-        return null;
-    }
+        if (typeof SillyTavern === 'undefined' || !SillyTavern.getContext) return null;
+        const ctx = SillyTavern.getContext();
+        if (!ctx.generateRaw) return null;
 
-    function extractSpeakerFromContext(text, quote) {
-        // Find speaker near the quote using patterns
-        const idx = text.indexOf(quote);
-        const before = text.substring(Math.max(0, idx - 100), idx);
-        const after = text.substring(idx + quote.length, idx + quote.length + 100);
-        
-        const patterns = [
-            /\b([A-Z][a-z]{2,})\s+(?:said|says|asked|whispered|replied|murmured|called)\s*[,.]?\s*$/i,
-            /\b([A-Z][a-z]{2,})'s\s+voice/i,
-            /^\s*(?:said|asked|whispered|replied)\s+([A-Z][a-z]{2,})/i,
-        ];
-        
-        for (const p of patterns) {
-            const m = before.match(p);
-            if (m?.[1]) return m[1];
-        }
-        for (const p of patterns) {
-            const m = after.match(p);
-            if (m?.[1]) return m[1];
-        }
+        try {
+            const prompt = `List characters who speak dialogue in this text. Return JSON: {"quote": "speaker"}\nText: ${text.substring(0, 1500)}\nJSON:`;
+            const resp = await ctx.generateRaw(prompt, null, false, false, '', 200);
+            const match = resp.match(/\{[\s\S]*\}/);
+            if (match) return JSON.parse(match[0]);
+        } catch (e) {}
         return null;
     }
 
     function applyColors(mesText, dialogueMap) {
         const mesBlock = mesText.closest('.mes');
         const mainChar = mesBlock?.querySelector('.name_text')?.textContent?.trim();
-        const fullText = mesText.textContent;
 
         // Color thoughts in em/i tags (『...』 and *...*)
         if (settings.colorThoughts && mainChar) {
@@ -81,7 +66,9 @@
             });
         }
 
-        // Color dialogue in quotes
+        // Color dialogue in quotes (only if we have dialogueMap from LLM)
+        if (!dialogueMap) return;
+        
         const walk = document.createTreeWalker(mesText, NodeFilter.SHOW_TEXT);
         const nodes = [];
         while (walk.nextNode()) nodes.push(walk.currentNode);
@@ -97,10 +84,14 @@
             for (const part of parts) {
                 if (!part) continue;
                 if (/^[""][^""]+[""]$/.test(part)) {
-                    const inner = part.slice(1, -1);
-                    let speaker = extractSpeakerFromContext(fullText, inner);
-                    if (!speaker) speaker = mainChar;
-                    
+                    const inner = part.slice(1, -1).toLowerCase();
+                    let speaker = null;
+                    for (const [d, c] of Object.entries(dialogueMap)) {
+                        if (inner.includes(d.toLowerCase().substring(0, 12)) || d.toLowerCase().includes(inner.substring(0, 12))) {
+                            speaker = c;
+                            break;
+                        }
+                    }
                     if (speaker) {
                         const span = document.createElement('span');
                         span.className = 'cc-dialogue';
@@ -117,13 +108,18 @@
     }
 
     async function processMessage(el, useLLM) {
-        if (el.dataset.ccProcessed) return;
+        if (el.dataset.ccProcessed && !useLLM) return;
         el.dataset.ccProcessed = '1';
-        applyColors(el, null);
+        const map = useLLM ? await extractDialogueMap(el.textContent) : null;
+        applyColors(el, map);
     }
 
     function processAll(useLLM = false) {
-        document.querySelectorAll('.mes_text:not([data-cc-processed])').forEach(el => processMessage(el, useLLM));
+        document.querySelectorAll('.mes_text').forEach(el => {
+            if (useLLM || !el.dataset.ccProcessed) {
+                processMessage(el, useLLM);
+            }
+        });
     }
 
     function reprocess() {
@@ -173,13 +169,13 @@
         loadData();
         const wait = setInterval(() => { if (document.getElementById('extensions_settings')) { clearInterval(wait); createUI(); } }, 500);
         if (typeof eventSource !== 'undefined' && typeof event_types !== 'undefined') {
-            // Use GENERATION_ENDED instead of MESSAGE_RECEIVED to avoid interrupting streaming
-            eventSource.on(event_types.GENERATION_ENDED, () => setTimeout(() => processAll(true), 1000));
+            // Only color thoughts automatically, NOT dialogue (to avoid interrupting generation)
+            eventSource.on(event_types.MESSAGE_RECEIVED, () => setTimeout(() => processAll(false), 500));
             eventSource.on(event_types.CHAT_CHANGED, () => { characterColors = {}; saveData(); updateCharacterList(); });
         }
-        // Only do non-LLM processing periodically (just colors em/i tags)
+        // Auto-process thoughts only (no LLM)
         setInterval(() => processAll(false), 3000);
-        setTimeout(() => processAll(false), 1500);
+        setTimeout(() => processAll(false), 1000);
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
