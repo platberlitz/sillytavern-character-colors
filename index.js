@@ -101,16 +101,56 @@
         
         let html = messageElement.innerHTML;
         
-        for (const name of names) {
-            const color = getCharacterColor(name);
-            const regex = new RegExp(`\\b(${name})\\b`, 'g');
-            html = html.replace(regex, `<span class="cc-name" style="color:${color}!important;font-weight:bold!important">$1</span>`);
+        // Color dialogue in quotes based on nearby character names
+        // Pattern: find "dialogue" and associate with nearest character name
+        
+        // First, find all dialogue segments and their positions
+        const dialoguePattern = /"([^"]+)"/g;
+        let match;
+        let segments = [];
+        
+        while ((match = dialoguePattern.exec(html)) !== null) {
+            segments.push({
+                start: match.index,
+                end: match.index + match[0].length,
+                text: match[0],
+                inner: match[1]
+            });
         }
         
-        if (settings.colorThoughts) {
-            const color = getCharacterColor(names[0]);
-            html = html.replace(/\*([^*]+)\*/g, `<span class="cc-thought" style="color:${color}!important;opacity:0.85!important">*$1*</span>`);
-            html = html.replace(/『([^』]+)』/g, `<span class="cc-thought" style="color:${color}!important;opacity:0.85!important">『$1』</span>`);
+        // For each dialogue segment, find the nearest character name
+        for (const seg of segments.reverse()) { // reverse to not mess up indices
+            let nearestName = null;
+            let nearestDist = Infinity;
+            
+            for (const name of names) {
+                // Look for name before or after the dialogue
+                const beforePattern = new RegExp(`\\b${name}\\b`, 'g');
+                let nameMatch;
+                while ((nameMatch = beforePattern.exec(html)) !== null) {
+                    const dist = Math.min(
+                        Math.abs(nameMatch.index - seg.start),
+                        Math.abs(nameMatch.index - seg.end)
+                    );
+                    if (dist < nearestDist) {
+                        nearestDist = dist;
+                        nearestName = name;
+                    }
+                }
+            }
+            
+            if (nearestName) {
+                const color = getCharacterColor(nearestName);
+                const colored = `"<span class="cc-dialogue" style="color:${color}!important">${seg.inner}</span>"`;
+                html = html.substring(0, seg.start) + colored + html.substring(seg.end);
+            }
+        }
+        
+        // Color thoughts if enabled
+        if (settings.colorThoughts && names.length > 0) {
+            const defaultColor = getCharacterColor(names[0]);
+            html = html.replace(/\*([^*]+)\*/g, `<span class="cc-thought" style="color:${defaultColor}!important;opacity:0.85!important">*$1*</span>`);
+            html = html.replace(/『([^』]+)』/g, `<span class="cc-thought" style="color:${defaultColor}!important;opacity:0.85!important">『$1』</span>`);
         }
         
         messageElement.innerHTML = html;
