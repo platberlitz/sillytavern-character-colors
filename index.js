@@ -6,7 +6,8 @@
         colorThoughts: true, 
         themeMode: 'auto',
         useCustomModel: false,
-        customModel: ''
+        customModel: '',
+        autoRefresh: true
     };
 
     // Generate truly random color based on theme
@@ -276,6 +277,7 @@ JSON:`;
                     </select>
                 </div>
                 <label class="checkbox_label"><input type="checkbox" id="cc-thoughts"><span>Color thoughts (『』/*text*)</span></label>
+                <label class="checkbox_label"><input type="checkbox" id="cc-auto-refresh"><span>Auto-refresh after generation</span></label>
                 <hr>
                 <label class="checkbox_label"><input type="checkbox" id="cc-custom-model"><span>Use custom model for detection</span></label>
                 <div id="cc-model-row" style="display:none;">
@@ -302,6 +304,11 @@ JSON:`;
         const thoughtsCheck = document.getElementById('cc-thoughts');
         thoughtsCheck.checked = settings.colorThoughts;
         thoughtsCheck.onchange = e => { settings.colorThoughts = e.target.checked; saveData(); reprocess(); };
+        
+        // Auto-refresh
+        const autoRefreshCheck = document.getElementById('cc-auto-refresh');
+        autoRefreshCheck.checked = settings.autoRefresh;
+        autoRefreshCheck.onchange = e => { settings.autoRefresh = e.target.checked; saveData(); };
         
         // Custom model
         const customCheck = document.getElementById('cc-custom-model');
@@ -346,9 +353,11 @@ JSON:`;
         
         if (typeof eventSource !== 'undefined' && typeof event_types !== 'undefined') {
             eventSource.on(event_types.GENERATION_ENDED, () => {
-                setTimeout(() => processAll(true), 1500);
-                setTimeout(() => processAll(true), 3000);
-                setTimeout(() => processAll(true), 5000);
+                if (settings.autoRefresh) {
+                    setTimeout(() => processAll(true), 1500);
+                    setTimeout(() => processAll(true), 3000);
+                    setTimeout(() => processAll(true), 5000);
+                }
             });
             eventSource.on(event_types.CHAT_CHANGED, () => { characterColors = {}; saveData(); updateCharacterList(); });
         }
