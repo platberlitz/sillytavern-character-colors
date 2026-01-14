@@ -12,16 +12,21 @@
     top: 20% !important;
     left: 50% !important;
     transform: translate(-50%, 0) !important;
+    min-width: 300px !important;
     max-width: 90vw !important;
     max-height: 70vh !important;
     overflow-y: auto !important;
     z-index: 9999 !important;
-    background: var(--SmartThemeBodyColor) !important;
-    border: 1px solid var(--SmartThemeBorderColor) !important;
+    background-color: var(--SmartThemeBlurTintColor, #1a1a1a) !important;
+    border: 1px solid var(--SmartThemeBorderColor, #444) !important;
     border-radius: 8px !important;
     padding: 16px !important;
     box-shadow: 0 4px 12px rgba(0,0,0,0.5) !important;
-    color: var(--SmartThemeTextColor) !important;
+    color: var(--SmartThemeTextColor, #eee) !important;
+}
+
+#dc-stats-popup * {
+    color: inherit;
 }
 
 @media (max-width: 768px) {
