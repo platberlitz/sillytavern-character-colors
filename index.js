@@ -47,16 +47,34 @@
         const SCRIPT_NAME = 'Trim Font Colors';
         
         const tryInstall = () => {
-            if (typeof extension_settings === 'undefined') return false;
-            if (!extension_settings.regex) extension_settings.regex = [];
-            if (!Array.isArray(extension_settings.regex)) return false;
+            console.log('Dialogue Colors: Checking for regex extension...', typeof extension_settings);
+            
+            if (typeof extension_settings === 'undefined') {
+                console.log('Dialogue Colors: extension_settings not ready');
+                return false;
+            }
+            
+            console.log('Dialogue Colors: extension_settings.regex =', extension_settings.regex);
+            
+            if (!extension_settings.regex) {
+                console.log('Dialogue Colors: Creating regex array');
+                extension_settings.regex = [];
+            }
             
             if (extension_settings.regex.some(r => r.scriptName === SCRIPT_NAME)) {
+                console.log('Dialogue Colors: Regex already exists');
                 return true;
             }
             
+            const id = (typeof uuidv4 !== 'undefined') ? uuidv4() : 
+                       (crypto.randomUUID ? crypto.randomUUID() : 
+                       'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+                           const r = Math.random() * 16 | 0;
+                           return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+                       }));
+            
             const newScript = {
-                id: typeof uuidv4 === 'function' ? uuidv4() : crypto.randomUUID?.() || Math.random().toString(36).substr(2, 9),
+                id: id,
                 scriptName: SCRIPT_NAME,
                 findRegex: '</?font[^>]*>',
                 replaceString: '',
@@ -71,19 +89,34 @@
                 maxDepth: null
             };
             
+            console.log('Dialogue Colors: Adding regex script:', newScript);
             extension_settings.regex.push(newScript);
-            if (typeof saveSettingsDebounced === 'function') saveSettingsDebounced();
-            console.log('Dialogue Colors: Regex "' + SCRIPT_NAME + '" installed');
+            
+            if (typeof saveSettingsDebounced === 'function') {
+                console.log('Dialogue Colors: Saving settings...');
+                saveSettingsDebounced();
+            } else {
+                console.log('Dialogue Colors: saveSettingsDebounced not available');
+            }
+            
+            console.log('Dialogue Colors: Regex "' + SCRIPT_NAME + '" installed!');
             return true;
         };
         
-        if (tryInstall()) return;
+        // Wait for jQuery ready and extension_settings
+        const startInstall = () => {
+            if (tryInstall()) return;
+            
+            let attempts = 0;
+            const interval = setInterval(() => {
+                attempts++;
+                console.log('Dialogue Colors: Retry attempt', attempts);
+                if (tryInstall() || attempts >= 30) clearInterval(interval);
+            }, 500);
+        };
         
-        let attempts = 0;
-        const interval = setInterval(() => {
-            attempts++;
-            if (tryInstall() || attempts >= 30) clearInterval(interval);
-        }, 500);
+        // Delay start to let SillyTavern initialize
+        setTimeout(startInstall, 2000);
     }
 
     function buildPromptInstruction() {
