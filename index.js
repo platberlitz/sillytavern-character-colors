@@ -223,7 +223,7 @@
             const symbols = settings.thoughtSymbols.split('').map(s => `'${s}'`).join(' or ');
             thoughts = ` Inner thoughts (text wrapped in ${symbols}) should use the current speaker's color.`;
         }
-        return `[Font Color Rule: Wrap dialogue in <font color=#RRGGBB> tags. ${themeHint} ${colorList ? `ASSIGNED: ${colorList}.` : ''} ${aliases ? `ALIASES: ${aliases}.` : ''} ${settings.narratorColor ? `Narrator: ${settings.narratorColor}.` : ''} ${thoughts} ${settings.highlightMode ? 'Also add background highlight.' : ''} Consistent colors per character.]`;
+        return `[Font Color Rule: Wrap dialogue in <font color=#RRGGBB> tags. ${themeHint} ${colorList ? `ASSIGNED: ${colorList}.` : ''} ${aliases ? `ALIASES: ${aliases}.` : ''} ${settings.narratorColor ? `Narrator: ${settings.narratorColor}.` : ''} ${thoughts} ${settings.highlightMode ? 'Also add background highlight.' : ''} Always assign a unique color to any new character that doesn't have one yet. Consistent colors per character.]`;
     }
 
     function buildColoredPromptPreview() {
