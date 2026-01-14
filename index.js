@@ -45,25 +45,37 @@
     }
 
     function ensureRegexScript() {
-        if (typeof extension_settings === 'undefined' || !Array.isArray(extension_settings.regex)) return;
-        if (extension_settings.regex.some(r => r.scriptName === REGEX_SCRIPT_NAME)) return;
+        const tryInstall = () => {
+            if (typeof extension_settings === 'undefined' || !Array.isArray(extension_settings.regex)) return false;
+            if (extension_settings.regex.some(r => r.scriptName === REGEX_SCRIPT_NAME)) return true;
+            
+            extension_settings.regex.push({
+                id: crypto.randomUUID?.() || Math.random().toString(36).substr(2, 9),
+                scriptName: REGEX_SCRIPT_NAME,
+                findRegex: '<\\/?font[^>]*>',
+                replaceString: '',
+                trimStrings: [],
+                placement: [2, 3, 4],
+                disabled: false,
+                markdownOnly: false,
+                promptOnly: true,
+                runOnEdit: true,
+                substituteRegex: false,
+                minDepth: null,
+                maxDepth: null
+            });
+            if (typeof saveSettingsDebounced === 'function') saveSettingsDebounced();
+            console.log('Dialogue Colors: Regex script auto-installed');
+            return true;
+        };
         
-        extension_settings.regex.push({
-            id: crypto.randomUUID?.() || Math.random().toString(36).substr(2, 9),
-            scriptName: REGEX_SCRIPT_NAME,
-            findRegex: '<\\/?font[^>]*>',
-            replaceString: '',
-            trimStrings: [],
-            placement: [2, 3, 4],
-            disabled: false,
-            markdownOnly: false,
-            promptOnly: true,
-            runOnEdit: true,
-            substituteRegex: false,
-            minDepth: null,
-            maxDepth: null
-        });
-        if (typeof saveSettingsDebounced === 'function') saveSettingsDebounced();
+        if (!tryInstall()) {
+            // Retry after settings load
+            const interval = setInterval(() => {
+                if (tryInstall()) clearInterval(interval);
+            }, 1000);
+            setTimeout(() => clearInterval(interval), 10000);
+        }
     }
 
     function buildPromptInstruction() {
