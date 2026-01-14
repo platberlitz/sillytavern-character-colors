@@ -8,7 +8,6 @@
     let characterColors = {};
     let colorHistory = [];
     let historyIndex = -1;
-    let currentChatId = null;
     let swapMode = null;
     let customPatterns = [];
     let potentialCharacters = {};
@@ -164,7 +163,7 @@
     }
 
     function getSortedEntries() {
-        const entries = Object.entries(characterColors).filter(([k, v]) => !searchTerm || v.name.toLowerCase().includes(searchTerm.toLowerCase()));
+        const entries = Object.entries(characterColors).filter(([, v]) => !searchTerm || v.name.toLowerCase().includes(searchTerm.toLowerCase()));
         if (sortMode === 'count') entries.sort((a, b) => (b[1].dialogueCount || 0) - (a[1].dialogueCount || 0));
         else entries.sort((a, b) => a[1].name.localeCompare(b[1].name));
         return entries;
@@ -185,12 +184,11 @@
     function invalidateThemeCache() { cachedTheme = null; cachedIsDark = null; }
 
     function getCharKey() { try { const ctx = getContext(); return ctx?.characters?.[ctx?.characterId]?.avatar || ctx?.characterId || null; } catch { return null; } }
-    function getStorageKey() { const charKey = getCharKey(); return charKey ? `dc_char_${charKey}` : `dc_${currentChatId}`; }
-    function saveData() { const key = getStorageKey(); if (key) localStorage.setItem(key, JSON.stringify({ colors: characterColors, settings })); localStorage.setItem('dc_patterns', JSON.stringify(customPatterns)); }
+    function getStorageKey() { return `dc_char_${getCharKey() || 'default'}`; }
+    function saveData() { localStorage.setItem(getStorageKey(), JSON.stringify({ colors: characterColors, settings })); localStorage.setItem('dc_patterns', JSON.stringify(customPatterns)); }
     function loadData() {
         characterColors = {};
-        const key = getStorageKey();
-        if (key) { try { const d = JSON.parse(localStorage.getItem(key)); if (d?.colors) characterColors = d.colors; if (d?.settings) Object.assign(settings, d.settings); } catch {} }
+        try { const d = JSON.parse(localStorage.getItem(getStorageKey())); if (d?.colors) characterColors = d.colors; if (d?.settings) Object.assign(settings, d.settings); } catch {}
         try { customPatterns = JSON.parse(localStorage.getItem('dc_patterns')) || []; } catch {}
         colorHistory = [JSON.stringify(characterColors)]; historyIndex = 0;
     }
@@ -205,8 +203,6 @@
         reader.onload = e => { try { const d = JSON.parse(e.target.result); if (d.colors) characterColors = d.colors; if (d.settings) Object.assign(settings, d.settings); saveHistory(); saveData(); updateCharList(); injectPrompt(); toastr?.success?.('Imported!'); } catch { toastr?.error?.('Invalid file'); } };
         reader.readAsText(file);
     }
-
-    function getChatId() { try { const ctx = getContext(); return ctx?.chatId || ctx?.chatID || null; } catch { return null; } }
 
     function ensureRegexScript() {
         if (!extension_settings) return;
@@ -559,20 +555,17 @@
     globalThis.DialogueColorsInterceptor = async function(chat, contextSize, abort, type) { if (type !== 'quiet' && settings.enabled) injectPrompt(); };
 
     console.log('Dialogue Colors: Initializing...');
-    currentChatId = getChatId(); loadData(); ensureRegexScript();
+    loadData(); ensureRegexScript();
     const waitUI = setInterval(() => { if (document.getElementById('extensions_settings')) { clearInterval(waitUI); createUI(); injectPrompt(); } }, 500);
     eventSource.on(event_types.GENERATION_AFTER_COMMANDS, () => injectPrompt());
     eventSource.on(event_types.MESSAGE_RECEIVED, onNewMessage);
     eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, onNewMessage);
     eventSource.on(event_types.CHAT_CHANGED, () => {
-        currentChatId = getChatId();
         loadData();
-        if (Object.keys(characterColors).length === 0) {
-            tryLoadFromCard();
-        }
+        if (!Object.keys(characterColors).length) tryLoadFromCard();
         updateCharList();
         injectPrompt();
-        if (settings.autoScanOnLoad !== false && Object.keys(characterColors).length === 0) {
+        if (settings.autoScanOnLoad !== false && !Object.keys(characterColors).length) {
             setTimeout(() => { if (document.querySelectorAll('.mes').length) scanAllMessages(); }, 1000);
         }
         document.querySelectorAll('.mes').forEach(m => colorThoughts(m));
