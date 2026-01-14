@@ -14,7 +14,7 @@
     let sortMode = 'name';
     let searchTerm = '';
     let lastSpeaker = '';
-    let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, minOccurrences: 2, thoughtSymbols: '*', ttsHints: {}, disableNarration: false, autoDeleteUnlocked: false };
+    let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, minOccurrences: 2, thoughtSymbols: '*', ttsHints: {}, disableNarration: true, autoDeleteUnlocked: true };
     let messageCounter = 0;
 
     const COLOR_THEMES = {
@@ -524,8 +524,8 @@
         $('dc-highlight').checked = settings.highlightMode; $('dc-highlight').onchange = e => { settings.highlightMode = e.target.checked; saveData(); injectPrompt(); };
         $('dc-autoscan').checked = settings.autoScanOnLoad !== false; $('dc-autoscan').onchange = e => { settings.autoScanOnLoad = e.target.checked; saveData(); };
         $('dc-legend').checked = settings.showLegend; $('dc-legend').onchange = e => { settings.showLegend = e.target.checked; saveData(); updateLegend(); };
-        $('dc-disable-narration').checked = settings.disableNarration || false; $('dc-disable-narration').onchange = e => { settings.disableNarration = e.target.checked; saveData(); injectPrompt(); };
-        $('dc-auto-delete').checked = settings.autoDeleteUnlocked || false; $('dc-auto-delete').onchange = e => { settings.autoDeleteUnlocked = e.target.checked; messageCounter = 0; saveData(); };
+        $('dc-disable-narration').checked = settings.disableNarration !== false; $('dc-disable-narration').onchange = e => { settings.disableNarration = e.target.checked; saveData(); injectPrompt(); };
+        $('dc-auto-delete').checked = settings.autoDeleteUnlocked !== false; $('dc-auto-delete').onchange = e => { settings.autoDeleteUnlocked = e.target.checked; messageCounter = 0; saveData(); };
         $('dc-theme').value = settings.themeMode; $('dc-theme').onchange = e => { settings.themeMode = e.target.value; invalidateThemeCache(); saveData(); injectPrompt(); };
         $('dc-palette').value = settings.colorTheme; $('dc-palette').onchange = e => { settings.colorTheme = e.target.value; saveData(); };
         $('dc-min-occ').value = settings.minOccurrences || 2; $('dc-min-occ').onchange = e => { settings.minOccurrences = parseInt(e.target.value); saveData(); };
