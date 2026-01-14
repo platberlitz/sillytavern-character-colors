@@ -335,7 +335,6 @@
             }).catch(() => toastr?.error?.('Failed to reload character'));
         } catch { toastr?.error?.('Failed to load from card'); }
     }
-    }
 
     function tryLoadFromCard() {
         try {
