@@ -129,16 +129,39 @@
         
         while ((match = fontRegex.exec(html)) !== null) {
             const color = '#' + match[1];
-            const afterTag = html.substring(match.index + match[0].length, match.index + match[0].length + 150);
-            const attrPattern = /^[^<]*?[,.]?\s*["'"」』»]?\s*([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)?)\s+(said|says|replied|replies|asked|asks|whispered|whispers|yelled|yells|shouted|shouts|exclaimed|exclaims|murmured|murmurs|muttered|mutters|answered|answers|added|adds|called|calls|cried|cries|demanded|demands|groaned|groans|growled|growls|hissed|hisses|laughed|laughs|moaned|moans|mumbled|mumbles|purred|purrs|screamed|screams|sighed|sighs|smiled|smiles|snapped|snaps|sobbed|sobs|spoke|speaks|stammered|stammers|stated|states|stuttered|stutters|teased|teases|thought|thinks|warned|warns|whimpered|whimpers)/i;
+            const tagStart = match.index;
+            const tagEnd = match.index + match[0].length;
             
-            const attrMatch = afterTag.match(attrPattern);
-            if (attrMatch) {
-                const speaker = attrMatch[1];
+            // Look BEFORE the tag for "Name verb," pattern
+            const beforeTag = html.substring(Math.max(0, tagStart - 200), tagStart);
+            const beforePattern = /([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)?)\s+(?:said|says|replied|replies|asked|asks|whispered|whispers|yelled|yells|shouted|shouts|exclaimed|exclaims|murmured|murmurs|muttered|mutters|answered|answers|added|adds|called|calls|cried|cries|chirped|chirps|purred|purrs|projects|projected|announced|announces|continued|continues|began|begins|started|starts|spoke|speaks|stated|states|remarked|remarks|noted|notes|observed|observes|commented|comments|mentioned|mentions|explained|explains|declared|declares|suggested|suggests|offered|offers|admitted|admits|agreed|agrees|argued|argues|insisted|insists|demanded|demands|warned|warns|promised|promises|threatened|threatens|teased|teases|joked|jokes|laughed|laughs|giggled|giggles|chuckled|chuckles|sighed|sighs|groaned|groans|moaned|moans|growled|growls|hissed|hisses|snapped|snaps|barked|barks|screamed|screams|shouted|shouts|yelled|yells|whispered|whispers|mumbled|mumbles|stammered|stammers|stuttered|stutters)[,.:]\s*["'"「『«]?\s*$/i;
+            
+            // Look AFTER the tag for ", Name verb" pattern  
+            const afterTag = html.substring(tagEnd, Math.min(html.length, tagEnd + 150));
+            const afterPattern = /^[^<]*?[,.]?\s*["'"」』»]?\s*([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)?)\s+(?:said|says|replied|replies|asked|asks|whispered|whispers|yelled|yells|shouted|shouts|exclaimed|exclaims|murmured|murmurs|muttered|mutters|answered|answers|added|adds|called|calls|cried|cries|chirped|chirps|purred|purrs|projects|projected|announced|announces|continued|continues|began|begins|started|starts|spoke|speaks|stated|states|remarked|remarks|noted|notes|observed|observes|commented|comments|mentioned|mentions|explained|explains|declared|declares|suggested|suggests|offered|offers|admitted|admits|agreed|agrees|argued|argues|insisted|insists|demanded|demands|warned|warns|promised|promises|threatened|threatens|teased|teases|joked|jokes|laughed|laughs|giggled|giggles|chuckled|chuckles|sighed|sighs|groaned|groans|moaned|moans|growled|growls|hissed|hisses|snapped|snaps|barked|barks|screamed|screams|shouted|shouts|yelled|yells|whispered|whispers|mumbled|mumbles|stammered|stammers|stuttered|stutters)/i;
+            
+            let speaker = null;
+            
+            // Check before first
+            const beforeMatch = beforeTag.match(beforePattern);
+            if (beforeMatch) {
+                speaker = beforeMatch[1];
+            }
+            
+            // Check after if not found
+            if (!speaker) {
+                const afterMatch = afterTag.match(afterPattern);
+                if (afterMatch) {
+                    speaker = afterMatch[1];
+                }
+            }
+            
+            if (speaker) {
                 const key = speaker.toLowerCase();
                 if (!characterColors[key]) {
                     characterColors[key] = { color, name: speaker };
                     foundNew = true;
+                    console.log('Dialogue Colors: Found', speaker, color);
                 }
             }
         }
