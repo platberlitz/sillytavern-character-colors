@@ -21,6 +21,15 @@
         earth: [[25,50,55],[45,40,50],[90,30,45],[150,35,45],[180,30,50],[30,60,60],[60,35,55],[120,25,50]],
         jewel: [[340,70,45],[200,80,40],[150,70,40],[45,80,50],[280,70,45],[170,70,40],[0,75,50],[220,75,45]],
         muted: [[350,30,60],[200,30,55],[120,25,55],[45,35,60],[280,25,55],[170,30,55],[20,35,60],[240,25,55]],
+        jade: [[170,60,55],[150,55,50],[160,65,45],[165,50,60],[155,70,40],[140,45,55],[175,55,50],[130,60,45]],
+        forest: [[120,50,50],[90,45,45],[100,55,40],[110,40,55],[80,50,35],[130,45,50],[95,60,45],[85,55,40]],
+        ocean: [[200,70,60],[190,65,55],[180,60,65],[210,55,60],[170,75,50],[220,50,65],[195,80,45],[205,60,70]],
+        sunset: [[15,85,60],[35,90,55],[25,80,65],[40,75,70],[30,95,50],[20,70,75],[45,85,55],[10,80,60]],
+        aurora: [[280,50,70],[300,55,65],[260,45,75],[290,60,60],[270,65,55],[310,40,80],[285,70,50],[275,55,70]],
+        warm: [[20,70,65],[35,75,60],[45,65,70],[30,80,55],[40,85,50],[25,90,60],[50,60,75],[15,75,65]],
+        cool: [[210,60,70],[240,55,65],[200,65,75],[225,70,60],[190,75,55],[250,50,80],[215,80,50],[235,60,75]],
+        berry: [[330,70,60],[350,65,55],[320,60,70],[340,75,50],[360,80,45],[310,55,75],[345,85,40],[325,70,65]],
+        monochrome: [[0,0,30],[0,0,40],[0,0,50],[0,0,60],[0,0,70],[0,0,80],[0,0,90],[0,0,20]],
         protanopia: [[45,80,60],[200,80,55],[270,60,65],[30,90,55],[180,70,50],[300,50,60],[60,70,55],[220,70,60]],
         deuteranopia: [[45,80,60],[220,80,55],[280,60,65],[30,90,55],[200,70,50],[320,50,60],[60,70,55],[240,70,60]],
         tritanopia: [[0,70,60],[180,70,55],[330,60,65],[20,80,55],[200,60,50],[350,50,60],[160,70,55],[10,70,60]]
@@ -125,7 +134,7 @@
 
     function buildPromptInstruction() {
         if (!settings.enabled) return '';
-        const mode = detectTheme();
+        const mode = settings.themeMode === 'auto' ? detectTheme() : settings.themeMode;
         const themeHint = mode === 'dark' ? 'Use light colors.' : 'Use dark colors.';
         const colorList = Object.entries(characterColors).filter(([,v]) => !v.locked || v.color).map(([,v]) => `${v.name}=${v.color}${v.style ? ` (${v.style})` : ''}`).join(', ');
         const aliases = Object.entries(characterColors).filter(([,v]) => v.aliases?.length).map(([,v]) => `${v.name}/${v.aliases.join('/')}`).join('; ');
@@ -360,7 +369,8 @@
                 <label class="checkbox_label"><input type="checkbox" id="dc-highlight"><span>Highlight mode</span></label>
                 <label class="checkbox_label"><input type="checkbox" id="dc-autoscan"><span>Auto-scan on chat load</span></label>
                 <label class="checkbox_label"><input type="checkbox" id="dc-legend"><span>Show floating legend</span></label>
-                <div style="display:flex;gap:4px;align-items:center;"><label style="width:50px;">Palette:</label><select id="dc-palette" class="text_pole" style="flex:1;"><option value="pastel">Pastel</option><option value="neon">Neon</option><option value="earth">Earth</option><option value="jewel">Jewel</option><option value="muted">Muted</option><option value="protanopia">Protanopia</option><option value="deuteranopia">Deuteranopia</option><option value="tritanopia">Tritanopia</option></select></div>
+                <div style="display:flex;gap:4px;align-items:center;"><label style="width:50px;">Theme:</label><select id="dc-theme" class="text_pole" style="flex:1;"><option value="auto">Auto</option><option value="dark">Dark</option><option value="light">Light</option></select></div>
+                <div style="display:flex;gap:4px;align-items:center;"><label style="width:50px;">Palette:</label><select id="dc-palette" class="text_pole" style="flex:1;"><option value="pastel">Pastel</option><option value="neon">Neon</option><option value="earth">Earth</option><option value="jewel">Jewel</option><option value="muted">Muted</option><option value="jade">Jade</option><option value="forest">Forest</option><option value="ocean">Ocean</option><option value="sunset">Sunset</option><option value="aurora">Aurora</option><option value="warm">Warm</option><option value="cool">Cool</option><option value="berry">Berry</option><option value="monochrome">Monochrome</option><option value="protanopia">Protanopia</option><option value="deuteranopia">Deuteranopia</option><option value="tritanopia">Tritanopia</option></select></div>
                 <div style="display:flex;gap:4px;align-items:center;"><label style="width:50px;" title="Min dialogues before auto-adding">Min:</label><input type="number" id="dc-min-occ" min="1" max="5" value="2" style="flex:1;padding:2px;"><small style="opacity:0.6;">occurrences</small></div>
                 <div style="display:flex;gap:4px;align-items:center;"><label style="width:50px;">Bright:</label><input type="range" id="dc-brightness" min="-30" max="30" value="0" style="flex:1;"><span id="dc-bright-val">0</span></div>
                 <div style="display:flex;gap:4px;align-items:center;"><label style="width:50px;">Narrator:</label><input type="color" id="dc-narrator" value="#888888" style="width:24px;height:20px;"><button id="dc-narrator-clear" class="menu_button" style="padding:2px 6px;font-size:0.8em;">Clear</button></div>
@@ -385,7 +395,7 @@
         $('dc-highlight').checked = settings.highlightMode; $('dc-highlight').onchange = e => { settings.highlightMode = e.target.checked; saveData(); injectPrompt(); };
         $('dc-autoscan').checked = settings.autoScanOnLoad !== false; $('dc-autoscan').onchange = e => { settings.autoScanOnLoad = e.target.checked; saveData(); };
         $('dc-legend').checked = settings.showLegend; $('dc-legend').onchange = e => { settings.showLegend = e.target.checked; saveData(); updateLegend(); };
-        settings.themeMode = 'auto';
+        $('dc-theme').value = settings.themeMode; $('dc-theme').onchange = e => { settings.themeMode = e.target.value; saveData(); injectPrompt(); };
         $('dc-palette').value = settings.colorTheme; $('dc-palette').onchange = e => { settings.colorTheme = e.target.value; saveData(); };
         $('dc-min-occ').value = settings.minOccurrences || 2; $('dc-min-occ').onchange = e => { settings.minOccurrences = parseInt(e.target.value); saveData(); };
         $('dc-brightness').value = settings.brightness || 0; $('dc-bright-val').textContent = settings.brightness || 0;
