@@ -56,12 +56,18 @@ The included regex script strips `<font>` tags from context so colors don't cons
 ## How LLM Detects Characters
 
 The LLM is instructed to:
-- Detect any named character/speaker in the message
+- Detect any named character/speaker in message
 - Assign them a unique hex color (#RRGGBB)
-- Use the same color consistently for each character
-- Reuse colors from the "Established colors" list
+- Use same color consistently for each character
+- Reuse colors from "Established colors" list
+- Use novel-style narrative format (not "Name:" format)
 
-For example, if Mary is established as `#aabbcc`, any future dialogue from Mary will use that color.
+For example, if Mary is established as `#aabbcc`, the extension tracks dialogue like:
+```
+<font color=#aabbcc>"Hello!"</font> Mary said with a smile.
+```
+
+The extension looks for `"Hello," Mary said` patterns to associate Mary with that color.
 
 ## Manual Overrides
 

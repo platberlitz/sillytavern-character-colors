@@ -114,11 +114,10 @@
             : 'Use dark muted colors (#RRGGBB with low lightness).';
         
         const colorList = Object.entries(characterColors).length > 0
-            ? `Use these existing colors: ${Object.entries(characterColors).map(([k, v]) => `${v.name}=${v.color}`).join(', ')}. `
+            ? `Use these colors: ${Object.entries(characterColors).map(([k, v]) => `${v.name}=${v.color}`).join(', ')}. `
             : '';
         
-        return `<font color instruction: Wrap ALL dialogue ("text") and thoughts (*text*) in <font color=#RRGGBB>. ${themeHint} ${colorList}
-Use the SAME color consistently for each character. Format: Name: "<font color=#abc123>Dialogue</font>" or <font color=#abc123>Name: "Dialogue"</font>. Important: Always put character name before their dialogue using "Name:" format so the system can track speakers. Example: John: <font color=#ff88aa>"Hello"</font>`;
+        return `<font color rule: Wrap ALL dialogue ("text") and thoughts (*text*) in <font color=#RRGGBB> tags. ${themeHint} ${colorList}Keep the SAME color for each character. Use novel-style narrative format (e.g., "<font color=#abc123>Hello,</font> John said). Do NOT use "Name:" format before dialogue.`;
     }
 
     function injectPrompt() {
@@ -145,22 +144,22 @@ Use the SAME color consistently for each character. Format: Name: "<font color=#
         }
     }
 
-    function detectSpeakerFromText(text, tagEndIndex) {
-        const beforeTag = text.substring(0, tagEndIndex);
-        const maxLookback = 300;
-        const context = beforeTag.substring(Math.max(0, beforeTag.length - maxLookback));
+    function detectSpeakerFromText(text, tagStart, tagEnd) {
+        const maxLookback = 200;
+        const maxLookahead = 200;
         
-        const patterns = [
-            /(?:^|\n)\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s*[:]\s*$/m,
-            /(?:^|\n)\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+(says|said|asks|asked|replies|replied|answers|answered|whispers|whispered|shouts|shouted|yells|yelled|exclaims|exclaimed|murmurs|murmured|mutters|muttered|remarks|remarked|adds|added|continues|continued|interrupts|interrupted)\s*$/im
+        const beforeTag = text.substring(Math.max(0, tagStart - maxLookback), tagStart);
+        const afterTag = text.substring(tagEnd, Math.min(text.length, tagEnd + maxLookahead));
+        
+        const afterPatterns = [
+            /,\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+(said|says|replied|replies|answered|asked|asked|whispered|whispers|yelled|yells|shouted|exclaimed|exclaims|added|murmured|murmured|muttered|mutters)\s*[,.]?\s*$/i
         ];
         
-        for (const pattern of patterns) {
-            const matches = [...context.matchAll(new RegExp(pattern.source, pattern.flags || 'gi'))];
+        for (const pattern of afterPatterns) {
+            const matches = [...afterTag.matchAll(new RegExp(pattern.source, pattern.flags || 'i'))];
             if (matches.length > 0) {
-                const lastMatch = matches[matches.length - 1];
-                const speaker = lastMatch[1];
-                return speaker;
+                const firstMatch = matches[0];
+                return firstMatch[1];
             }
         }
         
@@ -178,8 +177,9 @@ Use the SAME color consistently for each character. Format: Name: "<font color=#
             
             while ((match = fontRegex.exec(html)) !== null) {
                 const color = match[1];
-                const tagEndIndex = match.index + match[0].length;
-                const speaker = detectSpeakerFromText(html, tagEndIndex);
+                const tagStart = match.index;
+                const tagEnd = tagStart + match[0].length;
+                const speaker = detectSpeakerFromText(html, tagStart, tagEnd);
                 
                 if (speaker) {
                     const key = speaker.toLowerCase();
