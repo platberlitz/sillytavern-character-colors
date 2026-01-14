@@ -163,13 +163,13 @@
         return foundNew;
     }
 
-    function scanAllMessages() {
-        Object.values(characterColors).forEach(c => c.dialogueCount = 0);
-        document.querySelectorAll('.mes').forEach(m => scanForColors(m));
-        saveHistory(); saveData(); updateCharList(); injectPrompt();
-        const conflicts = checkColorConflicts();
-        if (conflicts.length) toastr?.warning?.(`Similar: ${conflicts.slice(0,3).map(c => c.join(' & ')).join(', ')}`);
-        toastr?.info?.(`Found ${Object.keys(characterColors).length} characters`);
+    function scanLatestMessage() {
+        const msgs = document.querySelectorAll('.mes');
+        if (msgs.length) {
+            const found = scanForColors(msgs[msgs.length - 1]);
+            saveHistory(); saveData(); updateCharList(); injectPrompt();
+            if (found) toastr?.info?.(`Found ${Object.keys(characterColors).length} characters`);
+        }
     }
 
     function onNewMessage() {
@@ -273,7 +273,7 @@
         $('dc-brightness').oninput = e => { settings.brightness = parseInt(e.target.value); $('dc-bright-val').textContent = e.target.value; saveData(); injectPrompt(); };
         $('dc-narrator').value = settings.narratorColor || '#888888'; $('dc-narrator').oninput = e => { settings.narratorColor = e.target.value; saveData(); injectPrompt(); };
         $('dc-narrator-clear').onclick = () => { settings.narratorColor = ''; $('dc-narrator').value = '#888888'; saveData(); injectPrompt(); };
-        $('dc-scan').onclick = scanAllMessages;
+        $('dc-scan').onclick = scanLatestMessage;
         $('dc-clear').onclick = () => { characterColors = {}; saveHistory(); saveData(); injectPrompt(); updateCharList(); };
         $('dc-card').onclick = autoAssignFromCard;
         $('dc-undo').onclick = undo; $('dc-redo').onclick = redo;
