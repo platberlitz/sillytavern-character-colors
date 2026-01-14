@@ -123,6 +123,8 @@
         const mesText = element.querySelector ? element.querySelector('.mes_text') : element;
         if (!mesText) return false;
         
+        const pronouns = new Set(['she', 'he', 'they', 'it', 'i', 'you', 'we', 'her', 'him', 'them', 'his', 'hers', 'its', 'their', 'theirs', 'one', 'someone', 'anyone', 'everyone', 'nobody', 'somebody', 'anybody', 'everybody', 'the', 'a', 'an', 'this', 'that', 'these', 'those']);
+        
         const html = mesText.innerHTML;
         const fontRegex = /<font\s+color=["']?#([a-fA-F0-9]{6})["']?[^>]*>([\s\S]*?)<\/font>/gi;
         let match, foundNew = false;
@@ -132,31 +134,23 @@
             const tagStart = match.index;
             const tagEnd = match.index + match[0].length;
             
-            // Look BEFORE the tag for "Name verb," pattern
             const beforeTag = html.substring(Math.max(0, tagStart - 200), tagStart);
-            const beforePattern = /([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)?)\s+(?:said|says|replied|replies|asked|asks|whispered|whispers|yelled|yells|shouted|shouts|exclaimed|exclaims|murmured|murmurs|muttered|mutters|answered|answers|added|adds|called|calls|cried|cries|chirped|chirps|purred|purrs|projects|projected|announced|announces|continued|continues|began|begins|started|starts|spoke|speaks|stated|states|remarked|remarks|noted|notes|observed|observes|commented|comments|mentioned|mentions|explained|explains|declared|declares|suggested|suggests|offered|offers|admitted|admits|agreed|agrees|argued|argues|insisted|insists|demanded|demands|warned|warns|promised|promises|threatened|threatens|teased|teases|joked|jokes|laughed|laughs|giggled|giggles|chuckled|chuckles|sighed|sighs|groaned|groans|moaned|moans|growled|growls|hissed|hisses|snapped|snaps|barked|barks|screamed|screams|shouted|shouts|yelled|yells|whispered|whispers|mumbled|mumbles|stammered|stammers|stuttered|stutters)[,.:]\s*["'"「『«]?\s*$/i;
+            const beforePattern = /([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)?)\s+(?:said|says|replied|replies|asked|asks|whispered|whispers|yelled|yells|shouted|shouts|exclaimed|exclaims|murmured|murmurs|muttered|mutters|answered|answers|added|adds|called|calls|cried|cries|chirped|chirps|purred|purrs|projects|projected|announced|announces|continued|continues|began|begins|started|starts|spoke|speaks|stated|states|remarked|remarks|noted|notes|observed|observes|commented|comments|mentioned|mentions|explained|explains|declared|declares|suggested|suggests|offered|offers|admitted|admits|agreed|agrees|argued|argues|insisted|insists|demanded|demands|warned|warns|promised|promises|threatened|threatens|teased|teases|joked|jokes|laughed|laughs|giggled|giggles|chuckled|chuckles|sighed|sighs|groaned|groans|moaned|moans|growled|growls|hissed|hisses|snapped|snaps|barked|barks|screamed|screams|whispered|whispers|mumbled|mumbles|stammered|stammers|stuttered|stutters)[,.:]\s*["'"「『«]?\s*$/i;
             
-            // Look AFTER the tag for ", Name verb" pattern  
             const afterTag = html.substring(tagEnd, Math.min(html.length, tagEnd + 150));
-            const afterPattern = /^[^<]*?[,.]?\s*["'"」』»]?\s*([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)?)\s+(?:said|says|replied|replies|asked|asks|whispered|whispers|yelled|yells|shouted|shouts|exclaimed|exclaims|murmured|murmurs|muttered|mutters|answered|answers|added|adds|called|calls|cried|cries|chirped|chirps|purred|purrs|projects|projected|announced|announces|continued|continues|began|begins|started|starts|spoke|speaks|stated|states|remarked|remarks|noted|notes|observed|observes|commented|comments|mentioned|mentions|explained|explains|declared|declares|suggested|suggests|offered|offers|admitted|admits|agreed|agrees|argued|argues|insisted|insists|demanded|demands|warned|warns|promised|promises|threatened|threatens|teased|teases|joked|jokes|laughed|laughs|giggled|giggles|chuckled|chuckles|sighed|sighs|groaned|groans|moaned|moans|growled|growls|hissed|hisses|snapped|snaps|barked|barks|screamed|screams|shouted|shouts|yelled|yells|whispered|whispers|mumbled|mumbles|stammered|stammers|stuttered|stutters)/i;
+            const afterPattern = /^[^<]*?[,.]?\s*["'"」』»]?\s*([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)?)\s+(?:said|says|replied|replies|asked|asks|whispered|whispers|yelled|yells|shouted|shouts|exclaimed|exclaims|murmured|murmurs|muttered|mutters|answered|answers|added|adds|called|calls|cried|cries|chirped|chirps|purred|purrs|projects|projected|announced|announces|continued|continues|began|begins|started|starts|spoke|speaks|stated|states|remarked|remarks|noted|notes|observed|observes|commented|comments|mentioned|mentions|explained|explains|declared|declares|suggested|suggests|offered|offers|admitted|admits|agreed|agrees|argued|argues|insisted|insists|demanded|demands|warned|warns|promised|promises|threatened|threatens|teased|teases|joked|jokes|laughed|laughs|giggled|giggles|chuckled|chuckles|sighed|sighs|groaned|groans|moaned|moans|growled|growls|hissed|hisses|snapped|snaps|barked|barks|screamed|screams|whispered|whispers|mumbled|mumbles|stammered|stammers|stuttered|stutters)/i;
             
             let speaker = null;
             
-            // Check before first
             const beforeMatch = beforeTag.match(beforePattern);
-            if (beforeMatch) {
-                speaker = beforeMatch[1];
-            }
+            if (beforeMatch) speaker = beforeMatch[1];
             
-            // Check after if not found
             if (!speaker) {
                 const afterMatch = afterTag.match(afterPattern);
-                if (afterMatch) {
-                    speaker = afterMatch[1];
-                }
+                if (afterMatch) speaker = afterMatch[1];
             }
             
-            if (speaker) {
+            if (speaker && !pronouns.has(speaker.toLowerCase())) {
                 const key = speaker.toLowerCase();
                 if (!characterColors[key]) {
                     characterColors[key] = { color, name: speaker };
