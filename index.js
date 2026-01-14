@@ -314,7 +314,10 @@
 
     function createUI() {
         console.log('Dialogue Colors: createUI() called');
-        if (document.getElementById('cc-ext')) {
+        
+        const existingUI = document.getElementById('cc-ext');
+        console.log('Dialogue Colors: Existing UI check:', !!existingUI);
+        if (existingUI) {
             console.log('Dialogue Colors: UI already exists, skipping');
             return;
         }
@@ -352,12 +355,20 @@
         </div>`;
         
         const container = document.getElementById('extensions_settings');
+        console.log('Dialogue Colors: extensions_settings container:', !!container);
         if (!container) {
             console.error('Dialogue Colors: extensions_settings container not found!');
+            console.error('Dialogue Colors: Available IDs:', Array.from(document.querySelectorAll('[id$="_settings"]')).map(el => el.id));
+            alert('Dialogue Colors: Could not find Extensions panel. Click Extensions button in the top bar first.');
             return;
         }
         container.insertAdjacentHTML('beforeend', html);
         console.log('Dialogue Colors: UI inserted successfully');
+        
+        setTimeout(() => {
+            const createdUI = document.getElementById('cc-ext');
+            console.log('Dialogue Colors: UI verification after 100ms:', !!createdUI);
+        }, 100);
         
         const enabledCheck = document.getElementById('cc-enabled');
         enabledCheck.checked = settings.enabled;
@@ -409,7 +420,9 @@
             currentChatId = getChatId();
             console.log('Dialogue Colors: chatId =', currentChatId);
             loadData();
+            console.log('Dialogue Colors: Data loaded');
             ensureRegexScriptInstalled();
+            console.log('Dialogue Colors: Regex script checked');
             
             let attempts = 0;
             const maxAttempts = 60; // 30 seconds
@@ -417,23 +430,33 @@
             const wait = setInterval(() => {
                 attempts++;
                 const settingsPanel = document.getElementById('extensions_settings');
+                console.log('Dialogue Colors: Looking for extensions_settings, attempt', attempts, 'panel exists:', !!settingsPanel);
+                
                 if (settingsPanel) {
                     clearInterval(wait);
                     console.log('Dialogue Colors: extensions_settings found after', attempts * 500, 'ms');
                     createUI();
+                    console.log('Dialogue Colors: UI created');
                     injectPrompt();
+                    console.log('Dialogue Colors: Initial prompt injected');
                 } else if (attempts >= maxAttempts) {
                     clearInterval(wait);
                     console.error('Dialogue Colors: Could not find extensions_settings after 30 seconds');
-                    alert('Dialogue Colors: Could not load properly. Check console for details.');
+                    alert('Dialogue Colors: Could not find Extensions panel. Make sure SillyTavern is fully loaded.');
                 }
             }, 500);
             
             const btnWait = setInterval(() => {
-                if (document.getElementById('send_form')) {
+                const sendForm = document.getElementById('send_form');
+                console.log('Dialogue Colors: Looking for send_form, exists:', !!sendForm);
+                
+                if (sendForm) {
                     clearInterval(btnWait);
+                    console.log('Dialogue Colors: send_form found');
                     addInputButton();
+                    console.log('Dialogue Colors: Input button added');
                     hookSendButton();
+                    console.log('Dialogue Colors: Send button hooked');
                 }
             }, 500);
             
@@ -475,19 +498,9 @@
                 console.log('Dialogue Colors: eventSource not available yet');
             }
             
-            setInterval(() => {
-                if (settings.enabled && typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
-                    injectPrompt();
-                }
-            }, 5000);
-            
-            setTimeout(() => {
-                console.log('Dialogue Colors: Initial delayed injection');
-                injectPrompt();
-            }, 1000);
-            
         } catch (e) {
             console.error('Dialogue Colors: Initialization error:', e);
+            console.error('Dialogue Colors: Error stack:', e.stack);
             alert('Dialogue Colors: Failed to initialize: ' + e.message);
         }
     }
