@@ -2,7 +2,6 @@
     'use strict';
 
     const MODULE_NAME = 'dialogue-colors';
-    const REGEX_SCRIPT_NAME = 'Dialogue Colors - Strip Tags from AI Context';
     let characterColors = {};
     let currentChatId = null;
     let settings = { enabled: true, themeMode: 'auto' };
@@ -45,23 +44,21 @@
     }
 
     function ensureRegexScript() {
+        const SCRIPT_NAME = 'Trim Font Colors';
+        
         const tryInstall = () => {
-            // Check if extension_settings and regex array exist
             if (typeof extension_settings === 'undefined') return false;
             if (!extension_settings.regex) extension_settings.regex = [];
             if (!Array.isArray(extension_settings.regex)) return false;
             
-            // Check if already installed
-            if (extension_settings.regex.some(r => r.scriptName === REGEX_SCRIPT_NAME)) {
-                console.log('Dialogue Colors: Regex script already exists');
+            if (extension_settings.regex.some(r => r.scriptName === SCRIPT_NAME)) {
                 return true;
             }
             
-            // Create the regex script
             const newScript = {
                 id: typeof uuidv4 === 'function' ? uuidv4() : crypto.randomUUID?.() || Math.random().toString(36).substr(2, 9),
-                scriptName: REGEX_SCRIPT_NAME,
-                findRegex: '/<\\/?font[^>]*>/gi',
+                scriptName: SCRIPT_NAME,
+                findRegex: '</?font[^>]*>',
                 replaceString: '',
                 trimStrings: [],
                 placement: [2],
@@ -75,32 +72,17 @@
             };
             
             extension_settings.regex.push(newScript);
-            
-            if (typeof saveSettingsDebounced === 'function') {
-                saveSettingsDebounced();
-            }
-            
-            console.log('Dialogue Colors: Regex script auto-installed!');
-            if (typeof toastr !== 'undefined') {
-                toastr.success('Regex script installed: ' + REGEX_SCRIPT_NAME);
-            }
+            if (typeof saveSettingsDebounced === 'function') saveSettingsDebounced();
+            console.log('Dialogue Colors: Regex "' + SCRIPT_NAME + '" installed');
             return true;
         };
         
-        // Try immediately
         if (tryInstall()) return;
         
-        // Retry with increasing delays
         let attempts = 0;
-        const maxAttempts = 20;
         const interval = setInterval(() => {
             attempts++;
-            if (tryInstall() || attempts >= maxAttempts) {
-                clearInterval(interval);
-                if (attempts >= maxAttempts) {
-                    console.warn('Dialogue Colors: Could not auto-install regex script after', maxAttempts, 'attempts');
-                }
-            }
+            if (tryInstall() || attempts >= 30) clearInterval(interval);
         }, 500);
     }
 
