@@ -349,6 +349,12 @@
             if (speaker && !blocklist.has(speaker.toLowerCase())) {
                 const key = speaker.toLowerCase();
                 lastSpeaker = color;
+                // Check if character is locked, if so skip entirely
+                if (characterColors[key]?.locked) {
+                    characterColors[key].dialogueCount = (characterColors[key].dialogueCount || 0) + 1;
+                    lastSpeaker = characterColors[key].color;
+                    return;
+                }
                 // Check aliases
                 for (const [k, v] of Object.entries(characterColors)) { if (v.aliases?.map(a => a.toLowerCase()).includes(key)) { if (!v.locked) { v.color = color; lastSpeaker = v.color; } foundNew = true; break; } }
                 if (!characterColors[key]) {
