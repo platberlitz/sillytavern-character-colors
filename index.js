@@ -38,9 +38,22 @@
         tritanopia: [[0,70,60],[180,70,55],[330,60,65],[20,80,55],[200,60,50],[350,50,60],[160,70,55],[10,70,60]]
     };
     const VERBS = 'says?|said|replies?|replied|asks?|asked|whispers?|whispered|yells?|yelled|shouts?|shouted|exclaims?|exclaimed|murmurs?|murmured|mutters?|muttered|answers?|answered|calls?|called|cries?|cried|chirps?|chirped|purrs?|purred|announces?|announced|speaks?|spoke|states?|stated|remarks?|remarked|comments?|commented|explains?|explained|declares?|declared|demands?|demanded|warns?|warned|laughs?|laughed|sighs?|sighed|groans?|groaned|growls?|growled|hisses?|hissed|snaps?|snapped|screams?|screamed|mumbles?|mumbled|breathes?|breathed|gasps?|gasped|huffs?|huffed|scoffs?|scoffed|adds?|added|notes?|noted|continues?|continued|offers?|offered|zips?|zipped|floats?|floated|shoots?|shot';
-    const VERB_REGEX_BEFORE = new RegExp(`([A-Z][a-z]{2,})\\s+(?:${VERBS})[,.:]*\\s*["'"「『«]?\\s*$`, 'i');
-    const VERB_REGEX_AFTER = new RegExp(`^["'"」』»]?\\s*([A-Z][a-z]{2,})\\s+(?:${VERBS})`, 'i');
-    const BLOCKLIST = new Set(['she','he','they','it','i','you','we','her','him','them','his','hers','its','their','theirs','one','someone','anyone','everyone','nobody','the','a','an','this','that','what','who','where','when','why','how','something','nothing','everything','anything','dark','light','through','between','around','behind','before','after','during','and','but','or','nor','for','yet','so','if','then','than','because','while','your','my','our','some','any','no','every','each','all','both','few','many','most','other','another','such','only','own','same','well','much','more','less','first','last','next','new','old','good','great','little','big','small','long','short','high','low','right','left','hand','eyes','face','head','voice','door','room','way','time','day','night','world','man','woman','people','thing','place','despite','still','just','even','also','very','too','quite','rather','really','almost','already','always','never','often','sometimes','here','there','now','today','soon','later','again','back','away','down','out','off','let','secret','papers','three','two','being','look','want','need','know','think','see','come','go','get','make','take','give','find','tell','ask','use','seem','leave','call','keep','put','mean','become','begin','feel','try','start','show','hear','play','run','move','live','believe','hold','bring','happen','write','sit','stand','lose','pay','meet','include','continue','set','learn','change','lead','understand','watch','follow','stop','create','speak','read','spend','grow','open','walk','win','teach','offer','remember','consider','appear','buy','wait','serve','die','send','build','stay','fall','cut','reach','kill','remain','suggest','raise','pass','sell','require','report','decide','pull','unlike','personally','actually','obviously','apparently','certainly','probably','possibly','maybe','perhaps','definitely','clearly','simply','basically','essentially','generally','usually','typically','normally','finally','eventually','suddenly','immediately','quickly','slowly','carefully','exactly','completely','entirely','absolutely','totally','fully','partly','mostly','nearly','hardly','barely','merely','yes','no','okay','sure','fine','well','right','wrong','true','false','rubs','nods','sighs','smiles','laughs','grins','shrugs','waves','looks','turns','moves','steps','walks','runs','sits','stands','leans','reaches','pulls','pushes','holds','takes','gives','puts','gets','makes','says','asks','tells','thinks','feels','knows','sees','hears','wants','needs','tries','starts','stops','goes','comes','leaves','stays','returns','enters','exits','opens','closes','touches','grabs','drops','lifts','lowers','raises','points','gestures','blinks','stares','glances','watches','notices','realizes','understands','remembers','forgets','believes','hopes','wishes','fears','loves','hates','likes','enjoys','prefers','accepts','refuses','agrees','disagrees','nope','yeah','yep','hmm','huh','wow','oh','ah','uh','um','err','hey','hello','hi','bye','goodbye','thanks','sorry','please','excuse','pardon']);
+    let VERB_REGEX_BEFORE = null;
+    let VERB_REGEX_AFTER = null;
+    let BLOCKLIST = null;
+    
+    function getVerbRegexBefore() {
+        if (!VERB_REGEX_BEFORE) VERB_REGEX_BEFORE = new RegExp(`([A-Z][a-z]{2,})\\s+(?:${VERBS})[,.:]*\\s*["'"「『«]?\\s*$`, 'i');
+        return VERB_REGEX_BEFORE;
+    }
+    function getVerbRegexAfter() {
+        if (!VERB_REGEX_AFTER) VERB_REGEX_AFTER = new RegExp(`^["'"」』»]?\\s*([A-Z][a-z]{2,})\\s+(?:${VERBS})`, 'i');
+        return VERB_REGEX_AFTER;
+    }
+    function getBlocklist() {
+        if (!BLOCKLIST) BLOCKLIST = new Set(['she','he','they','it','i','you','we','her','him','them','his','hers','its','their','theirs','one','someone','anyone','everyone','nobody','the','a','an','this','that','what','who','where','when','why','how','something','nothing','everything','anything','dark','light','through','between','around','behind','before','after','during','and','but','or','nor','for','yet','so','if','then','than','because','while','your','my','our','some','any','no','every','each','all','both','few','many','most','other','another','such','only','own','same','well','much','more','less','first','last','next','new','old','good','great','little','big','small','long','short','high','low','right','left','hand','eyes','face','head','voice','door','room','way','time','day','night','world','man','woman','people','thing','place','despite','still','just','even','also','very','too','quite','rather','really','almost','already','always','never','often','sometimes','here','there','now','today','soon','later','again','back','away','down','out','off','let','secret','papers','three','two','being','look','want','need','know','think','see','come','go','get','make','take','give','find','tell','ask','use','seem','leave','call','keep','put','mean','become','begin','feel','try','start','show','hear','play','run','move','live','believe','hold','bring','happen','write','sit','stand','lose','pay','meet','include','continue','set','learn','change','lead','understand','watch','follow','stop','create','speak','read','spend','grow','open','walk','win','teach','offer','remember','consider','appear','buy','wait','serve','die','send','build','stay','fall','cut','reach','kill','remain','suggest','raise','pass','sell','require','report','decide','pull','unlike','personally','actually','obviously','apparently','certainly','probably','possibly','maybe','perhaps','definitely','clearly','simply','basically','essentially','generally','usually','typically','normally','finally','eventually','suddenly','immediately','quickly','slowly','carefully','exactly','completely','entirely','absolutely','totally','fully','partly','mostly','nearly','hardly','barely','merely','yes','no','okay','sure','fine','well','right','wrong','true','false','rubs','nods','sighs','smiles','laughs','grins','shrugs','waves','looks','turns','moves','steps','walks','runs','sits','stands','leans','reaches','pulls','pushes','holds','takes','gives','puts','gets','makes','says','asks','tells','thinks','feels','knows','sees','hears','wants','needs','tries','starts','stops','goes','comes','leaves','stays','returns','enters','exits','opens','closes','touches','grabs','drops','lifts','lowers','raises','points','gestures','blinks','stares','glances','watches','notices','realizes','understands','remembers','forgets','believes','hopes','wishes','fears','loves','hates','likes','enjoys','prefers','accepts','refuses','agrees','disagrees','nope','yeah','yep','hmm','huh','wow','oh','ah','uh','um','err','hey','hello','hi','bye','goodbye','thanks','sorry','please','excuse','pardon']);
+        return BLOCKLIST;
+    }
     let cachedTheme = null;
     let cachedIsDark = null;
     let injectDebouncedTimer = null;
@@ -350,16 +363,17 @@
         const html = mesText.innerHTML;
         const fontRegex = /<font\s+color=["']?#([a-fA-F0-9]{6})["']?[^>]*>([\s\S]*?)<\/font>/gi;
         let match, foundNew = false;
+        const blocklist = getBlocklist();
         while ((match = fontRegex.exec(html)) !== null) {
             const color = '#' + match[1], tagStart = match.index, tagEnd = tagStart + match[0].length;
             const beforeText = html.substring(Math.max(0, tagStart - 400), tagStart).replace(/<[^>]+>/g, ' ');
             const afterText = html.substring(tagEnd, Math.min(html.length, tagEnd + 150)).replace(/<[^>]+>/g, ' ');
             let speaker = null;
-            const bv = beforeText.match(VERB_REGEX_BEFORE);
+            const bv = beforeText.match(getVerbRegexBefore());
             if (bv) speaker = bv[1];
-            if (!speaker) { const av = afterText.match(VERB_REGEX_AFTER); if (av) speaker = av[1]; }
-            if (!speaker) { const sentences = beforeText.split(/[.!?]+\s*/); for (let i = sentences.length - 1; i >= Math.max(0, sentences.length - 2); i--) { const m = sentences[i].trim().match(/^([A-Z][a-z]{2,})\b/); if (m && !BLOCKLIST.has(m[1].toLowerCase())) { speaker = m[1]; break; } } }
-            if (speaker && !BLOCKLIST.has(speaker.toLowerCase())) {
+            if (!speaker) { const av = afterText.match(getVerbRegexAfter()); if (av) speaker = av[1]; }
+            if (!speaker) { const sentences = beforeText.split(/[.!?]+\s*/); for (let i = sentences.length - 1; i >= Math.max(0, sentences.length - 2); i--) { const m = sentences[i].trim().match(/^([A-Z][a-z]{2,})\b/); if (m && !blocklist.has(m[1].toLowerCase())) { speaker = m[1]; break; } } }
+            if (speaker && !blocklist.has(speaker.toLowerCase())) {
                 const key = speaker.toLowerCase();
                 lastSpeaker = color;
                 if (characterColors[key]?.locked) { characterColors[key].dialogueCount = (characterColors[key].dialogueCount || 0) + 1; lastSpeaker = characterColors[key].color; continue; }
@@ -599,19 +613,39 @@
     globalThis.DialogueColorsInterceptor = async function(chat, contextSize, abort, type) { if (type !== 'quiet' && settings.enabled) injectPrompt(); };
 
     console.log('Dialogue Colors: Initializing...');
-    loadData(); ensureRegexScript();
-    let waitAttempts = 0;
-    const waitUI = setInterval(() => { 
-        waitAttempts++;
-        if (document.getElementById('extensions_settings')) { 
-            clearInterval(waitUI); 
-            createUI(); 
-            injectPrompt(); 
-        } else if (waitAttempts > 40) {
-            clearInterval(waitUI);
-            console.error('Dialogue Colors: Failed to find extensions_settings after 20s');
-        }
-    }, 500);
+    
+    // Defer all initialization to not block page load
+    requestIdleCallback?.(() => {
+        loadData(); 
+        ensureRegexScript();
+        
+        let waitAttempts = 0;
+        const waitUI = setInterval(() => { 
+            waitAttempts++;
+            if (document.getElementById('extensions_settings')) { 
+                clearInterval(waitUI); 
+                createUI(); 
+                injectPrompt(); 
+            } else if (waitAttempts > 40) {
+                clearInterval(waitUI);
+            }
+        }, 500);
+    }) || setTimeout(() => {
+        loadData(); 
+        ensureRegexScript();
+        
+        let waitAttempts = 0;
+        const waitUI = setInterval(() => { 
+            waitAttempts++;
+            if (document.getElementById('extensions_settings')) { 
+                clearInterval(waitUI); 
+                createUI(); 
+                injectPrompt(); 
+            } else if (waitAttempts > 40) {
+                clearInterval(waitUI);
+            }
+        }, 500);
+    }, 0);
     eventSource.on(event_types.GENERATION_AFTER_COMMANDS, () => injectPrompt());
     eventSource.on(event_types.MESSAGE_RECEIVED, onNewMessage);
     eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, onNewMessage);
