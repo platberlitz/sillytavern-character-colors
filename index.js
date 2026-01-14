@@ -278,10 +278,11 @@
             html += Object.entries(potentialCharacters).map(([k, v]) => `<div style="display:flex;align-items:center;gap:6px;margin:2px 0;opacity:0.7;"><span style="width:60px;">${v.name}</span><span style="flex:1;font-size:0.8em;">${v.count}/${settings.minOccurrences}</span><button class="dc-add-pending menu_button" style="padding:1px 6px;font-size:0.7em;" data-key="${k}">Add</button></div>`).join('');
         }
         const popup = document.createElement('div');
-        popup.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:var(--SmartThemeBodyColor);border:1px solid var(--SmartThemeBorderColor);border-radius:8px;padding:16px;z-index:10000;min-width:300px;';
-        popup.innerHTML = `<div style="font-weight:bold;margin-bottom:8px;">Dialogue Statistics</div>${html}<button class="menu_button" style="margin-top:10px;width:100%;">Close</button>`;
-        popup.querySelector('button').onclick = () => popup.remove();
-        popup.querySelectorAll('.dc-add-pending').forEach(b => { b.onclick = () => { const p = potentialCharacters[b.dataset.key]; if (p) { addCharacter(p.name, [...p.colors].pop()); updateCharList(); showStatsPopup(); } }; });
+        popup.id = 'dc-stats-popup';
+        popup.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:var(--SmartThemeBodyColor);border:1px solid var(--SmartThemeBorderColor);border-radius:8px;padding:16px;z-index:10000;min-width:300px;max-width:90vw;max-height:80vh;overflow-y:auto;box-shadow:0 4px 12px rgba(0,0,0,0.3);';
+        popup.innerHTML = `<div style="font-weight:bold;margin-bottom:8px;">Dialogue Statistics</div>${html}<button class="dc-close-popup menu_button" style="margin-top:10px;width:100%;">Close</button>`;
+        popup.querySelector('.dc-close-popup').onclick = () => popup.remove();
+        popup.querySelectorAll('.dc-add-pending').forEach(b => { b.onclick = () => { const p = potentialCharacters[b.dataset.key]; if (p) { addCharacter(p.name, [...p.colors].pop()); updateCharList(); popup.remove(); showStatsPopup(); } }; });
         document.body.appendChild(popup);
     }
 

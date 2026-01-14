@@ -6,3 +6,21 @@
 .cc-char-item input[type="color"] { width: 24px; height: 24px; padding: 0; border: 1px solid var(--SmartThemeBorderColor); }
 #cc-input-btn:hover { opacity: 1 !important; }
 #dc-ext .checkbox_label input[type="checkbox"] { opacity: 1 !important; position: relative !important; }
+
+#dc-stats-popup {
+    position: fixed !important;
+    top: 50% !important;
+    left: 50% !important;
+    transform: translate(-50%, -50%) !important;
+    max-width: 90vw !important;
+    max-height: 80vh !important;
+    overflow-y: auto !important;
+}
+
+@media (max-width: 768px) {
+    #dc-stats-popup {
+        max-width: 95vw !important;
+        max-height: 85vh !important;
+        padding: 12px !important;
+    }
+}
