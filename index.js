@@ -196,7 +196,9 @@
             if (!char.data) char.data = {};
             if (!char.data.extensions) char.data.extensions = {};
             char.data.extensions.dialogueColors = { colors: characterColors, settings };
-            toastr?.success?.('Saved to card (save card to persist)');
+            saveData();
+            try { saveSettingsDebounced?.(); } catch {}
+            toastr?.success?.('Saved to card');
         } catch { toastr?.error?.('Failed to save to card'); }
     }
 
@@ -208,6 +210,21 @@
             if (data?.colors) { characterColors = data.colors; if (data.settings) Object.assign(settings, data.settings); saveHistory(); saveData(); updateCharList(); injectPrompt(); toastr?.success?.('Loaded from card'); }
             else toastr?.info?.('No saved colors in card');
         } catch { toastr?.error?.('Failed to load from card'); }
+    }
+
+    function tryLoadFromCard() {
+        try {
+            const ctx = getContext();
+            const char = ctx?.characters?.[ctx?.characterId];
+            const data = char?.data?.extensions?.dialogueColors;
+            if (data?.colors) {
+                characterColors = data.colors;
+                if (data.settings) Object.assign(settings, data.settings);
+                saveHistory();
+                saveData();
+                console.log('Dialogue Colors: Loaded from card');
+            }
+        } catch {}
     }
 
     function addCustomPattern(pattern) {
@@ -408,12 +425,14 @@
     eventSource.on(event_types.GENERATION_AFTER_COMMANDS, () => injectPrompt());
     eventSource.on(event_types.MESSAGE_RECEIVED, onNewMessage);
     eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, onNewMessage);
-    eventSource.on(event_types.CHAT_CHANGED, () => { 
-        currentChatId = getChatId(); 
-        loadData(); 
-        updateCharList(); 
-        injectPrompt(); 
-        // Auto-scan if no colors saved and setting enabled
+    eventSource.on(event_types.CHAT_CHANGED, () => {
+        currentChatId = getChatId();
+        loadData();
+        if (Object.keys(characterColors).length === 0) {
+            tryLoadFromCard();
+        }
+        updateCharList();
+        injectPrompt();
         if (settings.autoScanOnLoad !== false && Object.keys(characterColors).length === 0) {
             setTimeout(() => { if (document.querySelectorAll('.mes').length) scanAllMessages(); }, 1000);
         }
