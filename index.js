@@ -404,27 +404,93 @@
     }
 
     function init() {
-        console.log('Dialogue Colors: init() called');
-        currentChatId = getChatId();
-        console.log('Dialogue Colors: chatId =', currentChatId);
-        loadData();
-        ensureRegexScriptInstalled();
-        
-        let attempts = 0;
-        const maxAttempts = 60; // 30 seconds
-        
-        const wait = setInterval(() => {
-            attempts++;
-            if (document.getElementById('extensions_settings')) {
-                clearInterval(wait);
-                console.log('Dialogue Colors: extensions_settings found after', attempts * 500, 'ms');
-                createUI();
-                injectPrompt();
-            } else if (attempts >= maxAttempts) {
-                clearInterval(wait);
-                console.error('Dialogue Colors: Could not find extensions_settings after 30 seconds');
+        try {
+            console.log('Dialogue Colors: init() called');
+            currentChatId = getChatId();
+            console.log('Dialogue Colors: chatId =', currentChatId);
+            loadData();
+            ensureRegexScriptInstalled();
+            
+            let attempts = 0;
+            const maxAttempts = 60; // 30 seconds
+            
+            const wait = setInterval(() => {
+                attempts++;
+                const settingsPanel = document.getElementById('extensions_settings');
+                if (settingsPanel) {
+                    clearInterval(wait);
+                    console.log('Dialogue Colors: extensions_settings found after', attempts * 500, 'ms');
+                    createUI();
+                    injectPrompt();
+                } else if (attempts >= maxAttempts) {
+                    clearInterval(wait);
+                    console.error('Dialogue Colors: Could not find extensions_settings after 30 seconds');
+                    alert('Dialogue Colors: Could not load properly. Check console for details.');
+                }
+            }, 500);
+            
+            const btnWait = setInterval(() => {
+                if (document.getElementById('send_form')) {
+                    clearInterval(btnWait);
+                    addInputButton();
+                    hookSendButton();
+                }
+            }, 500);
+            
+            if (typeof eventSource !== 'undefined' && typeof event_types !== 'undefined') {
+                console.log('Dialogue Colors: eventSource available');
+                eventSource.on(event_types.GENERATION_STARTED, () => {
+                    console.log('CC: GENERATION_STARTED event');
+                    injectPrompt();
+                });
+                
+                eventSource.on(event_types.GENERATE_BEFORE_COMBINE_PROMPTS, () => {
+                    console.log('CC: GENERATE_BEFORE_COMBINE_PROMPTS event');
+                    injectPrompt();
+                });
+                
+                if (event_types.GENERATE_AFTER_INJECT) {
+                    eventSource.on(event_types.GENERATE_AFTER_INJECT, () => {
+                        console.log('CC: GENERATE_AFTER_INJECT event');
+                        injectPrompt();
+                    });
+                }
+                
+                eventSource.on(event_types.MESSAGE_RECEIVED, () => {
+                    setTimeout(scanMessagesForColors, 500);
+                });
+                
+                eventSource.on(event_types.CHAT_CHANGED, () => {
+                    currentChatId = getChatId();
+                    characterColors = {};
+                    loadData();
+                    updateCharList();
+                    setTimeout(injectPrompt, 500);
+                });
+                
+                eventSource.on(event_types.USER_MESSAGE_RENDERED, () => {
+                    if (settings.enabled) setTimeout(applyDisplayColors, 300);
+                });
+            } else {
+                console.log('Dialogue Colors: eventSource not available yet');
             }
-        }, 500);
+            
+            setInterval(() => {
+                if (settings.enabled && typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
+                    injectPrompt();
+                }
+            }, 5000);
+            
+            setTimeout(() => {
+                console.log('Dialogue Colors: Initial delayed injection');
+                injectPrompt();
+            }, 1000);
+            
+        } catch (e) {
+            console.error('Dialogue Colors: Initialization error:', e);
+            alert('Dialogue Colors: Failed to initialize: ' + e.message);
+        }
+    }
         
         const btnWait = setInterval(() => {
             if (document.getElementById('send_form')) {
