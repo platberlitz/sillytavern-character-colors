@@ -606,8 +606,7 @@
 
     console.log('Dialogue Colors: Initializing...');
     
-    // Defer all initialization to not block page load
-    requestIdleCallback?.(() => {
+    function init() {
         loadData(); 
         ensureRegexScript();
         
@@ -618,26 +617,13 @@
                 clearInterval(waitUI); 
                 createUI(); 
                 injectPrompt(); 
-            } else if (waitAttempts > 40) {
+            } else if (waitAttempts > 60) {
                 clearInterval(waitUI);
             }
         }, 500);
-    }) || setTimeout(() => {
-        loadData(); 
-        ensureRegexScript();
-        
-        let waitAttempts = 0;
-        const waitUI = setInterval(() => { 
-            waitAttempts++;
-            if (document.getElementById('extensions_settings')) { 
-                clearInterval(waitUI); 
-                createUI(); 
-                injectPrompt(); 
-            } else if (waitAttempts > 40) {
-                clearInterval(waitUI);
-            }
-        }, 500);
-    }, 0);
+    }
+    
+    setTimeout(init, 100);
     eventSource.on(event_types.GENERATION_AFTER_COMMANDS, () => injectPrompt());
     eventSource.on(event_types.MESSAGE_RECEIVED, onNewMessage);
     eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, onNewMessage);
