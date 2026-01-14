@@ -58,7 +58,7 @@ function ensureRegexScript() {
     extension_settings.regex.push({
         id: uuidv4(),
         scriptName: SCRIPT_NAME,
-        findRegex: '/<\\/?font[^>]*>/g',
+        findRegex: '/<\\/?font[^>]*>/gi',
         replaceString: '',
         trimStrings: [],
         placement: [2],
