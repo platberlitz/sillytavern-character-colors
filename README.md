@@ -1,89 +1,102 @@
-# SillyTavern Dialogue Colors
+# Dialogue Colors
 
-Automatically colors character dialogue and thoughts via LLM prompt injection - consistent colors per chat!
+A SillyTavern extension that automatically colors character dialogue using LLM-generated `<font color>` tags, with intelligent character detection and color management.
 
 ## Features
 
-- **Prompt Injection**: Instructs LLM to use `<font color>` tags for dialogue/thoughts
-- **LLM Detection**: LLM detects and assigns unique colors to each named character
-- **Persistent per Chat**: Colors saved per chat session in localStorage
-- **Context Clean**: Regex script strips font tags from context (minimal token impact)
-- **Thought Coloring**: Inner thoughts in *asterisks* are also colored
-- **Theme Modes**: Auto/Light/Dark - instructs LLM to generate appropriate colors
-- **Color Tracking**: Scans messages to track which character uses which color
+### Core
+- **Auto-coloring** - Instructs the LLM to wrap dialogue in `<font color=#RRGGBB>` tags
+- **Character detection** - Automatically scans messages and detects speakers from dialogue attribution
+- **Per-chat memory** - Colors are saved per chat session
+- **Auto-scan** - Scans for new characters after each message
+
+### Color Management
+- **Color lock** 🔒 - Lock a character's color to prevent overwrites
+- **Quick swap** ⇄ - Click two characters to swap their colors
+- **Brightness adjustment** - Global slider to make all colors lighter/darker
+- **Undo/Redo** ↶↷ - History of color changes
+- **Export/Import** - Save and load color schemes as JSON
+
+### Palettes
+- **Pastel** - Soft, light colors
+- **Neon** - Vibrant, saturated
+- **Earth** - Natural, warm tones
+- **Jewel** - Rich, deep colors
+- **Muted** - Subtle, desaturated
+- **Protanopia** - Red-blind friendly
+- **Deuteranopia** - Green-blind friendly
+- **Tritanopia** - Blue-blind friendly
+
+### Advanced
+- **Character aliases** - Map multiple names to the same color (e.g., "Kaveh" and "the architect")
+- **Per-character styles** - Bold, italic, or bold italic per character
+- **Narrator color** - Separate color for narration/action text
+- **Highlight mode** - Request background highlights in addition to text color
+- **Auto-assign from card** - Pull character name from active ST character card
+- **Dialogue statistics** - Shows dialogue count per character
+- **Conflict detection** - Warns when characters have similar colors
+
+### Technical
+- **Regex auto-install** - Automatically installs a regex script to strip font tags from AI context
+- **Japanese quote support** - Colors 「brackets」『double』«guillemets» in addition to standard quotes
+- **Theme-aware** - Adjusts color lightness based on dark/light theme
 
 ## Installation
 
-1. Place folder in SillyTavern `data/<user>/extensions/`
-2. Restart SillyTavern (regex script auto-installs on first load)
-
-**Note:** The regex script is automatically installed on first load. You can also manually import `regex-script.json` in Extensions > Regex if needed.
-
-## How It Works
-
-**Step 1: Prompt Injection**
-The extension injects a system prompt before each generation telling the LLM:
-- Wrap all dialogue in `<font color=#RRGGBB>` tags
-- Use distinct colors for each character
-- Reuse established colors (tracked per chat)
-- Generate light pastel colors for dark themes, dark muted for light
-
-**Step 2: LLM Generates Colored Output**
-LLM automatically detects speakers and colors their dialogue:
-```
-<font color=#abc123>"Hello!"</font> <font color=#abc123>*She smiled.*</font>
-<font color=#def456>"Nice to meet you!"</font> <font color=#def456>*He nodded.*</font>
-```
-
-**Step 3: Extension Tracks Colors**
-After each message, the extension:
-- Scans for all `<font color>` tags
-- Associates colors with character names from message headers
-- Saves color assignments to localStorage (per chat ID)
-- Updates prompt with "Established colors" list
-
-**Step 4: Regex Script (Important!)**
-The included regex script strips `<font>` tags from context so colors don't consume tokens. Colors are display-only in chat, but not sent back to LLM.
+1. Open SillyTavern
+2. Go to Extensions → Install Extension
+3. Paste: `https://github.com/platberlitz/sillytavern-character-colors`
+4. Click Install
 
 ## Usage
 
-1. Enable "Enable color injection" in Extensions settings
-2. LLM will start coloring dialogue in new messages
-3. Click "Scan" button to extract colors from existing messages
-4. Each chat maintains its own color assignments
-5. Switching chats loads different color sets
+1. Enable the extension in the Extensions panel
+2. Start chatting - the LLM will color dialogue automatically
+3. Click **Scan** to detect characters from existing messages
+4. Adjust colors by clicking the color picker next to each character
+5. Use **Lock** to prevent a color from changing
+6. Use **Swap** to exchange colors between characters
+7. Add **Aliases** for characters with multiple names
+8. **Export** your color scheme to reuse later
 
-## How LLM Detects Characters
+## UI Controls
 
-The LLM is instructed to:
-- Detect any named character/speaker in message
-- Assign them a unique hex color (#RRGGBB)
-- Internally track which color belongs to which character (ephemeral memory)
-- Use same color consistently for each character
-- Maintain color associations throughout conversation like author's notes
-- Use any narrative format - no forced "Name:" pattern
+| Button | Function |
+|--------|----------|
+| Scan | Scan all messages for characters |
+| Clear | Remove all characters |
+| Card | Add character from active card |
+| ↶ | Undo last change |
+| ↷ | Redo |
+| Export | Save colors to JSON file |
+| Import | Load colors from JSON file |
+| 🔒/🔓 | Toggle color lock |
+| ⇄ | Swap colors with another character |
+| S | Cycle font style (normal/bold/italic) |
+| + | Add alias for character |
+| × | Remove character |
 
-The extension scans for patterns like `"Hello," Mary said` to associate characters with colors, regardless of how LLM formats the dialogue. LLM maintains its own internal color tracking.
+## Settings
 
-## Manual Overrides
+- **Enable** - Toggle the extension on/off
+- **Highlight mode** - Request background highlights
+- **Theme** - Auto/Dark/Light color adjustment
+- **Palette** - Color scheme for new characters
+- **Brightness** - Global brightness adjustment (-30 to +30)
+- **Narrator** - Color for narrator/action text
 
-- Edit colors: Click color picker in character list to change manually
-- Clear colors: Use "Clear Colors" button to reset for current chat
-- Refresh prompt: Click droplet icon to scan messages and update LLM instruction
+## How It Works
 
-## Example Output
+1. The extension injects a prompt instructing the LLM to use `<font color>` tags
+2. A regex script strips these tags from the AI's context (so it doesn't see them in history)
+3. Users see the colored text in the chat
+4. The extension scans for character names near dialogue and caches their colors
+5. On subsequent messages, the prompt includes assigned colors for consistency
 
-```
-Chat with Alice and Bob:
+## License
 
-Message 1 (Alice):
-<font color=#ff88aa>"Hi Bob!"</font> <font color=#ff88aa>*She waved excitedly.*</font>
+MIT
 
-Message 2 (Bob):  
-<font color="#66aaff>"Hey Alice!"</font> <font color="#66aaff">*He smiled back.*</font>
+## Author
 
-Message 3 (Alice):
-<font color=#ff88aa>"How are you?"</font> <- Same color as before!
-```
-
-Colors are consistent within chat, reset when switching chats.
+platberlitz
