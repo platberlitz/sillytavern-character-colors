@@ -184,11 +184,13 @@
     }
     function invalidateThemeCache() { cachedTheme = null; cachedIsDark = null; }
 
-    function getStorageKey() { return `dc_${currentChatId}`; }
-    function saveData() { if (currentChatId) localStorage.setItem(getStorageKey(), JSON.stringify({ colors: characterColors, settings })); localStorage.setItem('dc_patterns', JSON.stringify(customPatterns)); }
+    function getCharKey() { try { const ctx = getContext(); return ctx?.characters?.[ctx?.characterId]?.avatar || ctx?.characterId || null; } catch { return null; } }
+    function getStorageKey() { const charKey = getCharKey(); return charKey ? `dc_char_${charKey}` : `dc_${currentChatId}`; }
+    function saveData() { const key = getStorageKey(); if (key) localStorage.setItem(key, JSON.stringify({ colors: characterColors, settings })); localStorage.setItem('dc_patterns', JSON.stringify(customPatterns)); }
     function loadData() {
         characterColors = {};
-        if (currentChatId) { try { const d = JSON.parse(localStorage.getItem(getStorageKey())); if (d?.colors) characterColors = d.colors; if (d?.settings) Object.assign(settings, d.settings); } catch {} }
+        const key = getStorageKey();
+        if (key) { try { const d = JSON.parse(localStorage.getItem(key)); if (d?.colors) characterColors = d.colors; if (d?.settings) Object.assign(settings, d.settings); } catch {} }
         try { customPatterns = JSON.parse(localStorage.getItem('dc_patterns')) || []; } catch {}
         colorHistory = [JSON.stringify(characterColors)]; historyIndex = 0;
     }
