@@ -1,4 +1,4 @@
-import { extension_settings, saveSettingsDebounced } from '../../../extensions.js';
+import { extension_settings, saveSettingsDebounced, getContext } from '../../../extensions.js';
 import { eventSource, event_types, setExtensionPrompt } from '../../../../script.js';
 
 const MODULE_NAME = 'dialogue-colors';
@@ -33,46 +33,60 @@ function loadData() {
 }
 
 function getChatId() {
-    if (typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
-        const ctx = SillyTavern.getContext();
-        return ctx.chatId || ctx.chatID || null;
+    try {
+        const ctx = getContext();
+        return ctx?.chatId || ctx?.chatID || null;
+    } catch {
+        return null;
     }
-    return null;
 }
 
 function ensureRegexScript() {
     const SCRIPT_NAME = 'Trim Font Colors';
     
-    if (!extension_settings || !Array.isArray(extension_settings.regex)) {
-        if (extension_settings) extension_settings.regex = [];
-        else return;
+    try {
+        if (!extension_settings) {
+            console.log('Dialogue Colors: extension_settings not available');
+            return false;
+        }
+        
+        if (!Array.isArray(extension_settings.regex)) {
+            extension_settings.regex = [];
+        }
+        
+        if (extension_settings.regex.some(r => r.scriptName === SCRIPT_NAME)) {
+            console.log('Dialogue Colors: Regex already exists');
+            return true;
+        }
+        
+        const uuidv4 = () => 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+            const r = Math.random() * 16 | 0;
+            return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+        });
+        
+        extension_settings.regex.push({
+            id: uuidv4(),
+            scriptName: SCRIPT_NAME,
+            findRegex: '/<\\/?font[^>]*>/gi',
+            replaceString: '',
+            trimStrings: [],
+            placement: [2],
+            disabled: false,
+            markdownOnly: false,
+            promptOnly: true,
+            runOnEdit: true,
+            substituteRegex: 0,
+            minDepth: null,
+            maxDepth: null
+        });
+        
+        saveSettingsDebounced();
+        console.log('Dialogue Colors: Regex "' + SCRIPT_NAME + '" installed!');
+        return true;
+    } catch (error) {
+        console.error('Dialogue Colors: Failed to install regex:', error);
+        return false;
     }
-    
-    if (extension_settings.regex.some(r => r.scriptName === SCRIPT_NAME)) return;
-    
-    const uuidv4 = () => 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
-        const r = Math.random() * 16 | 0;
-        return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
-    });
-    
-    extension_settings.regex.push({
-        id: uuidv4(),
-        scriptName: SCRIPT_NAME,
-        findRegex: '/<\\/?font[^>]*>/gi',
-        replaceString: '',
-        trimStrings: [],
-        placement: [2],
-        disabled: false,
-        markdownOnly: false,
-        promptOnly: true,
-        runOnEdit: true,
-        substituteRegex: 0,
-        minDepth: null,
-        maxDepth: null
-    });
-    
-    saveSettingsDebounced();
-    console.log('Dialogue Colors: Regex "' + SCRIPT_NAME + '" installed!');
 }
 
 function buildPromptInstruction() {
@@ -205,31 +219,36 @@ globalThis.DialogueColorsInterceptor = async function(chat, contextSize, abort, 
 
 jQuery(async () => {
     console.log('Dialogue Colors: Initializing...');
-    currentChatId = getChatId();
-    loadData();
     
-    // Install regex script
-    ensureRegexScript();
-
-    // Wait for UI
-    const waitForUI = setInterval(() => {
-        if (document.getElementById('extensions_settings')) {
-            clearInterval(waitForUI);
-            createUI();
-            injectPrompt();
-        }
-    }, 500);
-
-    // Register events
-    eventSource.on(event_types.GENERATION_AFTER_COMMANDS, () => injectPrompt());
-    eventSource.on(event_types.MESSAGE_RECEIVED, onNewMessage);
-    eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, onNewMessage);
-    eventSource.on(event_types.CHAT_CHANGED, () => {
+    try {
         currentChatId = getChatId();
         loadData();
-        updateCharList();
-        injectPrompt();
-    });
-    
-    console.log('Dialogue Colors: Loaded!');
+        
+        // Install regex script
+        ensureRegexScript();
+
+        // Wait for UI
+        const waitForUI = setInterval(() => {
+            if (document.getElementById('extensions_settings')) {
+                clearInterval(waitForUI);
+                createUI();
+                injectPrompt();
+            }
+        }, 500);
+
+        // Register events
+        eventSource.on(event_types.GENERATION_AFTER_COMMANDS, () => injectPrompt());
+        eventSource.on(event_types.MESSAGE_RECEIVED, onNewMessage);
+        eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, onNewMessage);
+        eventSource.on(event_types.CHAT_CHANGED, () => {
+            currentChatId = getChatId();
+            loadData();
+            updateCharList();
+            injectPrompt();
+        });
+        
+        console.log('Dialogue Colors: Loaded!');
+    } catch (error) {
+        console.error('Dialogue Colors: Failed to initialize:', error);
+    }
 });
