@@ -10,7 +10,9 @@
     let historyIndex = -1;
     let currentChatId = null;
     let swapMode = null;
-    let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false };
+    let legendVisible = false;
+    let customPatterns = [];
+    let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, ttsHints: {} };
 
     const COLOR_THEMES = {
         pastel: [[340,70,75],[200,70,75],[120,50,70],[45,80,70],[280,60,75],[170,60,70],[20,80,75],[240,60,75]],
@@ -129,9 +131,82 @@
         return `[Font Color Rule: Wrap dialogue in <font color=#RRGGBB> tags. ${themeHint} ${colorList ? `ASSIGNED: ${colorList}.` : ''} ${aliases ? `ALIASES: ${aliases}.` : ''} ${settings.narratorColor ? `Narrator: ${settings.narratorColor}.` : ''} ${settings.highlightMode ? 'Also add background highlight.' : ''} Consistent colors per character.]`;
     }
 
+    function buildColoredPromptPreview() {
+        if (!settings.enabled) return '<span style="opacity:0.5">(disabled)</span>';
+        const entries = Object.entries(characterColors);
+        if (!entries.length) return '<span style="opacity:0.5">(no characters)</span>';
+        return entries.map(([,v]) => `<span style="color:${v.color}">${v.name}</span>`).join(', ');
+    }
+
     function injectPrompt() {
         setExtensionPrompt(MODULE_NAME, settings.enabled ? buildPromptInstruction() : '', 1, 0);
-        const p = document.getElementById('dc-prompt-preview'); if (p) p.textContent = buildPromptInstruction() || '(disabled)';
+        const p = document.getElementById('dc-prompt-preview');
+        if (p) p.innerHTML = buildColoredPromptPreview();
+    }
+
+    function createLegend() {
+        let legend = document.getElementById('dc-legend');
+        if (!legend) {
+            legend = document.createElement('div');
+            legend.id = 'dc-legend';
+            legend.style.cssText = 'position:fixed;top:60px;right:10px;background:var(--SmartThemeBlurTintColor);border:1px solid var(--SmartThemeBorderColor);border-radius:8px;padding:8px;z-index:9999;font-size:0.8em;max-width:150px;display:none;';
+            document.body.appendChild(legend);
+        }
+        return legend;
+    }
+
+    function updateLegend() {
+        const legend = createLegend();
+        const entries = Object.entries(characterColors);
+        if (!entries.length || !settings.showLegend) { legend.style.display = 'none'; return; }
+        legend.innerHTML = '<div style="font-weight:bold;margin-bottom:4px;">Characters</div>' + 
+            entries.map(([,v]) => `<div style="display:flex;align-items:center;gap:4px;"><span style="width:8px;height:8px;border-radius:50%;background:${v.color};"></span><span style="color:${v.color}">${v.name}</span><span style="opacity:0.5;font-size:0.8em;">${v.dialogueCount||0}</span></div>`).join('');
+        legend.style.display = settings.showLegend ? 'block' : 'none';
+    }
+
+    function getDialogueStats() {
+        const entries = Object.entries(characterColors);
+        const total = entries.reduce((s, [,v]) => s + (v.dialogueCount || 0), 0);
+        return entries.map(([,v]) => ({ name: v.name, count: v.dialogueCount || 0, pct: total ? Math.round((v.dialogueCount || 0) / total * 100) : 0, color: v.color })).sort((a,b) => b.count - a.count);
+    }
+
+    function showStatsPopup() {
+        const stats = getDialogueStats();
+        if (!stats.length) { toastr?.info?.('No dialogue data'); return; }
+        const maxCount = Math.max(...stats.map(s => s.count));
+        const html = stats.map(s => `<div style="display:flex;align-items:center;gap:6px;margin:2px 0;"><span style="width:60px;color:${s.color}">${s.name}</span><div style="flex:1;height:12px;background:var(--SmartThemeBlurTintColor);border-radius:3px;overflow:hidden;"><div style="width:${s.count/maxCount*100}%;height:100%;background:${s.color};"></div></div><span style="width:40px;text-align:right;font-size:0.8em;">${s.count} (${s.pct}%)</span></div>`).join('');
+        const popup = document.createElement('div');
+        popup.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:var(--SmartThemeBodyColor);border:1px solid var(--SmartThemeBorderColor);border-radius:8px;padding:16px;z-index:10000;min-width:300px;';
+        popup.innerHTML = `<div style="font-weight:bold;margin-bottom:8px;">Dialogue Statistics</div>${html}<button class="menu_button" style="margin-top:10px;width:100%;">Close</button>`;
+        popup.querySelector('button').onclick = () => popup.remove();
+        document.body.appendChild(popup);
+    }
+
+    function saveToCard() {
+        try {
+            const ctx = getContext();
+            const char = ctx?.characters?.[ctx?.characterId];
+            if (!char) { toastr?.error?.('No character loaded'); return; }
+            if (!char.data) char.data = {};
+            if (!char.data.extensions) char.data.extensions = {};
+            char.data.extensions.dialogueColors = { colors: characterColors, settings };
+            toastr?.success?.('Saved to card (save card to persist)');
+        } catch { toastr?.error?.('Failed to save to card'); }
+    }
+
+    function loadFromCard() {
+        try {
+            const ctx = getContext();
+            const char = ctx?.characters?.[ctx?.characterId];
+            const data = char?.data?.extensions?.dialogueColors;
+            if (data?.colors) { characterColors = data.colors; if (data.settings) Object.assign(settings, data.settings); saveHistory(); saveData(); updateCharList(); injectPrompt(); toastr?.success?.('Loaded from card'); }
+            else toastr?.info?.('No saved colors in card');
+        } catch { toastr?.error?.('Failed to load from card'); }
+    }
+
+    function addCustomPattern(pattern) {
+        try { new RegExp(pattern); customPatterns.push(pattern); toastr?.success?.('Pattern added'); } 
+        catch { toastr?.error?.('Invalid regex'); }
     }
 
     const blocklist = new Set(['she','he','they','it','i','you','we','her','him','them','his','hers','its','their','theirs','one','someone','anyone','everyone','nobody','the','a','an','this','that','what','who','where','when','why','how','something','nothing','everything','anything','dark','light','through','between','around','behind','before','after','during','and','but','or','nor','for','yet','so','if','then','than','because','while','your','my','our','some','any','no','every','each','all','both','few','many','most','other','another','such','only','own','same','well','much','more','less','first','last','next','new','old','good','great','little','big','small','long','short','high','low','right','left','hand','eyes','face','head','voice','door','room','way','time','day','night','world','man','woman','people','thing','place','despite','still','just','even','also','very','too','quite','rather','really','almost','already','always','never','often','sometimes','here','there','now','today','soon','later','again','back','away','down','out','off','let','secret','papers','three','two','being','look','want','need','know','think','see','come','go','get','make','take','give','find','tell','ask','use','seem','leave','call','keep','put','mean','become','begin','feel','try','start','show','hear','play','run','move','live','believe','hold','bring','happen','write','sit','stand','lose','pay','meet','include','continue','set','learn','change','lead','understand','watch','follow','stop','create','speak','read','spend','grow','open','walk','win','teach','offer','remember','consider','appear','buy','wait','serve','die','send','build','stay','fall','cut','reach','kill','remain','suggest','raise','pass','sell','require','report','decide','pull','unlike','personally','actually','obviously','apparently','certainly','probably','possibly','maybe','perhaps','definitely','clearly','simply','basically','essentially','generally','usually','typically','normally','finally','eventually','suddenly','immediately','quickly','slowly','carefully','exactly','completely','entirely','absolutely','totally','fully','partly','mostly','nearly','hardly','barely','merely','yes','no','okay','sure','fine','well','right','wrong','true','false','rubs','nods','sighs','smiles','laughs','grins','shrugs','waves','looks','turns','moves','steps','walks','runs','sits','stands','leans','reaches','pulls','pushes','holds','takes','gives','puts','gets','makes','says','asks','tells','thinks','feels','knows','sees','hears','wants','needs','tries','starts','stops','goes','comes','leaves','stays','returns','enters','exits','opens','closes','touches','grabs','drops','lifts','lowers','raises','points','gestures','blinks','stares','glances','watches','notices','realizes','understands','remembers','forgets','believes','hopes','wishes','fears','loves','hates','likes','enjoys','prefers','accepts','refuses','agrees','disagrees','nope','yeah','yep','hmm','huh','wow','oh','ah','uh','um','err','hey','hello','hi','bye','goodbye','thanks','sorry','please','excuse','pardon']);
@@ -194,6 +269,7 @@
     function updateCharList() {
         const list = document.getElementById('dc-char-list'); if (!list) return;
         const entries = Object.entries(characterColors);
+        document.getElementById('dc-count').textContent = entries.length;
         list.innerHTML = entries.length ? entries.map(([k, v]) => `
             <div class="dc-char ${swapMode === k ? 'dc-swap-selected' : ''}" data-key="${k}" style="display:flex;align-items:center;gap:4px;margin:3px 0;padding:2px;border-radius:4px;${swapMode === k ? 'background:var(--SmartThemeQuoteColor);' : ''}">
                 <span style="width:8px;height:8px;border-radius:50%;background:${v.color};flex-shrink:0;"></span>
@@ -207,7 +283,7 @@
                 <button class="dc-del menu_button" data-key="${k}" style="padding:1px 4px;font-size:0.7em;">×</button>
             </div>`).join('') : '<small style="opacity:0.6;">No characters</small>';
 
-        list.querySelectorAll('input[type="color"]').forEach(i => { i.oninput = () => { characterColors[i.dataset.key].color = i.value; saveHistory(); saveData(); injectPrompt(); updateCharList(); }; });
+        list.querySelectorAll('input[type="color"]').forEach(i => { i.oninput = () => { const c = characterColors[i.dataset.key]; c.color = i.value; c.aliases?.forEach(a => { const ak = a.toLowerCase(); if (characterColors[ak]) characterColors[ak].color = i.value; }); saveHistory(); saveData(); injectPrompt(); updateCharList(); }; });
         list.querySelectorAll('.dc-del').forEach(b => { b.onclick = () => { delete characterColors[b.dataset.key]; saveHistory(); saveData(); injectPrompt(); updateCharList(); }; });
         list.querySelectorAll('.dc-lock').forEach(b => { b.onclick = () => { characterColors[b.dataset.key].locked = !characterColors[b.dataset.key].locked; saveData(); updateCharList(); }; });
         list.querySelectorAll('.dc-swap').forEach(b => { b.onclick = () => {
@@ -225,6 +301,7 @@
             const alias = prompt('Add alias for ' + characterColors[b.dataset.key].name + ':');
             if (alias?.trim()) { characterColors[b.dataset.key].aliases = characterColors[b.dataset.key].aliases || []; characterColors[b.dataset.key].aliases.push(alias.trim()); saveData(); injectPrompt(); updateCharList(); }
         }; });
+        updateLegend();
     }
 
     function autoAssignFromCard() {
@@ -246,20 +323,24 @@
             <div class="inline-drawer-content" style="padding:10px;display:flex;flex-direction:column;gap:6px;font-size:0.9em;">
                 <label class="checkbox_label"><input type="checkbox" id="dc-enabled"><span>Enable</span></label>
                 <label class="checkbox_label"><input type="checkbox" id="dc-highlight"><span>Highlight mode</span></label>
+                <label class="checkbox_label"><input type="checkbox" id="dc-autoscan"><span>Auto-scan on chat load</span></label>
+                <label class="checkbox_label"><input type="checkbox" id="dc-legend"><span>Show floating legend</span></label>
                 <div style="display:flex;gap:4px;align-items:center;"><label style="width:50px;">Theme:</label><select id="dc-theme" class="text_pole" style="flex:1;"><option value="auto">Auto</option><option value="dark">Dark</option><option value="light">Light</option></select></div>
                 <div style="display:flex;gap:4px;align-items:center;"><label style="width:50px;">Palette:</label><select id="dc-palette" class="text_pole" style="flex:1;"><option value="pastel">Pastel</option><option value="neon">Neon</option><option value="earth">Earth</option><option value="jewel">Jewel</option><option value="muted">Muted</option><option value="protanopia">Protanopia</option><option value="deuteranopia">Deuteranopia</option><option value="tritanopia">Tritanopia</option></select></div>
                 <div style="display:flex;gap:4px;align-items:center;"><label style="width:50px;">Bright:</label><input type="range" id="dc-brightness" min="-30" max="30" value="0" style="flex:1;"><span id="dc-bright-val">0</span></div>
                 <div style="display:flex;gap:4px;align-items:center;"><label style="width:50px;">Narrator:</label><input type="color" id="dc-narrator" value="#888888" style="width:24px;height:20px;"><button id="dc-narrator-clear" class="menu_button" style="padding:2px 6px;font-size:0.8em;">Clear</button></div>
                 <hr style="margin:2px 0;opacity:0.2;">
-                <div style="display:flex;gap:4px;"><button id="dc-scan" class="menu_button" style="flex:1;">Scan</button><button id="dc-clear" class="menu_button" style="flex:1;">Clear</button><button id="dc-card" class="menu_button" style="flex:1;" title="Add from card">Card</button></div>
+                <div style="display:flex;gap:4px;"><button id="dc-scan" class="menu_button" style="flex:1;">Scan</button><button id="dc-clear" class="menu_button" style="flex:1;">Clear</button><button id="dc-stats" class="menu_button" style="flex:1;" title="Dialogue statistics">Stats</button></div>
                 <div style="display:flex;gap:4px;"><button id="dc-undo" class="menu_button" style="flex:1;">↶</button><button id="dc-redo" class="menu_button" style="flex:1;">↷</button><button id="dc-export" class="menu_button" style="flex:1;">Export</button><button id="dc-import" class="menu_button" style="flex:1;">Import</button></div>
+                <div style="display:flex;gap:4px;"><button id="dc-card" class="menu_button" style="flex:1;" title="Add from card">+Card</button><button id="dc-save-card" class="menu_button" style="flex:1;" title="Save to card">Save→Card</button><button id="dc-load-card" class="menu_button" style="flex:1;" title="Load from card">Card→Load</button></div>
                 <input type="file" id="dc-import-file" accept=".json" style="display:none;">
                 <div style="display:flex;gap:4px;"><input type="text" id="dc-add-name" placeholder="Add character..." class="text_pole" style="flex:1;padding:3px;"><button id="dc-add-btn" class="menu_button" style="padding:3px 8px;">+</button></div>
+                <div style="display:flex;gap:4px;"><input type="text" id="dc-pattern" placeholder="Custom regex pattern..." class="text_pole" style="flex:1;padding:3px;font-size:0.8em;"><button id="dc-pattern-btn" class="menu_button" style="padding:3px 6px;font-size:0.8em;">+Pat</button></div>
                 <small>Characters: <span id="dc-count">0</span></small>
                 <div id="dc-char-list" style="max-height:150px;overflow-y:auto;"></div>
                 <hr style="margin:2px 0;opacity:0.2;">
-                <small>Prompt:</small>
-                <div id="dc-prompt-preview" style="font-size:0.7em;max-height:40px;overflow-y:auto;padding:3px;background:var(--SmartThemeBlurTintColor);border-radius:3px;opacity:0.7;"></div>
+                <small>Preview:</small>
+                <div id="dc-prompt-preview" style="font-size:0.75em;max-height:40px;overflow-y:auto;padding:3px;background:var(--SmartThemeBlurTintColor);border-radius:3px;"></div>
             </div>
         </div>`;
         document.getElementById('extensions_settings')?.insertAdjacentHTML('beforeend', html);
@@ -267,6 +348,8 @@
         const $ = id => document.getElementById(id);
         $('dc-enabled').checked = settings.enabled; $('dc-enabled').onchange = e => { settings.enabled = e.target.checked; saveData(); injectPrompt(); };
         $('dc-highlight').checked = settings.highlightMode; $('dc-highlight').onchange = e => { settings.highlightMode = e.target.checked; saveData(); injectPrompt(); };
+        $('dc-autoscan').checked = settings.autoScanOnLoad !== false; $('dc-autoscan').onchange = e => { settings.autoScanOnLoad = e.target.checked; saveData(); };
+        $('dc-legend').checked = settings.showLegend; $('dc-legend').onchange = e => { settings.showLegend = e.target.checked; saveData(); updateLegend(); };
         $('dc-theme').value = settings.themeMode; $('dc-theme').onchange = e => { settings.themeMode = e.target.value; saveData(); injectPrompt(); };
         $('dc-palette').value = settings.colorTheme; $('dc-palette').onchange = e => { settings.colorTheme = e.target.value; saveData(); };
         $('dc-brightness').value = settings.brightness || 0; $('dc-bright-val').textContent = settings.brightness || 0;
@@ -275,16 +358,26 @@
         $('dc-narrator-clear').onclick = () => { settings.narratorColor = ''; $('dc-narrator').value = '#888888'; saveData(); injectPrompt(); };
         $('dc-scan').onclick = scanAllMessages;
         $('dc-clear').onclick = () => { characterColors = {}; saveHistory(); saveData(); injectPrompt(); updateCharList(); };
+        $('dc-stats').onclick = showStatsPopup;
         $('dc-card').onclick = autoAssignFromCard;
+        $('dc-save-card').onclick = saveToCard;
+        $('dc-load-card').onclick = loadFromCard;
         $('dc-undo').onclick = undo; $('dc-redo').onclick = redo;
         $('dc-export').onclick = exportColors;
         $('dc-import').onclick = () => $('dc-import-file').click();
         $('dc-import-file').onchange = e => { if (e.target.files[0]) importColors(e.target.files[0]); };
         $('dc-add-btn').onclick = () => { addCharacter($('dc-add-name').value); $('dc-add-name').value = ''; };
         $('dc-add-name').onkeypress = e => { if (e.key === 'Enter') $('dc-add-btn').click(); };
+        $('dc-pattern-btn').onclick = () => { addCustomPattern($('dc-pattern').value); $('dc-pattern').value = ''; };
+        
+        // Keyboard shortcuts
+        document.addEventListener('keydown', e => {
+            if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey && document.activeElement?.closest('#dc-ext')) { e.preventDefault(); undo(); }
+            if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey)) && document.activeElement?.closest('#dc-ext')) { e.preventDefault(); redo(); }
+        });
+        
         updateCharList();
-        $('dc-prompt-preview').textContent = buildPromptInstruction();
-        $('dc-count').textContent = Object.keys(characterColors).length;
+        injectPrompt();
     }
 
     globalThis.DialogueColorsInterceptor = async function(chat, contextSize, abort, type) { if (type !== 'quiet' && settings.enabled) injectPrompt(); };
@@ -295,6 +388,15 @@
     eventSource.on(event_types.GENERATION_AFTER_COMMANDS, () => injectPrompt());
     eventSource.on(event_types.MESSAGE_RECEIVED, onNewMessage);
     eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, onNewMessage);
-    eventSource.on(event_types.CHAT_CHANGED, () => { currentChatId = getChatId(); loadData(); updateCharList(); injectPrompt(); });
+    eventSource.on(event_types.CHAT_CHANGED, () => { 
+        currentChatId = getChatId(); 
+        loadData(); 
+        updateCharList(); 
+        injectPrompt(); 
+        // Auto-scan if no colors saved and setting enabled
+        if (settings.autoScanOnLoad !== false && Object.keys(characterColors).length === 0) {
+            setTimeout(() => { if (document.querySelectorAll('.mes').length) scanAllMessages(); }, 1000);
+        }
+    });
     console.log('Dialogue Colors: Ready!');
 })();
