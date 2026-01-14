@@ -69,8 +69,18 @@
                 const exists = extension_settings.regex.some(r => r.scriptName === REGEX_SCRIPT_NAME);
                 
                 if (!exists) {
+                    const generateUUID = () => {
+                        if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+                            return crypto.randomUUID();
+                        }
+                        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+                            const r = Math.random() * 16 | 0;
+                            return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+                        });
+                    };
+                    
                     const newRegexScript = {
-                        id: crypto.randomUUID(),
+                        id: generateUUID(),
                         scriptName: REGEX_SCRIPT_NAME,
                         findRegex: regexData.findRegex,
                         replaceString: regexData.replaceString,
