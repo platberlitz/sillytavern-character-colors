@@ -5,3 +5,4 @@
 .cc-char-item { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
 .cc-char-item input[type="color"] { width: 24px; height: 24px; padding: 0; border: 1px solid var(--SmartThemeBorderColor); }
 #cc-input-btn:hover { opacity: 1 !important; }
+#dc-ext .checkbox_label input[type="checkbox"] { opacity: 1 !important; position: relative !important; }

@@ -83,7 +83,10 @@
     function getNextColor() {
         const theme = COLOR_THEMES[settings.colorTheme] || COLOR_THEMES.pastel;
         const usedColors = Object.values(characterColors).map(c => c.color);
-        if (cachedIsDark === null) cachedIsDark = detectTheme() === 'dark';
+        if (cachedIsDark === null) {
+            const mode = settings.themeMode === 'auto' ? detectTheme() : settings.themeMode;
+            cachedIsDark = mode === 'dark';
+        }
         const isDark = cachedIsDark;
         for (const [h, s, l] of theme) {
             const adjustedL = isDark ? Math.min(l + 15, 85) : Math.max(l - 15, 35);
@@ -113,6 +116,7 @@
     }
 
     function regenerateAllColors() {
+        invalidateThemeCache();
         const sortedEntries = Object.entries(characterColors).sort((a, b) => (a[1].dialogueCount || 0) - (b[1].dialogueCount || 0));
         const newColors = [];
         sortedEntries.forEach(([key, char]) => {
@@ -246,10 +250,10 @@
     }
 
     function createLegend() {
-        let legend = document.getElementById('dc-legend');
+        let legend = document.getElementById('dc-legend-float');
         if (!legend) {
             legend = document.createElement('div');
-            legend.id = 'dc-legend';
+            legend.id = 'dc-legend-float';
             legend.style.cssText = 'position:fixed;top:60px;right:10px;background:var(--SmartThemeBlurTintColor);border:1px solid var(--SmartThemeBorderColor);border-radius:8px;padding:8px;z-index:9999;font-size:0.8em;max-width:150px;display:none;';
             document.body.appendChild(legend);
         }
