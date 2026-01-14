@@ -147,7 +147,7 @@
             const beforeText = html.substring(Math.max(0, tagStart - 400), tagStart).replace(/<[^>]+>/g, ' ');
             const afterText = html.substring(tagEnd, Math.min(html.length, tagEnd + 150)).replace(/<[^>]+>/g, ' ');
             let speaker = null;
-            const verbs = 'said|says|replied|asked|whispered|yelled|shouted|exclaimed|murmured|muttered|answered|called|cried|chirped|purred|announced|spoke|stated|remarked|commented|explained|declared|demanded|warned|laughed|sighed|groaned|growled|hissed|snapped|screamed|mumbled|breathed|gasped|huffed|scoffed|added|noted|continued|offered';
+            const verbs = 'says?|said|replies?|replied|asks?|asked|whispers?|whispered|yells?|yelled|shouts?|shouted|exclaims?|exclaimed|murmurs?|murmured|mutters?|muttered|answers?|answered|calls?|called|cries?|cried|chirps?|chirped|purrs?|purred|announces?|announced|speaks?|spoke|states?|stated|remarks?|remarked|comments?|commented|explains?|explained|declares?|declared|demands?|demanded|warns?|warned|laughs?|laughed|sighs?|sighed|groans?|groaned|growls?|growled|hisses?|hissed|snaps?|snapped|screams?|screamed|mumbles?|mumbled|breathes?|breathed|gasps?|gasped|huffs?|huffed|scoffs?|scoffed|adds?|added|notes?|noted|continues?|continued|offers?|offered|zips?|zipped|floats?|floated|shoots?|shot';
             const bv = beforeText.match(new RegExp(`([A-Z][a-z]{2,})\\s+(?:${verbs})[,.:]*\\s*["'"「『«]?\\s*$`, 'i'));
             if (bv) speaker = bv[1];
             if (!speaker) { const av = afterText.match(new RegExp(`^["'"」』»]?\\s*([A-Z][a-z]{2,})\\s+(?:${verbs})`, 'i')); if (av) speaker = av[1]; }
