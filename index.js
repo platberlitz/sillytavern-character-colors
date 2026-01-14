@@ -14,8 +14,9 @@
     let sortMode = 'name';
     let searchTerm = '';
     let lastSpeaker = '';
-    let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, minOccurrences: 2, thoughtSymbols: '*', ttsHints: {}, disableNarration: true, autoDeleteUnlocked: true };
+    let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, minOccurrences: 2, thoughtSymbols: '*', ttsHints: {}, disableNarration: true, autoDeleteUnlocked: true, autoLockConsistent: true };
     let messageCounter = 0;
+    let charMessageCounts = {};
     let lastCharKey = null;
 
     const COLOR_THEMES = {
@@ -405,11 +406,26 @@
                 saveData(); 
                 updateCharList(); 
                 injectPrompt(); 
+                
+                // Track message counts per character for auto-lock
+                if (settings.autoLockConsistent) {
+                    Object.keys(characterColors).forEach(k => {
+                        if (!characterColors[k].locked) {
+                            charMessageCounts[k] = (charMessageCounts[k] || 0) + 1;
+                            if (charMessageCounts[k] >= 3) {
+                                characterColors[k].locked = true;
+                            }
+                        }
+                    });
+                }
+                
+                // Auto-delete unlocked after 5 messages
                 if (settings.autoDeleteUnlocked) {
                     messageCounter++;
-                    if (messageCounter >= 3) {
+                    if (messageCounter >= 5) {
                         Object.keys(characterColors).forEach(k => { if (!characterColors[k].locked) delete characterColors[k]; });
                         messageCounter = 0;
+                        charMessageCounts = {};
                         saveData();
                         updateCharList();
                         injectPrompt();
@@ -505,7 +521,8 @@
                 <label class="checkbox_label"><input type="checkbox" id="dc-autoscan"><span>Auto-scan on chat load</span></label>
                 <label class="checkbox_label"><input type="checkbox" id="dc-legend"><span>Show floating legend</span></label>
                 <label class="checkbox_label"><input type="checkbox" id="dc-disable-narration"><span>Disable narration coloring</span></label>
-                <label class="checkbox_label"><input type="checkbox" id="dc-auto-delete"><span>Auto-delete unlocked (every 3 msgs)</span></label>
+                <label class="checkbox_label"><input type="checkbox" id="dc-auto-lock"><span>Auto-lock consistent (3 msgs)</span></label>
+                <label class="checkbox_label"><input type="checkbox" id="dc-auto-delete"><span>Auto-delete unlocked (5 msgs)</span></label>
                 <div style="display:flex;gap:4px;align-items:center;"><label style="width:50px;">Theme:</label><select id="dc-theme" class="text_pole" style="flex:1;"><option value="auto">Auto</option><option value="dark">Dark</option><option value="light">Light</option></select></div>
                 <div style="display:flex;gap:4px;align-items:center;"><label style="width:50px;">Palette:</label><select id="dc-palette" class="text_pole" style="flex:1;"><option value="pastel">Pastel</option><option value="neon">Neon</option><option value="earth">Earth</option><option value="jewel">Jewel</option><option value="muted">Muted</option><option value="jade">Jade</option><option value="forest">Forest</option><option value="ocean">Ocean</option><option value="sunset">Sunset</option><option value="aurora">Aurora</option><option value="warm">Warm</option><option value="cool">Cool</option><option value="berry">Berry</option><option value="monochrome">Monochrome</option><option value="protanopia">Protanopia</option><option value="deuteranopia">Deuteranopia</option><option value="tritanopia">Tritanopia</option></select></div>
                 <div style="display:flex;gap:4px;align-items:center;"><label style="width:50px;" title="Min dialogues before auto-adding">Min:</label><input type="number" id="dc-min-occ" min="1" max="5" value="2" class="text_pole" style="flex:1;"><small style="opacity:0.6;">occurrences</small></div>
@@ -539,6 +556,7 @@
         $('dc-autoscan').checked = settings.autoScanOnLoad !== false; $('dc-autoscan').onchange = e => { settings.autoScanOnLoad = e.target.checked; saveData(); };
         $('dc-legend').checked = settings.showLegend; $('dc-legend').onchange = e => { settings.showLegend = e.target.checked; saveData(); updateLegend(); };
         $('dc-disable-narration').checked = settings.disableNarration !== false; $('dc-disable-narration').onchange = e => { settings.disableNarration = e.target.checked; saveData(); injectPrompt(); };
+        $('dc-auto-lock').checked = settings.autoLockConsistent !== false; $('dc-auto-lock').onchange = e => { settings.autoLockConsistent = e.target.checked; charMessageCounts = {}; saveData(); };
         $('dc-auto-delete').checked = settings.autoDeleteUnlocked !== false; $('dc-auto-delete').onchange = e => { settings.autoDeleteUnlocked = e.target.checked; messageCounter = 0; saveData(); };
         $('dc-theme').value = settings.themeMode; $('dc-theme').onchange = e => { settings.themeMode = e.target.value; invalidateThemeCache(); saveData(); injectPrompt(); };
         $('dc-palette').value = settings.colorTheme; $('dc-palette').onchange = e => { settings.colorTheme = e.target.value; saveData(); };
