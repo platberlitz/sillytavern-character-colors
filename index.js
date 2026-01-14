@@ -2,7 +2,7 @@
     'use strict';
     
     const { extension_settings, saveSettingsDebounced, getContext } = await import('../../../extensions.js');
-    const { eventSource, event_types, setExtensionPrompt } = await import('../../../../script.js');
+    const { eventSource, event_types, setExtensionPrompt, saveCharacterDebounced } = await import('../../../../script.js');
 
     const MODULE_NAME = 'dialogue-colors';
     let characterColors = {};
@@ -296,7 +296,7 @@
             if (!char.data.extensions) char.data.extensions = {};
             char.data.extensions.dialogueColors = { colors: characterColors, settings };
             saveData();
-            try { saveSettingsDebounced?.(); } catch {}
+            saveCharacterDebounced?.();
             toastr?.success?.('Saved to card');
         } catch { toastr?.error?.('Failed to save to card'); }
     }
