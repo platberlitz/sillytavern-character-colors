@@ -16,6 +16,7 @@
     let lastSpeaker = '';
     let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, minOccurrences: 2, thoughtSymbols: '*', ttsHints: {}, disableNarration: true, autoDeleteUnlocked: true };
     let messageCounter = 0;
+    let lastCharKey = null;
 
     const COLOR_THEMES = {
         pastel: [[340,70,75],[200,70,75],[120,50,70],[45,80,70],[280,60,75],[170,60,70],[20,80,75],[240,60,75]],
@@ -587,8 +588,12 @@
     eventSource.on(event_types.MESSAGE_RECEIVED, onNewMessage);
     eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, onNewMessage);
     eventSource.on(event_types.CHAT_CHANGED, () => {
-        loadData();
-        if (!Object.keys(characterColors).length) tryLoadFromCard();
+        const currentCharKey = getCharKey();
+        if (currentCharKey !== lastCharKey) {
+            loadData();
+            if (!Object.keys(characterColors).length) tryLoadFromCard();
+            lastCharKey = currentCharKey;
+        }
         updateCharList();
         injectPrompt();
         if (settings.autoScanOnLoad !== false && !Object.keys(characterColors).length) {
