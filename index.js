@@ -81,11 +81,8 @@
         const ctx = SillyTavern.getContext();
         if (!ctx.setExtensionPrompt) return;
         const prompt = settings.enabled ? buildPromptInstruction() : '';
-        // extension_prompt_types: IN_PROMPT = 0, IN_CHAT = 1, BEFORE_PROMPT = 2, AFTER_PROMPT = 3
-        // Use IN_CHAT with depth 0 to inject at the end of chat (right before generation)
         ctx.setExtensionPrompt(MODULE_NAME, prompt, 1, 0);
         updatePromptPreview(prompt);
-        console.log('Dialogue Colors: Prompt injected:', prompt.substring(0, 50) + '...');
     }
 
     function updatePromptPreview(prompt) {
@@ -93,27 +90,33 @@
         if (preview) preview.textContent = prompt || '(disabled)';
     }
 
-    function detectSpeakerFromText(text, tagStart, tagEnd) {
-        const afterTag = text.substring(tagEnd, Math.min(text.length, tagEnd + 200));
-        const pattern = /,\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+(said|says|replied|replies|answered|asked|whispered|whispers|yelled|yells|shouted|exclaimed|exclaims|added|murmured|muttered|mutters)/i;
-        const match = afterTag.match(pattern);
-        return match ? match[1] : null;
-    }
-
     function scanForColors(element) {
         const mesText = element.querySelector ? element.querySelector('.mes_text') : element;
         if (!mesText) return false;
+        
         const html = mesText.innerHTML;
-        const fontRegex = /<font\s+color=["']?#([a-fA-F0-9]{6})["']?[^>]*>/gi;
+        // Match font tags with colors
+        const fontRegex = /<font\s+color=["']?#([a-fA-F0-9]{6})["']?[^>]*>([\s\S]*?)<\/font>/gi;
         let match, foundNew = false;
+        
         while ((match = fontRegex.exec(html)) !== null) {
             const color = '#' + match[1];
-            const speaker = detectSpeakerFromText(html, match.index, match.index + match[0].length);
-            if (speaker) {
+            const content = match[2];
+            
+            // Look for speaker attribution after the closing tag
+            const afterTag = html.substring(match.index + match[0].length, match.index + match[0].length + 150);
+            
+            // Pattern: "dialogue," Name said/says/etc
+            const attrPattern = /^[^<]*?[,.]?\s*["'"」』»]?\s*([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)?)\s+(said|says|replied|replies|asked|asks|whispered|whispers|yelled|yells|shouted|shouts|exclaimed|exclaims|murmured|murmurs|muttered|mutters|answered|answers|added|adds|called|calls|cried|cries|demanded|demands|groaned|groans|growled|growls|hissed|hisses|laughed|laughs|moaned|moans|mumbled|mumbles|purred|purrs|screamed|screams|sighed|sighs|smiled|smiles|snapped|snaps|sobbed|sobs|spoke|speaks|stammered|stammers|stated|states|stuttered|stutters|teased|teases|thought|thinks|warned|warns|whimpered|whimpers)/i;
+            
+            const attrMatch = afterTag.match(attrPattern);
+            if (attrMatch) {
+                const speaker = attrMatch[1];
                 const key = speaker.toLowerCase();
                 if (!characterColors[key]) {
                     characterColors[key] = { color, name: speaker };
                     foundNew = true;
+                    console.log('Dialogue Colors: Found character:', speaker, color);
                 }
             }
         }
@@ -121,10 +124,24 @@
     }
 
     function scanAllMessages() {
-        document.querySelectorAll('.mes').forEach(m => scanForColors(m));
+        console.log('Dialogue Colors: Scanning all messages...');
+        const messages = document.querySelectorAll('.mes');
+        console.log('Dialogue Colors: Found', messages.length, 'messages');
+        
+        let totalFound = 0;
+        messages.forEach((m, i) => {
+            const found = scanForColors(m);
+            if (found) totalFound++;
+        });
+        
+        console.log('Dialogue Colors: Scan complete. Characters:', Object.keys(characterColors));
         saveData();
         updateCharList();
         injectPrompt();
+        
+        if (typeof toastr !== 'undefined') {
+            toastr.info(`Found ${Object.keys(characterColors).length} characters`);
+        }
     }
 
     function scanLastMessage() {
@@ -206,11 +223,9 @@
         updatePromptPreview(buildPromptInstruction());
     }
 
-    // Generate interceptor - called before each generation
     globalThis.DialogueColorsInterceptor = async function(chat, contextSize, abort, type) {
         if (type === 'quiet') return;
         if (!settings.enabled) return;
-        console.log('Dialogue Colors: Interceptor called, injecting prompt');
         injectPrompt();
     };
 
@@ -229,17 +244,9 @@
         }, 500);
 
         if (typeof eventSource !== 'undefined' && typeof event_types !== 'undefined') {
-            // These events fire before generation
-            eventSource.on(event_types.GENERATION_AFTER_COMMANDS, () => {
-                console.log('Dialogue Colors: GENERATION_AFTER_COMMANDS');
-                injectPrompt();
-            });
-            
-            // Scan after message received
+            eventSource.on(event_types.GENERATION_AFTER_COMMANDS, () => injectPrompt());
             eventSource.on(event_types.MESSAGE_RECEIVED, onNewMessage);
             eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, onNewMessage);
-            
-            // Handle chat switch
             eventSource.on(event_types.CHAT_CHANGED, () => {
                 currentChatId = getChatId();
                 loadData();
