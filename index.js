@@ -232,8 +232,7 @@
         const aliases = Object.entries(characterColors).filter(([,v]) => v.aliases?.length).map(([,v]) => `${v.name}/${v.aliases.join('/')}`).join('; ');
         let thoughts = '';
         if (settings.thoughtSymbols) {
-            const symbols = settings.thoughtSymbols.split('').map(s => `'${s}'`).join(' or ');
-            thoughts = ` Inner thoughts (text wrapped in ${symbols}) must also be wrapped in <font color=...> tags using the current speaker's color, including the ${symbols} symbols themselves.`;
+            thoughts = ` Inner thoughts (text wrapped in ${settings.thoughtSymbols}) must also be wrapped in <font color=...> tags using the current speaker's color, including the ${settings.thoughtSymbols} symbols themselves.`;
         }
         const narratorRule = settings.disableNarration ? '' : (settings.narratorColor ? `Narrator: ${settings.narratorColor}.` : '');
         return `[Font Color Rule: Wrap dialogue in <font color=#RRGGBB> tags. ${themeHint} ${colorList ? `ASSIGNED: ${colorList}.` : ''} ${aliases ? `ALIASES: ${aliases}.` : ''} ${narratorRule} ${thoughts} ${settings.highlightMode ? 'Also add background highlight.' : ''} Always assign a unique color to any new character that doesn't have one yet. Consistent colors per character.]`;
