@@ -2,7 +2,7 @@
     'use strict';
     
     const { extension_settings, saveSettingsDebounced, getContext } = await import('../../../extensions.js');
-    const { eventSource, event_types, setExtensionPrompt, saveCharacterDebounced } = await import('../../../../script.js');
+    const { eventSource, event_types, setExtensionPrompt, saveCharacterDebounced, getCharacters } = await import('../../../../script.js');
 
     const MODULE_NAME = 'dialogue-colors';
     let characterColors = {};
@@ -305,11 +305,26 @@
     function loadFromCard() {
         try {
             const ctx = getContext();
-            const char = ctx?.characters?.[ctx?.characterId];
-            const data = char?.data?.extensions?.dialogueColors;
-            if (data?.colors) { characterColors = data.colors; if (data.settings) Object.assign(settings, data.settings); saveHistory(); saveData(); updateCharList(); injectPrompt(); toastr?.success?.('Loaded from card'); }
-            else toastr?.info?.('No saved colors in card');
+            const charId = ctx?.characterId;
+            if (charId === undefined) { toastr?.error?.('No character loaded'); return; }
+            
+            getCharacters?.().then(() => {
+                const char = ctx?.characters?.[charId];
+                const data = char?.data?.extensions?.dialogueColors;
+                if (data?.colors) { 
+                    characterColors = data.colors; 
+                    if (data.settings) Object.assign(settings, data.settings); 
+                    saveHistory(); 
+                    saveData(); 
+                    updateCharList(); 
+                    injectPrompt(); 
+                    toastr?.success?.('Loaded from card'); 
+                } else {
+                    toastr?.info?.('No saved colors in card');
+                }
+            }).catch(() => toastr?.error?.('Failed to reload character'));
         } catch { toastr?.error?.('Failed to load from card'); }
+    }
     }
 
     function tryLoadFromCard() {
