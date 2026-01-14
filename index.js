@@ -494,7 +494,7 @@
                 <div style="display:flex;gap:4px;"><button id="dc-regen" class="menu_button" style="flex:1;" title="Regenerate all colors">Regen</button><button id="dc-save-preset" class="menu_button" style="flex:1;" title="Save color preset">Preset↓</button><button id="dc-load-preset" class="menu_button" style="flex:1;" title="Load color preset">Preset↑</button></div>
                 <div style="display:flex;gap:4px;"><button id="dc-export" class="menu_button" style="flex:1;">Export</button><button id="dc-import" class="menu_button" style="flex:1;">Import</button></div>
                 <div style="display:flex;gap:4px;"><button id="dc-card" class="menu_button" style="flex:1;" title="Add from card">+Card</button><button id="dc-save-card" class="menu_button" style="flex:1;" title="Save to card">Save→Card</button><button id="dc-load-card" class="menu_button" style="flex:1;" title="Load from card">Card→Load</button></div>
-                <div style="display:flex;gap:4px;"><button id="dc-del-locked" class="menu_button" style="flex:1;" title="Delete all locked characters">DelLocked</button><button id="dc-reset" class="menu_button" style="flex:1;" title="Reset to default colors">Reset</button></div>
+                <div style="display:flex;gap:4px;"><button id="dc-del-locked" class="menu_button" style="flex:1;" title="Delete all locked characters">DelLocked</button><button id="dc-del-unlocked" class="menu_button" style="flex:1;" title="Delete all unlocked characters">DelUnlocked</button><button id="dc-reset" class="menu_button" style="flex:1;" title="Reset to default colors">Reset</button></div>
                 <input type="file" id="dc-import-file" accept=".json" style="display:none;">
                 <div style="display:flex;gap:4px;"><input type="text" id="dc-search" placeholder="Search characters..." class="text_pole" style="flex:1;padding:3px;"></div>
                 <div style="display:flex;gap:4px;align-items:center;"><label>Sort:</label><select id="dc-sort" class="text_pole" style="flex:1;"><option value="name">Name</option><option value="count">Dialogue Count</option></select></div>
@@ -537,6 +537,7 @@
         $('dc-import').onclick = () => $('dc-import-file').click();
         $('dc-import-file').onchange = e => { if (e.target.files[0]) importColors(e.target.files[0]); };
         $('dc-del-locked').onclick = () => { let count = 0; Object.keys(characterColors).forEach(k => { if (characterColors[k].locked) { delete characterColors[k]; count++; } }); saveHistory(); saveData(); injectPrompt(); updateCharList(); toastr?.info?.(`Deleted ${count} locked characters`); };
+        $('dc-del-unlocked').onclick = () => { let count = 0; Object.keys(characterColors).forEach(k => { if (!characterColors[k].locked) { delete characterColors[k]; count++; } }); saveHistory(); saveData(); injectPrompt(); updateCharList(); toastr?.info?.(`Deleted ${count} unlocked characters`); };
         $('dc-reset').onclick = () => { if (confirm('Reset all colors?')) { Object.values(characterColors).forEach(c => { if (!c.locked) c.color = getNextColor(); }); saveHistory(); saveData(); updateCharList(); injectPrompt(); } };
         $('dc-search').oninput = e => { searchTerm = e.target.value; updateCharList(); };
         $('dc-sort').onchange = e => { sortMode = e.target.value; updateCharList(); };
