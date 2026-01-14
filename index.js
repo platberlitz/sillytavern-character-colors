@@ -81,9 +81,11 @@
         const ctx = SillyTavern.getContext();
         if (!ctx.setExtensionPrompt) return;
         const prompt = settings.enabled ? buildPromptInstruction() : '';
-        // position 1 = after main prompt, depth 0 = at the end of system prompt area
-        ctx.setExtensionPrompt(MODULE_NAME, prompt, 1, 0, false, 0);
+        // extension_prompt_types: IN_PROMPT = 0, IN_CHAT = 1, BEFORE_PROMPT = 2, AFTER_PROMPT = 3
+        // Use IN_CHAT with depth 0 to inject at the end of chat (right before generation)
+        ctx.setExtensionPrompt(MODULE_NAME, prompt, 1, 0);
         updatePromptPreview(prompt);
+        console.log('Dialogue Colors: Prompt injected:', prompt.substring(0, 50) + '...');
     }
 
     function updatePromptPreview(prompt) {
@@ -204,7 +206,16 @@
         updatePromptPreview(buildPromptInstruction());
     }
 
+    // Generate interceptor - called before each generation
+    globalThis.DialogueColorsInterceptor = async function(chat, contextSize, abort, type) {
+        if (type === 'quiet') return;
+        if (!settings.enabled) return;
+        console.log('Dialogue Colors: Interceptor called, injecting prompt');
+        injectPrompt();
+    };
+
     function init() {
+        console.log('Dialogue Colors: Initializing...');
         currentChatId = getChatId();
         loadData();
         ensureRegexScript();
@@ -218,12 +229,16 @@
         }, 500);
 
         if (typeof eventSource !== 'undefined' && typeof event_types !== 'undefined') {
-            // Inject before generation starts
-            eventSource.on(event_types.GENERATION_AFTER_COMMANDS, () => injectPrompt());
-            eventSource.on(event_types.GENERATE_BEFORE_COMBINE_PROMPTS, () => injectPrompt());
+            // These events fire before generation
+            eventSource.on(event_types.GENERATION_AFTER_COMMANDS, () => {
+                console.log('Dialogue Colors: GENERATION_AFTER_COMMANDS');
+                injectPrompt();
+            });
+            
             // Scan after message received
             eventSource.on(event_types.MESSAGE_RECEIVED, onNewMessage);
             eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, onNewMessage);
+            
             // Handle chat switch
             eventSource.on(event_types.CHAT_CHANGED, () => {
                 currentChatId = getChatId();
