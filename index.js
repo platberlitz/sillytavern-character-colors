@@ -193,7 +193,7 @@
         const mesText = element.querySelector ? element.querySelector('.mes_text') : element;
         if (!mesText) return false;
         
-        const pronouns = new Set(['she','he','they','it','i','you','we','her','him','them','his','hers','its','their','theirs','one','someone','anyone','everyone','nobody','somebody','anybody','everybody','the','a','an','this','that','these','those']);
+        const pronouns = new Set(['she','he','they','it','i','you','we','her','him','them','his','hers','its','their','theirs','one','someone','anyone','everyone','nobody','somebody','anybody','everybody','the','a','an','this','that','these','those','what','who','where','when','why','how']);
         const html = mesText.innerHTML;
         const fontRegex = /<font\s+color=["']?#([a-fA-F0-9]{6})["']?[^>]*>([\s\S]*?)<\/font>/gi;
         let match, foundNew = false;
@@ -203,20 +203,39 @@
             const tagStart = match.index;
             const tagEnd = match.index + match[0].length;
             
-            const beforeTag = html.substring(Math.max(0, tagStart - 200), tagStart);
-            const afterTag = html.substring(tagEnd, Math.min(html.length, tagEnd + 150));
-            const verbPattern = '(?:said|says|replied|replies|asked|asks|whispered|whispers|yelled|yells|shouted|shouts|exclaimed|exclaims|murmured|murmurs|muttered|mutters|answered|answers|added|adds|called|calls|cried|cries|chirped|chirps|purred|purrs|projects|projected|announced|announces|continued|continues|began|begins|started|starts|spoke|speaks|stated|states|remarked|remarks|noted|notes|observed|observes|commented|comments|mentioned|mentions|explained|explains|declared|declares|suggested|suggests|offered|offers|admitted|admits|agreed|agrees|argued|argues|insisted|insists|demanded|demands|warned|warns|promised|promises|threatened|threatens|teased|teases|joked|jokes|laughed|laughs|giggled|giggles|chuckled|chuckles|sighed|sighs|groaned|groans|moaned|moans|growled|growls|hissed|hisses|snapped|snaps|barked|barks|screamed|screams|mumbled|mumbles|stammered|stammers|stuttered|stutters)';
+            const beforeTag = html.substring(Math.max(0, tagStart - 300), tagStart);
+            const afterTag = html.substring(tagEnd, Math.min(html.length, tagEnd + 200));
             
-            const beforePattern = new RegExp(`([A-Z][a-zA-Z]+(?:\\s+[A-Z][a-zA-Z]+)?)\\s+${verbPattern}[,.:]\\s*["'"「『«]?\\s*$`, 'i');
-            const afterPattern = new RegExp(`^[^<]*?[,.]?\\s*["'"」』»]?\\s*([A-Z][a-zA-Z]+(?:\\s+[A-Z][a-zA-Z]+)?)\\s+${verbPattern}`, 'i');
+            let speaker = null;
             
-            let speaker = beforeTag.match(beforePattern)?.[1] || afterTag.match(afterPattern)?.[1];
+            // Pattern 1: "Name verb," before dialogue (Name said, "...")
+            const beforeVerb = beforeTag.match(/([A-Z][a-zA-Z]+(?:'s)?)\s+(?:said|says|replied|replies|asked|asks|whispered|whispers|yelled|yells|shouted|shouts|exclaimed|exclaims|murmured|murmurs|muttered|mutters|answered|answers|added|adds|called|calls|cried|cries|chirped|chirps|purred|purrs|projected|projects|announced|announces|continued|continues|began|begins|started|starts|spoke|speaks|stated|states|remarked|remarks|noted|notes|observed|observes|commented|comments|mentioned|mentions|explained|explains|declared|declares|suggested|suggests|offered|offers|admitted|admits|agreed|agrees|argued|argues|insisted|insists|demanded|demands|warned|warns|promised|promises|threatened|threatens|teased|teases|joked|jokes|laughed|laughs|giggled|giggles|chuckled|chuckles|sighed|sighs|groaned|groans|moaned|moans|growled|growls|hissed|hisses|snapped|snaps|barked|barks|screamed|screams|mumbled|mumbles|stammered|stammers|stuttered|stutters|breathed|breathes|gasped|gasps|huffed|huffs|scoffed|scoffs|sneered|sneers|smirked|smirks|grinned|grins|frowned|frowns|nodded|nods|shrugged|shrugs)[,.:;]?\s*["'"「『«]?\s*$/i);
+            if (beforeVerb) speaker = beforeVerb[1].replace(/'s$/, '');
             
-            if (speaker && !pronouns.has(speaker.toLowerCase())) {
+            // Pattern 2: "..." Name verb (after dialogue)
+            if (!speaker) {
+                const afterVerb = afterTag.match(/^["'"」』»]?[,.]?\s*([A-Z][a-zA-Z]+(?:'s)?)\s+(?:said|says|replied|replies|asked|asks|whispered|whispers|yelled|yells|shouted|shouts|exclaimed|exclaims|murmured|murmurs|muttered|mutters|answered|answers|added|adds|called|calls|cried|cries|chirped|chirps|purred|purrs|projected|projects|announced|announces|continued|continues|began|begins|started|starts|spoke|speaks|stated|states|remarked|remarks|noted|notes|observed|observes|commented|comments|mentioned|mentions|explained|explains|declared|declares|suggested|suggests|offered|offers|admitted|admits|agreed|agrees|argued|argues|insisted|insists|demanded|demands|warned|warns|promised|promises|threatened|threatens|teased|teases|joked|jokes|laughed|laughs|giggled|giggles|chuckled|chuckles|sighed|sighs|groaned|groans|moaned|moans|growled|growls|hissed|hisses|snapped|snaps|barked|barks|screamed|screams|mumbled|mumbles|stammered|stammers|stuttered|stutters|breathed|breathes|gasped|gasps|huffed|huffs|scoffed|scoffs|sneered|sneers|smirked|smirks|grinned|grins|frowned|frowns|nodded|nods|shrugged|shrugs)/i);
+                if (afterVerb) speaker = afterVerb[1].replace(/'s$/, '');
+            }
+            
+            // Pattern 3: Name + action before quote (Kaveh startles, ... "text")
+            if (!speaker) {
+                const nameAction = beforeTag.match(/([A-Z][a-zA-Z]+)\s+[a-z]+(?:s|es|ed|ing)?\b[^.!?]*?["'"「『«]\s*$/i);
+                if (nameAction) speaker = nameAction[1];
+            }
+            
+            // Pattern 4: Paragraph starts with Name (Name's voice... "text")
+            if (!speaker) {
+                const paraStart = beforeTag.match(/(?:^|[.!?]\s+|<br\s*\/?>|<\/p>)\s*([A-Z][a-zA-Z]+)(?:'s)?\s+[a-z]/i);
+                if (paraStart) speaker = paraStart[1];
+            }
+            
+            if (speaker && !pronouns.has(speaker.toLowerCase()) && speaker.length > 1) {
                 const key = speaker.toLowerCase();
                 if (!characterColors[key]) {
                     characterColors[key] = { color, name: speaker };
                     foundNew = true;
+                    console.log('Dialogue Colors: Found', speaker, color);
                 }
             }
         }
@@ -241,11 +260,11 @@
         setTimeout(() => {
             const messages = document.querySelectorAll('.mes');
             if (messages.length === 0) return;
-            if (scanForColors(messages[messages.length - 1])) {
-                saveData();
-                updateCharList();
-            }
+            const foundNew = scanForColors(messages[messages.length - 1]);
+            saveData();
+            updateCharList();
             injectPrompt();
+            if (foundNew) console.log('Dialogue Colors: New character detected');
         }, 600);
     }
 
