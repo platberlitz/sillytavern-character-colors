@@ -250,6 +250,21 @@
         rightArea.insertBefore(btn, rightArea.firstChild);
     }
 
+    function hookSendButton() {
+        const observer = new MutationObserver(() => {
+            const sendBtn = document.getElementById('send_but') || document.querySelector('#send_form button[type="submit"]');
+            if (sendBtn && !sendBtn.dataset.ccHooked) {
+                sendBtn.dataset.ccHooked = 'true';
+                sendBtn.addEventListener('click', () => {
+                    console.log('CC: Send button clicked, injecting prompt');
+                    injectPrompt();
+                }, { capture: true });
+            }
+        });
+        
+        observer.observe(document.body, { childList: true, subtree: true });
+    }
+
     function createUI() {
         if (document.getElementById('cc-ext')) return;
         
@@ -347,6 +362,7 @@
             if (document.getElementById('send_form')) {
                 clearInterval(btnWait);
                 addInputButton();
+                hookSendButton();
             }
         }, 500);
         
@@ -361,6 +377,13 @@
                 injectPrompt();
             });
             
+            if (event_types.GENERATE_AFTER_INJECT) {
+                eventSource.on(event_types.GENERATE_AFTER_INJECT, () => {
+                    console.log('CC: GENERATE_AFTER_INJECT event');
+                    injectPrompt();
+                });
+            }
+            
             eventSource.on(event_types.MESSAGE_RECEIVED, () => {
                 setTimeout(scanMessagesForColors, 500);
             });
@@ -372,7 +395,22 @@
                 updateCharList();
                 setTimeout(injectPrompt, 500);
             });
+            
+            eventSource.on(event_types.USER_MESSAGE_RENDERED, () => {
+                if (settings.enabled) setTimeout(applyDisplayColors, 300);
+            });
         }
+        
+        setInterval(() => {
+            if (settings.enabled) applyDisplayColors();
+        }, 3000);
+        
+        setInterval(() => {
+            if (settings.enabled && typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
+                injectPrompt();
+            }
+        }, 5000);
+    }
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
