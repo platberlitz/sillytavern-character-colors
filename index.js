@@ -117,7 +117,7 @@
             ? `Use these colors: ${Object.entries(characterColors).map(([k, v]) => `${v.name}=${v.color}`).join(', ')}. `
             : '';
         
-        return `<font color rule: Wrap ALL dialogue ("text") and thoughts (*text*) in <font color=#RRGGBB> tags. ${themeHint} ${colorList}Keep the SAME color for each character. Use novel-style narrative format (e.g., "<font color=#abc123>Hello,</font> John said). Do NOT use "Name:" format before dialogue.`;
+        return `<font color rule: Wrap ALL dialogue ("text") and thoughts (*text*) in <font color=#RRGGBB> tags. ${themeHint} ${colorList}Maintain internal tracking of which color belongs to which character throughout this conversation - treat this as ephemeral memory (like author's notes). Use the SAME color consistently for each character you've assigned colors to.`;
     }
 
     function injectPrompt() {
