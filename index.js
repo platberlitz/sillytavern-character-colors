@@ -155,16 +155,17 @@
     function onNewMessage() {
         if (!settings.enabled) return;
         setTimeout(() => {
-            if (isEstablished) {
-                scanLastMessage();
-            } else {
-                scanAllMessages();
-                if (Object.keys(characterColors).length >= 2) {
-                    isEstablished = true;
-                    saveData();
-                }
+            const messages = document.querySelectorAll('.mes');
+            if (messages.length === 0) return;
+            
+            const foundNew = scanForColors(messages[messages.length - 1]);
+            if (foundNew) {
+                console.log('Dialogue Colors: New character found in last message');
+                saveData();
+                updateCharList();
             }
-        }, 500);
+            injectPrompt();
+        }, 600);
     }
 
     function updateCharList() {
