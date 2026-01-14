@@ -193,7 +193,7 @@
         const mesText = element.querySelector ? element.querySelector('.mes_text') : element;
         if (!mesText) return false;
         
-        const blocklist = new Set(['she','he','they','it','i','you','we','her','him','them','his','hers','its','their','theirs','one','someone','anyone','everyone','nobody','somebody','anybody','everybody','the','a','an','this','that','these','those','what','who','where','when','why','how','something','nothing','everything','anything','dark','light','through','between','around','behind','before','after','during','and','but','or','nor','for','yet','so','if','then','than','because','while','his','your','my','our','their','some','any','no','every','each','all','both','few','many','most','other','another','such','only','own','same','well','much','more','less','first','last','next','new','old','good','great','little','big','small','long','short','high','low','right','left','hand','hands','eyes','face','head','voice','door','room','way','time','day','night','world','man','woman','people','thing','place','despite','still','just','even','also','very','too','quite','rather','really','almost','already','always','never','often','sometimes','here','there','now','today','soon','later','again','back','away','down','out','off']);
+        const blocklist = new Set(['she','he','they','it','i','you','we','her','him','them','his','hers','its','their','theirs','one','someone','anyone','everyone','nobody','somebody','anybody','everybody','the','a','an','this','that','these','those','what','who','where','when','why','how','something','nothing','everything','anything','dark','light','through','between','around','behind','before','after','during','and','but','or','nor','for','yet','so','if','then','than','because','while','your','my','our','their','some','any','no','every','each','all','both','few','many','most','other','another','such','only','own','same','well','much','more','less','first','last','next','new','old','good','great','little','big','small','long','short','high','low','right','left','hand','hands','eyes','face','head','voice','door','room','way','time','day','night','world','man','woman','people','thing','place','despite','still','just','even','also','very','too','quite','rather','really','almost','already','always','never','often','sometimes','here','there','now','today','soon','later','again','back','away','down','out','off','let','secret','papers','three','two','being','look','want','need','know','think','see','come','go','get','make','take','give','find','tell','ask','use','seem','leave','call','keep','put','mean','become','begin','feel','try','start','show','hear','play','run','move','live','believe','hold','bring','happen','write','sit','stand','lose','pay','meet','include','continue','set','learn','change','lead','understand','watch','follow','stop','create','speak','read','spend','grow','open','walk','win','teach','offer','remember','consider','appear','buy','wait','serve','die','send','build','stay','fall','cut','reach','kill','remain','suggest','raise','pass','sell','require','report','decide','pull']);
         
         const html = mesText.innerHTML;
         const fontRegex = /<font\s+color=["']?#([a-fA-F0-9]{6})["']?[^>]*>([\s\S]*?)<\/font>/gi;
@@ -204,29 +204,32 @@
             const tagStart = match.index;
             const tagEnd = match.index + match[0].length;
             
-            const beforeTag = html.substring(Math.max(0, tagStart - 300), tagStart);
-            const afterTag = html.substring(tagEnd, Math.min(html.length, tagEnd + 150));
+            // Get text before, strip HTML tags for cleaner parsing
+            const beforeHtml = html.substring(Math.max(0, tagStart - 400), tagStart);
+            const beforeText = beforeHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+            const afterHtml = html.substring(tagEnd, Math.min(html.length, tagEnd + 150));
+            const afterText = afterHtml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
             
             let speaker = null;
             
             // Method 1: "Name said," pattern before dialogue
-            const beforeVerb = beforeTag.match(/([A-Z][a-z]{2,})\s+(?:said|says|replied|replies|asked|asks|whispered|whispers|yelled|yells|shouted|shouts|exclaimed|exclaims|murmured|murmurs|muttered|mutters|answered|answers|called|calls|cried|cries|chirped|chirps|purred|purrs|announced|announces|spoke|speaks|stated|states|remarked|remarks|commented|comments|explained|explains|declared|declares|demanded|demands|warned|warns|laughed|laughs|sighed|sighs|groaned|groans|growled|growls|hissed|hisses|snapped|snaps|screamed|screams|mumbled|mumbles|breathed|breathes|gasped|gasps|huffed|huffs|scoffed|scoffs|offers|offered)[,.:]*\s*["'"「『«]?\s*$/i);
+            const beforeVerb = beforeText.match(/([A-Z][a-z]{2,})\s+(?:said|says|replied|replies|asked|asks|whispered|whispers|yelled|yells|shouted|shouts|exclaimed|exclaims|murmured|murmurs|muttered|mutters|answered|answers|called|calls|cried|cries|chirped|chirps|purred|purrs|announced|announces|spoke|speaks|stated|states|remarked|remarks|commented|comments|explained|explains|declared|declares|demanded|demands|warned|warns|laughed|laughs|sighed|sighs|groaned|groans|growled|growls|hissed|hisses|snapped|snaps|screamed|screams|mumbled|mumbles|breathed|breathes|gasped|gasps|huffed|huffs|scoffed|scoffs|offers|offered|adds|added|notes|noted|continues|continued)[,.:]*\s*["'"「『«]?\s*$/i);
             if (beforeVerb) speaker = beforeVerb[1];
             
             // Method 2: "..." Name said pattern after dialogue
             if (!speaker) {
-                const afterVerb = afterTag.match(/^["'"」』»]?[,.]?\s*([A-Z][a-z]{2,})\s+(?:said|says|replied|replies|asked|asks|whispered|whispers|yelled|yells|shouted|shouts|exclaimed|exclaims|murmured|murmurs|muttered|mutters|answered|answers|called|calls|cried|cries|chirped|chirps|purred|purrs|announced|announces|spoke|speaks|stated|states|remarked|remarks|commented|comments|explained|explains|declared|declares|demanded|demands|warned|warns|laughed|laughs|sighed|sighs|groaned|groans|growled|growls|hissed|hisses|snapped|snaps|screamed|screams|mumbled|mumbles|breathed|breathes|gasped|gasps|huffed|huffs|scoffed|scoffs|offers|offered)/i);
+                const afterVerb = afterText.match(/^["'"」』»]?\s*([A-Z][a-z]{2,})\s+(?:said|says|replied|replies|asked|asks|whispered|whispers|yelled|yells|shouted|shouts|exclaimed|exclaims|murmured|murmurs|muttered|mutters|answered|answers|called|calls|cried|cries|chirped|chirps|purred|purrs|announced|announces|spoke|speaks|stated|states|remarked|remarks|commented|comments|explained|explains|declared|declares|demanded|demands|warned|warns|laughed|laughs|sighed|sighs|groaned|groans|growled|growls|hissed|hisses|snapped|snaps|screamed|screams|mumbled|mumbles|breathed|breathes|gasped|gasps|huffed|huffs|scoffed|scoffs|offers|offered|adds|added|notes|noted|continues|continued)/i);
                 if (afterVerb) speaker = afterVerb[1];
             }
             
-            // Method 3: Find Name at start of sentence before dialogue (handles "Kaveh startles. <font>")
+            // Method 3: Find Name at start of recent sentence (last 2 sentences before dialogue)
             if (!speaker) {
-                // Look for last sentence that starts with a capitalized name
-                const sentences = beforeTag.split(/(?<=[.!?])\s+/);
-                for (let i = sentences.length - 1; i >= 0 && i >= sentences.length - 3; i--) {
-                    const sentenceMatch = sentences[i].match(/^([A-Z][a-z]{2,})\s+[a-z]/);
-                    if (sentenceMatch && !blocklist.has(sentenceMatch[1].toLowerCase())) {
-                        speaker = sentenceMatch[1];
+                const sentences = beforeText.split(/[.!?]+\s*/);
+                for (let i = sentences.length - 1; i >= Math.max(0, sentences.length - 2); i--) {
+                    const s = sentences[i].trim();
+                    const nameMatch = s.match(/^([A-Z][a-z]{2,})\b/);
+                    if (nameMatch && !blocklist.has(nameMatch[1].toLowerCase())) {
+                        speaker = nameMatch[1];
                         break;
                     }
                 }
