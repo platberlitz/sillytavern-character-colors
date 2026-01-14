@@ -193,44 +193,36 @@
         const mesText = element.querySelector ? element.querySelector('.mes_text') : element;
         if (!mesText) return false;
         
-        const pronouns = new Set(['she','he','they','it','i','you','we','her','him','them','his','hers','its','their','theirs','one','someone','anyone','everyone','nobody','somebody','anybody','everybody','the','a','an','this','that','these','those','what','who','where','when','why','how']);
+        // Common words that aren't character names
+        const blocklist = new Set(['she','he','they','it','i','you','we','her','him','them','his','hers','its','their','theirs','one','someone','anyone','everyone','nobody','somebody','anybody','everybody','the','a','an','this','that','these','those','what','who','where','when','why','how','something','nothing','everything','anything','dark','light','secret','puzzle','toward','towards','about','over','overs','under','through','between','around','behind','before','after','during','and','but','or','nor','for','yet','so','if','then','than','because','although','though','while','unless','until','since','once','where','wherever','whereas','whether','which','whatever','whichever','whoever','however','moreover','furthermore','therefore','thus','hence','accordingly','consequently','meanwhile','nonetheless','nevertheless','otherwise','instead','regardless','despite','beyond','within','without','upon','onto','into','from','with','trembling','housemates','ied','cks','th','to']);
+        
         const html = mesText.innerHTML;
         const fontRegex = /<font\s+color=["']?#([a-fA-F0-9]{6})["']?[^>]*>([\s\S]*?)<\/font>/gi;
         let match, foundNew = false;
+        
+        const speechVerbs = 'said|says|replied|replies|asked|asks|whispered|whispers|yelled|yells|shouted|shouts|exclaimed|exclaims|murmured|murmurs|muttered|mutters|answered|answers|added|adds|called|calls|cried|cries|chirped|chirps|purred|purrs|projected|projects|announced|announces|continued|continues|spoke|speaks|stated|states|remarked|remarks|noted|notes|commented|comments|explained|explains|declared|declares|demanded|demands|warned|warns|teased|teases|laughed|laughs|sighed|sighs|groaned|groans|growled|growls|hissed|hisses|snapped|snaps|screamed|screams|mumbled|mumbles|breathed|breathes|gasped|gasps|huffed|huffs|scoffed|scoffs';
         
         while ((match = fontRegex.exec(html)) !== null) {
             const color = '#' + match[1];
             const tagStart = match.index;
             const tagEnd = match.index + match[0].length;
             
-            const beforeTag = html.substring(Math.max(0, tagStart - 300), tagStart);
-            const afterTag = html.substring(tagEnd, Math.min(html.length, tagEnd + 200));
+            const beforeTag = html.substring(Math.max(0, tagStart - 200), tagStart);
+            const afterTag = html.substring(tagEnd, Math.min(html.length, tagEnd + 150));
             
             let speaker = null;
             
-            // Pattern 1: "Name verb," before dialogue (Name said, "...")
-            const beforeVerb = beforeTag.match(/([A-Z][a-zA-Z]+(?:'s)?)\s+(?:said|says|replied|replies|asked|asks|whispered|whispers|yelled|yells|shouted|shouts|exclaimed|exclaims|murmured|murmurs|muttered|mutters|answered|answers|added|adds|called|calls|cried|cries|chirped|chirps|purred|purrs|projected|projects|announced|announces|continued|continues|began|begins|started|starts|spoke|speaks|stated|states|remarked|remarks|noted|notes|observed|observes|commented|comments|mentioned|mentions|explained|explains|declared|declares|suggested|suggests|offered|offers|admitted|admits|agreed|agrees|argued|argues|insisted|insists|demanded|demands|warned|warns|promised|promises|threatened|threatens|teased|teases|joked|jokes|laughed|laughs|giggled|giggles|chuckled|chuckles|sighed|sighs|groaned|groans|moaned|moans|growled|growls|hissed|hisses|snapped|snaps|barked|barks|screamed|screams|mumbled|mumbles|stammered|stammers|stuttered|stutters|breathed|breathes|gasped|gasps|huffed|huffs|scoffed|scoffs|sneered|sneers|smirked|smirks|grinned|grins|frowned|frowns|nodded|nods|shrugged|shrugs)[,.:;]?\s*["'"「『«]?\s*$/i);
-            if (beforeVerb) speaker = beforeVerb[1].replace(/'s$/, '');
+            // Pattern 1: Name said, "..." (strict - must have speech verb right before quote)
+            const beforeVerb = beforeTag.match(new RegExp(`([A-Z][a-z]+)\\s+(?:${speechVerbs})[,.:]*\\s*["'"「『«]?\\s*$`, 'i'));
+            if (beforeVerb) speaker = beforeVerb[1];
             
-            // Pattern 2: "..." Name verb (after dialogue)
+            // Pattern 2: "..." Name said (strict - speech verb right after name)
             if (!speaker) {
-                const afterVerb = afterTag.match(/^["'"」』»]?[,.]?\s*([A-Z][a-zA-Z]+(?:'s)?)\s+(?:said|says|replied|replies|asked|asks|whispered|whispers|yelled|yells|shouted|shouts|exclaimed|exclaims|murmured|murmurs|muttered|mutters|answered|answers|added|adds|called|calls|cried|cries|chirped|chirps|purred|purrs|projected|projects|announced|announces|continued|continues|began|begins|started|starts|spoke|speaks|stated|states|remarked|remarks|noted|notes|observed|observes|commented|comments|mentioned|mentions|explained|explains|declared|declares|suggested|suggests|offered|offers|admitted|admits|agreed|agrees|argued|argues|insisted|insists|demanded|demands|warned|warns|promised|promises|threatened|threatens|teased|teases|joked|jokes|laughed|laughs|giggled|giggles|chuckled|chuckles|sighed|sighs|groaned|groans|moaned|moans|growled|growls|hissed|hisses|snapped|snaps|barked|barks|screamed|screams|mumbled|mumbles|stammered|stammers|stuttered|stutters|breathed|breathes|gasped|gasps|huffed|huffs|scoffed|scoffs|sneered|sneers|smirked|smirks|grinned|grins|frowned|frowns|nodded|nods|shrugged|shrugs)/i);
-                if (afterVerb) speaker = afterVerb[1].replace(/'s$/, '');
+                const afterVerb = afterTag.match(new RegExp(`^["'"」』»]?[,.]?\\s*([A-Z][a-z]+)\\s+(?:${speechVerbs})`, 'i'));
+                if (afterVerb) speaker = afterVerb[1];
             }
             
-            // Pattern 3: Name + action before quote (Kaveh startles, ... "text")
-            if (!speaker) {
-                const nameAction = beforeTag.match(/([A-Z][a-zA-Z]+)\s+[a-z]+(?:s|es|ed|ing)?\b[^.!?]*?["'"「『«]\s*$/i);
-                if (nameAction) speaker = nameAction[1];
-            }
-            
-            // Pattern 4: Paragraph starts with Name (Name's voice... "text")
-            if (!speaker) {
-                const paraStart = beforeTag.match(/(?:^|[.!?]\s+|<br\s*\/?>|<\/p>)\s*([A-Z][a-zA-Z]+)(?:'s)?\s+[a-z]/i);
-                if (paraStart) speaker = paraStart[1];
-            }
-            
-            if (speaker && !pronouns.has(speaker.toLowerCase()) && speaker.length > 1) {
+            if (speaker && !blocklist.has(speaker.toLowerCase()) && speaker.length >= 3) {
                 const key = speaker.toLowerCase();
                 if (!characterColors[key]) {
                     characterColors[key] = { color, name: speaker };
