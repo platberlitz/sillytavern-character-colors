@@ -37,6 +37,9 @@
         deuteranopia: [[45,80,60],[220,80,55],[280,60,65],[30,90,55],[200,70,50],[320,50,60],[60,70,55],[240,70,60]],
         tritanopia: [[0,70,60],[180,70,55],[330,60,65],[20,80,55],[200,60,50],[350,50,60],[160,70,55],[10,70,60]]
     };
+    let cachedTheme = null;
+    let cachedIsDark = null;
+    let injectDebouncedTimer = null;
 
     function hslToHex(h, s, l) {
         l = Math.max(0, Math.min(100, l + settings.brightness));
@@ -80,7 +83,8 @@
     function getNextColor() {
         const theme = COLOR_THEMES[settings.colorTheme] || COLOR_THEMES.pastel;
         const usedColors = Object.values(characterColors).map(c => c.color);
-        const isDark = detectTheme() === 'dark';
+        if (cachedIsDark === null) cachedIsDark = detectTheme() === 'dark';
+        const isDark = cachedIsDark;
         for (const [h, s, l] of theme) {
             const adjustedL = isDark ? Math.min(l + 15, 85) : Math.max(l - 15, 35);
             const color = hslToHex(h, s, adjustedL);
@@ -174,9 +178,12 @@
     }
 
     function detectTheme() {
+        if (cachedTheme) return cachedTheme;
         const m = getComputedStyle(document.body).backgroundColor.match(/\d+/g);
-        return m && (parseInt(m[0])*299 + parseInt(m[1])*587 + parseInt(m[2])*114) / 1000 < 128 ? 'dark' : 'light';
+        cachedTheme = m && (parseInt(m[0])*299 + parseInt(m[1])*587 + parseInt(m[2])*114) / 1000 < 128 ? 'dark' : 'light';
+        return cachedTheme;
     }
+    function invalidateThemeCache() { cachedTheme = null; cachedIsDark = null; }
 
     function getStorageKey() { return `dc_${currentChatId}`; }
     function saveData() { if (currentChatId) localStorage.setItem(getStorageKey(), JSON.stringify({ colors: characterColors, settings })); localStorage.setItem('dc_patterns', JSON.stringify(customPatterns)); }
@@ -230,9 +237,12 @@
     }
 
     function injectPrompt() {
-        setExtensionPrompt(MODULE_NAME, settings.enabled ? buildPromptInstruction() : '', 1, 0);
-        const p = document.getElementById('dc-prompt-preview');
-        if (p) p.innerHTML = buildColoredPromptPreview();
+        if (injectDebouncedTimer) clearTimeout(injectDebouncedTimer);
+        injectDebouncedTimer = setTimeout(() => {
+            setExtensionPrompt(MODULE_NAME, settings.enabled ? buildPromptInstruction() : '', 1, 0);
+            const p = document.getElementById('dc-prompt-preview');
+            if (p) p.innerHTML = buildColoredPromptPreview();
+        }, 50);
     }
 
     function createLegend() {
@@ -317,10 +327,6 @@
         } catch {}
     }
 
-    function addCustomPattern(pattern) {
-        try { new RegExp(pattern); customPatterns.push(pattern); toastr?.success?.('Pattern added'); } 
-        catch { toastr?.error?.('Invalid regex'); }
-    }
 
     const blocklist = new Set(['she','he','they','it','i','you','we','her','him','them','his','hers','its','their','theirs','one','someone','anyone','everyone','nobody','the','a','an','this','that','what','who','where','when','why','how','something','nothing','everything','anything','dark','light','through','between','around','behind','before','after','during','and','but','or','nor','for','yet','so','if','then','than','because','while','your','my','our','some','any','no','every','each','all','both','few','many','most','other','another','such','only','own','same','well','much','more','less','first','last','next','new','old','good','great','little','big','small','long','short','high','low','right','left','hand','eyes','face','head','voice','door','room','way','time','day','night','world','man','woman','people','thing','place','despite','still','just','even','also','very','too','quite','rather','really','almost','already','always','never','often','sometimes','here','there','now','today','soon','later','again','back','away','down','out','off','let','secret','papers','three','two','being','look','want','need','know','think','see','come','go','get','make','take','give','find','tell','ask','use','seem','leave','call','keep','put','mean','become','begin','feel','try','start','show','hear','play','run','move','live','believe','hold','bring','happen','write','sit','stand','lose','pay','meet','include','continue','set','learn','change','lead','understand','watch','follow','stop','create','speak','read','spend','grow','open','walk','win','teach','offer','remember','consider','appear','buy','wait','serve','die','send','build','stay','fall','cut','reach','kill','remain','suggest','raise','pass','sell','require','report','decide','pull','unlike','personally','actually','obviously','apparently','certainly','probably','possibly','maybe','perhaps','definitely','clearly','simply','basically','essentially','generally','usually','typically','normally','finally','eventually','suddenly','immediately','quickly','slowly','carefully','exactly','completely','entirely','absolutely','totally','fully','partly','mostly','nearly','hardly','barely','merely','yes','no','okay','sure','fine','well','right','wrong','true','false','rubs','nods','sighs','smiles','laughs','grins','shrugs','waves','looks','turns','moves','steps','walks','runs','sits','stands','leans','reaches','pulls','pushes','holds','takes','gives','puts','gets','makes','says','asks','tells','thinks','feels','knows','sees','hears','wants','needs','tries','starts','stops','goes','comes','leaves','stays','returns','enters','exits','opens','closes','touches','grabs','drops','lifts','lowers','raises','points','gestures','blinks','stares','glances','watches','notices','realizes','understands','remembers','forgets','believes','hopes','wishes','fears','loves','hates','likes','enjoys','prefers','accepts','refuses','agrees','disagrees','nope','yeah','yep','hmm','huh','wow','oh','ah','uh','um','err','hey','hello','hi','bye','goodbye','thanks','sorry','please','excuse','pardon']);
 
@@ -502,11 +508,11 @@
         $('dc-highlight').checked = settings.highlightMode; $('dc-highlight').onchange = e => { settings.highlightMode = e.target.checked; saveData(); injectPrompt(); };
         $('dc-autoscan').checked = settings.autoScanOnLoad !== false; $('dc-autoscan').onchange = e => { settings.autoScanOnLoad = e.target.checked; saveData(); };
         $('dc-legend').checked = settings.showLegend; $('dc-legend').onchange = e => { settings.showLegend = e.target.checked; saveData(); updateLegend(); };
-        $('dc-theme').value = settings.themeMode; $('dc-theme').onchange = e => { settings.themeMode = e.target.value; saveData(); injectPrompt(); };
+        $('dc-theme').value = settings.themeMode; $('dc-theme').onchange = e => { settings.themeMode = e.target.value; invalidateThemeCache(); saveData(); injectPrompt(); };
         $('dc-palette').value = settings.colorTheme; $('dc-palette').onchange = e => { settings.colorTheme = e.target.value; saveData(); };
         $('dc-min-occ').value = settings.minOccurrences || 2; $('dc-min-occ').onchange = e => { settings.minOccurrences = parseInt(e.target.value); saveData(); };
         $('dc-brightness').value = settings.brightness || 0; $('dc-bright-val').textContent = settings.brightness || 0;
-        $('dc-brightness').oninput = e => { settings.brightness = parseInt(e.target.value); $('dc-bright-val').textContent = e.target.value; saveData(); injectPrompt(); };
+        $('dc-brightness').oninput = e => { settings.brightness = parseInt(e.target.value); $('dc-bright-val').textContent = e.target.value; saveData(); invalidateThemeCache(); injectPrompt(); };
         $('dc-narrator').value = settings.narratorColor || '#888888'; $('dc-narrator').oninput = e => { settings.narratorColor = e.target.value; saveData(); injectPrompt(); };
         $('dc-narrator-clear').onclick = () => { settings.narratorColor = ''; $('dc-narrator').value = '#888888'; saveData(); injectPrompt(); };
         $('dc-thought-symbols').value = settings.thoughtSymbols || ''; $('dc-thought-symbols').oninput = e => { settings.thoughtSymbols = e.target.value; saveData(); injectPrompt(); document.querySelectorAll('.mes').forEach(m => colorThoughts(m)); };
