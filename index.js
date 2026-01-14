@@ -1,6 +1,8 @@
-(async () => {
+(() => {
     'use strict';
 
+    console.log('Dialogue Colors: Extension loaded!');
+    
     const MODULE_NAME = 'dialogue-colors';
     const REGEX_SCRIPT_NAME = 'Strip Font Color Tags';
     let characterColors = {};
@@ -61,45 +63,57 @@
         return null;
     }
 
-    async function ensureRegexScriptInstalled() {
+    function ensureRegexScriptInstalled() {
         try {
-            const regexData = await (await fetch(chrome?.runtime?.getURL('regex-script.json') || 'regex-script.json')).json();
-            
-            if (typeof extension_settings !== 'undefined' && Array.isArray(extension_settings.regex)) {
-                const exists = extension_settings.regex.some(r => r.scriptName === REGEX_SCRIPT_NAME);
-                
-                if (!exists) {
-                    const generateUUID = () => {
-                        if (typeof crypto !== 'undefined' && crypto.randomUUID) {
-                            return crypto.randomUUID();
+            const scriptPath = 'scripts/extensions/dialogue-colors/regex-script.json';
+            fetch(scriptPath)
+                .then(response => {
+                    if (!response.ok) {
+                        console.log('Dialogue Colors: regex-script.json not found at', scriptPath, 'trying direct path');
+                        return fetch('regex-script.json');
+                    }
+                    return response.json();
+                })
+                .then(regexData => {
+                    if (typeof extension_settings !== 'undefined' && Array.isArray(extension_settings.regex)) {
+                        const exists = extension_settings.regex.some(r => r.scriptName === REGEX_SCRIPT_NAME);
+                        
+                        if (!exists) {
+                            const generateUUID = () => {
+                                if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+                                    return crypto.randomUUID();
+                                }
+                                return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+                                    const r = Math.random() * 16 | 0;
+                                    return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+                                });
+                            };
+                            
+                            const newRegexScript = {
+                                id: generateUUID(),
+                                scriptName: REGEX_SCRIPT_NAME,
+                                findRegex: regexData.findRegex,
+                                replaceString: regexData.replaceString,
+                                trimStrings: regexData.trimStrings || [],
+                                placement: regexData.placement || [2],
+                                disabled: regexData.disabled || false,
+                                markdownOnly: regexData.markdownOnly || false,
+                                promptOnly: regexData.promptOnly || true,
+                                runOnEdit: regexData.runOnEdit || false,
+                                substituteRegex: regexData.substituteRegex || false,
+                                minDepth: regexData.minDepth || null,
+                                maxDepth: regexData.maxDepth || null
+                            };
+                            
+                            extension_settings.regex.push(newRegexScript);
+                            saveSettingsDebounced();
+                            console.log('Dialogue Colors: Regex script auto-installed');
                         }
-                        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
-                            const r = Math.random() * 16 | 0;
-                            return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
-                        });
-                    };
-                    
-                    const newRegexScript = {
-                        id: generateUUID(),
-                        scriptName: REGEX_SCRIPT_NAME,
-                        findRegex: regexData.findRegex,
-                        replaceString: regexData.replaceString,
-                        trimStrings: regexData.trimStrings || [],
-                        placement: regexData.placement || [2],
-                        disabled: regexData.disabled || false,
-                        markdownOnly: regexData.markdownOnly || false,
-                        promptOnly: regexData.promptOnly || true,
-                        runOnEdit: regexData.runOnEdit || false,
-                        substituteRegex: regexData.substituteRegex || false,
-                        minDepth: regexData.minDepth || null,
-                        maxDepth: regexData.maxDepth || null
-                    };
-                    
-                    extension_settings.regex.push(newRegexScript);
-                    saveSettingsDebounced();
-                    console.log('Dialogue Colors: Regex script auto-installed');
-                }
-            }
+                    }
+                })
+                .catch(e => {
+                    console.warn('Dialogue Colors: Could not auto-install regex script', e);
+                });
         } catch (e) {
             console.warn('Dialogue Colors: Could not auto-install regex script', e);
         }
@@ -121,19 +135,31 @@
     }
 
     function injectPrompt() {
-        if (typeof SillyTavern === 'undefined' || !SillyTavern.getContext) {
-            console.log('CC: SillyTavern not available');
+        console.log('CC: injectPrompt() called, enabled =', settings.enabled);
+        
+        if (typeof SillyTavern === 'undefined') {
+            console.error('CC: SillyTavern is undefined');
             return;
         }
+        
+        if (!SillyTavern.getContext) {
+            console.error('CC: SillyTavern.getContext not available');
+            return;
+        }
+        
         const ctx = SillyTavern.getContext();
+        console.log('CC: Context obtained:', !!ctx);
+        
         if (!ctx.setExtensionPrompt) {
-            console.log('CC: setExtensionPrompt not available');
+            console.error('CC: ctx.setExtensionPrompt not available');
             return;
         }
 
         const prompt = settings.enabled ? buildPromptInstruction() : '';
-        console.log('CC: Injecting prompt:', prompt);
+        console.log('CC: Injecting prompt (length:', prompt.length, ')');
+        console.log('CC: Prompt:', prompt);
         ctx.setExtensionPrompt(MODULE_NAME, prompt, 1, 0, false, 0);
+        console.log('CC: Prompt injected successfully');
         updatePromptPreview(prompt);
     }
 
@@ -287,8 +313,13 @@
     }
 
     function createUI() {
-        if (document.getElementById('cc-ext')) return;
+        console.log('Dialogue Colors: createUI() called');
+        if (document.getElementById('cc-ext')) {
+            console.log('Dialogue Colors: UI already exists, skipping');
+            return;
+        }
         
+        console.log('Dialogue Colors: Creating UI...');
         const html = `
         <div id="cc-ext" class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
@@ -320,7 +351,13 @@
             </div>
         </div>`;
         
-        document.getElementById('extensions_settings')?.insertAdjacentHTML('beforeend', html);
+        const container = document.getElementById('extensions_settings');
+        if (!container) {
+            console.error('Dialogue Colors: extensions_settings container not found!');
+            return;
+        }
+        container.insertAdjacentHTML('beforeend', html);
+        console.log('Dialogue Colors: UI inserted successfully');
         
         const enabledCheck = document.getElementById('cc-enabled');
         enabledCheck.checked = settings.enabled;
@@ -367,15 +404,25 @@
     }
 
     function init() {
+        console.log('Dialogue Colors: init() called');
         currentChatId = getChatId();
+        console.log('Dialogue Colors: chatId =', currentChatId);
         loadData();
         ensureRegexScriptInstalled();
         
+        let attempts = 0;
+        const maxAttempts = 60; // 30 seconds
+        
         const wait = setInterval(() => {
+            attempts++;
             if (document.getElementById('extensions_settings')) {
                 clearInterval(wait);
+                console.log('Dialogue Colors: extensions_settings found after', attempts * 500, 'ms');
                 createUI();
                 injectPrompt();
+            } else if (attempts >= maxAttempts) {
+                clearInterval(wait);
+                console.error('Dialogue Colors: Could not find extensions_settings after 30 seconds');
             }
         }, 500);
         
