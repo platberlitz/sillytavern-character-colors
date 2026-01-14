@@ -441,16 +441,7 @@
     }
 
     function colorThoughts(element) {
-        if (!settings.thoughtSymbols) return;
-        const mesText = element.querySelector?.('.mes_text');
-        if (!mesText) return;
-        const symbols = settings.thoughtSymbols.split('').filter(s => s.trim());
-        if (!symbols.length) return;
-        symbols.forEach(symbol => {
-            const escaped = symbol.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            const regex = new RegExp(`(${escaped}([^]*?)${escaped})`, 'g');
-            mesText.innerHTML = mesText.innerHTML.replace(regex, `<font color="${lastSpeaker || '#888888'}">$1</font>`);
-        });
+        // Disabled - let the AI handle thought coloring via prompt instruction
     }
 
     function updateCharList() {
