@@ -1,6 +1,6 @@
 # Dialogue Colors
 
-> **TL;DR:** A SillyTavern extension that makes the LLM color-code each character's dialogue automatically. No more walls of same-colored text—instantly see who's speaking at a glance. Includes smart character detection, colorblind-friendly palettes, per-chat memory, floating legend, dialogue statistics, and card-based color persistence.
+> **TL;DR:** A SillyTavern extension that makes the LLM color-code each character's dialogue automatically. No more walls of same-colored text—instantly see who's speaking at a glance. Includes smart character detection, colorblind-friendly palettes, per-chat memory, floating legend, dialogue statistics, card-based color persistence, and inner thought coloring.
 
 ---
 
@@ -32,6 +32,7 @@
 - **Character aliases** - Map multiple names to same color
 - **Per-character styles** - Bold, italic, or both
 - **Narrator color** - Separate color for narration
+- **Thought symbols** - Custom symbols (e.g., `*`, `「`) for inner thoughts that use current speaker's color
 - **Highlight mode** - Background highlights + text color
 - **Custom regex patterns** - Add your own speaker detection patterns (with pattern management UI)
 - **Card integration** - Save/load colors to character card metadata
@@ -80,6 +81,7 @@
 | Min | Set minimum occurrences before auto-adding |
 | Bright | Adjust global brightness |
 | Narrator | Set narrator color |
+| Thoughts | Set symbols for inner thoughts (*「etc.) |
 | Scan | Detect characters from all messages |
 | Clear | Remove all characters |
 | Stats | Show dialogue distribution graph |
@@ -114,6 +116,7 @@
 4. Names must appear minimum threshold times before being confirmed (reduces false positives)
 5. Subsequent messages include assigned colors for consistency
 6. Colors persist per chat or can be saved to character cards
+7. Custom thought symbols (e.g., `*`, `「`) are automatically colored using the last speaker's color for inner thoughts
 
 ## License
 

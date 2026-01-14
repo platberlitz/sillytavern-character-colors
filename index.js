@@ -15,7 +15,8 @@
     let potentialCharacters = {};
     let sortMode = 'name';
     let searchTerm = '';
-    let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, minOccurrences: 2, ttsHints: {} };
+    let lastSpeaker = '';
+    let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, minOccurrences: 2, thoughtSymbols: '*', ttsHints: {} };
 
     const COLOR_THEMES = {
         pastel: [[340,70,75],[200,70,75],[120,50,70],[45,80,70],[280,60,75],[170,60,70],[20,80,75],[240,60,75]],
@@ -213,7 +214,12 @@
         const themeHint = mode === 'dark' ? 'Use light colors.' : 'Use dark colors.';
         const colorList = Object.entries(characterColors).filter(([,v]) => !v.locked || v.color).map(([,v]) => `${v.name}=${v.color}${v.style ? ` (${v.style})` : ''}`).join(', ');
         const aliases = Object.entries(characterColors).filter(([,v]) => v.aliases?.length).map(([,v]) => `${v.name}/${v.aliases.join('/')}`).join('; ');
-        return `[Font Color Rule: Wrap dialogue in <font color=#RRGGBB> tags. ${themeHint} ${colorList ? `ASSIGNED: ${colorList}.` : ''} ${aliases ? `ALIASES: ${aliases}.` : ''} ${settings.narratorColor ? `Narrator: ${settings.narratorColor}.` : ''} ${settings.highlightMode ? 'Also add background highlight.' : ''} Consistent colors per character.]`;
+        let thoughts = '';
+        if (settings.thoughtSymbols) {
+            const symbols = settings.thoughtSymbols.split('').map(s => `'${s}'`).join(' or ');
+            thoughts = ` Inner thoughts (text wrapped in ${symbols}) should use the current speaker's color.`;
+        }
+        return `[Font Color Rule: Wrap dialogue in <font color=#RRGGBB> tags. ${themeHint} ${colorList ? `ASSIGNED: ${colorList}.` : ''} ${aliases ? `ALIASES: ${aliases}.` : ''} ${settings.narratorColor ? `Narrator: ${settings.narratorColor}.` : ''} ${thoughts} ${settings.highlightMode ? 'Also add background highlight.' : ''} Consistent colors per character.]`;
     }
 
     function buildColoredPromptPreview() {
@@ -336,8 +342,9 @@
             if (!speaker) { const sentences = beforeText.split(/[.!?]+\s*/); for (let i = sentences.length - 1; i >= Math.max(0, sentences.length - 2); i--) { const m = sentences[i].trim().match(/^([A-Z][a-z]{2,})\b/); if (m && !blocklist.has(m[1].toLowerCase())) { speaker = m[1]; break; } } }
             if (speaker && !blocklist.has(speaker.toLowerCase())) {
                 const key = speaker.toLowerCase();
+                lastSpeaker = color;
                 // Check aliases
-                for (const [k, v] of Object.entries(characterColors)) { if (v.aliases?.map(a => a.toLowerCase()).includes(key)) { if (!v.locked) { v.color = color; } foundNew = true; break; } }
+                for (const [k, v] of Object.entries(characterColors)) { if (v.aliases?.map(a => a.toLowerCase()).includes(key)) { if (!v.locked) { v.color = color; lastSpeaker = v.color; } foundNew = true; break; } }
                 if (!characterColors[key]) {
                     potentialCharacters[key] = { name: speaker, colors: (potentialCharacters[key]?.colors || new Set()).add(color), count: (potentialCharacters[key]?.count || 0) + 1 };
                     if (potentialCharacters[key].count >= (settings.minOccurrences || 2)) {
@@ -345,7 +352,7 @@
                         delete potentialCharacters[key];
                         foundNew = true;
                     }
-                } else { characterColors[key].dialogueCount = (characterColors[key].dialogueCount || 0) + 1; if (!characterColors[key].locked) characterColors[key].color = color; }
+                } else { characterColors[key].dialogueCount = (characterColors[key].dialogueCount || 0) + 1; if (!characterColors[key].locked) { characterColors[key].color = color; lastSpeaker = color; } }
             }
         }
         return foundNew;
@@ -366,7 +373,7 @@
 
     function onNewMessage() {
         if (!settings.enabled) return;
-        setTimeout(() => { const msgs = document.querySelectorAll('.mes'); if (msgs.length) { scanForColors(msgs[msgs.length - 1]); saveData(); updateCharList(); injectPrompt(); } }, 600);
+        setTimeout(() => { const msgs = document.querySelectorAll('.mes'); if (msgs.length) { scanForColors(msgs[msgs.length - 1]); colorThoughts(msgs[msgs.length - 1]); saveData(); updateCharList(); injectPrompt(); } }, 600);
     }
 
     function addCharacter(name, color) {
@@ -388,6 +395,19 @@
         characterColors[key1].color = characterColors[key2].color;
         characterColors[key2].color = tmp;
         saveHistory(); saveData(); updateCharList(); injectPrompt();
+    }
+
+    function colorThoughts(element) {
+        if (!settings.thoughtSymbols) return;
+        const mesText = element.querySelector?.('.mes_text');
+        if (!mesText) return;
+        const symbols = settings.thoughtSymbols.split('').filter(s => s.trim());
+        if (!symbols.length) return;
+        symbols.forEach(symbol => {
+            const escaped = symbol.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const regex = new RegExp(`(${escaped}([^]*?)${escaped})`, 'g');
+            mesText.innerHTML = mesText.innerHTML.replace(regex, `<font color="${lastSpeaker || '#888888'}">$1</font>`);
+        });
     }
 
     function updateCharList() {
@@ -455,6 +475,7 @@
                 <div style="display:flex;gap:4px;align-items:center;"><label style="width:50px;" title="Min dialogues before auto-adding">Min:</label><input type="number" id="dc-min-occ" min="1" max="5" value="2" class="text_pole" style="flex:1;"><small style="opacity:0.6;">occurrences</small></div>
                 <div style="display:flex;gap:4px;align-items:center;"><label style="width:50px;">Bright:</label><input type="range" id="dc-brightness" min="-30" max="30" value="0" style="flex:1;"><span id="dc-bright-val">0</span></div>
                 <div style="display:flex;gap:4px;align-items:center;"><label style="width:50px;">Narrator:</label><input type="color" id="dc-narrator" value="#888888" style="width:24px;height:20px;"><button id="dc-narrator-clear" class="menu_button" style="padding:2px 6px;font-size:0.8em;">Clear</button></div>
+                <div style="display:flex;gap:4px;align-items:center;"><label style="width:50px;" title="Symbols for inner thoughts (*「etc)">Thoughts:</label><input type="text" id="dc-thought-symbols" placeholder="*" class="text_pole" style="flex:1;padding:3px;"><small style="opacity:0.6;">current speaker color</small></div>
                 <hr style="margin:2px 0;opacity:0.2;">
                 <div style="display:flex;gap:4px;"><button id="dc-scan" class="menu_button" style="flex:1;">Scan</button><button id="dc-clear" class="menu_button" style="flex:1;">Clear</button><button id="dc-stats" class="menu_button" style="flex:1;" title="Dialogue statistics">Stats</button></div>
                 <div style="display:flex;gap:4px;"><button id="dc-undo" class="menu_button" style="flex:1;">↶</button><button id="dc-redo" class="menu_button" style="flex:1;">↷</button><button id="dc-fix-conflicts" class="menu_button" style="flex:1;" title="Auto-fix color conflicts">Fix</button></div>
@@ -488,6 +509,7 @@
         $('dc-brightness').oninput = e => { settings.brightness = parseInt(e.target.value); $('dc-bright-val').textContent = e.target.value; saveData(); injectPrompt(); };
         $('dc-narrator').value = settings.narratorColor || '#888888'; $('dc-narrator').oninput = e => { settings.narratorColor = e.target.value; saveData(); injectPrompt(); };
         $('dc-narrator-clear').onclick = () => { settings.narratorColor = ''; $('dc-narrator').value = '#888888'; saveData(); injectPrompt(); };
+        $('dc-thought-symbols').value = settings.thoughtSymbols || ''; $('dc-thought-symbols').oninput = e => { settings.thoughtSymbols = e.target.value; saveData(); injectPrompt(); document.querySelectorAll('.mes').forEach(m => colorThoughts(m)); };
         $('dc-scan').onclick = scanAllMessages;
         $('dc-clear').onclick = () => { characterColors = {}; saveHistory(); saveData(); injectPrompt(); updateCharList(); };
         $('dc-stats').onclick = showStatsPopup;
@@ -547,6 +569,7 @@
         if (settings.autoScanOnLoad !== false && Object.keys(characterColors).length === 0) {
             setTimeout(() => { if (document.querySelectorAll('.mes').length) scanAllMessages(); }, 1000);
         }
+        document.querySelectorAll('.mes').forEach(m => colorThoughts(m));
     });
     console.log('Dialogue Colors: Ready!');
 })();
