@@ -208,7 +208,7 @@
         list.innerHTML = entries.length ? entries.map(([k, v]) =>
             `<div class="cc-char-item" style="display:flex;align-items:center;gap:5px;margin:2px 0;">
                 <input type="color" value="${v.color}" data-key="${k}" style="width:24px;height:24px;padding:0;border:none;">
-                <span style="color:${v.color};font-weight:bold;flex:1">${v.name}</span>
+                <input type="text" value="${v.name}" data-key="${k}" style="flex:1;padding:2px 5px;border:1px solid var(--SmartThemeBorderColor);background:var(--SmartThemeBlurTintColor);color:var(--SmartThemeBodyColor);border-radius:4px;">
                 <button class="cc-del menu_button" data-key="${k}" style="padding:2px 6px;font-size:0.8em;">×</button>
             </div>`
         ).join('') : '<small>No characters yet</small>';
@@ -216,9 +216,30 @@
         list.querySelectorAll('input[type="color"]').forEach(i => {
             i.oninput = () => { 
                 characterColors[i.dataset.key].color = i.value; 
-                i.nextElementSibling.style.color = i.value;
+                const nameInput = i.nextElementSibling;
+                nameInput.style.color = i.value;
                 saveData();
                 injectPrompt();
+                console.log('CC: Color updated for', characterColors[i.dataset.key].name, 'to', i.value);
+            };
+        });
+        
+        list.querySelectorAll('input[type="text"]').forEach(i => {
+            i.onchange = () => { 
+                const oldKey = i.dataset.key;
+                const newName = i.value.trim();
+                if (newName && newName !== characterColors[oldKey].name) {
+                    delete characterColors[oldKey];
+                    const newKey = newName.toLowerCase();
+                    characterColors[newKey] = { 
+                        color: characterColors[oldKey].color, 
+                        name: newName 
+                    };
+                    i.dataset.key = newKey;
+                    saveData();
+                    injectPrompt();
+                    console.log('CC: Name updated from', oldKey, 'to', newKey);
+                }
             };
         });
         
@@ -354,7 +375,7 @@
             if (document.getElementById('extensions_settings')) {
                 clearInterval(wait);
                 createUI();
-                setTimeout(injectPrompt, 500);
+                injectPrompt();
             }
         }, 500);
         
