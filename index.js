@@ -61,7 +61,10 @@
             extension_settings.regex = [];
         }
         
-        if (extension_settings.regex.some(r => r.scriptName === SCRIPT_NAME)) {
+        const exists = extension_settings.regex.some(r => r.scriptName === SCRIPT_NAME);
+        console.log('Dialogue Colors: Script exists?', exists);
+        
+        if (exists) {
             console.log('Dialogue Colors: Regex already exists');
             return;
         }
@@ -71,7 +74,7 @@
             return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
         });
         
-        extension_settings.regex.push({
+        const newScript = {
             id: uuidv4(),
             scriptName: SCRIPT_NAME,
             findRegex: '/<\\/?font[^>]*>/gi',
@@ -85,7 +88,11 @@
             substituteRegex: 0,
             minDepth: null,
             maxDepth: null
-        });
+        };
+        
+        console.log('Dialogue Colors: Adding script:', newScript);
+        extension_settings.regex.push(newScript);
+        console.log('Dialogue Colors: Now have', extension_settings.regex.length, 'scripts');
         
         saveSettingsDebounced();
         console.log('Dialogue Colors: Regex installed!');
