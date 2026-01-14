@@ -12,7 +12,8 @@
     let swapMode = null;
     let legendVisible = false;
     let customPatterns = [];
-    let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, ttsHints: {} };
+    let potentialCharacters = {};
+    let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, minOccurrences: 2, ttsHints: {} };
 
     const COLOR_THEMES = {
         pastel: [[340,70,75],[200,70,75],[120,50,70],[45,80,70],[280,60,75],[170,60,70],[20,80,75],[240,60,75]],
@@ -172,13 +173,18 @@
 
     function showStatsPopup() {
         const stats = getDialogueStats();
-        if (!stats.length) { toastr?.info?.('No dialogue data'); return; }
-        const maxCount = Math.max(...stats.map(s => s.count));
-        const html = stats.map(s => `<div style="display:flex;align-items:center;gap:6px;margin:2px 0;"><span style="width:60px;color:${s.color}">${s.name}</span><div style="flex:1;height:12px;background:var(--SmartThemeBlurTintColor);border-radius:3px;overflow:hidden;"><div style="width:${s.count/maxCount*100}%;height:100%;background:${s.color};"></div></div><span style="width:40px;text-align:right;font-size:0.8em;">${s.count} (${s.pct}%)</span></div>`).join('');
+        if (!stats.length && !Object.keys(potentialCharacters).length) { toastr?.info?.('No dialogue data'); return; }
+        const maxCount = Math.max(...stats.map(s => s.count), 1);
+        let html = stats.map(s => `<div style="display:flex;align-items:center;gap:6px;margin:2px 0;"><span style="width:60px;color:${s.color}">${s.name}</span><div style="flex:1;height:12px;background:var(--SmartThemeBlurTintColor);border-radius:3px;overflow:hidden;"><div style="width:${s.count/maxCount*100}%;height:100%;background:${s.color};"></div></div><span style="width:40px;text-align:right;font-size:0.8em;">${s.count} (${s.pct}%)</span></div>`).join('');
+        if (Object.keys(potentialCharacters).length) {
+            html += `<hr style="margin:8px 0;opacity:0.2;"><div style="font-weight:bold;margin-bottom:4px;">Pending (${Object.keys(potentialCharacters).length})</div>`;
+            html += Object.entries(potentialCharacters).map(([k, v]) => `<div style="display:flex;align-items:center;gap:6px;margin:2px 0;opacity:0.7;"><span style="width:60px;">${v.name}</span><span style="flex:1;font-size:0.8em;">${v.count}/${settings.minOccurrences}</span><button class="dc-add-pending menu_button" style="padding:1px 6px;font-size:0.7em;" data-key="${k}">Add</button></div>`).join('');
+        }
         const popup = document.createElement('div');
         popup.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:var(--SmartThemeBodyColor);border:1px solid var(--SmartThemeBorderColor);border-radius:8px;padding:16px;z-index:10000;min-width:300px;';
         popup.innerHTML = `<div style="font-weight:bold;margin-bottom:8px;">Dialogue Statistics</div>${html}<button class="menu_button" style="margin-top:10px;width:100%;">Close</button>`;
         popup.querySelector('button').onclick = () => popup.remove();
+        popup.querySelectorAll('.dc-add-pending').forEach(b => { b.onclick = () => { const p = potentialCharacters[b.dataset.key]; if (p) { addCharacter(p.name, [...p.colors].pop()); updateCharList(); showStatsPopup(); } }; });
         document.body.appendChild(popup);
     }
 
@@ -231,8 +237,14 @@
                 const key = speaker.toLowerCase();
                 // Check aliases
                 for (const [k, v] of Object.entries(characterColors)) { if (v.aliases?.map(a => a.toLowerCase()).includes(key)) { if (!v.locked) { v.color = color; } foundNew = true; break; } }
-                if (!characterColors[key]) { characterColors[key] = { color, name: speaker, locked: false, aliases: [], style: '', dialogueCount: 1 }; foundNew = true; }
-                else { characterColors[key].dialogueCount = (characterColors[key].dialogueCount || 0) + 1; if (!characterColors[key].locked) characterColors[key].color = color; }
+                if (!characterColors[key]) {
+                    potentialCharacters[key] = { name: speaker, colors: (potentialCharacters[key]?.colors || new Set()).add(color), count: (potentialCharacters[key]?.count || 0) + 1 };
+                    if (potentialCharacters[key].count >= (settings.minOccurrences || 2)) {
+                        characterColors[key] = { color: [...potentialCharacters[key].colors].pop(), name: speaker, locked: false, aliases: [], style: '', dialogueCount: potentialCharacters[key].count };
+                        delete potentialCharacters[key];
+                        foundNew = true;
+                    }
+                } else { characterColors[key].dialogueCount = (characterColors[key].dialogueCount || 0) + 1; if (!characterColors[key].locked) characterColors[key].color = color; }
             }
         }
         return foundNew;
@@ -240,11 +252,15 @@
 
     function scanAllMessages() {
         Object.values(characterColors).forEach(c => c.dialogueCount = 0);
+        potentialCharacters = {};
         document.querySelectorAll('.mes').forEach(m => scanForColors(m));
         saveHistory(); saveData(); updateCharList(); injectPrompt();
         const conflicts = checkColorConflicts();
         if (conflicts.length) toastr?.warning?.(`Similar: ${conflicts.slice(0,3).map(c => c.join(' & ')).join(', ')}`);
-        toastr?.info?.(`Found ${Object.keys(characterColors).length} characters`);
+        const pendingCount = Object.keys(potentialCharacters).length;
+        let msg = `Found ${Object.keys(characterColors).length} characters`;
+        if (pendingCount > 0) msg += ` (${pendingCount} pending, need ${settings.minOccurrences}+ occurrences)`;
+        toastr?.info?.(msg);
     }
 
     function onNewMessage() {
@@ -255,7 +271,8 @@
     function addCharacter(name, color) {
         if (!name.trim()) return;
         const key = name.trim().toLowerCase();
-        characterColors[key] = { color: color || getNextColor(), name: name.trim(), locked: false, aliases: [], style: '', dialogueCount: 0 };
+        characterColors[key] = { color: color || getNextColor(), name: name.trim(), locked: false, aliases: [], style: '', dialogueCount: potentialCharacters[key]?.count || 0 };
+        delete potentialCharacters[key];
         saveHistory(); saveData(); updateCharList(); injectPrompt();
     }
 
@@ -308,7 +325,8 @@
         try {
             const ctx = getContext();
             const char = ctx?.characters?.[ctx?.characterId];
-            if (char?.name && !characterColors[char.name.toLowerCase()]) {
+            const key = char?.name?.toLowerCase();
+            if (key && !characterColors[key]) {
                 addCharacter(char.name);
                 toastr?.success?.(`Added ${char.name}`);
             }
@@ -327,6 +345,7 @@
                 <label class="checkbox_label"><input type="checkbox" id="dc-legend"><span>Show floating legend</span></label>
                 <div style="display:flex;gap:4px;align-items:center;"><label style="width:50px;">Theme:</label><select id="dc-theme" class="text_pole" style="flex:1;"><option value="auto">Auto</option><option value="dark">Dark</option><option value="light">Light</option></select></div>
                 <div style="display:flex;gap:4px;align-items:center;"><label style="width:50px;">Palette:</label><select id="dc-palette" class="text_pole" style="flex:1;"><option value="pastel">Pastel</option><option value="neon">Neon</option><option value="earth">Earth</option><option value="jewel">Jewel</option><option value="muted">Muted</option><option value="protanopia">Protanopia</option><option value="deuteranopia">Deuteranopia</option><option value="tritanopia">Tritanopia</option></select></div>
+                <div style="display:flex;gap:4px;align-items:center;"><label style="width:50px;" title="Min dialogues before auto-adding">Min:</label><input type="number" id="dc-min-occ" min="1" max="5" value="2" style="flex:1;padding:2px;"><small style="opacity:0.6;">occurrences</small></div>
                 <div style="display:flex;gap:4px;align-items:center;"><label style="width:50px;">Bright:</label><input type="range" id="dc-brightness" min="-30" max="30" value="0" style="flex:1;"><span id="dc-bright-val">0</span></div>
                 <div style="display:flex;gap:4px;align-items:center;"><label style="width:50px;">Narrator:</label><input type="color" id="dc-narrator" value="#888888" style="width:24px;height:20px;"><button id="dc-narrator-clear" class="menu_button" style="padding:2px 6px;font-size:0.8em;">Clear</button></div>
                 <hr style="margin:2px 0;opacity:0.2;">
@@ -352,6 +371,7 @@
         $('dc-legend').checked = settings.showLegend; $('dc-legend').onchange = e => { settings.showLegend = e.target.checked; saveData(); updateLegend(); };
         $('dc-theme').value = settings.themeMode; $('dc-theme').onchange = e => { settings.themeMode = e.target.value; saveData(); injectPrompt(); };
         $('dc-palette').value = settings.colorTheme; $('dc-palette').onchange = e => { settings.colorTheme = e.target.value; saveData(); };
+        $('dc-min-occ').value = settings.minOccurrences || 2; $('dc-min-occ').onchange = e => { settings.minOccurrences = parseInt(e.target.value); saveData(); };
         $('dc-brightness').value = settings.brightness || 0; $('dc-bright-val').textContent = settings.brightness || 0;
         $('dc-brightness').oninput = e => { settings.brightness = parseInt(e.target.value); $('dc-bright-val').textContent = e.target.value; saveData(); injectPrompt(); };
         $('dc-narrator').value = settings.narratorColor || '#888888'; $('dc-narrator').oninput = e => { settings.narratorColor = e.target.value; saveData(); injectPrompt(); };
