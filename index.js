@@ -1,17 +1,11 @@
 (() => {
     'use strict';
 
-    console.log('Dialogue Colors: Extension loaded!');
-    
     const MODULE_NAME = 'dialogue-colors';
     const REGEX_SCRIPT_NAME = 'Strip Font Color Tags';
     let characterColors = {};
     let currentChatId = null;
-    let settings = { 
-        enabled: true,
-        colorThoughts: true,
-        themeMode: 'auto'
-    };
+    let settings = { enabled: true, colorThoughts: true, themeMode: 'auto' };
 
     function hslToHex(h, s, l) {
         s /= 100; l /= 100;
@@ -34,23 +28,17 @@
         return 'dark';
     }
 
-    function getStorageKey() {
-        return `cc_${currentChatId}`;
-    }
+    function getStorageKey() { return `cc_${currentChatId}`; }
 
     function saveData() {
-        if (currentChatId) {
-            localStorage.setItem(getStorageKey(), JSON.stringify({ colors: characterColors }));
-        }
+        if (currentChatId) localStorage.setItem(getStorageKey(), JSON.stringify({ colors: characterColors }));
     }
 
     function loadData() {
         if (currentChatId) {
             try {
                 const data = JSON.parse(localStorage.getItem(getStorageKey()));
-                if (data?.colors) {
-                    characterColors = data.colors;
-                }
+                if (data?.colors) characterColors = data.colors;
             } catch (e) {}
         }
     }
@@ -65,32 +53,13 @@
 
     function ensureRegexScriptInstalled() {
         try {
-            const scriptPath = 'scripts/extensions/dialogue-colors/regex-script.json';
-            fetch(scriptPath)
-                .then(response => {
-                    if (!response.ok) {
-                        console.log('Dialogue Colors: regex-script.json not found at', scriptPath, 'trying direct path');
-                        return fetch('regex-script.json');
-                    }
-                    return response.json();
-                })
+            fetch('scripts/extensions/third-party/sillytavern-character-colors/regex-script.json')
+                .then(r => r.ok ? r.json() : fetch('regex-script.json').then(r2 => r2.json()))
                 .then(regexData => {
                     if (typeof extension_settings !== 'undefined' && Array.isArray(extension_settings.regex)) {
-                        const exists = extension_settings.regex.some(r => r.scriptName === REGEX_SCRIPT_NAME);
-                        
-                        if (!exists) {
-                            const generateUUID = () => {
-                                if (typeof crypto !== 'undefined' && crypto.randomUUID) {
-                                    return crypto.randomUUID();
-                                }
-                                return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
-                                    const r = Math.random() * 16 | 0;
-                                    return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
-                                });
-                            };
-                            
-                            const newRegexScript = {
-                                id: generateUUID(),
+                        if (!extension_settings.regex.some(r => r.scriptName === REGEX_SCRIPT_NAME)) {
+                            extension_settings.regex.push({
+                                id: crypto.randomUUID?.() || 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => (Math.random() * 16 | 0).toString(16)),
                                 scriptName: REGEX_SCRIPT_NAME,
                                 findRegex: regexData.findRegex,
                                 replaceString: regexData.replaceString,
@@ -103,117 +72,61 @@
                                 substituteRegex: regexData.substituteRegex || false,
                                 minDepth: regexData.minDepth || null,
                                 maxDepth: regexData.maxDepth || null
-                            };
-                            
-                            extension_settings.regex.push(newRegexScript);
+                            });
                             saveSettingsDebounced();
                             console.log('Dialogue Colors: Regex script auto-installed');
                         }
                     }
                 })
-                .catch(e => {
-                    console.warn('Dialogue Colors: Could not auto-install regex script', e);
-                });
-        } catch (e) {
-            console.warn('Dialogue Colors: Could not auto-install regex script', e);
-        }
+                .catch(e => console.warn('Dialogue Colors: Could not auto-install regex script', e));
+        } catch (e) { console.warn('Dialogue Colors: Could not auto-install regex script', e); }
     }
 
     function buildPromptInstruction() {
         if (!settings.enabled) return '';
-        
         const mode = settings.themeMode === 'auto' ? detectTheme() : settings.themeMode;
-        const themeHint = mode === 'dark' 
-            ? 'Use light pastel colors (#RRGGBB with high lightness).' 
-            : 'Use dark muted colors (#RRGGBB with low lightness).';
-        
+        const themeHint = mode === 'dark' ? 'Use light pastel colors (#RRGGBB with high lightness).' : 'Use dark muted colors (#RRGGBB with low lightness).';
         const colorList = Object.entries(characterColors).length > 0
             ? `Use these colors: ${Object.entries(characterColors).map(([k, v]) => `${v.name}=${v.color}`).join(', ')}. `
             : '';
-        
         return `<font color rule: Wrap ALL dialogue ("text") and thoughts (*text*) in <font color=#RRGGBB> tags. ${themeHint} ${colorList}Maintain internal tracking of which color belongs to which character throughout this conversation - treat this as ephemeral memory (like author's notes). Use the SAME color consistently for each character you've assigned colors to.`;
     }
 
     function injectPrompt() {
-        console.log('CC: injectPrompt() called, enabled =', settings.enabled);
-        
-        if (typeof SillyTavern === 'undefined') {
-            console.error('CC: SillyTavern is undefined');
-            return;
-        }
-        
-        if (!SillyTavern.getContext) {
-            console.error('CC: SillyTavern.getContext not available');
-            return;
-        }
-        
+        if (typeof SillyTavern === 'undefined' || !SillyTavern.getContext) return;
         const ctx = SillyTavern.getContext();
-        console.log('CC: Context obtained:', !!ctx);
-        
-        if (!ctx.setExtensionPrompt) {
-            console.error('CC: ctx.setExtensionPrompt not available');
-            return;
-        }
-
+        if (!ctx.setExtensionPrompt) return;
         const prompt = settings.enabled ? buildPromptInstruction() : '';
-        console.log('CC: Injecting prompt (length:', prompt.length, ')');
-        console.log('CC: Prompt:', prompt);
         ctx.setExtensionPrompt(MODULE_NAME, prompt, 1, 0, false, 0);
-        console.log('CC: Prompt injected successfully');
         updatePromptPreview(prompt);
     }
 
     function updatePromptPreview(prompt) {
         const preview = document.getElementById('cc-prompt-preview');
-        if (preview) {
-            preview.textContent = prompt || '(disabled)';
-        }
+        if (preview) preview.textContent = prompt || '(disabled)';
     }
 
     function detectSpeakerFromText(text, tagStart, tagEnd) {
-        const maxLookback = 200;
-        const maxLookahead = 200;
-        
-        const beforeTag = text.substring(Math.max(0, tagStart - maxLookback), tagStart);
-        const afterTag = text.substring(tagEnd, Math.min(text.length, tagEnd + maxLookahead));
-        
-        const afterPatterns = [
-            /,\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+(said|says|replied|replies|answered|asked|asked|whispered|whispers|yelled|yells|shouted|exclaimed|exclaims|added|murmured|murmured|muttered|mutters)\s*[,.]?\s*$/i
-        ];
-        
-        for (const pattern of afterPatterns) {
-            const matches = [...afterTag.matchAll(new RegExp(pattern.source, pattern.flags || 'i'))];
-            if (matches.length > 0) {
-                const firstMatch = matches[0];
-                return firstMatch[1];
-            }
-        }
-        
-        return null;
+        const afterTag = text.substring(tagEnd, Math.min(text.length, tagEnd + 200));
+        const pattern = /,\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+(said|says|replied|replies|answered|asked|whispered|whispers|yelled|yells|shouted|exclaimed|exclaims|added|murmured|muttered|mutters)\s*[,.]?\s*$/i;
+        const matches = [...afterTag.matchAll(new RegExp(pattern.source, 'i'))];
+        return matches.length > 0 ? matches[0][1] : null;
     }
- 
+
     function scanMessagesForColors() {
         document.querySelectorAll('.mes').forEach(mesBlock => {
             const mesText = mesBlock.querySelector('.mes_text');
             if (!mesText) return;
-            
             const html = mesText.innerHTML;
             const fontRegex = /<font\s+color="#([a-fA-F0-9]{6})"[^>]*>/g;
             let match;
-            
             while ((match = fontRegex.exec(html)) !== null) {
                 const color = match[1];
-                const tagStart = match.index;
-                const tagEnd = tagStart + match[0].length;
-                const speaker = detectSpeakerFromText(html, tagStart, tagEnd);
-                
+                const speaker = detectSpeakerFromText(html, match.index, match.index + match[0].length);
                 if (speaker) {
                     const key = speaker.toLowerCase();
                     if (!characterColors[key]) {
-                        characterColors[key] = { 
-                            color: color, 
-                            name: speaker 
-                        };
+                        characterColors[key] = { color: color, name: speaker };
                         updateCharList();
                     } else if (characterColors[key].color !== color) {
                         characterColors[key].color = color;
@@ -222,14 +135,12 @@
                 }
             }
         });
-        
         saveData();
     }
 
     function updateCharList() {
         const list = document.getElementById('cc-char-list');
         if (!list) return;
-        
         const entries = Object.entries(characterColors);
         list.innerHTML = entries.length ? entries.map(([k, v]) =>
             `<div class="cc-char-item" style="display:flex;align-items:center;gap:5px;margin:2px 0;">
@@ -238,44 +149,24 @@
                 <button class="cc-del menu_button" data-key="${k}" style="padding:2px 6px;font-size:0.8em;">×</button>
             </div>`
         ).join('') : '<small>No characters yet</small>';
-        
+
         list.querySelectorAll('input[type="color"]').forEach(i => {
-            i.oninput = () => { 
-                characterColors[i.dataset.key].color = i.value; 
-                const nameInput = i.nextElementSibling;
-                nameInput.style.color = i.value;
-                saveData();
-                injectPrompt();
-                console.log('CC: Color updated for', characterColors[i.dataset.key].name, 'to', i.value);
-            };
+            i.oninput = () => { characterColors[i.dataset.key].color = i.value; saveData(); injectPrompt(); };
         });
-        
         list.querySelectorAll('input[type="text"]').forEach(i => {
-            i.onchange = () => { 
+            i.onchange = () => {
                 const oldKey = i.dataset.key;
                 const newName = i.value.trim();
-                if (newName && newName !== characterColors[oldKey].name) {
+                if (newName && newName !== characterColors[oldKey]?.name) {
+                    const oldColor = characterColors[oldKey]?.color || '#ffffff';
                     delete characterColors[oldKey];
-                    const newKey = newName.toLowerCase();
-                    characterColors[newKey] = { 
-                        color: characterColors[oldKey].color, 
-                        name: newName 
-                    };
-                    i.dataset.key = newKey;
-                    saveData();
-                    injectPrompt();
-                    console.log('CC: Name updated from', oldKey, 'to', newKey);
+                    characterColors[newName.toLowerCase()] = { color: oldColor, name: newName };
+                    saveData(); injectPrompt(); updateCharList();
                 }
             };
         });
-        
         list.querySelectorAll('.cc-del').forEach(btn => {
-            btn.onclick = () => {
-                delete characterColors[btn.dataset.key];
-                saveData();
-                injectPrompt();
-                updateCharList();
-            };
+            btn.onclick = () => { delete characterColors[btn.dataset.key]; saveData(); injectPrompt(); updateCharList(); };
         });
     }
 
@@ -283,17 +174,12 @@
         if (document.getElementById('cc-input-btn')) return;
         const rightArea = document.getElementById('rightSendForm') || document.querySelector('#send_form .right_menu_buttons');
         if (!rightArea) return;
-        
         const btn = document.createElement('div');
         btn.id = 'cc-input-btn';
         btn.className = 'fa-solid fa-droplet interactable';
         btn.title = 'Scan Messages for Colors';
         btn.style.cssText = 'cursor:pointer;padding:5px;font-size:1.2em;opacity:0.7;';
-        btn.onclick = () => {
-            scanMessagesForColors();
-            injectPrompt();
-            toastr?.success?.('Colors scanned and prompt updated!');
-        };
+        btn.onclick = () => { scanMessagesForColors(); injectPrompt(); toastr?.success?.('Colors scanned and prompt updated!'); };
         rightArea.insertBefore(btn, rightArea.firstChild);
     }
 
@@ -302,27 +188,14 @@
             const sendBtn = document.getElementById('send_but') || document.querySelector('#send_form button[type="submit"]');
             if (sendBtn && !sendBtn.dataset.ccHooked) {
                 sendBtn.dataset.ccHooked = 'true';
-                sendBtn.addEventListener('click', () => {
-                    console.log('CC: Send button clicked, injecting prompt');
-                    injectPrompt();
-                }, { capture: true });
+                sendBtn.addEventListener('click', () => injectPrompt(), { capture: true });
             }
         });
-        
         observer.observe(document.body, { childList: true, subtree: true });
     }
 
     function createUI() {
-        console.log('Dialogue Colors: createUI() called');
-        
-        const existingUI = document.getElementById('cc-ext');
-        console.log('Dialogue Colors: Existing UI check:', !!existingUI);
-        if (existingUI) {
-            console.log('Dialogue Colors: UI already exists, skipping');
-            return;
-        }
-        
-        console.log('Dialogue Colors: Creating UI...');
+        if (document.getElementById('cc-ext')) return;
         const html = `
         <div id="cc-ext" class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
@@ -331,13 +204,8 @@
             </div>
             <div class="inline-drawer-content" style="padding:10px;display:flex;flex-direction:column;gap:8px;">
                 <label class="checkbox_label"><input type="checkbox" id="cc-enabled"><span>Enable color injection</span></label>
-                <div class="cc-row">
-                    <label>Theme Mode</label>
-                    <select id="cc-theme">
-                        <option value="auto">Auto</option>
-                        <option value="dark">Dark</option>
-                        <option value="light">Light</option>
-                    </select>
+                <div class="cc-row"><label>Theme Mode</label>
+                    <select id="cc-theme"><option value="auto">Auto</option><option value="dark">Dark</option><option value="light">Light</option></select>
                 </div>
                 <label class="checkbox_label"><input type="checkbox" id="cc-thoughts"><span>Color thoughts (*text*)</span></label>
                 <hr>
@@ -353,188 +221,56 @@
                 <div id="cc-prompt-preview" style="font-size:0.8em;color:var(--SmartThemeBodyColor);max-height:100px;overflow-y:auto;padding:5px;background:var(--SmartThemeBlurTintColor);border-radius:4px;"></div>
             </div>
         </div>`;
-        
         const container = document.getElementById('extensions_settings');
-        console.log('Dialogue Colors: extensions_settings container:', !!container);
-        if (!container) {
-            console.error('Dialogue Colors: extensions_settings container not found!');
-            console.error('Dialogue Colors: Available IDs:', Array.from(document.querySelectorAll('[id$="_settings"]')).map(el => el.id));
-            alert('Dialogue Colors: Could not find Extensions panel. Click Extensions button in the top bar first.');
-            return;
-        }
+        if (!container) return;
         container.insertAdjacentHTML('beforeend', html);
-        console.log('Dialogue Colors: UI inserted successfully');
-        
-        setTimeout(() => {
-            const createdUI = document.getElementById('cc-ext');
-            console.log('Dialogue Colors: UI verification after 100ms:', !!createdUI);
-        }, 100);
-        
+
         const enabledCheck = document.getElementById('cc-enabled');
         enabledCheck.checked = settings.enabled;
-        enabledCheck.onchange = e => { 
-            settings.enabled = e.target.checked; 
-            saveData();
-            injectPrompt();
-        };
+        enabledCheck.onchange = e => { settings.enabled = e.target.checked; saveData(); injectPrompt(); };
         updatePromptPreview(buildPromptInstruction());
-        
+
         const themeSelect = document.getElementById('cc-theme');
         themeSelect.value = settings.themeMode;
-        themeSelect.onchange = e => { 
-            settings.themeMode = e.target.value; 
-            saveData();
-            injectPrompt();
-        };
-        
+        themeSelect.onchange = e => { settings.themeMode = e.target.value; saveData(); injectPrompt(); };
+
         const thoughtsCheck = document.getElementById('cc-thoughts');
         thoughtsCheck.checked = settings.colorThoughts;
-        thoughtsCheck.onchange = e => { 
-            settings.colorThoughts = e.target.checked; 
-            saveData();
-        };
-        
-        document.getElementById('cc-clear').onclick = () => {
-            characterColors = {};
-            saveData();
-            injectPrompt();
-            updateCharList();
-        };
-        
-        document.getElementById('cc-scan').onclick = () => {
-            scanMessagesForColors();
-            injectPrompt();
-        };
+        thoughtsCheck.onchange = e => { settings.colorThoughts = e.target.checked; saveData(); };
 
-        document.getElementById('cc-refresh').onclick = () => {
-            injectPrompt();
-            toastr?.info?.('Prompt re-injected!');
-        };
-        
+        document.getElementById('cc-clear').onclick = () => { characterColors = {}; saveData(); injectPrompt(); updateCharList(); };
+        document.getElementById('cc-scan').onclick = () => { scanMessagesForColors(); injectPrompt(); };
+        document.getElementById('cc-refresh').onclick = () => { injectPrompt(); toastr?.info?.('Prompt re-injected!'); };
         updateCharList();
     }
 
     function init() {
-        try {
-            console.log('Dialogue Colors: init() called');
-            currentChatId = getChatId();
-            console.log('Dialogue Colors: chatId =', currentChatId);
-            loadData();
-            console.log('Dialogue Colors: Data loaded');
-            ensureRegexScriptInstalled();
-            console.log('Dialogue Colors: Regex script checked');
-            
-            let attempts = 0;
-            const maxAttempts = 60; // 30 seconds
-            
-            const wait = setInterval(() => {
-                attempts++;
-                const settingsPanel = document.getElementById('extensions_settings');
-                console.log('Dialogue Colors: Looking for extensions_settings, attempt', attempts, 'panel exists:', !!settingsPanel);
-                
-                if (settingsPanel) {
-                    clearInterval(wait);
-                    console.log('Dialogue Colors: extensions_settings found after', attempts * 500, 'ms');
-                    createUI();
-                    console.log('Dialogue Colors: UI created');
-                    injectPrompt();
-                    console.log('Dialogue Colors: Initial prompt injected');
-                } else if (attempts >= maxAttempts) {
-                    clearInterval(wait);
-                    console.error('Dialogue Colors: Could not find extensions_settings after 30 seconds');
-                    alert('Dialogue Colors: Could not find Extensions panel. Make sure SillyTavern is fully loaded.');
-                }
-            }, 500);
-            
-            const btnWait = setInterval(() => {
-                const sendForm = document.getElementById('send_form');
-                console.log('Dialogue Colors: Looking for send_form, exists:', !!sendForm);
-                
-                if (sendForm) {
-                    clearInterval(btnWait);
-                    console.log('Dialogue Colors: send_form found');
-                    addInputButton();
-                    console.log('Dialogue Colors: Input button added');
-                    hookSendButton();
-                    console.log('Dialogue Colors: Send button hooked');
-                }
-            }, 500);
-            
-            if (typeof eventSource !== 'undefined' && typeof event_types !== 'undefined') {
-                console.log('Dialogue Colors: eventSource available');
-                eventSource.on(event_types.GENERATION_STARTED, () => {
-                    console.log('CC: GENERATION_STARTED event');
-                    injectPrompt();
-                });
-                
-                eventSource.on(event_types.GENERATE_BEFORE_COMBINE_PROMPTS, () => {
-                    console.log('CC: GENERATE_BEFORE_COMBINE_PROMPTS event');
-                    injectPrompt();
-                });
-                
-                if (event_types.GENERATE_AFTER_INJECT) {
-                    eventSource.on(event_types.GENERATE_AFTER_INJECT, () => {
-                        console.log('CC: GENERATE_AFTER_INJECT event');
-                        injectPrompt();
-                    });
-                }
-                
-                eventSource.on(event_types.MESSAGE_RECEIVED, () => {
-                    setTimeout(scanMessagesForColors, 500);
-                });
-                
-                eventSource.on(event_types.CHAT_CHANGED, () => {
-                    currentChatId = getChatId();
-                    characterColors = {};
-                    loadData();
-                    updateCharList();
-                    setTimeout(injectPrompt, 500);
-                });
-                
-                eventSource.on(event_types.USER_MESSAGE_RENDERED, () => {
-                    if (settings.enabled) setTimeout(applyDisplayColors, 300);
-                });
-            } else {
-                console.log('Dialogue Colors: eventSource not available yet');
+        console.log('Dialogue Colors: Initializing...');
+        currentChatId = getChatId();
+        loadData();
+        ensureRegexScriptInstalled();
+
+        const waitForUI = setInterval(() => {
+            if (document.getElementById('extensions_settings')) {
+                clearInterval(waitForUI);
+                createUI();
+                injectPrompt();
             }
-            
-        } catch (e) {
-            console.error('Dialogue Colors: Initialization error:', e);
-            console.error('Dialogue Colors: Error stack:', e.stack);
-            alert('Dialogue Colors: Failed to initialize: ' + e.message);
-        }
-    }
-        
-        const btnWait = setInterval(() => {
+        }, 500);
+
+        const waitForSendForm = setInterval(() => {
             if (document.getElementById('send_form')) {
-                clearInterval(btnWait);
+                clearInterval(waitForSendForm);
                 addInputButton();
                 hookSendButton();
             }
         }, 500);
-        
+
         if (typeof eventSource !== 'undefined' && typeof event_types !== 'undefined') {
-            eventSource.on(event_types.GENERATION_STARTED, () => {
-                console.log('CC: GENERATION_STARTED event');
-                injectPrompt();
-            });
-            
-            eventSource.on(event_types.GENERATE_BEFORE_COMBINE_PROMPTS, () => {
-                console.log('CC: GENERATE_BEFORE_COMBINE_PROMPTS event');
-                injectPrompt();
-            });
-            
-            if (event_types.GENERATE_AFTER_INJECT) {
-                eventSource.on(event_types.GENERATE_AFTER_INJECT, () => {
-                    console.log('CC: GENERATE_AFTER_INJECT event');
-                    injectPrompt();
-                });
-            }
-            
-            eventSource.on(event_types.MESSAGE_RECEIVED, () => {
-                setTimeout(scanMessagesForColors, 500);
-            });
-            
+            eventSource.on(event_types.GENERATION_STARTED, () => injectPrompt());
+            eventSource.on(event_types.GENERATE_BEFORE_COMBINE_PROMPTS, () => injectPrompt());
+            if (event_types.GENERATE_AFTER_INJECT) eventSource.on(event_types.GENERATE_AFTER_INJECT, () => injectPrompt());
+            eventSource.on(event_types.MESSAGE_RECEIVED, () => setTimeout(scanMessagesForColors, 500));
             eventSource.on(event_types.CHAT_CHANGED, () => {
                 currentChatId = getChatId();
                 characterColors = {};
@@ -542,22 +278,9 @@
                 updateCharList();
                 setTimeout(injectPrompt, 500);
             });
-            
-            eventSource.on(event_types.USER_MESSAGE_RENDERED, () => {
-                if (settings.enabled) setTimeout(applyDisplayColors, 300);
-            });
         }
-        
-        setInterval(() => {
-            if (settings.enabled) applyDisplayColors();
-        }, 3000);
-        
-        setInterval(() => {
-            if (settings.enabled && typeof SillyTavern !== 'undefined' && SillyTavern.getContext) {
-                injectPrompt();
-            }
-        }, 5000);
-    }
+
+        setInterval(() => { if (settings.enabled && typeof SillyTavern !== 'undefined') injectPrompt(); }, 5000);
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
