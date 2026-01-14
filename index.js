@@ -117,7 +117,8 @@
             ? `Use these existing colors: ${Object.entries(characterColors).map(([k, v]) => `${v.name}=${v.color}`).join(', ')}. `
             : '';
         
-        return `<font color instruction: For ALL dialogue ("text") and thoughts (*text*), wrap in <font color=#RRGGBB>. ${themeHint} ${colorList}Use the SAME color consistently for each character. Example: <font color=#ff88aa>"Hello"</font>`;
+        return `<font color instruction: Wrap ALL dialogue ("text") and thoughts (*text*) in <font color=#RRGGBB>. ${themeHint} ${colorList}
+Use the SAME color consistently for each character. Format: Name: "<font color=#abc123>Dialogue</font>" or <font color=#abc123>Name: "Dialogue"</font>. Important: Always put character name before their dialogue using "Name:" format so the system can track speakers. Example: John: <font color=#ff88aa>"Hello"</font>`;
     }
 
     function injectPrompt() {
@@ -144,42 +145,54 @@
         }
     }
 
-    function extractColorsFromHTML(html) {
-        const colorRegex = /<font\s+color="#([a-fA-F0-9]{6})"[^>]*>/g;
-        const colors = [];
-        let match;
-        while ((match = colorRegex.exec(html)) !== null) {
-            if (!colors.includes(match[1])) {
-                colors.push(match[1]);
+    function detectSpeakerFromText(text, tagEndIndex) {
+        const beforeTag = text.substring(0, tagEndIndex);
+        const maxLookback = 300;
+        const context = beforeTag.substring(Math.max(0, beforeTag.length - maxLookback));
+        
+        const patterns = [
+            /(?:^|\n)\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s*[:]\s*$/m,
+            /(?:^|\n)\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+(says|said|asks|asked|replies|replied|answers|answered|whispers|whispered|shouts|shouted|yells|yelled|exclaims|exclaimed|murmurs|murmured|mutters|muttered|remarks|remarked|adds|added|continues|continued|interrupts|interrupted)\s*$/im
+        ];
+        
+        for (const pattern of patterns) {
+            const matches = [...context.matchAll(new RegExp(pattern.source, pattern.flags || 'gi'))];
+            if (matches.length > 0) {
+                const lastMatch = matches[matches.length - 1];
+                const speaker = lastMatch[1];
+                return speaker;
             }
         }
-        return colors;
-    }
-
-    function detectCharacterFromContext(mesBlock, color) {
-        const nameEl = mesBlock.querySelector('.name_text');
-        if (nameEl) {
-            return nameEl.textContent.trim();
-        }
+        
         return null;
     }
-
+ 
     function scanMessagesForColors() {
         document.querySelectorAll('.mes').forEach(mesBlock => {
             const mesText = mesBlock.querySelector('.mes_text');
             if (!mesText) return;
             
-            const colors = extractColorsFromHTML(mesText.innerHTML);
-            const charName = mesBlock.querySelector('.name_text')?.textContent?.trim();
+            const html = mesText.innerHTML;
+            const fontRegex = /<font\s+color="#([a-fA-F0-9]{6})"[^>]*>/g;
+            let match;
             
-            if (charName && colors.length > 0) {
-                const key = charName.toLowerCase();
-                if (!characterColors[key]) {
-                    characterColors[key] = { 
-                        color: colors[0], 
-                        name: charName 
-                    };
-                    updateCharList();
+            while ((match = fontRegex.exec(html)) !== null) {
+                const color = match[1];
+                const tagEndIndex = match.index + match[0].length;
+                const speaker = detectSpeakerFromText(html, tagEndIndex);
+                
+                if (speaker) {
+                    const key = speaker.toLowerCase();
+                    if (!characterColors[key]) {
+                        characterColors[key] = { 
+                            color: color, 
+                            name: speaker 
+                        };
+                        updateCharList();
+                    } else if (characterColors[key].color !== color) {
+                        characterColors[key].color = color;
+                        updateCharList();
+                    }
                 }
             }
         });
