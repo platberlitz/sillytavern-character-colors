@@ -13,6 +13,8 @@
     let legendVisible = false;
     let customPatterns = [];
     let potentialCharacters = {};
+    let sortMode = 'name';
+    let searchTerm = '';
     let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, minOccurrences: 2, ttsHints: {} };
 
     const COLOR_THEMES = {
@@ -98,16 +100,89 @@
         return conflicts;
     }
 
+    function suggestColorForName(name) {
+        const n = name.toLowerCase();
+        const colorMap = { red: 0, rose: 340, pink: 340, magenta: 330, purple: 280, violet: 270, blue: 220, cyan: 180, teal: 170, green: 120, lime: 90, yellow: 50, gold: 45, orange: 30, brown: 25, grey: 0, gray: 0 };
+        for (const [k, h] of Object.entries(colorMap)) if (n.includes(k)) return hslToHex(h, 70, 50);
+        return null;
+    }
+
+    function regenerateAllColors() {
+        const sortedEntries = Object.entries(characterColors).sort((a, b) => (a[1].dialogueCount || 0) - (b[1].dialogueCount || 0));
+        const newColors = [];
+        sortedEntries.forEach(([key, char]) => {
+            if (!char.locked) {
+                const suggested = suggestColorForName(char.name);
+                char.color = suggested || getNextColor();
+            }
+            newColors.push(char.color);
+        });
+        saveHistory(); saveData(); updateCharList(); injectPrompt();
+        toastr?.success?.('Colors regenerated');
+    }
+
+    function autoResolveConflicts() {
+        const conflicts = checkColorConflicts();
+        if (!conflicts.length) { toastr?.info?.('No conflicts found'); return; }
+        let fixed = 0;
+        conflicts.forEach(([name1, name2]) => {
+            const key1 = name1.toLowerCase(), key2 = name2.toLowerCase();
+            if (!characterColors[key1].locked) { characterColors[key1].color = getNextColor(); fixed++; }
+            else if (!characterColors[key2].locked) { characterColors[key2].color = getNextColor(); fixed++; }
+        });
+        saveHistory(); saveData(); updateCharList(); injectPrompt();
+        toastr?.success?.(`Fixed ${fixed} conflicts`);
+    }
+
+    function saveColorPreset() {
+        const name = prompt('Preset name:');
+        if (!name?.trim()) return;
+        const presets = JSON.parse(localStorage.getItem('dc_presets') || '{}');
+        presets[name] = Object.entries(characterColors).map(([k, v]) => ({ name: v.name, color: v.color, style: v.style }));
+        localStorage.setItem('dc_presets', JSON.stringify(presets));
+        toastr?.success?.('Preset saved');
+    }
+
+    function loadColorPreset() {
+        const presets = JSON.parse(localStorage.getItem('dc_presets') || '{}');
+        const names = Object.keys(presets);
+        if (!names.length) { toastr?.info?.('No presets saved'); return; }
+        const name = prompt('Load preset:\n' + names.map(n => `• ${n}`).join('\n'));
+        if (name && presets[name]) {
+            presets[name].forEach(p => {
+                const key = p.name.toLowerCase();
+                if (characterColors[key]) { characterColors[key].color = p.color; characterColors[key].style = p.style || ''; }
+                else { characterColors[key] = { color: p.color, name: p.name, locked: false, aliases: [], style: p.style || '', dialogueCount: 0 }; }
+            });
+            saveHistory(); saveData(); updateCharList(); injectPrompt();
+            toastr?.success?.('Preset loaded');
+        }
+    }
+
+    function getSortedEntries() {
+        const entries = Object.entries(characterColors).filter(([k, v]) => !searchTerm || v.name.toLowerCase().includes(searchTerm.toLowerCase()));
+        if (sortMode === 'count') entries.sort((a, b) => (b[1].dialogueCount || 0) - (a[1].dialogueCount || 0));
+        else entries.sort((a, b) => a[1].name.localeCompare(b[1].name));
+        return entries;
+    }
+
+    function getBadge(count) {
+        if (count >= 100) return '💎';
+        if (count >= 50) return '⭐';
+        return '';
+    }
+
     function detectTheme() {
         const m = getComputedStyle(document.body).backgroundColor.match(/\d+/g);
         return m && (parseInt(m[0])*299 + parseInt(m[1])*587 + parseInt(m[2])*114) / 1000 < 128 ? 'dark' : 'light';
     }
 
     function getStorageKey() { return `dc_${currentChatId}`; }
-    function saveData() { if (currentChatId) localStorage.setItem(getStorageKey(), JSON.stringify({ colors: characterColors, settings })); }
+    function saveData() { if (currentChatId) localStorage.setItem(getStorageKey(), JSON.stringify({ colors: characterColors, settings })); localStorage.setItem('dc_patterns', JSON.stringify(customPatterns)); }
     function loadData() {
         characterColors = {};
         if (currentChatId) { try { const d = JSON.parse(localStorage.getItem(getStorageKey())); if (d?.colors) characterColors = d.colors; if (d?.settings) Object.assign(settings, d.settings); } catch {} }
+        try { customPatterns = JSON.parse(localStorage.getItem('dc_patterns')) || []; } catch {}
         colorHistory = [JSON.stringify(characterColors)]; historyIndex = 0;
     }
 
@@ -297,9 +372,15 @@
     function addCharacter(name, color) {
         if (!name.trim()) return;
         const key = name.trim().toLowerCase();
-        characterColors[key] = { color: color || getNextColor(), name: name.trim(), locked: false, aliases: [], style: '', dialogueCount: potentialCharacters[key]?.count || 0 };
+        const suggested = color || suggestColorForName(name) || getNextColor();
+        characterColors[key] = { color: suggested, name: name.trim(), locked: false, aliases: [], style: '', dialogueCount: potentialCharacters[key]?.count || 0 };
         delete potentialCharacters[key];
         saveHistory(); saveData(); updateCharList(); injectPrompt();
+    }
+
+    function addCustomPattern(pattern) {
+        try { new RegExp(pattern); customPatterns.push(pattern); saveData(); toastr?.success?.('Pattern added'); }
+        catch { toastr?.error?.('Invalid regex'); }
     }
 
     function swapColors(key1, key2) {
@@ -311,13 +392,13 @@
 
     function updateCharList() {
         const list = document.getElementById('dc-char-list'); if (!list) return;
-        const entries = Object.entries(characterColors);
-        document.getElementById('dc-count').textContent = entries.length;
+        const entries = getSortedEntries();
+        document.getElementById('dc-count').textContent = Object.keys(characterColors).length;
         list.innerHTML = entries.length ? entries.map(([k, v]) => `
             <div class="dc-char ${swapMode === k ? 'dc-swap-selected' : ''}" data-key="${k}" style="display:flex;align-items:center;gap:4px;margin:3px 0;padding:2px;border-radius:4px;${swapMode === k ? 'background:var(--SmartThemeQuoteColor);' : ''}">
                 <span style="width:8px;height:8px;border-radius:50%;background:${v.color};flex-shrink:0;"></span>
                 <input type="color" value="${v.color}" data-key="${k}" style="width:18px;height:18px;padding:0;border:none;cursor:pointer;">
-                <span style="flex:1;color:${v.color};font-size:0.85em;" title="Dialogues: ${v.dialogueCount || 0}${v.aliases?.length ? '\nAliases: ' + v.aliases.join(', ') : ''}">${v.name}${v.style ? ` [${v.style[0].toUpperCase()}]` : ''}</span>
+                <span style="flex:1;color:${v.color};font-size:0.85em;" title="Dialogues: ${v.dialogueCount || 0}${v.aliases?.length ? '\nAliases: ' + v.aliases.join(', ') : ''}">${v.name}${v.style ? ` [${v.style[0].toUpperCase()}]` : ''}${getBadge(v.dialogueCount || 0)}</span>
                 <span style="font-size:0.7em;opacity:0.6;">${v.dialogueCount || 0}</span>
                 <button class="dc-lock menu_button" data-key="${k}" style="padding:1px 4px;font-size:0.7em;" title="Lock color">${v.locked ? '🔒' : '🔓'}</button>
                 <button class="dc-swap menu_button" data-key="${k}" style="padding:1px 4px;font-size:0.7em;" title="Swap colors">⇄</button>
@@ -376,12 +457,17 @@
                 <div style="display:flex;gap:4px;align-items:center;"><label style="width:50px;">Narrator:</label><input type="color" id="dc-narrator" value="#888888" style="width:24px;height:20px;"><button id="dc-narrator-clear" class="menu_button" style="padding:2px 6px;font-size:0.8em;">Clear</button></div>
                 <hr style="margin:2px 0;opacity:0.2;">
                 <div style="display:flex;gap:4px;"><button id="dc-scan" class="menu_button" style="flex:1;">Scan</button><button id="dc-clear" class="menu_button" style="flex:1;">Clear</button><button id="dc-stats" class="menu_button" style="flex:1;" title="Dialogue statistics">Stats</button></div>
-                <div style="display:flex;gap:4px;"><button id="dc-undo" class="menu_button" style="flex:1;">↶</button><button id="dc-redo" class="menu_button" style="flex:1;">↷</button><button id="dc-export" class="menu_button" style="flex:1;">Export</button><button id="dc-import" class="menu_button" style="flex:1;">Import</button></div>
+                <div style="display:flex;gap:4px;"><button id="dc-undo" class="menu_button" style="flex:1;">↶</button><button id="dc-redo" class="menu_button" style="flex:1;">↷</button><button id="dc-fix-conflicts" class="menu_button" style="flex:1;" title="Auto-fix color conflicts">Fix</button></div>
+                <div style="display:flex;gap:4px;"><button id="dc-regen" class="menu_button" style="flex:1;" title="Regenerate all colors">Regen</button><button id="dc-save-preset" class="menu_button" style="flex:1;" title="Save color preset">Preset↓</button><button id="dc-load-preset" class="menu_button" style="flex:1;" title="Load color preset">Preset↑</button></div>
+                <div style="display:flex;gap:4px;"><button id="dc-export" class="menu_button" style="flex:1;">Export</button><button id="dc-import" class="menu_button" style="flex:1;">Import</button></div>
                 <div style="display:flex;gap:4px;"><button id="dc-card" class="menu_button" style="flex:1;" title="Add from card">+Card</button><button id="dc-save-card" class="menu_button" style="flex:1;" title="Save to card">Save→Card</button><button id="dc-load-card" class="menu_button" style="flex:1;" title="Load from card">Card→Load</button></div>
+                <div style="display:flex;gap:4px;"><button id="dc-del-locked" class="menu_button" style="flex:1;" title="Delete all locked characters">DelLocked</button><button id="dc-reset" class="menu_button" style="flex:1;" title="Reset to default colors">Reset</button></div>
                 <input type="file" id="dc-import-file" accept=".json" style="display:none;">
+                <div style="display:flex;gap:4px;"><input type="text" id="dc-search" placeholder="Search characters..." class="text_pole" style="flex:1;padding:3px;"></div>
+                <div style="display:flex;gap:4px;align-items:center;"><label>Sort:</label><select id="dc-sort" class="text_pole" style="flex:1;"><option value="name">Name</option><option value="count">Dialogue Count</option></select></div>
                 <div style="display:flex;gap:4px;"><input type="text" id="dc-add-name" placeholder="Add character..." class="text_pole" style="flex:1;padding:3px;"><button id="dc-add-btn" class="menu_button" style="padding:3px 8px;">+</button></div>
-                <div style="display:flex;gap:4px;"><input type="text" id="dc-pattern" placeholder="Custom regex pattern..." class="text_pole" style="flex:1;padding:3px;font-size:0.8em;"><button id="dc-pattern-btn" class="menu_button" style="padding:3px 6px;font-size:0.8em;">+Pat</button></div>
-                <small>Characters: <span id="dc-count">0</span></small>
+                <div style="display:flex;gap:4px;"><input type="text" id="dc-pattern" placeholder="Custom regex pattern..." class="text_pole" style="flex:1;padding:3px;font-size:0.8em;"><button id="dc-pattern-btn" class="menu_button" style="padding:3px 6px;font-size:0.8em;">+Pat</button><button id="dc-patterns" class="menu_button" style="padding:3px 6px;font-size:0.8em;">Patterns</button></div>
+                <small>Characters: <span id="dc-count">0</span> (⭐=50+, 💎=100+)</small>
                 <div id="dc-char-list" style="max-height:150px;overflow-y:auto;"></div>
                 <hr style="margin:2px 0;opacity:0.2;">
                 <small>Preview:</small>
@@ -405,6 +491,10 @@
         $('dc-scan').onclick = scanAllMessages;
         $('dc-clear').onclick = () => { characterColors = {}; saveHistory(); saveData(); injectPrompt(); updateCharList(); };
         $('dc-stats').onclick = showStatsPopup;
+        $('dc-fix-conflicts').onclick = autoResolveConflicts;
+        $('dc-regen').onclick = regenerateAllColors;
+        $('dc-save-preset').onclick = saveColorPreset;
+        $('dc-load-preset').onclick = loadColorPreset;
         $('dc-card').onclick = autoAssignFromCard;
         $('dc-save-card').onclick = saveToCard;
         $('dc-load-card').onclick = loadFromCard;
@@ -412,9 +502,21 @@
         $('dc-export').onclick = exportColors;
         $('dc-import').onclick = () => $('dc-import-file').click();
         $('dc-import-file').onchange = e => { if (e.target.files[0]) importColors(e.target.files[0]); };
+        $('dc-del-locked').onclick = () => { let count = 0; Object.keys(characterColors).forEach(k => { if (characterColors[k].locked) { delete characterColors[k]; count++; } }); saveHistory(); saveData(); injectPrompt(); updateCharList(); toastr?.info?.(`Deleted ${count} locked characters`); };
+        $('dc-reset').onclick = () => { if (confirm('Reset all colors?')) { Object.values(characterColors).forEach(c => { if (!c.locked) c.color = getNextColor(); }); saveHistory(); saveData(); updateCharList(); injectPrompt(); } };
+        $('dc-search').oninput = e => { searchTerm = e.target.value; updateCharList(); };
+        $('dc-sort').onchange = e => { sortMode = e.target.value; updateCharList(); };
         $('dc-add-btn').onclick = () => { addCharacter($('dc-add-name').value); $('dc-add-name').value = ''; };
         $('dc-add-name').onkeypress = e => { if (e.key === 'Enter') $('dc-add-btn').click(); };
         $('dc-pattern-btn').onclick = () => { addCustomPattern($('dc-pattern').value); $('dc-pattern').value = ''; };
+        $('dc-patterns').onclick = () => {
+            const popup = document.createElement('div');
+            popup.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:var(--SmartThemeBodyColor);border:1px solid var(--SmartThemeBorderColor);border-radius:8px;padding:16px;z-index:10000;min-width:400px;';
+            popup.innerHTML = `<div style="font-weight:bold;margin-bottom:8px;">Custom Regex Patterns</div>${customPatterns.length ? customPatterns.map((p, i) => `<div style="display:flex;align-items:center;gap:4px;margin:2px 0;"><code style="flex:1;word-break:break-all;font-size:0.8em;">${p}</code><button class="dc-del-pat menu_button" data-idx="${i}" style="padding:1px 6px;font-size:0.7em;">×</button></div>`).join('') : '<small style="opacity:0.6;">No custom patterns</small>'}<button class="menu_button" style="margin-top:10px;width:100%;">Close</button>`;
+            popup.querySelector('button').onclick = () => popup.remove();
+            popup.querySelectorAll('.dc-del-pat').forEach(b => { b.onclick = () => { customPatterns.splice(b.dataset.idx, 1); popup.remove(); $('dc-patterns').click(); }; });
+            document.body.appendChild(popup);
+        };
         
         // Keyboard shortcuts
         document.addEventListener('keydown', e => {
