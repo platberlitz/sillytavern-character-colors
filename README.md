@@ -31,12 +31,14 @@
 ### Advanced
 - **Character aliases** - Map multiple names to same color
 - **Per-character styles** - Bold, italic, or both
-- **Narrator color** - Separate color for narration
-- **Thought symbols** - Custom symbols (e.g., `*`, `「`) for inner thoughts that use current speaker's color
+- **Narrator color** - Separate color for narration (can be disabled)
+- **Thought symbols** - Custom symbols (e.g., `*`, `『』`) for inner thoughts that use current speaker's color
 - **Highlight mode** - Background highlights + text color
 - **Custom regex patterns** - Add your own speaker detection patterns (with pattern management UI)
 - **Card integration** - Save/load colors to character card metadata
 - **Conflict resolution** - Auto-fix similar colors with one click
+- **Auto-lock consistent** - Automatically lock characters that appear consistently across 3 messages
+- **Auto-delete unlocked** - Automatically delete unlocked characters after 5 messages (cleanup false positives)
 - **Bulk actions** - DelLocked/Delete all locked, DelUnlocked/Delete all unlocked, clear all, reset to defaults
 
 ### Visual
@@ -99,13 +101,16 @@
 | Highlight mode | Add background highlights to dialogue in addition to text color |
 | Auto-scan | Automatically scan for characters when opening a chat with no saved colors |
 | Show floating legend | Show overlay on-screen mapping character names to their colors |
+| Disable narration coloring | Exclude narrator color instruction from prompt |
+| Auto-lock consistent | Automatically lock characters that appear across 3 consecutive messages |
+| Auto-delete unlocked | Automatically delete unlocked characters after 5 messages |
 | **Appearance** |
 | Theme | Force dark/light mode, or let it auto-detect from SillyTavern theme |
 | Palette | Choose from 17 color palettes (Pastel, Neon, Earth, Jewel, etc.) |
 | Min | Set how many times a name must appear before auto-adding as a character (higher = fewer false positives) |
 | Bright | Global brightness adjustment (-30 to +30) for all colors |
 | Narrator | Set a specific color for narration text (if LLM uses narrator tag) |
-| Thoughts | Custom symbols (e.g., `*`, `「`) that wrap inner thoughts - uses last speaker's color |
+| Thoughts | Custom symbols (e.g., `*`, `『』`) that wrap inner thoughts - LLM wraps these in font tags |
 | **Scanning & Management** |
 | Scan | Scan all messages in the chat to detect characters and assign colors |
 | Clear | Remove all characters from the list |
@@ -150,7 +155,9 @@
 4. Names must appear minimum threshold times before being confirmed (reduces false positives)
 5. Subsequent messages include assigned colors for consistency
 6. Colors persist per chat or can be saved to character cards
-7. Custom thought symbols (e.g., `*`, `「`) are automatically colored using last speaker's color for inner thoughts
+7. Custom thought symbols (e.g., `*`, `『』`) are instructed to be wrapped in font tags by the LLM
+8. Auto-lock feature locks consistent characters after 3 messages
+9. Auto-delete feature removes unlocked characters after 5 messages to clean up false positives
 
 ## Troubleshooting
 
