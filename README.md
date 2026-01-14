@@ -15,8 +15,9 @@ Automatically colors character dialogue and thoughts via LLM prompt injection - 
 ## Installation
 
 1. Place folder in SillyTavern `data/<user>/extensions/`
-2. Import `regex-script.json` in Extensions > Regex
-3. Restart SillyTavern
+2. Restart SillyTavern (regex script auto-installs on first load)
+
+**Note:** The regex script is automatically installed on first load. You can also manually import `regex-script.json` in Extensions > Regex if needed.
 
 ## How It Works
 

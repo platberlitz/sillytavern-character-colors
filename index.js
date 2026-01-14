@@ -1,7 +1,8 @@
-(() => {
+(async () => {
     'use strict';
 
     const MODULE_NAME = 'dialogue-colors';
+    const REGEX_SCRIPT_NAME = 'Strip Font Color Tags';
     let characterColors = {};
     let currentChatId = null;
     let settings = { 
@@ -58,6 +59,40 @@
             return ctx.chatId || ctx.chatID || null;
         }
         return null;
+    }
+
+    async function ensureRegexScriptInstalled() {
+        try {
+            const regexData = await (await fetch(chrome?.runtime?.getURL('regex-script.json') || 'regex-script.json')).json();
+            
+            if (typeof extension_settings !== 'undefined' && Array.isArray(extension_settings.regex)) {
+                const exists = extension_settings.regex.some(r => r.scriptName === REGEX_SCRIPT_NAME);
+                
+                if (!exists) {
+                    const newRegexScript = {
+                        id: crypto.randomUUID(),
+                        scriptName: REGEX_SCRIPT_NAME,
+                        findRegex: regexData.findRegex,
+                        replaceString: regexData.replaceString,
+                        trimStrings: regexData.trimStrings || [],
+                        placement: regexData.placement || [2],
+                        disabled: regexData.disabled || false,
+                        markdownOnly: regexData.markdownOnly || false,
+                        promptOnly: regexData.promptOnly || true,
+                        runOnEdit: regexData.runOnEdit || false,
+                        substituteRegex: regexData.substituteRegex || false,
+                        minDepth: regexData.minDepth || null,
+                        maxDepth: regexData.maxDepth || null
+                    };
+                    
+                    extension_settings.regex.push(newRegexScript);
+                    saveSettingsDebounced();
+                    console.log('Dialogue Colors: Regex script auto-installed');
+                }
+            }
+        } catch (e) {
+            console.warn('Dialogue Colors: Could not auto-install regex script', e);
+        }
     }
 
     function buildPromptInstruction() {
@@ -259,6 +294,7 @@ The color should be a hex code like #RRGGBB (6 characters). Each character must 
     function init() {
         currentChatId = getChatId();
         loadData();
+        ensureRegexScriptInstalled();
         
         const wait = setInterval(() => {
             if (document.getElementById('extensions_settings')) {
