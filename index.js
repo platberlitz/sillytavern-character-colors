@@ -110,32 +110,38 @@
         
         const mode = settings.themeMode === 'auto' ? detectTheme() : settings.themeMode;
         const themeHint = mode === 'dark' 
-            ? 'Use LIGHT/PASTEL colors (high lightness 60-75%) for dark background.' 
-            : 'Use DARK/MUTED colors (low lightness 30-45%) for light background.';
+            ? 'Use light pastel colors (#RRGGBB with high lightness).' 
+            : 'Use dark muted colors (#RRGGBB with low lightness).';
         
         const colorList = Object.entries(characterColors).length > 0
-            ? `Established character colors: ${Object.entries(characterColors).map(([k, v]) => `${v.name}: ${v.color}`).join(', ')}. `
+            ? `Use these existing colors: ${Object.entries(characterColors).map(([k, v]) => `${v.name}=${v.color}`).join(', ')}. `
             : '';
         
-        return `[IMPORTANT: Wrap all character dialogue ("speech") and inner thoughts (*thoughts*) in <font color=#RRGGBB> tags. ${themeHint}
-${colorList}
-Assign a UNIQUE color to each named character/speaker. When a character speaks, ALWAYS use the same color for them. 
-REUSE existing colors for established characters. Only generate NEW colors for characters not in the established list.
-Format: <font color=#abc123>"Dialogue here"</font> <font color=#def456>*Thought here*</font>
-The color should be a hex code like #RRGGBB (6 characters). Each character must have their own consistent color.]`;
+        return `<font color instruction: For ALL dialogue ("text") and thoughts (*text*), wrap in <font color=#RRGGBB>. ${themeHint} ${colorList}Use the SAME color consistently for each character. Example: <font color=#ff88aa>"Hello"</font>`;
     }
 
     function injectPrompt() {
         if (typeof SillyTavern === 'undefined' || !SillyTavern.getContext) {
+            console.log('CC: SillyTavern not available');
             return;
         }
         const ctx = SillyTavern.getContext();
         if (!ctx.setExtensionPrompt) {
+            console.log('CC: setExtensionPrompt not available');
             return;
         }
 
         const prompt = settings.enabled ? buildPromptInstruction() : '';
+        console.log('CC: Injecting prompt:', prompt);
         ctx.setExtensionPrompt(MODULE_NAME, prompt, 1, 0, false, 0);
+        updatePromptPreview(prompt);
+    }
+
+    function updatePromptPreview(prompt) {
+        const preview = document.getElementById('cc-prompt-preview');
+        if (preview) {
+            preview.textContent = prompt || '(disabled)';
+        }
     }
 
     function extractColorsFromHTML(html) {
@@ -255,9 +261,13 @@ The color should be a hex code like #RRGGBB (6 characters). Each character must 
                 <div style="display:flex;gap:5px;">
                     <button id="cc-clear" class="menu_button" style="flex:1">Clear Colors</button>
                     <button id="cc-scan" class="menu_button" style="flex:1">Scan</button>
+                    <button id="cc-refresh" class="menu_button" style="flex:1">Re-inject</button>
                 </div>
                 <small>Characters (per chat):</small>
                 <div id="cc-char-list" style="max-height:100px;overflow-y:auto;"></div>
+                <hr>
+                <small>Current prompt preview:</small>
+                <div id="cc-prompt-preview" style="font-size:0.8em;color:var(--SmartThemeBodyColor);max-height:100px;overflow-y:auto;padding:5px;background:var(--SmartThemeBlurTintColor);border-radius:4px;"></div>
             </div>
         </div>`;
         
@@ -270,6 +280,7 @@ The color should be a hex code like #RRGGBB (6 characters). Each character must 
             saveData();
             injectPrompt();
         };
+        updatePromptPreview(buildPromptInstruction());
         
         const themeSelect = document.getElementById('cc-theme');
         themeSelect.value = settings.themeMode;
@@ -297,6 +308,11 @@ The color should be a hex code like #RRGGBB (6 characters). Each character must 
             scanMessagesForColors();
             injectPrompt();
         };
+
+        document.getElementById('cc-refresh').onclick = () => {
+            injectPrompt();
+            toastr?.info?.('Prompt re-injected!');
+        };
         
         updateCharList();
     }
@@ -323,14 +339,14 @@ The color should be a hex code like #RRGGBB (6 characters). Each character must 
         
         if (typeof eventSource !== 'undefined' && typeof event_types !== 'undefined') {
             eventSource.on(event_types.GENERATION_STARTED, () => {
+                console.log('CC: GENERATION_STARTED event');
                 injectPrompt();
             });
             
-            if (event_types.GENERATE_BEFORE_COMBINE_PROMPTS) {
-                eventSource.on(event_types.GENERATE_BEFORE_COMBINE_PROMPTS, () => {
-                    injectPrompt();
-                });
-            }
+            eventSource.on(event_types.GENERATE_BEFORE_COMBINE_PROMPTS, () => {
+                console.log('CC: GENERATE_BEFORE_COMBINE_PROMPTS event');
+                injectPrompt();
+            });
             
             eventSource.on(event_types.MESSAGE_RECEIVED, () => {
                 setTimeout(scanMessagesForColors, 500);
