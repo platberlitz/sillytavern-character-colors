@@ -81,7 +81,8 @@ Effects are visible in chat but stripped from the prompt context.
 |---------|----------|
 | **Enable** | Toggle extension on/off |
 | **Highlight mode** | Add background highlights to dialogue |
-| **Auto-scan** | Scan for characters when opening a chat |
+| **Auto-scan on chat load** | Scan for characters when opening a chat |
+| **Auto-scan new messages** | Scan each new generated message for colors |
 | **Show floating legend** | Overlay showing character colors |
 | **Disable narration** | Exclude narrator from coloring |
 | **Share colors globally** | Use same colors across all chats |
