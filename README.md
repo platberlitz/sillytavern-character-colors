@@ -1,6 +1,6 @@
 # Dialogue Colors
 
-> **TL;DR:** A SillyTavern extension that makes the LLM color-code each character's dialogue automatically. No more walls of same-colored text—instantly see who's speaking at a glance. Includes smart character detection, colorblind-friendly palettes, per-chat memory, floating legend, dialogue statistics, card-based color persistence, and inner thought coloring.
+> **TL;DR:** A SillyTavern extension that makes the LLM color-code each character's dialogue automatically. No more walls of same-colored text—instantly see who's speaking at a glance. Includes LLM-driven character detection, colorblind-friendly palettes, per-chat memory, floating legend, dialogue statistics, and card-based color persistence.
 
 ---
 
@@ -8,7 +8,8 @@
 
 ### Core
 - **Auto-coloring** - Instructs the LLM to wrap dialogue in `<font color>` tags
-- **Character detection** - Scans messages and detects speakers from dialogue attribution
+- **LLM color blocks** - LLM outputs `[COLORS:Name=#RRGGBB,...]` at end of messages for reliable character detection (auto-removed)
+- **Fallback detection** - Scans font tags and dialogue attribution if no color block present
 - **Per-chat memory** - Colors saved per chat session
 - **Auto-scan on load** - Automatically scans when opening a chat with no saved colors
 - **Min occurrence threshold** - Require names to appear multiple times (configurable) to reduce false positives
@@ -37,8 +38,6 @@
 - **Custom regex patterns** - Add your own speaker detection patterns (with pattern management UI)
 - **Card integration** - Save/load colors to character card metadata
 - **Conflict resolution** - Auto-fix similar colors with one click
-- **Auto-lock consistent** - Automatically lock characters that appear consistently across 3 messages
-- **Auto-delete unlocked** - Automatically delete unlocked characters after 5 messages (cleanup false positives)
 - **Bulk actions** - DelLocked/Delete all locked, DelUnlocked/Delete all unlocked, clear all, reset to defaults
 
 ### Visual
@@ -65,27 +64,37 @@
 ## Quick Start
 
 1. Enable the extension (checkbox at the top)
-2. Start chatting - dialogue gets colored automatically
-3. If you see wrong colors detected, click **Scan** again after setting **Min** higher
+2. Start chatting - the LLM will color dialogue and output a `[COLORS:...]` block at the end
+3. Characters are detected automatically from the color block
 4. Lock your real characters (🔒) to prevent changes
-5. Click **DelUnlocked** to remove all false positives at once
-6. Adjust colors with the color picker
-7. Toggle **floating legend** to see colors while reading
+5. Adjust colors with the color picker
+6. Toggle **floating legend** to see colors while reading
+
+### How Color Detection Works
+
+The extension instructs the LLM to:
+1. Wrap each character's dialogue in `<font color=#RRGGBB>` tags
+2. Output a color summary at the end: `[COLORS:Name=#RRGGBB,Name2=#RRGGBB]`
+
+The extension then:
+1. Parses the `[COLORS:...]` block to extract character names and their colors
+2. Removes the block from the displayed message
+3. Falls back to scanning `<font>` tags if no block is present
+
+This approach is more reliable than pattern-matching speaker names from text.
 
 ### Common Workflows
 
 **Fresh chat:**
 1. Start chatting
-2. Characters get detected automatically (if they appear 2+ times)
-3. Click **Scan** to detect more
-4. Lock (🔒) real characters, click **DelUnlocked** to remove false positives
+2. Characters get detected automatically from `[COLORS:...]` blocks
+3. Lock (🔒) characters you want to keep consistent
+4. Click **DelUnlocked** to remove any false positives
 
 **Existing chat:**
-1. Click **Scan** to detect all characters
-2. Increase **Min** to 3-5 if too many false positives
-3. Click **Scan** again
-4. Lock (🔒) your confirmed characters
-5. Click **DelUnlocked** to clear the rest
+1. Click **Scan** to detect all characters from existing messages
+2. Lock (🔒) your confirmed characters
+3. Click **DelUnlocked** to clear the rest
 
 **Backup & Restore:**
 - Click **Save→Card** to save colors to character card
@@ -102,8 +111,6 @@
 | Auto-scan | Automatically scan for characters when opening a chat with no saved colors |
 | Show floating legend | Show overlay on-screen mapping character names to their colors |
 | Disable narration coloring | Exclude narrator color instruction from prompt |
-| Auto-lock consistent | Automatically lock characters that appear across 3 consecutive messages |
-| Auto-delete unlocked | Automatically delete unlocked characters after 5 messages |
 | **Appearance** |
 | Theme | Force dark/light mode, or let it auto-detect from SillyTavern theme |
 | Palette | Choose from 17 color palettes (Pastel, Neon, Earth, Jewel, etc.) |
@@ -149,42 +156,39 @@
 
 ## How It Works
 
-1. Extension injects a prompt telling LLM to use `<font color>` tags
+1. Extension injects a prompt telling LLM to use `<font color>` tags and output `[COLORS:...]` block
 2. Regex script strips tags from AI context (it doesn't see its own coloring)
-3. Extension scans for character names near dialogue and caches colors
-4. Names must appear minimum threshold times before being confirmed (reduces false positives)
-5. Subsequent messages include assigned colors for consistency
-6. Colors persist per chat or can be saved to character cards
-7. Custom thought symbols (e.g., `*`, `『』`) are instructed to be wrapped in font tags by the LLM
-8. Auto-lock feature locks consistent characters after 3 messages
-9. Auto-delete feature removes unlocked characters after 5 messages to clean up false positives
+3. Extension parses `[COLORS:Name=#RRGGBB,...]` block and removes it from display
+4. Falls back to scanning font tags if no color block present
+5. Names must appear minimum threshold times before being confirmed (reduces false positives)
+6. Subsequent messages include locked colors for consistency
+7. Colors persist per chat or can be saved to character cards
 
 ## Troubleshooting
 
-### False Positives (Wrong Characters Detected)
+### Colors Not Being Detected
 
-**Problem:** The extension detects words like "Just", "At", or "At least" as characters.
+**Problem:** Characters aren't showing up in the list.
 
 **Solutions:**
+1. Check if the LLM is outputting `[COLORS:...]` at the end of messages
+2. If not, the LLM may not be following the instruction - try a different model or adjust your system prompt
+3. Click **Scan** to use fallback detection from font tags
 
-1. **Increase the Min threshold** - Set it higher (3-5) to require more occurrences before auto-adding characters
-   - Go to the **Min** input and change from `2` to `3` or higher
+### False Positives (Wrong Characters Detected)
 
-2. **Use the DelUnlocked button** - After scanning, lock your real characters (🔒), then click **DelUnlocked**
-   - This removes all false positives at once while keeping your locked characters
+**Problem:** The extension detects words like "Just" or "At" as characters.
 
-3. **Manually delete false characters** - Click the **×** button next to each false character
-
-**Why this happens:**
-The extension looks for patterns like: `[Name] said/dialogue`. Common words can appear before dialogue markers, so they're mistakenly detected as character names. The **Min occurrence threshold** and **locking** features are designed to mitigate this.
+**Solutions:**
+1. **Lock your real characters** (🔒), then click **DelUnlocked** to remove all false positives
+2. **Increase the Min threshold** to require more occurrences before auto-adding
 
 ### Character Colors Change Randomly
 
-**Problem:** Characters keep getting new colors despite being established.
+**Problem:** Characters keep getting new colors.
 
 **Solution:** 
-- **Lock the character** (🔒) to prevent color changes during scans
-- Locked characters won't be reassigned new colors
+- **Lock the character** (🔒) to prevent color changes
 
 ### Colors Don't Show
 
@@ -192,18 +196,8 @@ The extension looks for patterns like: `[Name] said/dialogue`. Common words can 
 
 **Solutions:**
 1. Make sure **Enable** checkbox is checked
-2. Verify the LLM is actually using `<font color>` tags (check raw message source)
+2. Verify the LLM is using `<font color>` tags
 3. Check the **Prompt Preview** to see if colors are being injected
-4. Try **Reseting** or **Regenerating** colors
-
-### Thoughts Not Colored
-
-**Problem:** Inner thoughts wrapped in custom symbols aren't colored.
-
-**Solutions:**
-1. Make sure **Thoughts** field has your symbols (e.g., `*`)
-2. The color used is the **last speaker's** color - ensure someone spoke recently
-3. Check the speaker color is locked (thoughts respect the speaker's assigned color)
 
 ## License
 
