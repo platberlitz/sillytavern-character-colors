@@ -28,7 +28,7 @@ A SillyTavern extension that makes the LLM color-code each character's dialogue 
 - **Colorblind-friendly:** Protanopia, Deuteranopia, Tritanopia
 
 ### CSS Effects
-*Inspired by [Prolix's Lucid Loom](https://rentry.org/LucidLoom)*
+*Inspired by [Prolix's Lucid Loom](https://github.com/prolix-oc/ST-Presets)*
 
 When enabled, instructs the LLM to apply CSS transforms for dramatic effect:
 - **Chaos/madness** → `rotate(2deg) skew(5deg)`
@@ -119,7 +119,7 @@ The extension automatically imports these regex scripts:
 
 ## Credits
 
-- CSS effects feature inspired by [Prolix's Lucid Loom](https://rentry.org/LucidLoom)
+- CSS effects feature inspired by [Prolix's Lucid Loom](https://github.com/prolix-oc/ST-Presets)
 
 ## License
 
