@@ -529,11 +529,13 @@
         const mesText = element.querySelector?.('.mes_text') || element;
         if (!mesText) return false;
         const html = mesText.innerHTML;
+        console.log('[Dialogue Colors] Parsing message, length:', html.length);
         // Match [COLORS:...] format (visible in text, will be removed)
         const colorBlockRegex = /\[COLORS?:(.*?)\]/gi;
         let match, foundNew = false;
         const blocksToRemove = [];
         while ((match = colorBlockRegex.exec(html)) !== null) {
+            console.log('[Dialogue Colors] Found color block:', match[0]);
             blocksToRemove.push(match[0]);
             const colorPairs = match[1].split(',');
             for (const pair of colorPairs) {
@@ -541,6 +543,7 @@
                 if (eqIdx === -1) continue;
                 const name = pair.substring(0, eqIdx).trim();
                 const color = pair.substring(eqIdx + 1).trim();
+                console.log('[Dialogue Colors] Parsed:', name, color);
                 if (!name || !color || !/^#[a-fA-F0-9]{6}$/i.test(color)) continue;
                 const key = name.toLowerCase();
                 if (characterColors[key]) {
