@@ -219,9 +219,16 @@
     function ensureRegexScript() {
         if (!extension_settings) return;
         if (!Array.isArray(extension_settings.regex)) extension_settings.regex = [];
-        if (extension_settings.regex.some(r => r.scriptName === 'Trim Font Colors')) return;
-        extension_settings.regex.push({ id: crypto.randomUUID?.() || Math.random().toString(36).slice(2), scriptName: 'Trim Font Colors', findRegex: '/<\\/?font[^>]*>/gi', replaceString: '', trimStrings: [], placement: [2], disabled: false, markdownOnly: false, promptOnly: true, runOnEdit: true, substituteRegex: 0, minDepth: null, maxDepth: null });
-        saveSettingsDebounced();
+        // Trim font tags from prompt
+        if (!extension_settings.regex.some(r => r.scriptName === 'Trim Font Colors')) {
+            extension_settings.regex.push({ id: crypto.randomUUID?.() || Math.random().toString(36).slice(2), scriptName: 'Trim Font Colors', findRegex: '/<\\/?font[^>]*>/gi', replaceString: '', trimStrings: [], placement: [2], disabled: false, markdownOnly: false, promptOnly: true, runOnEdit: true, substituteRegex: 0, minDepth: null, maxDepth: null });
+            saveSettingsDebounced();
+        }
+        // Trim [COLORS:...] blocks from prompt
+        if (!extension_settings.regex.some(r => r.scriptName === 'Trim Color Blocks')) {
+            extension_settings.regex.push({ id: crypto.randomUUID?.() || Math.random().toString(36).slice(2), scriptName: 'Trim Color Blocks', findRegex: '/\\[COLORS?:[^\\]]*\\]/gi', replaceString: '', trimStrings: [], placement: [2], disabled: false, markdownOnly: false, promptOnly: true, runOnEdit: true, substituteRegex: 0, minDepth: null, maxDepth: null });
+            saveSettingsDebounced();
+        }
     }
 
     function buildPromptInstruction() {
