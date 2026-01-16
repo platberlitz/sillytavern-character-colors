@@ -251,12 +251,12 @@
         toastr?.success?.('Legend exported');
     }
     
-    // Right-click context menu for messages
+    // Right-click and long-press context menu for messages
     function setupContextMenu() {
-        document.addEventListener('contextmenu', e => {
-            const fontTag = e.target.closest('font[color]');
-            const mesText = e.target.closest('.mes_text');
-            if (!fontTag || !mesText) return;
+        let longPressTimer = null;
+        let longPressTarget = null;
+        
+        const showMenu = (e, fontTag) => {
             e.preventDefault();
             const existingMenu = document.getElementById('dc-context-menu');
             if (existingMenu) existingMenu.remove();
@@ -264,16 +264,18 @@
             const text = fontTag.textContent.substring(0, 30) + (fontTag.textContent.length > 30 ? '...' : '');
             const menu = document.createElement('div');
             menu.id = 'dc-context-menu';
-            menu.style.cssText = `position:fixed;left:${e.clientX}px;top:${e.clientY}px;background:#1a1a2e;border:1px solid #4a4a6a;border-radius:6px;padding:8px;z-index:10001;min-width:180px;color:#e0e0e0;box-shadow:0 4px 12px rgba(0,0,0,0.5);`;
+            const x = e.clientX || e.touches?.[0]?.clientX || 100;
+            const y = e.clientY || e.touches?.[0]?.clientY || 100;
+            menu.style.cssText = `position:fixed;left:${x}px;top:${y}px;background:#1a1a2e;border:1px solid #4a4a6a;border-radius:6px;padding:8px;z-index:10001;min-width:180px;color:#e0e0e0;box-shadow:0 4px 12px rgba(0,0,0,0.5);`;
             menu.innerHTML = `
                 <div style="font-size:0.8em;opacity:0.7;margin-bottom:6px;">"${text}"</div>
                 <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
                     <span style="width:12px;height:12px;border-radius:50%;background:${color};"></span>
                     <input type="color" id="dc-ctx-color" value="${color}" style="width:24px;height:20px;border:none;">
-                    <input type="text" id="dc-ctx-name" placeholder="Character name" class="text_pole" style="flex:1;padding:3px;font-size:0.85em;">
+                    <input type="text" id="dc-ctx-name" placeholder="Character name" class="text_pole" style="flex:1;padding:3px;font-size:0.85em;background:#2a2a4e;color:#e0e0e0;border:1px solid #4a4a6a;">
                 </div>
-                <button id="dc-ctx-assign" class="menu_button" style="width:100%;margin-bottom:4px;">Assign to Character</button>
-                <button id="dc-ctx-close" class="menu_button" style="width:100%;">Cancel</button>
+                <button id="dc-ctx-assign" class="menu_button" style="width:100%;margin-bottom:4px;background:#3a3a5e;">Assign to Character</button>
+                <button id="dc-ctx-close" class="menu_button" style="width:100%;background:#3a3a5e;">Cancel</button>
             `;
             document.body.appendChild(menu);
             menu.querySelector('#dc-ctx-close').onclick = () => menu.remove();
@@ -292,9 +294,29 @@
                 }
                 menu.remove();
             };
-            const closeMenu = e2 => { if (!menu.contains(e2.target)) { menu.remove(); document.removeEventListener('click', closeMenu); } };
-            setTimeout(() => document.addEventListener('click', closeMenu), 10);
+            const closeMenu = e2 => { if (!menu.contains(e2.target)) { menu.remove(); document.removeEventListener('click', closeMenu); document.removeEventListener('touchstart', closeMenu); } };
+            setTimeout(() => { document.addEventListener('click', closeMenu); document.addEventListener('touchstart', closeMenu); }, 10);
+        };
+        
+        // Right-click (desktop)
+        document.addEventListener('contextmenu', e => {
+            const fontTag = e.target.closest('font[color]');
+            const mesText = e.target.closest('.mes_text');
+            if (!fontTag || !mesText) return;
+            showMenu(e, fontTag);
         });
+        
+        // Long-press (mobile)
+        document.addEventListener('touchstart', e => {
+            const fontTag = e.target.closest('font[color]');
+            const mesText = e.target.closest('.mes_text');
+            if (!fontTag || !mesText) return;
+            longPressTarget = fontTag;
+            longPressTimer = setTimeout(() => showMenu(e, fontTag), 500);
+        }, { passive: true });
+        
+        document.addEventListener('touchend', () => { clearTimeout(longPressTimer); longPressTimer = null; });
+        document.addEventListener('touchmove', () => { clearTimeout(longPressTimer); longPressTimer = null; });
     }
     function saveData() { localStorage.setItem(getStorageKey(), JSON.stringify({ colors: characterColors, settings })); localStorage.setItem('dc_patterns', JSON.stringify(customPatterns)); }
     function loadData() {
