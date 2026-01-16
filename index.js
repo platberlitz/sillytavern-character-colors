@@ -5,7 +5,6 @@
     const { eventSource, event_types, setExtensionPrompt, saveCharacterDebounced, getCharacters } = await import('../../../../script.js');
 
     const MODULE_NAME = 'dialogue-colors';
-    const COMMON_WORDS = new Set(['the','she','her','his','him','they','them','their','this','that','then','there','here','where','when','what','which','who','whom','whose','how','why','but','and','for','nor','yet','with','from','into','onto','upon','over','under','after','before','between','through','during','about','against','among','around','behind','below','beneath','beside','besides','beyond','down','inside','near','off','out','outside','since','toward','towards','until','within','without','also','just','only','even','still','already','always','never','ever','often','sometimes','usually','very','really','quite','rather','almost','enough','too','much','many','more','most','less','least','few','little','some','any','all','both','each','every','either','neither','other','another','such','same','different','own','else','anyway','however','therefore','thus','hence','otherwise','instead','meanwhile','moreover','furthermore','nevertheless','nonetheless','although','though','while','whereas','because','since','unless','until','whether','once','twice','again','back','away','together','apart','alone','along','across','ahead','aside','above','below']);
     let characterColors = {};
     let colorHistory = [];
     let historyIndex = -1;
@@ -369,7 +368,6 @@
                 const color = pair.substring(eqIdx + 1).trim();
                 if (!name || !color || !/^#[a-fA-F0-9]{6}$/i.test(color)) continue;
                 const key = name.toLowerCase();
-                if (COMMON_WORDS.has(key)) continue;
                 if (characterColors[key]) {
                     characterColors[key].dialogueCount = (characterColors[key].dialogueCount || 0) + 1;
                     if (!characterColors[key].locked) characterColors[key].color = color;
