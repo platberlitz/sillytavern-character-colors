@@ -302,10 +302,15 @@
         document.addEventListener('touchend', () => { clearTimeout(longPressTimer); longPressTimer = null; });
         document.addEventListener('touchmove', () => { clearTimeout(longPressTimer); longPressTimer = null; });
     }
-    function saveData() { localStorage.setItem(getStorageKey(), JSON.stringify({ colors: characterColors, settings })); }
+    function saveData() { 
+        localStorage.setItem(getStorageKey(), JSON.stringify({ colors: characterColors, settings })); 
+        localStorage.setItem('dc_global_settings', JSON.stringify({ thoughtSymbols: settings.thoughtSymbols }));
+    }
     function loadData() {
         characterColors = {};
+        try { const g = JSON.parse(localStorage.getItem('dc_global_settings')); if (g?.thoughtSymbols !== undefined) settings.thoughtSymbols = g.thoughtSymbols; } catch {}
         try { const d = JSON.parse(localStorage.getItem(getStorageKey())); if (d?.colors) characterColors = d.colors; if (d?.settings) Object.assign(settings, d.settings); } catch {}
+        try { const g = JSON.parse(localStorage.getItem('dc_global_settings')); if (g?.thoughtSymbols !== undefined) settings.thoughtSymbols = g.thoughtSymbols; } catch {}
         colorHistory = [JSON.stringify(characterColors)]; historyIndex = 0;
     }
 
