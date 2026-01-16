@@ -646,13 +646,20 @@
             loadData();
             if (!Object.keys(characterColors).length) tryLoadFromCard();
             lastCharKey = currentCharKey;
+            // Sync UI with loaded settings
+            const $ = id => document.getElementById(id);
+            if ($('dc-thought-symbols')) $('dc-thought-symbols').value = settings.thoughtSymbols || '';
+            if ($('dc-narrator')) $('dc-narrator').value = settings.narratorColor || '#888888';
+            if ($('dc-brightness')) { $('dc-brightness').value = settings.brightness || 0; $('dc-bright-val').textContent = settings.brightness || 0; }
+            if ($('dc-enabled')) $('dc-enabled').checked = settings.enabled;
+            if ($('dc-palette')) $('dc-palette').value = settings.colorTheme;
+            if ($('dc-theme')) $('dc-theme').value = settings.themeMode;
         }
         updateCharList();
         injectPrompt();
         if (settings.autoScanOnLoad !== false && !Object.keys(characterColors).length) {
             setTimeout(() => { if (document.querySelectorAll('.mes').length) scanAllMessages(); }, 1000);
         }
-        document.querySelectorAll('.mes').forEach(m => colorThoughts(m));
     });
     console.log('Dialogue Colors: Ready!');
 })();
