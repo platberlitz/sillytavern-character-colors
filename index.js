@@ -230,14 +230,14 @@
         if (!settings.enabled) return '';
         const mode = settings.themeMode === 'auto' ? detectTheme() : settings.themeMode;
         const themeHint = mode === 'dark' ? 'Use light colors.' : 'Use dark colors.';
-        const colorList = Object.entries(characterColors).filter(([,v]) => !v.locked || v.color).map(([,v]) => `${v.name}=${v.color}${v.style ? ` (${v.style})` : ''}`).join(', ');
+        const colorList = Object.entries(characterColors).filter(([,v]) => v.locked && v.color).map(([,v]) => `${v.name}=${v.color}${v.style ? ` (${v.style})` : ''}`).join(', ');
         const aliases = Object.entries(characterColors).filter(([,v]) => v.aliases?.length).map(([,v]) => `${v.name}/${v.aliases.join('/')}`).join('; ');
         let thoughts = '';
         if (settings.thoughtSymbols) {
-            thoughts = ` Inner thoughts wrapped in ${settings.thoughtSymbols} must be fully enclosed in <font color=...> tags using the current speaker's color. The opening and closing font tags must wrap the entire thought including the bracket symbols, e.g. <font color=#XXX>『thought』</font>.`;
+            thoughts = ` Inner thoughts wrapped in ${settings.thoughtSymbols} must be fully enclosed in <font color=...> tags using the current speaker's color.`;
         }
         const narratorRule = settings.disableNarration ? '' : (settings.narratorColor ? `Narrator: ${settings.narratorColor}.` : '');
-        return `[Font Color Rule: Wrap dialogue in <font color=#RRGGBB> tags. ${themeHint} ${colorList ? `ASSIGNED: ${colorList}.` : ''} ${aliases ? `ALIASES: ${aliases}.` : ''} ${narratorRule} ${thoughts} ${settings.highlightMode ? 'Also add background highlight.' : ''} Always assign a unique color to any new character that doesn't have one yet. Consistent colors per character.]`;
+        return `[Font Color Rule: Wrap dialogue in <font color=#RRGGBB> tags. ${themeHint} ${colorList ? `LOCKED: ${colorList}.` : ''} ${aliases ? `ALIASES: ${aliases}.` : ''} ${narratorRule} ${thoughts} ${settings.highlightMode ? 'Also add background highlight.' : ''} Assign unique colors to new characters. At the END of your response, add a hidden block: <!--COLORS:CharName=#RRGGBB,CharName2=#RRGGBB--> listing ALL characters who spoke with their colors. This block will be automatically removed.]`;
     }
 
     function buildColoredPromptPreview() {
@@ -352,6 +352,33 @@
         } catch {}
     }
 
+    function parseColorBlock(element) {
+        const mesText = element.querySelector?.('.mes_text') || element;
+        if (!mesText) return false;
+        const html = mesText.innerHTML;
+        const colorBlockRegex = /<!--COLORS:(.*?)-->/gi;
+        let match, foundNew = false;
+        while ((match = colorBlockRegex.exec(html)) !== null) {
+            const colorPairs = match[1].split(',');
+            for (const pair of colorPairs) {
+                const [name, color] = pair.split('=').map(s => s.trim());
+                if (!name || !color || !/^#[a-fA-F0-9]{6}$/i.test(color)) continue;
+                const key = name.toLowerCase();
+                if (COMMON_WORDS.has(key)) continue;
+                if (characterColors[key]) {
+                    characterColors[key].dialogueCount = (characterColors[key].dialogueCount || 0) + 1;
+                    if (!characterColors[key].locked) characterColors[key].color = color;
+                } else {
+                    characterColors[key] = { color, name, locked: false, aliases: [], style: '', dialogueCount: 1 };
+                    foundNew = true;
+                }
+            }
+            // Remove the color block from display
+            mesText.innerHTML = mesText.innerHTML.replace(match[0], '');
+        }
+        return foundNew;
+    }
+
     function scanForColors(element) {
         const mesText = element.querySelector?.('.mes_text') || element;
         if (!mesText) return false;
@@ -388,7 +415,10 @@
     function scanAllMessages() {
         Object.values(characterColors).forEach(c => c.dialogueCount = 0);
         potentialCharacters = {};
-        document.querySelectorAll('.mes').forEach(m => scanForColors(m));
+        document.querySelectorAll('.mes').forEach(m => {
+            parseColorBlock(m);
+            scanForColors(m);
+        });
         saveHistory(); saveData(); updateCharList(); injectPrompt();
         const conflicts = checkColorConflicts();
         if (conflicts.length) toastr?.warning?.(`Similar: ${conflicts.slice(0,3).map(c => c.join(' & ')).join(', ')}`);
@@ -403,8 +433,12 @@
         setTimeout(() => { 
             const msgs = document.querySelectorAll('.mes'); 
             if (msgs.length) { 
-                scanForColors(msgs[msgs.length - 1]); 
-                colorThoughts(msgs[msgs.length - 1]); 
+                const lastMsg = msgs[msgs.length - 1];
+                // First try to parse explicit color block
+                const foundFromBlock = parseColorBlock(lastMsg);
+                // Fall back to scanning font tags if no block found
+                if (!foundFromBlock) scanForColors(lastMsg);
+                colorThoughts(lastMsg); 
                 saveData(); 
                 updateCharList(); 
                 injectPrompt(); 
