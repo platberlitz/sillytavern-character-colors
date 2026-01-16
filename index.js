@@ -560,8 +560,6 @@
         }
         return foundNew;
     }
-        return foundNew;
-    }
 
     function scanAllMessages() {
         Object.values(characterColors).forEach(c => c.dialogueCount = 0);
