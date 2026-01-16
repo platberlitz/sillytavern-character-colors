@@ -264,7 +264,7 @@
             const text = fontTag.textContent.substring(0, 30) + (fontTag.textContent.length > 30 ? '...' : '');
             const menu = document.createElement('div');
             menu.id = 'dc-context-menu';
-            menu.style.cssText = `position:fixed;left:${e.clientX}px;top:${e.clientY}px;background:var(--SmartThemeBodyColor);border:1px solid var(--SmartThemeBorderColor);border-radius:6px;padding:8px;z-index:10001;min-width:180px;`;
+            menu.style.cssText = `position:fixed;left:${e.clientX}px;top:${e.clientY}px;background:#1a1a2e;border:1px solid #4a4a6a;border-radius:6px;padding:8px;z-index:10001;min-width:180px;color:#e0e0e0;box-shadow:0 4px 12px rgba(0,0,0,0.5);`;
             menu.innerHTML = `
                 <div style="font-size:0.8em;opacity:0.7;margin-bottom:6px;">"${text}"</div>
                 <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
@@ -686,7 +686,6 @@
                 <label class="checkbox_label"><input type="checkbox" id="dc-share-global"><span>Share colors across all chats</span></label>
                 <div style="display:flex;gap:4px;align-items:center;"><label style="width:50px;">Theme:</label><select id="dc-theme" class="text_pole" style="flex:1;"><option value="auto">Auto</option><option value="dark">Dark</option><option value="light">Light</option></select></div>
                 <div style="display:flex;gap:4px;align-items:center;"><label style="width:50px;">Palette:</label><select id="dc-palette" class="text_pole" style="flex:1;"><option value="pastel">Pastel</option><option value="neon">Neon</option><option value="earth">Earth</option><option value="jewel">Jewel</option><option value="muted">Muted</option><option value="jade">Jade</option><option value="forest">Forest</option><option value="ocean">Ocean</option><option value="sunset">Sunset</option><option value="aurora">Aurora</option><option value="warm">Warm</option><option value="cool">Cool</option><option value="berry">Berry</option><option value="monochrome">Monochrome</option><option value="protanopia">Protanopia</option><option value="deuteranopia">Deuteranopia</option><option value="tritanopia">Tritanopia</option></select></div>
-                <div style="display:flex;gap:4px;align-items:center;"><label style="width:50px;" title="Min dialogues before auto-adding">Min:</label><input type="number" id="dc-min-occ" min="1" max="5" value="2" class="text_pole" style="flex:1;"><small style="opacity:0.6;">occurrences</small></div>
                 <div style="display:flex;gap:4px;align-items:center;"><label style="width:50px;">Bright:</label><input type="range" id="dc-brightness" min="-30" max="30" value="0" style="flex:1;"><span id="dc-bright-val">0</span></div>
                 <div style="display:flex;gap:4px;align-items:center;"><label style="width:50px;">Narr:</label><input type="color" id="dc-narrator" value="#888888" style="width:24px;height:20px;"><button id="dc-narrator-clear" class="menu_button" style="padding:2px 6px;font-size:0.8em;">Clear</button></div>
                 <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;"><label style="width:50px;" title="Symbols for inner thoughts (*「etc)">Think:</label><input type="text" id="dc-thought-symbols" placeholder="*" class="text_pole" style="width:60px;padding:3px;"><button id="dc-thought-add" class="menu_button" style="padding:2px 6px;font-size:0.8em;">+</button><button id="dc-thought-clear" class="menu_button" style="padding:2px 6px;font-size:0.8em;">Clear</button></div>
@@ -701,7 +700,6 @@
                 <div style="display:flex;gap:4px;"><input type="text" id="dc-search" placeholder="Search characters..." class="text_pole" style="flex:1;padding:3px;"></div>
                 <div style="display:flex;gap:4px;align-items:center;"><label>Sort:</label><select id="dc-sort" class="text_pole" style="flex:1;"><option value="name">Name</option><option value="count">Dialogue Count</option></select></div>
                 <div style="display:flex;gap:4px;"><input type="text" id="dc-add-name" placeholder="Add character..." class="text_pole" style="flex:1;padding:3px;"><button id="dc-add-btn" class="menu_button" style="padding:3px 8px;">+</button></div>
-                <div style="display:flex;gap:4px;"><input type="text" id="dc-pattern" placeholder="Custom regex pattern..." class="text_pole" style="flex:1;padding:3px;font-size:0.8em;"><button id="dc-pattern-btn" class="menu_button" style="padding:3px 6px;font-size:0.8em;">+Pat</button><button id="dc-patterns" class="menu_button" style="padding:3px 6px;font-size:0.8em;">Patterns</button></div>
                 <small>Characters: <span id="dc-count">0</span> (⭐=50+, 💎=100+)</small>
                 <div id="dc-char-list" style="max-height:150px;overflow-y:auto;"></div>
                 <hr style="margin:2px 0;opacity:0.2;">
@@ -720,7 +718,6 @@
         $('dc-share-global').checked = settings.shareColorsGlobally || false; $('dc-share-global').onchange = e => { settings.shareColorsGlobally = e.target.checked; saveData(); loadData(); updateCharList(); injectPrompt(); };
         $('dc-theme').value = settings.themeMode; $('dc-theme').onchange = e => { settings.themeMode = e.target.value; invalidateThemeCache(); saveData(); injectPrompt(); };
         $('dc-palette').value = settings.colorTheme; $('dc-palette').onchange = e => { settings.colorTheme = e.target.value; saveData(); };
-        $('dc-min-occ').value = settings.minOccurrences || 2; $('dc-min-occ').onchange = e => { settings.minOccurrences = parseInt(e.target.value); saveData(); };
         $('dc-brightness').value = settings.brightness || 0; $('dc-bright-val').textContent = settings.brightness || 0;
         $('dc-brightness').oninput = e => { settings.brightness = parseInt(e.target.value); $('dc-bright-val').textContent = e.target.value; saveData(); invalidateThemeCache(); injectPrompt(); };
         $('dc-narrator').value = settings.narratorColor || '#888888'; $('dc-narrator').oninput = e => { settings.narratorColor = e.target.value; saveData(); injectPrompt(); };
@@ -772,15 +769,6 @@
         $('dc-sort').onchange = e => { sortMode = e.target.value; updateCharList(); };
         $('dc-add-btn').onclick = () => { addCharacter($('dc-add-name').value); $('dc-add-name').value = ''; };
         $('dc-add-name').onkeypress = e => { if (e.key === 'Enter') $('dc-add-btn').click(); };
-        $('dc-pattern-btn').onclick = () => { addCustomPattern($('dc-pattern').value); $('dc-pattern').value = ''; };
-        $('dc-patterns').onclick = () => {
-            const popup = document.createElement('div');
-            popup.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:var(--SmartThemeBodyColor);border:1px solid var(--SmartThemeBorderColor);border-radius:8px;padding:16px;z-index:10000;min-width:400px;';
-            popup.innerHTML = `<div style="font-weight:bold;margin-bottom:8px;">Custom Regex Patterns</div>${customPatterns.length ? customPatterns.map((p, i) => `<div style="display:flex;align-items:center;gap:4px;margin:2px 0;"><code style="flex:1;word-break:break-all;font-size:0.8em;">${p}</code><button class="dc-del-pat menu_button" data-idx="${i}" style="padding:1px 6px;font-size:0.7em;">×</button></div>`).join('') : '<small style="opacity:0.6;">No custom patterns</small>'}<button class="menu_button" style="margin-top:10px;width:100%;">Close</button>`;
-            popup.querySelector('button').onclick = () => popup.remove();
-            popup.querySelectorAll('.dc-del-pat').forEach(b => { b.onclick = () => { customPatterns.splice(b.dataset.idx, 1); popup.remove(); $('dc-patterns').click(); }; });
-            document.body.appendChild(popup);
-        };
         
         // Keyboard shortcuts
         document.addEventListener('keydown', e => {
