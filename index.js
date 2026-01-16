@@ -9,13 +9,9 @@
     let colorHistory = [];
     let historyIndex = -1;
     let swapMode = null;
-    let customPatterns = [];
-    let potentialCharacters = {};
     let sortMode = 'name';
     let searchTerm = '';
-    let lastSpeaker = '';
-    let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, minOccurrences: 2, thoughtSymbols: '*', ttsHints: {}, disableNarration: true, shareColorsGlobally: false, cssEffects: false };
-    let messageCounter = 0;
+    let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, thoughtSymbols: '*', disableNarration: true, shareColorsGlobally: false, cssEffects: false };
     let lastCharKey = null;
 
     const COLOR_THEMES = {
@@ -37,18 +33,6 @@
         deuteranopia: [[45,80,60],[220,80,55],[280,60,65],[30,90,55],[200,70,50],[320,50,60],[60,70,55],[240,70,60]],
         tritanopia: [[0,70,60],[180,70,55],[330,60,65],[20,80,55],[200,60,50],[350,50,60],[160,70,55],[10,70,60]]
     };
-    const VERBS = 'says?|said|replies?|replied|asks?|asked|whispers?|whispered|yells?|yelled|shouts?|shouted|exclaims?|exclaimed|murmurs?|murmured|mutters?|muttered|answers?|answered|calls?|called|cries?|cried|chirps?|chirped|purrs?|purred|announces?|announced|speaks?|spoke|states?|stated|remarks?|remarked|comments?|commented|explains?|explained|declares?|declared|demands?|demanded|warns?|warned|laughs?|laughed|sighs?|sighed|groans?|groaned|growls?|growled|hisses?|hissed|snaps?|snapped|screams?|screamed|mumbles?|mumbled|breathes?|breathed|gasps?|gasped|huffs?|huffed|scoffs?|scoffed|adds?|added|notes?|noted|continues?|continued|offers?|offered|zips?|zipped|floats?|floated|shoots?|shot';
-    let VERB_REGEX_BEFORE = null;
-    let VERB_REGEX_AFTER = null;
-    
-    function getVerbRegexBefore() {
-        if (!VERB_REGEX_BEFORE) VERB_REGEX_BEFORE = new RegExp(`([A-Z][a-z]{2,})\\s+(?:${VERBS})[,.:]*\\s*["'"「『«]?\\s*$`, 'i');
-        return VERB_REGEX_BEFORE;
-    }
-    function getVerbRegexAfter() {
-        if (!VERB_REGEX_AFTER) VERB_REGEX_AFTER = new RegExp(`^["'"」』»]?\\s*([A-Z][a-z]{2,})\\s+(?:${VERBS})`, 'i');
-        return VERB_REGEX_AFTER;
-    }
     let cachedTheme = null;
     let cachedIsDark = null;
     let injectDebouncedTimer = null;
@@ -318,11 +302,10 @@
         document.addEventListener('touchend', () => { clearTimeout(longPressTimer); longPressTimer = null; });
         document.addEventListener('touchmove', () => { clearTimeout(longPressTimer); longPressTimer = null; });
     }
-    function saveData() { localStorage.setItem(getStorageKey(), JSON.stringify({ colors: characterColors, settings })); localStorage.setItem('dc_patterns', JSON.stringify(customPatterns)); }
+    function saveData() { localStorage.setItem(getStorageKey(), JSON.stringify({ colors: characterColors, settings })); }
     function loadData() {
         characterColors = {};
         try { const d = JSON.parse(localStorage.getItem(getStorageKey())); if (d?.colors) characterColors = d.colors; if (d?.settings) Object.assign(settings, d.settings); } catch {}
-        try { customPatterns = JSON.parse(localStorage.getItem('dc_patterns')) || []; } catch {}
         colorHistory = [JSON.stringify(characterColors)]; historyIndex = 0;
     }
 
@@ -479,18 +462,13 @@
 
     function showStatsPopup() {
         const stats = getDialogueStats();
-        if (!stats.length && !Object.keys(potentialCharacters).length) { toastr?.info?.('No dialogue data'); return; }
+        if (!stats.length) { toastr?.info?.('No dialogue data'); return; }
         const maxCount = Math.max(...stats.map(s => s.count), 1);
         let html = stats.map(s => `<div style="display:flex;align-items:center;gap:6px;margin:2px 0;"><span style="width:60px;color:${s.color}">${s.name}</span><div style="flex:1;height:12px;background:var(--SmartThemeBlurTintColor);border-radius:3px;overflow:hidden;"><div style="width:${s.count/maxCount*100}%;height:100%;background:${s.color};"></div></div><span style="width:40px;text-align:right;font-size:0.8em;">${s.count} (${s.pct}%)</span></div>`).join('');
-        if (Object.keys(potentialCharacters).length) {
-            html += `<hr style="margin:8px 0;opacity:0.2;"><div style="font-weight:bold;margin-bottom:4px;">Pending (${Object.keys(potentialCharacters).length})</div>`;
-            html += Object.entries(potentialCharacters).map(([k, v]) => `<div style="display:flex;align-items:center;gap:6px;margin:2px 0;opacity:0.7;"><span style="width:60px;">${v.name}</span><span style="flex:1;font-size:0.8em;">${v.count}/${settings.minOccurrences}</span><button class="dc-add-pending menu_button" style="padding:1px 6px;font-size:0.7em;" data-key="${k}">Add</button></div>`).join('');
-        }
         const popup = document.createElement('div');
         popup.id = 'dc-stats-popup';
         popup.innerHTML = `<div style="font-weight:bold;margin-bottom:8px;">Dialogue Statistics</div>${html}<button class="dc-close-popup menu_button" style="margin-top:10px;width:100%;">Close</button>`;
         popup.querySelector('.dc-close-popup').onclick = () => popup.remove();
-        popup.querySelectorAll('.dc-add-pending').forEach(b => { b.onclick = () => { const p = potentialCharacters[b.dataset.key]; if (p) { addCharacter(p.name, [...p.colors].pop()); updateCharList(); popup.remove(); showStatsPopup(); } }; });
         document.body.appendChild(popup);
     }
 
@@ -583,39 +561,6 @@
         return foundNew;
     }
 
-    function scanForColors(element) {
-        const mesText = element.querySelector?.('.mes_text') || element;
-        if (!mesText) return false;
-        const html = mesText.innerHTML;
-        const fontRegex = /<font\s+color=["']?#([a-fA-F0-9]{6})["']?[^>]*>([\s\S]*?)<\/font>/gi;
-        let match, foundNew = false;
-        while ((match = fontRegex.exec(html)) !== null) {
-            const color = '#' + match[1], tagStart = match.index, tagEnd = tagStart + match[0].length;
-            const beforeText = html.substring(Math.max(0, tagStart - 400), tagStart).replace(/<[^>]+>/g, ' ');
-            const afterText = html.substring(tagEnd, Math.min(html.length, tagEnd + 150)).replace(/<[^>]+>/g, ' ');
-            let speaker = null;
-            const bv = beforeText.match(getVerbRegexBefore());
-            if (bv) speaker = bv[1];
-            if (!speaker) { const av = afterText.match(getVerbRegexAfter()); if (av) speaker = av[1]; }
-            if (speaker) {
-                const key = speaker.toLowerCase();
-                if (COMMON_WORDS.has(key)) continue;
-                lastSpeaker = color;
-                if (characterColors[key]?.locked) { characterColors[key].dialogueCount = (characterColors[key].dialogueCount || 0) + 1; lastSpeaker = characterColors[key].color; continue; }
-                for (const [k, v] of Object.entries(characterColors)) { if (v.aliases?.map(a => a.toLowerCase()).includes(key)) { if (!v.locked) { v.color = color; lastSpeaker = v.color; } foundNew = true; break; } }
-                if (!characterColors[key]) {
-                    potentialCharacters[key] = { name: speaker, colors: (potentialCharacters[key]?.colors || new Set()).add(color), count: (potentialCharacters[key]?.count || 0) + 1 };
-                    if (potentialCharacters[key].count >= (settings.minOccurrences || 2)) {
-                        characterColors[key] = { color: [...potentialCharacters[key].colors].pop(), name: speaker, locked: false, aliases: [], style: '', dialogueCount: potentialCharacters[key].count };
-                        delete potentialCharacters[key];
-                        foundNew = true;
-                    }
-                } else { characterColors[key].dialogueCount = (characterColors[key].dialogueCount || 0) + 1; if (!characterColors[key].locked) { characterColors[key].color = color; lastSpeaker = color; } }
-            }
-        }
-        return foundNew;
-    }
-
     function scanAllMessages() {
         Object.values(characterColors).forEach(c => c.dialogueCount = 0);
         document.querySelectorAll('.mes').forEach(m => {
@@ -645,14 +590,8 @@
         if (!name.trim()) return;
         const key = name.trim().toLowerCase();
         const suggested = color || suggestColorForName(name) || getNextColor();
-        characterColors[key] = { color: suggested, name: name.trim(), locked: false, aliases: [], style: '', dialogueCount: potentialCharacters[key]?.count || 0 };
-        delete potentialCharacters[key];
+        characterColors[key] = { color: suggested, name: name.trim(), locked: false, aliases: [], style: '', dialogueCount: 0 };
         saveHistory(); saveData(); updateCharList(); injectPrompt();
-    }
-
-    function addCustomPattern(pattern) {
-        try { new RegExp(pattern); customPatterns.push(pattern); saveData(); toastr?.success?.('Pattern added'); }
-        catch { toastr?.error?.('Invalid regex'); }
     }
 
     function swapColors(key1, key2) {
