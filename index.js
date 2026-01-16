@@ -14,7 +14,7 @@
     let sortMode = 'name';
     let searchTerm = '';
     let lastSpeaker = '';
-    let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, minOccurrences: 2, thoughtSymbols: '*', ttsHints: {}, disableNarration: true };
+    let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, minOccurrences: 2, thoughtSymbols: '*', ttsHints: {}, disableNarration: true, shareColorsGlobally: false };
     let messageCounter = 0;
     let lastCharKey = null;
 
@@ -196,7 +196,106 @@
     function invalidateThemeCache() { cachedTheme = null; cachedIsDark = null; }
 
     function getCharKey() { try { const ctx = getContext(); return ctx?.characters?.[ctx?.characterId]?.avatar || ctx?.characterId || null; } catch { return null; } }
-    function getStorageKey() { return `dc_char_${getCharKey() || 'default'}`; }
+    function getStorageKey() { return settings.shareColorsGlobally ? 'dc_global' : `dc_char_${getCharKey() || 'default'}`; }
+    
+    // Extract dominant color from avatar image
+    async function extractAvatarColor(imgSrc) {
+        return new Promise(resolve => {
+            const img = new Image();
+            img.crossOrigin = 'anonymous';
+            img.onload = () => {
+                const canvas = document.createElement('canvas');
+                const ctx = canvas.getContext('2d');
+                canvas.width = 50; canvas.height = 50;
+                ctx.drawImage(img, 0, 0, 50, 50);
+                const data = ctx.getImageData(0, 0, 50, 50).data;
+                let r = 0, g = 0, b = 0, count = 0;
+                for (let i = 0; i < data.length; i += 4) {
+                    if (data[i+3] < 128) continue; // Skip transparent
+                    r += data[i]; g += data[i+1]; b += data[i+2]; count++;
+                }
+                if (count === 0) { resolve(null); return; }
+                r = Math.round(r/count); g = Math.round(g/count); b = Math.round(b/count);
+                resolve(`#${r.toString(16).padStart(2,'0')}${g.toString(16).padStart(2,'0')}${b.toString(16).padStart(2,'0')}`);
+            };
+            img.onerror = () => resolve(null);
+            img.src = imgSrc;
+        });
+    }
+    
+    // Export legend as PNG
+    function exportLegendPng() {
+        const entries = Object.entries(characterColors);
+        if (!entries.length) { toastr?.info?.('No characters to export'); return; }
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        const lineHeight = 24, padding = 16, dotSize = 10;
+        canvas.width = 300;
+        canvas.height = entries.length * lineHeight + padding * 2;
+        ctx.fillStyle = '#1a1a2e';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        entries.forEach(([, v], i) => {
+            const y = padding + i * lineHeight + lineHeight / 2;
+            ctx.beginPath();
+            ctx.arc(padding + dotSize/2, y, dotSize/2, 0, Math.PI * 2);
+            ctx.fillStyle = v.color;
+            ctx.fill();
+            ctx.fillStyle = v.color;
+            ctx.font = '14px sans-serif';
+            ctx.fillText(v.name, padding + dotSize + 8, y + 5);
+        });
+        const a = document.createElement('a');
+        a.href = canvas.toDataURL('image/png');
+        a.download = `dialogue-colors-legend-${Date.now()}.png`;
+        a.click();
+        toastr?.success?.('Legend exported');
+    }
+    
+    // Right-click context menu for messages
+    function setupContextMenu() {
+        document.addEventListener('contextmenu', e => {
+            const fontTag = e.target.closest('font[color]');
+            const mesText = e.target.closest('.mes_text');
+            if (!fontTag || !mesText) return;
+            e.preventDefault();
+            const existingMenu = document.getElementById('dc-context-menu');
+            if (existingMenu) existingMenu.remove();
+            const color = fontTag.getAttribute('color');
+            const text = fontTag.textContent.substring(0, 30) + (fontTag.textContent.length > 30 ? '...' : '');
+            const menu = document.createElement('div');
+            menu.id = 'dc-context-menu';
+            menu.style.cssText = `position:fixed;left:${e.clientX}px;top:${e.clientY}px;background:var(--SmartThemeBodyColor);border:1px solid var(--SmartThemeBorderColor);border-radius:6px;padding:8px;z-index:10001;min-width:180px;`;
+            menu.innerHTML = `
+                <div style="font-size:0.8em;opacity:0.7;margin-bottom:6px;">"${text}"</div>
+                <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
+                    <span style="width:12px;height:12px;border-radius:50%;background:${color};"></span>
+                    <input type="color" id="dc-ctx-color" value="${color}" style="width:24px;height:20px;border:none;">
+                    <input type="text" id="dc-ctx-name" placeholder="Character name" class="text_pole" style="flex:1;padding:3px;font-size:0.85em;">
+                </div>
+                <button id="dc-ctx-assign" class="menu_button" style="width:100%;margin-bottom:4px;">Assign to Character</button>
+                <button id="dc-ctx-close" class="menu_button" style="width:100%;">Cancel</button>
+            `;
+            document.body.appendChild(menu);
+            menu.querySelector('#dc-ctx-close').onclick = () => menu.remove();
+            menu.querySelector('#dc-ctx-assign').onclick = () => {
+                const name = menu.querySelector('#dc-ctx-name').value.trim();
+                const newColor = menu.querySelector('#dc-ctx-color').value;
+                if (name) {
+                    const key = name.toLowerCase();
+                    if (characterColors[key]) {
+                        characterColors[key].color = newColor;
+                    } else {
+                        characterColors[key] = { color: newColor, name, locked: false, aliases: [], style: '', dialogueCount: 1 };
+                    }
+                    saveHistory(); saveData(); updateCharList(); injectPrompt();
+                    toastr?.success?.(`Assigned to ${name}`);
+                }
+                menu.remove();
+            };
+            const closeMenu = e2 => { if (!menu.contains(e2.target)) { menu.remove(); document.removeEventListener('click', closeMenu); } };
+            setTimeout(() => document.addEventListener('click', closeMenu), 10);
+        });
+    }
     function saveData() { localStorage.setItem(getStorageKey(), JSON.stringify({ colors: characterColors, settings })); localStorage.setItem('dc_patterns', JSON.stringify(customPatterns)); }
     function loadData() {
         characterColors = {};
@@ -288,7 +387,8 @@
             thoughts = ` Inner thoughts wrapped in ${settings.thoughtSymbols} must be fully enclosed in <font color=...> tags using the current speaker's color.`;
         }
         const narratorRule = settings.disableNarration ? '' : (settings.narratorColor ? `Narrator: ${settings.narratorColor}.` : '');
-        return `[Font Color Rule: Wrap dialogue in <font color=#RRGGBB> tags. ${themeHint} ${colorList ? `LOCKED: ${colorList}.` : ''} ${aliases ? `ALIASES: ${aliases}.` : ''} ${narratorRule} ${thoughts} ${settings.highlightMode ? 'Also add background highlight.' : ''} Assign unique colors to new characters. At the very END of your response, on its own line, add: [COLORS:Name=#RRGGBB,Name2=#RRGGBB] listing ALL characters who spoke. This will be auto-removed.]`;
+        const narratorInBlock = settings.disableNarration ? '' : ' Include Narrator=#RRGGBB if narration is used.';
+        return `[Font Color Rule: Wrap dialogue in <font color=#RRGGBB> tags. ${themeHint} ${colorList ? `LOCKED: ${colorList}.` : ''} ${aliases ? `ALIASES: ${aliases}.` : ''} ${narratorRule} ${thoughts} ${settings.highlightMode ? 'Also add background highlight.' : ''} Assign unique colors to new characters. At the very END of your response, on its own line, add: [COLORS:Name=#RRGGBB,Name2=#RRGGBB] listing ALL characters who spoke.${narratorInBlock} This will be auto-removed.]`;
     }
 
     function buildColoredPromptPreview() {
@@ -583,6 +683,7 @@
                 <label class="checkbox_label"><input type="checkbox" id="dc-autoscan"><span>Auto-scan on chat load</span></label>
                 <label class="checkbox_label"><input type="checkbox" id="dc-legend"><span>Show floating legend</span></label>
                 <label class="checkbox_label"><input type="checkbox" id="dc-disable-narration"><span>Disable narration coloring</span></label>
+                <label class="checkbox_label"><input type="checkbox" id="dc-share-global"><span>Share colors across all chats</span></label>
                 <div style="display:flex;gap:4px;align-items:center;"><label style="width:50px;">Theme:</label><select id="dc-theme" class="text_pole" style="flex:1;"><option value="auto">Auto</option><option value="dark">Dark</option><option value="light">Light</option></select></div>
                 <div style="display:flex;gap:4px;align-items:center;"><label style="width:50px;">Palette:</label><select id="dc-palette" class="text_pole" style="flex:1;"><option value="pastel">Pastel</option><option value="neon">Neon</option><option value="earth">Earth</option><option value="jewel">Jewel</option><option value="muted">Muted</option><option value="jade">Jade</option><option value="forest">Forest</option><option value="ocean">Ocean</option><option value="sunset">Sunset</option><option value="aurora">Aurora</option><option value="warm">Warm</option><option value="cool">Cool</option><option value="berry">Berry</option><option value="monochrome">Monochrome</option><option value="protanopia">Protanopia</option><option value="deuteranopia">Deuteranopia</option><option value="tritanopia">Tritanopia</option></select></div>
                 <div style="display:flex;gap:4px;align-items:center;"><label style="width:50px;" title="Min dialogues before auto-adding">Min:</label><input type="number" id="dc-min-occ" min="1" max="5" value="2" class="text_pole" style="flex:1;"><small style="opacity:0.6;">occurrences</small></div>
@@ -593,8 +694,8 @@
                 <div style="display:flex;gap:4px;"><button id="dc-scan" class="menu_button" style="flex:1;">Scan</button><button id="dc-clear" class="menu_button" style="flex:1;">Clear</button><button id="dc-stats" class="menu_button" style="flex:1;" title="Dialogue statistics">Stats</button></div>
                 <div style="display:flex;gap:4px;"><button id="dc-undo" class="menu_button" style="flex:1;">↶</button><button id="dc-redo" class="menu_button" style="flex:1;">↷</button><button id="dc-fix-conflicts" class="menu_button" style="flex:1;" title="Auto-fix color conflicts">Fix</button></div>
                 <div style="display:flex;gap:4px;"><button id="dc-regen" class="menu_button" style="flex:1;" title="Regenerate all colors">Regen</button><button id="dc-save-preset" class="menu_button" style="flex:1;" title="Save color preset">Preset↓</button><button id="dc-load-preset" class="menu_button" style="flex:1;" title="Load color preset">Preset↑</button></div>
-                <div style="display:flex;gap:4px;"><button id="dc-export" class="menu_button" style="flex:1;">Export</button><button id="dc-import" class="menu_button" style="flex:1;">Import</button></div>
-                <div style="display:flex;gap:4px;"><button id="dc-card" class="menu_button" style="flex:1;" title="Add from card">+Card</button><button id="dc-save-card" class="menu_button" style="flex:1;" title="Save to card">Save→Card</button><button id="dc-load-card" class="menu_button" style="flex:1;" title="Load from card">Card→Load</button></div>
+                <div style="display:flex;gap:4px;"><button id="dc-export" class="menu_button" style="flex:1;">Export</button><button id="dc-import" class="menu_button" style="flex:1;">Import</button><button id="dc-export-png" class="menu_button" style="flex:1;" title="Export legend as image">PNG</button></div>
+                <div style="display:flex;gap:4px;"><button id="dc-card" class="menu_button" style="flex:1;" title="Add from card">+Card</button><button id="dc-avatar-color" class="menu_button" style="flex:1;" title="Suggest color from avatar">Avatar</button><button id="dc-save-card" class="menu_button" style="flex:1;" title="Save to card">Save→Card</button><button id="dc-load-card" class="menu_button" style="flex:1;" title="Load from card">Card→Load</button></div>
                 <div style="display:flex;gap:4px;"><button id="dc-del-locked" class="menu_button" style="flex:1;" title="Delete all locked characters">DelLocked</button><button id="dc-del-unlocked" class="menu_button" style="flex:1;" title="Delete all unlocked characters">DelUnlocked</button><button id="dc-reset" class="menu_button" style="flex:1;" title="Reset to default colors">Reset</button></div>
                 <input type="file" id="dc-import-file" accept=".json" style="display:none;">
                 <div style="display:flex;gap:4px;"><input type="text" id="dc-search" placeholder="Search characters..." class="text_pole" style="flex:1;padding:3px;"></div>
@@ -616,6 +717,7 @@
         $('dc-autoscan').checked = settings.autoScanOnLoad !== false; $('dc-autoscan').onchange = e => { settings.autoScanOnLoad = e.target.checked; saveData(); };
         $('dc-legend').checked = settings.showLegend; $('dc-legend').onchange = e => { settings.showLegend = e.target.checked; saveData(); updateLegend(); };
         $('dc-disable-narration').checked = settings.disableNarration !== false; $('dc-disable-narration').onchange = e => { settings.disableNarration = e.target.checked; saveData(); injectPrompt(); };
+        $('dc-share-global').checked = settings.shareColorsGlobally || false; $('dc-share-global').onchange = e => { settings.shareColorsGlobally = e.target.checked; saveData(); loadData(); updateCharList(); injectPrompt(); };
         $('dc-theme').value = settings.themeMode; $('dc-theme').onchange = e => { settings.themeMode = e.target.value; invalidateThemeCache(); saveData(); injectPrompt(); };
         $('dc-palette').value = settings.colorTheme; $('dc-palette').onchange = e => { settings.colorTheme = e.target.value; saveData(); };
         $('dc-min-occ').value = settings.minOccurrences || 2; $('dc-min-occ').onchange = e => { settings.minOccurrences = parseInt(e.target.value); saveData(); };
@@ -635,11 +737,33 @@
         $('dc-save-preset').onclick = saveColorPreset;
         $('dc-load-preset').onclick = loadColorPreset;
         $('dc-card').onclick = autoAssignFromCard;
+        $('dc-avatar-color').onclick = async () => {
+            try {
+                const ctx = getContext();
+                const char = ctx?.characters?.[ctx?.characterId];
+                if (!char?.avatar) { toastr?.info?.('No avatar found'); return; }
+                const avatarUrl = `/characters/${encodeURIComponent(char.avatar)}`;
+                const color = await extractAvatarColor(avatarUrl);
+                if (color) {
+                    const key = char.name.toLowerCase();
+                    if (characterColors[key]) {
+                        characterColors[key].color = color;
+                    } else {
+                        characterColors[key] = { color, name: char.name, locked: false, aliases: [], style: '', dialogueCount: 0 };
+                    }
+                    saveHistory(); saveData(); updateCharList(); injectPrompt();
+                    toastr?.success?.(`Set ${char.name} to ${color}`);
+                } else {
+                    toastr?.error?.('Could not extract color');
+                }
+            } catch (e) { toastr?.error?.('Failed to extract avatar color'); }
+        };
         $('dc-save-card').onclick = saveToCard;
         $('dc-load-card').onclick = loadFromCard;
         $('dc-undo').onclick = undo; $('dc-redo').onclick = redo;
         $('dc-export').onclick = exportColors;
         $('dc-import').onclick = () => $('dc-import-file').click();
+        $('dc-export-png').onclick = exportLegendPng;
         $('dc-import-file').onchange = e => { if (e.target.files[0]) importColors(e.target.files[0]); };
         $('dc-del-locked').onclick = () => { let count = 0; Object.keys(characterColors).forEach(k => { if (characterColors[k].locked) { delete characterColors[k]; count++; } }); saveHistory(); saveData(); injectPrompt(); updateCharList(); toastr?.info?.(`Deleted ${count} locked characters`); };
         $('dc-del-unlocked').onclick = () => { let count = 0; Object.keys(characterColors).forEach(k => { if (!characterColors[k].locked) { delete characterColors[k]; count++; } }); saveHistory(); saveData(); injectPrompt(); updateCharList(); toastr?.info?.(`Deleted ${count} unlocked characters`); };
@@ -676,6 +800,7 @@
         loadData(); 
         // Delay regex import to ensure extension_settings is ready
         setTimeout(() => ensureRegexScript(), 1000);
+        setupContextMenu();
         
         let waitAttempts = 0;
         const waitUI = setInterval(() => { 
