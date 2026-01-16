@@ -532,6 +532,13 @@
         const html = mesText.innerHTML;
         console.log('[DC] Parsing, text length:', text?.length, 'html length:', html?.length);
         if (text?.includes('[COLOR')) console.log('[DC] Text snippet:', text.slice(text.indexOf('[COLOR'), text.indexOf('[COLOR') + 100));
+        
+        // Also check the full message element
+        const fullText = element.textContent;
+        if (fullText?.includes('[COLOR') && !text?.includes('[COLOR')) {
+            console.log('[DC] Found in parent, not mes_text:', fullText.slice(fullText.indexOf('[COLOR'), fullText.indexOf('[COLOR') + 100));
+        }
+        
         const colorBlockRegex = /\[COLORS?:(.*?)\]/gis;
         let match, foundNew = false;
         const blocksToRemove = [];
