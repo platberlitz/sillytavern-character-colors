@@ -572,9 +572,37 @@
 
     function scanAllMessages() {
         Object.values(characterColors).forEach(c => c.dialogueCount = 0);
-        document.querySelectorAll('.mes').forEach(m => {
-            parseColorBlock(m);
-        });
+        
+        // Scan from chat data (raw messages before regex trimming)
+        const ctx = getContext();
+        const chat = ctx?.chat || [];
+        const colorBlockRegex = /\[COLORS?:(.*?)\]/gis;
+        let foundNew = false;
+        
+        for (const msg of chat) {
+            const text = msg?.mes || '';
+            let match;
+            while ((match = colorBlockRegex.exec(text)) !== null) {
+                console.log('[DC] Found in chat data:', match[0]);
+                const colorPairs = match[1].split(',');
+                for (const pair of colorPairs) {
+                    const eqIdx = pair.indexOf('=');
+                    if (eqIdx === -1) continue;
+                    const name = pair.substring(0, eqIdx).trim();
+                    const color = pair.substring(eqIdx + 1).trim();
+                    if (!name || !color || !/^#[a-fA-F0-9]{6}$/i.test(color)) continue;
+                    const key = name.toLowerCase();
+                    if (characterColors[key]) {
+                        characterColors[key].dialogueCount = (characterColors[key].dialogueCount || 0) + 1;
+                        if (!characterColors[key].locked) characterColors[key].color = color;
+                    } else {
+                        characterColors[key] = { color, name, locked: false, aliases: [], style: '', dialogueCount: 1 };
+                        foundNew = true;
+                    }
+                }
+            }
+        }
+        
         saveHistory(); saveData(); updateCharList(); injectPrompt();
         const conflicts = checkColorConflicts();
         if (conflicts.length) toastr?.warning?.(`Similar: ${conflicts.slice(0,3).map(c => c.join(' & ')).join(', ')}`);
