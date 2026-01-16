@@ -529,10 +529,12 @@
         const mesText = element.querySelector?.('.mes_text') || element;
         if (!mesText) return false;
         const html = mesText.innerHTML;
+        console.log('[DC] Parsing, html length:', html?.length);
         const colorBlockRegex = /\[COLORS?:(.*?)\]/gi;
         let match, foundNew = false;
         const blocksToRemove = [];
         while ((match = colorBlockRegex.exec(html)) !== null) {
+            console.log('[DC] Found:', match[0]);
             blocksToRemove.push(match[0]);
             const colorPairs = match[1].split(',');
             for (const pair of colorPairs) {
@@ -556,6 +558,8 @@
             blocksToRemove.forEach(block => { newHtml = newHtml.replace(block, ''); });
             mesText.innerHTML = newHtml;
         }
+        return foundNew;
+    }
         return foundNew;
     }
 
