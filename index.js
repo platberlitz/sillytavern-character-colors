@@ -236,7 +236,7 @@
             thoughts = ` Inner thoughts wrapped in ${settings.thoughtSymbols} must be fully enclosed in <font color=...> tags using the current speaker's color.`;
         }
         const narratorRule = settings.disableNarration ? '' : (settings.narratorColor ? `Narrator: ${settings.narratorColor}.` : '');
-        return `[Font Color Rule: Wrap dialogue in <font color=#RRGGBB> tags. ${themeHint} ${colorList ? `LOCKED: ${colorList}.` : ''} ${aliases ? `ALIASES: ${aliases}.` : ''} ${narratorRule} ${thoughts} ${settings.highlightMode ? 'Also add background highlight.' : ''} Assign unique colors to new characters. At the END of your response, add a hidden block: <!--COLORS:CharName=#RRGGBB,CharName2=#RRGGBB--> listing ALL characters who spoke with their colors. This block will be automatically removed.]`;
+        return `[Font Color Rule: Wrap dialogue in <font color=#RRGGBB> tags. ${themeHint} ${colorList ? `LOCKED: ${colorList}.` : ''} ${aliases ? `ALIASES: ${aliases}.` : ''} ${narratorRule} ${thoughts} ${settings.highlightMode ? 'Also add background highlight.' : ''} Assign unique colors to new characters. At the very END of your response, on its own line, add: [COLORS:Name=#RRGGBB,Name2=#RRGGBB] listing ALL characters who spoke. This will be auto-removed.]`;
     }
 
     function buildColoredPromptPreview() {
@@ -355,8 +355,8 @@
         const mesText = element.querySelector?.('.mes_text') || element;
         if (!mesText) return false;
         const html = mesText.innerHTML;
-        // Match both raw HTML comments and escaped versions
-        const colorBlockRegex = /(?:<!--COLORS:|&lt;!--COLORS:)(.*?)(?:-->|--&gt;)/gi;
+        // Match [COLORS:...] format (visible in text, will be removed)
+        const colorBlockRegex = /\[COLORS?:(.*?)\]/gi;
         let match, foundNew = false;
         const blocksToRemove = [];
         while ((match = colorBlockRegex.exec(html)) !== null) {
