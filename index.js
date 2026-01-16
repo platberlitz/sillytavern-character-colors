@@ -355,7 +355,8 @@
         const mesText = element.querySelector?.('.mes_text') || element;
         if (!mesText) return false;
         const html = mesText.innerHTML;
-        const colorBlockRegex = /<!--COLORS:(.*?)-->/gi;
+        // Match both raw HTML comments and escaped versions
+        const colorBlockRegex = /(?:<!--COLORS:|&lt;!--COLORS:)(.*?)(?:-->|--&gt;)/gi;
         let match, foundNew = false;
         const blocksToRemove = [];
         while ((match = colorBlockRegex.exec(html)) !== null) {
