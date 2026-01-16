@@ -358,10 +358,15 @@
         const html = mesText.innerHTML;
         const colorBlockRegex = /<!--COLORS:(.*?)-->/gi;
         let match, foundNew = false;
+        const blocksToRemove = [];
         while ((match = colorBlockRegex.exec(html)) !== null) {
+            blocksToRemove.push(match[0]);
             const colorPairs = match[1].split(',');
             for (const pair of colorPairs) {
-                const [name, color] = pair.split('=').map(s => s.trim());
+                const eqIdx = pair.indexOf('=');
+                if (eqIdx === -1) continue;
+                const name = pair.substring(0, eqIdx).trim();
+                const color = pair.substring(eqIdx + 1).trim();
                 if (!name || !color || !/^#[a-fA-F0-9]{6}$/i.test(color)) continue;
                 const key = name.toLowerCase();
                 if (COMMON_WORDS.has(key)) continue;
@@ -373,8 +378,12 @@
                     foundNew = true;
                 }
             }
-            // Remove the color block from display
-            mesText.innerHTML = mesText.innerHTML.replace(match[0], '');
+        }
+        // Remove all color blocks after parsing
+        if (blocksToRemove.length) {
+            let newHtml = mesText.innerHTML;
+            blocksToRemove.forEach(block => { newHtml = newHtml.replace(block, ''); });
+            mesText.innerHTML = newHtml;
         }
         return foundNew;
     }
