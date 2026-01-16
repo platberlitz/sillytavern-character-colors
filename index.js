@@ -218,7 +218,11 @@
 
     function ensureRegexScript() {
         try {
-            if (!extension_settings || typeof extension_settings !== 'object') return;
+            console.log('[Dialogue Colors] Checking regex scripts, extension_settings:', !!extension_settings);
+            if (!extension_settings || typeof extension_settings !== 'object') {
+                console.warn('[Dialogue Colors] extension_settings not available');
+                return;
+            }
             if (!Array.isArray(extension_settings.regex)) extension_settings.regex = [];
             
             const uuidv4 = () => 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
@@ -228,6 +232,7 @@
             
             // Trim font tags from prompt
             if (!extension_settings.regex.some(r => r?.scriptName === 'Trim Font Colors')) {
+                console.log('[Dialogue Colors] Adding Trim Font Colors regex');
                 extension_settings.regex.push({
                     id: uuidv4(),
                     scriptName: 'Trim Font Colors',
@@ -248,6 +253,7 @@
             
             // Trim [COLORS:...] blocks from prompt and display
             if (!extension_settings.regex.some(r => r?.scriptName === 'Trim Color Blocks')) {
+                console.log('[Dialogue Colors] Adding Trim Color Blocks regex');
                 extension_settings.regex.push({
                     id: uuidv4(),
                     scriptName: 'Trim Color Blocks',
@@ -265,6 +271,7 @@
                 });
                 saveSettingsDebounced?.();
             }
+            console.log('[Dialogue Colors] Regex scripts check complete');
         } catch (e) {
             console.error('[Dialogue Colors] Failed to import regex scripts:', e);
         }
@@ -667,7 +674,8 @@
     
     function init() {
         loadData(); 
-        ensureRegexScript();
+        // Delay regex import to ensure extension_settings is ready
+        setTimeout(() => ensureRegexScript(), 1000);
         
         let waitAttempts = 0;
         const waitUI = setInterval(() => { 
