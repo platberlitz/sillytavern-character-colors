@@ -531,7 +531,8 @@
         const text = mesText.textContent;
         const html = mesText.innerHTML;
         console.log('[DC] Parsing, text length:', text?.length, 'html length:', html?.length);
-        const colorBlockRegex = /\[COLORS?:(.*?)\]/gi;
+        if (text?.includes('[COLOR')) console.log('[DC] Text snippet:', text.slice(text.indexOf('[COLOR'), text.indexOf('[COLOR') + 100));
+        const colorBlockRegex = /\[COLORS?:(.*?)\]/gis;
         let match, foundNew = false;
         const blocksToRemove = [];
         while ((match = colorBlockRegex.exec(text)) !== null) {
