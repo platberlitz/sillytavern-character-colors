@@ -246,7 +246,7 @@
                 saveSettingsDebounced?.();
             }
             
-            // Trim [COLORS:...] blocks from prompt
+            // Trim [COLORS:...] blocks from prompt and display
             if (!extension_settings.regex.some(r => r?.scriptName === 'Trim Color Blocks')) {
                 extension_settings.regex.push({
                     id: uuidv4(),
@@ -254,10 +254,10 @@
                     findRegex: '/\\[COLORS?:[^\\]]*\\]/gi',
                     replaceString: '',
                     trimStrings: [],
-                    placement: [2],
+                    placement: [1, 2],
                     disabled: false,
                     markdownOnly: false,
-                    promptOnly: true,
+                    promptOnly: false,
                     runOnEdit: true,
                     substituteRegex: 0,
                     minDepth: null,
