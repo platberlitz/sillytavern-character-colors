@@ -423,18 +423,13 @@
 
     function scanAllMessages() {
         Object.values(characterColors).forEach(c => c.dialogueCount = 0);
-        potentialCharacters = {};
         document.querySelectorAll('.mes').forEach(m => {
             parseColorBlock(m);
-            scanForColors(m);
         });
         saveHistory(); saveData(); updateCharList(); injectPrompt();
         const conflicts = checkColorConflicts();
         if (conflicts.length) toastr?.warning?.(`Similar: ${conflicts.slice(0,3).map(c => c.join(' & ')).join(', ')}`);
-        const pendingCount = Object.keys(potentialCharacters).length;
-        let msg = `Found ${Object.keys(characterColors).length} characters`;
-        if (pendingCount > 0) msg += ` (${pendingCount} pending, need ${settings.minOccurrences}+ occurrences)`;
-        toastr?.info?.(msg);
+        toastr?.info?.(`Found ${Object.keys(characterColors).length} characters`);
     }
 
     function onNewMessage() {
@@ -443,11 +438,7 @@
             const msgs = document.querySelectorAll('.mes'); 
             if (msgs.length) { 
                 const lastMsg = msgs[msgs.length - 1];
-                // First try to parse explicit color block
-                const foundFromBlock = parseColorBlock(lastMsg);
-                // Fall back to scanning font tags if no block found
-                if (!foundFromBlock) scanForColors(lastMsg);
-                colorThoughts(lastMsg); 
+                parseColorBlock(lastMsg);
                 saveData(); 
                 updateCharList(); 
                 injectPrompt(); 
