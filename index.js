@@ -4,6 +4,24 @@
     const { extension_settings, saveSettingsDebounced, getContext } = await import('../../../extensions.js');
     const { eventSource, event_types, setExtensionPrompt, saveCharacterDebounced, getCharacters } = await import('../../../../script.js');
 
+    // Cache frequently used DOM queries
+    const domCache = new Map();
+    function getCachedElement(selector) {
+        if (!domCache.has(selector)) {
+            domCache.set(selector, document.querySelector(selector));
+        }
+        return domCache.get(selector);
+    }
+    function clearDomCache() { domCache.clear(); }
+
+    // Optimized color distance calculation
+    function colorDistance(color1, color2) {
+        const [h1, , l1] = hexToHsl(color1);
+        const [h2, , l2] = hexToHsl(color2);
+        const hDiff = Math.min(Math.abs(h1 - h2), 360 - Math.abs(h1 - h2));
+        return hDiff < 25 && Math.abs(l1 - l2) < 15;
+    }
+
     const MODULE_NAME = 'dialogue-colors';
     let characterColors = {};
     let colorHistory = [];
@@ -94,28 +112,44 @@
     }
 
     function checkColorConflicts() {
-        const colors = Object.entries(characterColors), conflicts = [];
-        for (let i = 0; i < colors.length; i++) {
+        const colors = Object.entries(characterColors);
+        const conflicts = [];
+        for (let i = 0; i < colors.length - 1; i++) {
             for (let j = i + 1; j < colors.length; j++) {
-                const [h1,,l1] = hexToHsl(colors[i][1].color), [h2,,l2] = hexToHsl(colors[j][1].color);
-                if (Math.min(Math.abs(h1-h2), 360-Math.abs(h1-h2)) < 25 && Math.abs(l1-l2) < 15) conflicts.push([colors[i][1].name, colors[j][1].name]);
+                if (colorDistance(colors[i][1].color, colors[j][1].color)) {
+                    conflicts.push([colors[i][1].name, colors[j][1].name]);
+                }
             }
         }
         return conflicts;
     }
 
+    // Pre-compiled color name mapping for faster lookups
+    const COLOR_NAME_MAP = new Map([
+        ['red', 0], ['rose', 340], ['pink', 340], ['magenta', 330], 
+        ['purple', 280], ['violet', 270], ['blue', 220], ['cyan', 180], 
+        ['teal', 170], ['green', 120], ['lime', 90], ['yellow', 50], 
+        ['gold', 45], ['orange', 30], ['brown', 25], ['grey', 0], ['gray', 0]
+    ]);
+
     function suggestColorForName(name) {
         const n = name.toLowerCase();
-        const colorMap = { red: 0, rose: 340, pink: 340, magenta: 330, purple: 280, violet: 270, blue: 220, cyan: 180, teal: 170, green: 120, lime: 90, yellow: 50, gold: 45, orange: 30, brown: 25, grey: 0, gray: 0 };
-        for (const [k, h] of Object.entries(colorMap)) if (n.includes(k)) return hslToHex(h, 70, 50);
+        for (const [colorName, hue] of COLOR_NAME_MAP) {
+            if (n.includes(colorName)) return hslToHex(hue, 70, 50);
+        }
         return null;
     }
 
     function regenerateAllColors() {
         invalidateThemeCache();
-        Object.entries(characterColors).sort((a, b) => (a[1].dialogueCount || 0) - (b[1].dialogueCount || 0)).forEach(([, char]) => {
-            if (!char.locked) char.color = suggestColorForName(char.name) || getNextColor();
-        });
+        const sortedEntries = Object.entries(characterColors)
+            .sort((a, b) => (a[1].dialogueCount || 0) - (b[1].dialogueCount || 0));
+        
+        for (const [, char] of sortedEntries) {
+            if (!char.locked) {
+                char.color = suggestColorForName(char.name) || getNextColor();
+            }
+        }
         saveHistory(); saveData(); updateCharList(); injectPrompt();
         toastr?.success?.('Colors regenerated');
     }
@@ -148,11 +182,23 @@
         if (!names.length) { toastr?.info?.('No presets saved'); return; }
         const name = prompt('Load preset:\n' + names.map(n => `• ${n}`).join('\n'));
         if (name && presets[name]) {
-            presets[name].forEach(p => {
+            const presetData = presets[name];
+            for (const p of presetData) {
                 const key = p.name.toLowerCase();
-                if (characterColors[key]) { characterColors[key].color = p.color; characterColors[key].style = p.style || ''; }
-                else { characterColors[key] = { color: p.color, name: p.name, locked: false, aliases: [], style: p.style || '', dialogueCount: 0 }; }
-            });
+                if (characterColors[key]) {
+                    characterColors[key].color = p.color;
+                    characterColors[key].style = p.style || '';
+                } else {
+                    characterColors[key] = {
+                        color: p.color,
+                        name: p.name,
+                        locked: false,
+                        aliases: [],
+                        style: p.style || '',
+                        dialogueCount: 0
+                    };
+                }
+            }
             saveHistory(); saveData(); updateCharList(); injectPrompt();
             toastr?.success?.('Preset loaded');
         }
@@ -264,8 +310,10 @@
             document.body.appendChild(menu);
             menu.querySelector('#dc-ctx-close').onclick = () => menu.remove();
             menu.querySelector('#dc-ctx-assign').onclick = () => {
-                const name = menu.querySelector('#dc-ctx-name').value.trim();
-                const newColor = menu.querySelector('#dc-ctx-color').value;
+                const nameInput = menu.querySelector('#dc-ctx-name');
+                const colorInput = menu.querySelector('#dc-ctx-color');
+                const name = nameInput.value.trim();
+                const newColor = colorInput.value;
                 if (name) {
                     const key = name.toLowerCase();
                     if (characterColors[key]) {
