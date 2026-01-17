@@ -1,6 +1,6 @@
-(async function() {
+(async function () {
     'use strict';
-    
+
     const { extension_settings, saveSettingsDebounced, getContext } = await import('../../../extensions.js');
     const { eventSource, event_types, setExtensionPrompt, saveCharacterDebounced, getCharacters } = await import('../../../../script.js');
 
@@ -33,23 +33,23 @@
     let lastCharKey = null;
 
     const COLOR_THEMES = {
-        pastel: [[340,70,75],[200,70,75],[120,50,70],[45,80,70],[280,60,75],[170,60,70],[20,80,75],[240,60,75]],
-        neon: [[320,100,60],[180,100,50],[90,100,50],[45,100,55],[270,100,60],[150,100,45],[0,100,60],[210,100,55]],
-        earth: [[25,50,55],[45,40,50],[90,30,45],[150,35,45],[180,30,50],[30,60,60],[60,35,55],[120,25,50]],
-        jewel: [[340,70,45],[200,80,40],[150,70,40],[45,80,50],[280,70,45],[170,70,40],[0,75,50],[220,75,45]],
-        muted: [[350,30,60],[200,30,55],[120,25,55],[45,35,60],[280,25,55],[170,30,55],[20,35,60],[240,25,55]],
-        jade: [[170,60,55],[150,55,50],[160,65,45],[165,50,60],[155,70,40],[140,45,55],[175,55,50],[130,60,45]],
-        forest: [[120,50,50],[90,45,45],[100,55,40],[110,40,55],[80,50,35],[130,45,50],[95,60,45],[85,55,40]],
-        ocean: [[200,70,60],[190,65,55],[180,60,65],[210,55,60],[170,75,50],[220,50,65],[195,80,45],[205,60,70]],
-        sunset: [[15,85,60],[35,90,55],[25,80,65],[40,75,70],[30,95,50],[20,70,75],[45,85,55],[10,80,60]],
-        aurora: [[280,50,70],[300,55,65],[260,45,75],[290,60,60],[270,65,55],[310,40,80],[285,70,50],[275,55,70]],
-        warm: [[20,70,65],[35,75,60],[45,65,70],[30,80,55],[40,85,50],[25,90,60],[50,60,75],[15,75,65]],
-        cool: [[210,60,70],[240,55,65],[200,65,75],[225,70,60],[190,75,55],[250,50,80],[215,80,50],[235,60,75]],
-        berry: [[330,70,60],[350,65,55],[320,60,70],[340,75,50],[360,80,45],[310,55,75],[345,85,40],[325,70,65]],
-        monochrome: [[0,0,30],[0,0,40],[0,0,50],[0,0,60],[0,0,70],[0,0,80],[0,0,90],[0,0,20]],
-        protanopia: [[45,80,60],[200,80,55],[270,60,65],[30,90,55],[180,70,50],[300,50,60],[60,70,55],[220,70,60]],
-        deuteranopia: [[45,80,60],[220,80,55],[280,60,65],[30,90,55],[200,70,50],[320,50,60],[60,70,55],[240,70,60]],
-        tritanopia: [[0,70,60],[180,70,55],[330,60,65],[20,80,55],[200,60,50],[350,50,60],[160,70,55],[10,70,60]]
+        pastel: [[340, 70, 75], [200, 70, 75], [120, 50, 70], [45, 80, 70], [280, 60, 75], [170, 60, 70], [20, 80, 75], [240, 60, 75]],
+        neon: [[320, 100, 60], [180, 100, 50], [90, 100, 50], [45, 100, 55], [270, 100, 60], [150, 100, 45], [0, 100, 60], [210, 100, 55]],
+        earth: [[25, 50, 55], [45, 40, 50], [90, 30, 45], [150, 35, 45], [180, 30, 50], [30, 60, 60], [60, 35, 55], [120, 25, 50]],
+        jewel: [[340, 70, 45], [200, 80, 40], [150, 70, 40], [45, 80, 50], [280, 70, 45], [170, 70, 40], [0, 75, 50], [220, 75, 45]],
+        muted: [[350, 30, 60], [200, 30, 55], [120, 25, 55], [45, 35, 60], [280, 25, 55], [170, 30, 55], [20, 35, 60], [240, 25, 55]],
+        jade: [[170, 60, 55], [150, 55, 50], [160, 65, 45], [165, 50, 60], [155, 70, 40], [140, 45, 55], [175, 55, 50], [130, 60, 45]],
+        forest: [[120, 50, 50], [90, 45, 45], [100, 55, 40], [110, 40, 55], [80, 50, 35], [130, 45, 50], [95, 60, 45], [85, 55, 40]],
+        ocean: [[200, 70, 60], [190, 65, 55], [180, 60, 65], [210, 55, 60], [170, 75, 50], [220, 50, 65], [195, 80, 45], [205, 60, 70]],
+        sunset: [[15, 85, 60], [35, 90, 55], [25, 80, 65], [40, 75, 70], [30, 95, 50], [20, 70, 75], [45, 85, 55], [10, 80, 60]],
+        aurora: [[280, 50, 70], [300, 55, 65], [260, 45, 75], [290, 60, 60], [270, 65, 55], [310, 40, 80], [285, 70, 50], [275, 55, 70]],
+        warm: [[20, 70, 65], [35, 75, 60], [45, 65, 70], [30, 80, 55], [40, 85, 50], [25, 90, 60], [50, 60, 75], [15, 75, 65]],
+        cool: [[210, 60, 70], [240, 55, 65], [200, 65, 75], [225, 70, 60], [190, 75, 55], [250, 50, 80], [215, 80, 50], [235, 60, 75]],
+        berry: [[330, 70, 60], [350, 65, 55], [320, 60, 70], [340, 75, 50], [360, 80, 45], [310, 55, 75], [345, 85, 40], [325, 70, 65]],
+        monochrome: [[0, 0, 30], [0, 0, 40], [0, 0, 50], [0, 0, 60], [0, 0, 70], [0, 0, 80], [0, 0, 90], [0, 0, 20]],
+        protanopia: [[45, 80, 60], [200, 80, 55], [270, 60, 65], [30, 90, 55], [180, 70, 50], [300, 50, 60], [60, 70, 55], [220, 70, 60]],
+        deuteranopia: [[45, 80, 60], [220, 80, 55], [280, 60, 65], [30, 90, 55], [200, 70, 50], [320, 50, 60], [60, 70, 55], [240, 70, 60]],
+        tritanopia: [[0, 70, 60], [180, 70, 55], [330, 60, 65], [20, 80, 55], [200, 60, 50], [350, 50, 60], [160, 70, 55], [10, 70, 60]]
     };
     let cachedTheme = null;
     let cachedIsDark = null;
@@ -68,7 +68,7 @@
     }
 
     function hexToHsl(hex) {
-        let r = parseInt(hex.slice(1,3), 16) / 255, g = parseInt(hex.slice(3,5), 16) / 255, b = parseInt(hex.slice(5,7), 16) / 255;
+        let r = parseInt(hex.slice(1, 3), 16) / 255, g = parseInt(hex.slice(3, 5), 16) / 255, b = parseInt(hex.slice(5, 7), 16) / 255;
         const max = Math.max(r, g, b), min = Math.min(r, g, b);
         let h, s, l = (max + min) / 2;
         if (max === min) { h = s = 0; } else {
@@ -126,9 +126,9 @@
 
     // Pre-compiled color name mapping for faster lookups
     const COLOR_NAME_MAP = new Map([
-        ['red', 0], ['rose', 340], ['pink', 340], ['magenta', 330], 
-        ['purple', 280], ['violet', 270], ['blue', 220], ['cyan', 180], 
-        ['teal', 170], ['green', 120], ['lime', 90], ['yellow', 50], 
+        ['red', 0], ['rose', 340], ['pink', 340], ['magenta', 330],
+        ['purple', 280], ['violet', 270], ['blue', 220], ['cyan', 180],
+        ['teal', 170], ['green', 120], ['lime', 90], ['yellow', 50],
         ['gold', 45], ['orange', 30], ['brown', 25], ['grey', 0], ['gray', 0]
     ]);
 
@@ -144,7 +144,7 @@
         invalidateThemeCache();
         const sortedEntries = Object.entries(characterColors)
             .sort((a, b) => (a[1].dialogueCount || 0) - (b[1].dialogueCount || 0));
-        
+
         for (const [, char] of sortedEntries) {
             if (!char.locked) {
                 char.color = suggestColorForName(char.name) || getNextColor();
@@ -220,14 +220,14 @@
     function detectTheme() {
         if (cachedTheme) return cachedTheme;
         const m = getComputedStyle(document.body).backgroundColor.match(/\d+/g);
-        cachedTheme = m && (parseInt(m[0])*299 + parseInt(m[1])*587 + parseInt(m[2])*114) / 1000 < 128 ? 'dark' : 'light';
+        cachedTheme = m && (parseInt(m[0]) * 299 + parseInt(m[1]) * 587 + parseInt(m[2]) * 114) / 1000 < 128 ? 'dark' : 'light';
         return cachedTheme;
     }
     function invalidateThemeCache() { cachedTheme = null; cachedIsDark = null; }
 
     function getCharKey() { try { const ctx = getContext(); return ctx?.characters?.[ctx?.characterId]?.avatar || ctx?.characterId || null; } catch { return null; } }
     function getStorageKey() { return settings.shareColorsGlobally ? 'dc_global' : `dc_char_${getCharKey() || 'default'}`; }
-    
+
     // Extract dominant color from avatar image
     async function extractAvatarColor(imgSrc) {
         return new Promise(resolve => {
@@ -241,18 +241,18 @@
                 const data = ctx.getImageData(0, 0, 50, 50).data;
                 let r = 0, g = 0, b = 0, count = 0;
                 for (let i = 0; i < data.length; i += 4) {
-                    if (data[i+3] < 128) continue; // Skip transparent
-                    r += data[i]; g += data[i+1]; b += data[i+2]; count++;
+                    if (data[i + 3] < 128) continue; // Skip transparent
+                    r += data[i]; g += data[i + 1]; b += data[i + 2]; count++;
                 }
                 if (count === 0) { resolve(null); return; }
-                r = Math.round(r/count); g = Math.round(g/count); b = Math.round(b/count);
-                resolve(`#${r.toString(16).padStart(2,'0')}${g.toString(16).padStart(2,'0')}${b.toString(16).padStart(2,'0')}`);
+                r = Math.round(r / count); g = Math.round(g / count); b = Math.round(b / count);
+                resolve(`#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`);
             };
             img.onerror = () => resolve(null);
             img.src = imgSrc;
         });
     }
-    
+
     // Export legend as PNG
     function exportLegendPng() {
         const entries = Object.entries(characterColors);
@@ -267,7 +267,7 @@
         entries.forEach(([, v], i) => {
             const y = padding + i * lineHeight + lineHeight / 2;
             ctx.beginPath();
-            ctx.arc(padding + dotSize/2, y, dotSize/2, 0, Math.PI * 2);
+            ctx.arc(padding + dotSize / 2, y, dotSize / 2, 0, Math.PI * 2);
             ctx.fillStyle = v.color;
             ctx.fill();
             ctx.fillStyle = v.color;
@@ -280,12 +280,12 @@
         a.click();
         toastr?.success?.('Legend exported');
     }
-    
+
     // Right-click and long-press context menu for messages
     function setupContextMenu() {
         let longPressTimer = null;
         let longPressTarget = null;
-        
+
         const showMenu = (e, fontTag) => {
             e.preventDefault();
             const existingMenu = document.getElementById('dc-context-menu');
@@ -329,7 +329,7 @@
             const closeMenu = e2 => { if (!menu.contains(e2.target)) { menu.remove(); document.removeEventListener('click', closeMenu); document.removeEventListener('touchstart', closeMenu); } };
             setTimeout(() => { document.addEventListener('click', closeMenu); document.addEventListener('touchstart', closeMenu); }, 10);
         };
-        
+
         // Right-click (desktop)
         document.addEventListener('contextmenu', e => {
             if (!settings.enableRightClick) return;
@@ -338,7 +338,7 @@
             if (!fontTag || !mesText) return;
             showMenu(e, fontTag);
         });
-        
+
         // Long-press (mobile)
         document.addEventListener('touchstart', e => {
             if (!settings.enableRightClick) return;
@@ -348,19 +348,19 @@
             longPressTarget = fontTag;
             longPressTimer = setTimeout(() => showMenu(e, fontTag), 500);
         }, { passive: true });
-        
+
         document.addEventListener('touchend', () => { clearTimeout(longPressTimer); longPressTimer = null; });
         document.addEventListener('touchmove', () => { clearTimeout(longPressTimer); longPressTimer = null; });
     }
-    function saveData() { 
-        localStorage.setItem(getStorageKey(), JSON.stringify({ colors: characterColors, settings })); 
+    function saveData() {
+        localStorage.setItem(getStorageKey(), JSON.stringify({ colors: characterColors, settings }));
         localStorage.setItem('dc_global_settings', JSON.stringify({ thoughtSymbols: settings.thoughtSymbols }));
     }
     function loadData() {
         characterColors = {};
-        try { const g = JSON.parse(localStorage.getItem('dc_global_settings')); if (g?.thoughtSymbols !== undefined) settings.thoughtSymbols = g.thoughtSymbols; } catch {}
-        try { const d = JSON.parse(localStorage.getItem(getStorageKey())); if (d?.colors) characterColors = d.colors; if (d?.settings) Object.assign(settings, d.settings); } catch {}
-        try { const g = JSON.parse(localStorage.getItem('dc_global_settings')); if (g?.thoughtSymbols !== undefined) settings.thoughtSymbols = g.thoughtSymbols; } catch {}
+        try { const g = JSON.parse(localStorage.getItem('dc_global_settings')); if (g?.thoughtSymbols !== undefined) settings.thoughtSymbols = g.thoughtSymbols; } catch { }
+        try { const d = JSON.parse(localStorage.getItem(getStorageKey())); if (d?.colors) characterColors = d.colors; if (d?.settings) Object.assign(settings, d.settings); } catch { }
+        try { const g = JSON.parse(localStorage.getItem('dc_global_settings')); if (g?.thoughtSymbols !== undefined) settings.thoughtSymbols = g.thoughtSymbols; } catch { }
         colorHistory = [JSON.stringify(characterColors)]; historyIndex = 0;
     }
 
@@ -383,12 +383,12 @@
                 return;
             }
             if (!Array.isArray(extension_settings.regex)) extension_settings.regex = [];
-            
+
             const uuidv4 = () => 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
                 const r = Math.random() * 16 | 0;
                 return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
             });
-            
+
             // Trim font tags from prompt
             if (!extension_settings.regex.some(r => r?.scriptName === 'Trim Font Colors')) {
                 console.log('[Dialogue Colors] Adding Trim Font Colors regex');
@@ -409,7 +409,7 @@
                 });
                 saveSettingsDebounced?.();
             }
-            
+
             // Trim [COLORS:...] blocks from prompt and display
             if (!extension_settings.regex.some(r => r?.scriptName === 'Trim Color Blocks')) {
                 console.log('[Dialogue Colors] Adding Trim Color Blocks regex');
@@ -430,7 +430,7 @@
                 });
                 saveSettingsDebounced?.();
             }
-            
+
             // Trim CSS effect spans from prompt only (keep display)
             if (!extension_settings.regex.some(r => r?.scriptName === 'Trim CSS Effects (Prompt)')) {
                 console.log('[Dialogue Colors] Adding Trim CSS Effects regex');
@@ -461,8 +461,8 @@
         if (!settings.enabled) return '';
         const mode = settings.themeMode === 'auto' ? detectTheme() : settings.themeMode;
         const themeHint = mode === 'dark' ? 'Use light colors.' : 'Use dark colors.';
-        const colorList = Object.entries(characterColors).filter(([,v]) => v.locked && v.color).map(([,v]) => `${v.name}=${v.color}${v.style ? ` (${v.style})` : ''}`).join(', ');
-        const aliases = Object.entries(characterColors).filter(([,v]) => v.aliases?.length).map(([,v]) => `${v.name}/${v.aliases.join('/')}`).join('; ');
+        const colorList = Object.entries(characterColors).filter(([, v]) => v.locked && v.color).map(([, v]) => `${v.name}=${v.color}${v.style ? ` (${v.style})` : ''}`).join(', ');
+        const aliases = Object.entries(characterColors).filter(([, v]) => v.aliases?.length).map(([, v]) => `${v.name}/${v.aliases.join('/')}`).join('; ');
         let thoughts = '';
         if (settings.thoughtSymbols) {
             thoughts = ` Inner thoughts wrapped in ${settings.thoughtSymbols} must be fully enclosed in <font color=...> tags using the current speaker's color.`;
@@ -477,7 +477,7 @@
         if (!settings.enabled) return '<span style="opacity:0.5">(disabled)</span>';
         const entries = Object.entries(characterColors);
         if (!entries.length) return '<span style="opacity:0.5">(no characters)</span>';
-        return entries.map(([,v]) => `<span style="color:${v.color}">${v.name}</span>`).join(', ');
+        return entries.map(([, v]) => `<span style="color:${v.color}">${v.name}</span>`).join(', ');
     }
 
     function injectPrompt() {
@@ -494,7 +494,69 @@
         if (!legend) {
             legend = document.createElement('div');
             legend.id = 'dc-legend-float';
-            legend.style.cssText = 'position:fixed;top:60px;right:10px;background:var(--SmartThemeBlurTintColor);border:1px solid var(--SmartThemeBorderColor);border-radius:8px;padding:8px;z-index:9999;font-size:0.8em;max-width:150px;display:none;';
+
+            // Load saved position or use defaults
+            const savedPos = JSON.parse(localStorage.getItem('dc_legend_position') || '{}');
+            const top = savedPos.top || 60;
+            const left = savedPos.left;
+            const right = savedPos.right || 10;
+
+            legend.style.cssText = `position:fixed;top:${top}px;${left !== undefined ? `left:${left}px;` : `right:${right}px;`}background:var(--SmartThemeBlurTintColor);border:1px solid var(--SmartThemeBorderColor);border-radius:8px;padding:8px;z-index:9999;font-size:0.8em;max-width:150px;display:none;cursor:move;user-select:none;`;
+
+            // Drag functionality
+            let isDragging = false;
+            let startX, startY, startLeft, startTop;
+
+            const onMouseDown = (e) => {
+                if (e.target.closest('button') || e.target.closest('input')) return;
+                isDragging = true;
+                const rect = legend.getBoundingClientRect();
+                startX = e.clientX || e.touches?.[0]?.clientX;
+                startY = e.clientY || e.touches?.[0]?.clientY;
+                startLeft = rect.left;
+                startTop = rect.top;
+                legend.style.right = 'auto';
+                legend.style.left = startLeft + 'px';
+                e.preventDefault();
+            };
+
+            const onMouseMove = (e) => {
+                if (!isDragging) return;
+                const clientX = e.clientX || e.touches?.[0]?.clientX;
+                const clientY = e.clientY || e.touches?.[0]?.clientY;
+                const dx = clientX - startX;
+                const dy = clientY - startY;
+                let newLeft = startLeft + dx;
+                let newTop = startTop + dy;
+
+                // Constrain to viewport
+                const rect = legend.getBoundingClientRect();
+                newLeft = Math.max(0, Math.min(window.innerWidth - rect.width, newLeft));
+                newTop = Math.max(0, Math.min(window.innerHeight - rect.height, newTop));
+
+                legend.style.left = newLeft + 'px';
+                legend.style.top = newTop + 'px';
+            };
+
+            const onMouseUp = () => {
+                if (isDragging) {
+                    isDragging = false;
+                    // Save position
+                    const rect = legend.getBoundingClientRect();
+                    localStorage.setItem('dc_legend_position', JSON.stringify({
+                        top: rect.top,
+                        left: rect.left
+                    }));
+                }
+            };
+
+            legend.addEventListener('mousedown', onMouseDown);
+            legend.addEventListener('touchstart', onMouseDown, { passive: false });
+            document.addEventListener('mousemove', onMouseMove);
+            document.addEventListener('touchmove', onMouseMove, { passive: false });
+            document.addEventListener('mouseup', onMouseUp);
+            document.addEventListener('touchend', onMouseUp);
+
             document.body.appendChild(legend);
         }
         return legend;
@@ -504,22 +566,22 @@
         const legend = createLegend();
         const entries = Object.entries(characterColors);
         if (!entries.length || !settings.showLegend) { legend.style.display = 'none'; return; }
-        legend.innerHTML = '<div style="font-weight:bold;margin-bottom:4px;">Characters</div>' + 
-            entries.map(([,v]) => `<div style="display:flex;align-items:center;gap:4px;"><span style="width:8px;height:8px;border-radius:50%;background:${v.color};"></span><span style="color:${v.color}">${v.name}</span><span style="opacity:0.5;font-size:0.8em;">${v.dialogueCount||0}</span></div>`).join('');
+        legend.innerHTML = '<div style="font-weight:bold;margin-bottom:4px;cursor:grab;">⋮⋮ Characters</div>' +
+            entries.map(([, v]) => `<div style="display:flex;align-items:center;gap:4px;"><span style="width:8px;height:8px;border-radius:50%;background:${v.color};"></span><span style="color:${v.color}">${v.name}</span><span style="opacity:0.5;font-size:0.8em;">${v.dialogueCount || 0}</span></div>`).join('');
         legend.style.display = settings.showLegend ? 'block' : 'none';
     }
 
     function getDialogueStats() {
         const entries = Object.entries(characterColors);
-        const total = entries.reduce((s, [,v]) => s + (v.dialogueCount || 0), 0);
-        return entries.map(([,v]) => ({ name: v.name, count: v.dialogueCount || 0, pct: total ? Math.round((v.dialogueCount || 0) / total * 100) : 0, color: v.color })).sort((a,b) => b.count - a.count);
+        const total = entries.reduce((s, [, v]) => s + (v.dialogueCount || 0), 0);
+        return entries.map(([, v]) => ({ name: v.name, count: v.dialogueCount || 0, pct: total ? Math.round((v.dialogueCount || 0) / total * 100) : 0, color: v.color })).sort((a, b) => b.count - a.count);
     }
 
     function showStatsPopup() {
         const stats = getDialogueStats();
         if (!stats.length) { toastr?.info?.('No dialogue data'); return; }
         const maxCount = Math.max(...stats.map(s => s.count), 1);
-        let html = stats.map(s => `<div style="display:flex;align-items:center;gap:6px;margin:2px 0;"><span style="width:60px;color:${s.color}">${s.name}</span><div style="flex:1;height:12px;background:var(--SmartThemeBlurTintColor);border-radius:3px;overflow:hidden;"><div style="width:${s.count/maxCount*100}%;height:100%;background:${s.color};"></div></div><span style="width:40px;text-align:right;font-size:0.8em;">${s.count} (${s.pct}%)</span></div>`).join('');
+        let html = stats.map(s => `<div style="display:flex;align-items:center;gap:6px;margin:2px 0;"><span style="width:60px;color:${s.color}">${s.name}</span><div style="flex:1;height:12px;background:var(--SmartThemeBlurTintColor);border-radius:3px;overflow:hidden;"><div style="width:${s.count / maxCount * 100}%;height:100%;background:${s.color};"></div></div><span style="width:40px;text-align:right;font-size:0.8em;">${s.count} (${s.pct}%)</span></div>`).join('');
         const popup = document.createElement('div');
         popup.id = 'dc-stats-popup';
         popup.innerHTML = `<div style="font-weight:bold;margin-bottom:8px;">Dialogue Statistics</div>${html}<button class="dc-close-popup menu_button" style="margin-top:10px;width:100%;">Close</button>`;
@@ -546,18 +608,18 @@
             const ctx = getContext();
             const charId = ctx?.characterId;
             if (charId === undefined) { toastr?.error?.('No character loaded'); return; }
-            
+
             getCharacters?.().then(() => {
                 const char = ctx?.characters?.[charId];
                 const data = char?.data?.extensions?.dialogueColors;
-                if (data?.colors) { 
-                    characterColors = data.colors; 
-                    if (data.settings) Object.assign(settings, data.settings); 
-                    saveHistory(); 
-                    saveData(); 
-                    updateCharList(); 
-                    injectPrompt(); 
-                    toastr?.success?.('Loaded from card'); 
+                if (data?.colors) {
+                    characterColors = data.colors;
+                    if (data.settings) Object.assign(settings, data.settings);
+                    saveHistory();
+                    saveData();
+                    updateCharList();
+                    injectPrompt();
+                    toastr?.success?.('Loaded from card');
                 } else {
                     toastr?.info?.('No saved colors in card');
                 }
@@ -577,7 +639,7 @@
                 saveData();
                 console.log('Dialogue Colors: Loaded from card');
             }
-        } catch {}
+        } catch { }
     }
 
     function parseColorBlock(element) {
@@ -587,13 +649,13 @@
         const html = mesText.innerHTML;
         console.log('[DC] Parsing, text length:', text?.length, 'html length:', html?.length);
         if (text?.includes('[COLOR')) console.log('[DC] Text snippet:', text.slice(text.indexOf('[COLOR'), text.indexOf('[COLOR') + 100));
-        
+
         // Also check the full message element
         const fullText = element.textContent;
         if (fullText?.includes('[COLOR') && !text?.includes('[COLOR')) {
             console.log('[DC] Found in parent, not mes_text:', fullText.slice(fullText.indexOf('[COLOR'), fullText.indexOf('[COLOR') + 100));
         }
-        
+
         const colorBlockRegex = /\[COLORS?:(.*?)\]/gis;
         let match, foundNew = false;
         const blocksToRemove = [];
@@ -627,13 +689,13 @@
 
     function scanAllMessages() {
         Object.values(characterColors).forEach(c => c.dialogueCount = 0);
-        
+
         // Scan from chat data (raw messages before regex trimming)
         const ctx = getContext();
         const chat = ctx?.chat || [];
         const colorBlockRegex = /\[COLORS?:(.*?)\]/gis;
         let foundNew = false;
-        
+
         for (const msg of chat) {
             const text = msg?.mes || '';
             let match;
@@ -657,16 +719,16 @@
                 }
             }
         }
-        
+
         saveHistory(); saveData(); updateCharList(); injectPrompt();
         const conflicts = checkColorConflicts();
-        if (conflicts.length) toastr?.warning?.(`Similar: ${conflicts.slice(0,3).map(c => c.join(' & ')).join(', ')}`);
+        if (conflicts.length) toastr?.warning?.(`Similar: ${conflicts.slice(0, 3).map(c => c.join(' & ')).join(', ')}`);
         toastr?.info?.(`Found ${Object.keys(characterColors).length} characters`);
     }
 
     function onNewMessage() {
         if (!settings.enabled || !settings.autoScanNewMessages) return;
-        setTimeout(() => { 
+        setTimeout(() => {
             const ctx = getContext();
             const chat = ctx?.chat || [];
             if (!chat.length) return;
@@ -691,9 +753,9 @@
                     }
                 }
             }
-            saveData(); 
-            updateCharList(); 
-            injectPrompt(); 
+            saveData();
+            updateCharList();
+            injectPrompt();
         }, 600);
     }
 
@@ -736,21 +798,27 @@
         list.querySelectorAll('input[type="color"]').forEach(i => { i.oninput = () => { const c = characterColors[i.dataset.key]; c.color = i.value; c.aliases?.forEach(a => { const ak = a.toLowerCase(); if (characterColors[ak]) characterColors[ak].color = i.value; }); saveHistory(); saveData(); injectPrompt(); updateCharList(); }; });
         list.querySelectorAll('.dc-del').forEach(b => { b.onclick = () => { delete characterColors[b.dataset.key]; saveHistory(); saveData(); injectPrompt(); updateCharList(); }; });
         list.querySelectorAll('.dc-lock').forEach(b => { b.onclick = () => { characterColors[b.dataset.key].locked = !characterColors[b.dataset.key].locked; saveData(); updateCharList(); }; });
-        list.querySelectorAll('.dc-swap').forEach(b => { b.onclick = () => {
-            if (!swapMode) { swapMode = b.dataset.key; updateCharList(); toastr?.info?.('Click another character to swap'); }
-            else if (swapMode === b.dataset.key) { swapMode = null; updateCharList(); }
-            else { swapColors(swapMode, b.dataset.key); swapMode = null; }
-        }; });
-        list.querySelectorAll('.dc-style').forEach(b => { b.onclick = () => {
-            const styles = ['', 'bold', 'italic', 'bold italic'];
-            const curr = characterColors[b.dataset.key].style || '';
-            characterColors[b.dataset.key].style = styles[(styles.indexOf(curr) + 1) % styles.length];
-            saveData(); injectPrompt(); updateCharList();
-        }; });
-        list.querySelectorAll('.dc-alias').forEach(b => { b.onclick = () => {
-            const alias = prompt('Add alias for ' + characterColors[b.dataset.key].name + ':');
-            if (alias?.trim()) { characterColors[b.dataset.key].aliases = characterColors[b.dataset.key].aliases || []; characterColors[b.dataset.key].aliases.push(alias.trim()); saveData(); injectPrompt(); updateCharList(); }
-        }; });
+        list.querySelectorAll('.dc-swap').forEach(b => {
+            b.onclick = () => {
+                if (!swapMode) { swapMode = b.dataset.key; updateCharList(); toastr?.info?.('Click another character to swap'); }
+                else if (swapMode === b.dataset.key) { swapMode = null; updateCharList(); }
+                else { swapColors(swapMode, b.dataset.key); swapMode = null; }
+            };
+        });
+        list.querySelectorAll('.dc-style').forEach(b => {
+            b.onclick = () => {
+                const styles = ['', 'bold', 'italic', 'bold italic'];
+                const curr = characterColors[b.dataset.key].style || '';
+                characterColors[b.dataset.key].style = styles[(styles.indexOf(curr) + 1) % styles.length];
+                saveData(); injectPrompt(); updateCharList();
+            };
+        });
+        list.querySelectorAll('.dc-alias').forEach(b => {
+            b.onclick = () => {
+                const alias = prompt('Add alias for ' + characterColors[b.dataset.key].name + ':');
+                if (alias?.trim()) { characterColors[b.dataset.key].aliases = characterColors[b.dataset.key].aliases || []; characterColors[b.dataset.key].aliases.push(alias.trim()); saveData(); injectPrompt(); updateCharList(); }
+            };
+        });
         updateLegend();
     }
 
@@ -763,7 +831,7 @@
                 addCharacter(char.name);
                 toastr?.success?.(`Added ${char.name}`);
             }
-        } catch {}
+        } catch { }
     }
 
     function createUI() {
@@ -871,40 +939,40 @@
         $('dc-sort').onchange = e => { sortMode = e.target.value; updateCharList(); };
         $('dc-add-btn').onclick = () => { addCharacter($('dc-add-name').value); $('dc-add-name').value = ''; };
         $('dc-add-name').onkeypress = e => { if (e.key === 'Enter') $('dc-add-btn').click(); };
-        
+
         // Keyboard shortcuts
         document.addEventListener('keydown', e => {
             if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey && document.activeElement?.closest('#dc-ext')) { e.preventDefault(); undo(); }
             if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey)) && document.activeElement?.closest('#dc-ext')) { e.preventDefault(); redo(); }
         });
-        
+
         updateCharList();
         injectPrompt();
     }
 
-    globalThis.DialogueColorsInterceptor = async function(chat, contextSize, abort, type) { if (type !== 'quiet' && settings.enabled) injectPrompt(); };
+    globalThis.DialogueColorsInterceptor = async function (chat, contextSize, abort, type) { if (type !== 'quiet' && settings.enabled) injectPrompt(); };
 
     console.log('Dialogue Colors: Initializing...');
-    
+
     function init() {
-        loadData(); 
+        loadData();
         // Delay regex import to ensure extension_settings is ready
         setTimeout(() => ensureRegexScript(), 1000);
         setupContextMenu();
-        
+
         let waitAttempts = 0;
-        const waitUI = setInterval(() => { 
+        const waitUI = setInterval(() => {
             waitAttempts++;
-            if (document.getElementById('extensions_settings')) { 
-                clearInterval(waitUI); 
-                createUI(); 
-                injectPrompt(); 
+            if (document.getElementById('extensions_settings')) {
+                clearInterval(waitUI);
+                createUI();
+                injectPrompt();
             } else if (waitAttempts > 60) {
                 clearInterval(waitUI);
             }
         }, 500);
     }
-    
+
     setTimeout(init, 100);
     eventSource.on(event_types.GENERATION_AFTER_COMMANDS, () => injectPrompt());
     eventSource.on(event_types.MESSAGE_RECEIVED, onNewMessage);
