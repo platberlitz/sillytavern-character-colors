@@ -11,7 +11,7 @@
     let swapMode = null;
     let sortMode = 'name';
     let searchTerm = '';
-    let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, thoughtSymbols: '*', disableNarration: true, shareColorsGlobally: false, cssEffects: false, autoScanNewMessages: true, autoLockDetected: true };
+    let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, thoughtSymbols: '*', disableNarration: true, shareColorsGlobally: false, cssEffects: false, autoScanNewMessages: true, autoLockDetected: true, enableRightClick: false };
     let lastCharKey = null;
 
     const COLOR_THEMES = {
@@ -284,6 +284,7 @@
         
         // Right-click (desktop)
         document.addEventListener('contextmenu', e => {
+            if (!settings.enableRightClick) return;
             const fontTag = e.target.closest('font[color]');
             const mesText = e.target.closest('.mes_text');
             if (!fontTag || !mesText) return;
@@ -292,6 +293,7 @@
         
         // Long-press (mobile)
         document.addEventListener('touchstart', e => {
+            if (!settings.enableRightClick) return;
             const fontTag = e.target.closest('font[color]');
             const mesText = e.target.closest('.mes_text');
             if (!fontTag || !mesText) return;
@@ -727,6 +729,7 @@
                 <label class="checkbox_label"><input type="checkbox" id="dc-autoscan"><span>Auto-scan on chat load</span></label>
                 <label class="checkbox_label"><input type="checkbox" id="dc-autoscan-new"><span>Auto-scan new messages</span></label>
                 <label class="checkbox_label"><input type="checkbox" id="dc-auto-lock"><span>Auto-lock detected characters</span></label>
+                <label class="checkbox_label"><input type="checkbox" id="dc-right-click"><span>Enable right-click context menu</span></label>
                 <label class="checkbox_label"><input type="checkbox" id="dc-legend"><span>Show floating legend</span></label>
                 <label class="checkbox_label"><input type="checkbox" id="dc-disable-narration"><span>Disable narration coloring</span></label>
                 <label class="checkbox_label"><input type="checkbox" id="dc-share-global"><span>Share colors across all chats</span></label>
@@ -762,6 +765,7 @@
         $('dc-autoscan').checked = settings.autoScanOnLoad !== false; $('dc-autoscan').onchange = e => { settings.autoScanOnLoad = e.target.checked; saveData(); };
         $('dc-autoscan-new').checked = settings.autoScanNewMessages !== false; $('dc-autoscan-new').onchange = e => { settings.autoScanNewMessages = e.target.checked; saveData(); };
         $('dc-auto-lock').checked = settings.autoLockDetected !== false; $('dc-auto-lock').onchange = e => { settings.autoLockDetected = e.target.checked; saveData(); };
+        $('dc-right-click').checked = settings.enableRightClick; $('dc-right-click').onchange = e => { settings.enableRightClick = e.target.checked; saveData(); };
         $('dc-legend').checked = settings.showLegend; $('dc-legend').onchange = e => { settings.showLegend = e.target.checked; saveData(); updateLegend(); };
         $('dc-disable-narration').checked = settings.disableNarration !== false; $('dc-disable-narration').onchange = e => { settings.disableNarration = e.target.checked; saveData(); injectPrompt(); };
         $('dc-share-global').checked = settings.shareColorsGlobally || false; $('dc-share-global').onchange = e => { settings.shareColorsGlobally = e.target.checked; saveData(); loadData(); updateCharList(); injectPrompt(); };
