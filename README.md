@@ -10,7 +10,8 @@ A SillyTavern extension that makes the LLM color-code each character's dialogue 
 - **Auto-coloring** - Instructs the LLM to wrap dialogue in `<font color>` tags
 - **LLM color blocks** - LLM outputs `[COLORS:Name=#RRGGBB,...]` at end of messages for reliable character detection (auto-removed)
 - **Per-chat or global colors** - Store colors per character or share across all chats
-- **Right-click/long-press** - Tap and hold (mobile) or right-click (desktop) on colored dialogue to assign it to a character
+- **Auto-lock detected characters** - Automatically lock newly detected characters (default: on)
+- **Right-click/long-press** - Tap and hold (mobile) or right-click (desktop) on colored dialogue to assign it to a character (default: off)
 
 ### Color Management
 - **Color lock** 🔒 - Lock a character's color to prevent changes
@@ -63,9 +64,9 @@ Effects are visible in chat but stripped from the prompt context.
 
 1. Enable the extension (checkbox at the top)
 2. Start chatting - the LLM will color dialogue and output a `[COLORS:...]` block
-3. Characters are detected automatically from the color block
-4. Lock characters (🔒) you want to keep consistent
-5. Right-click or long-press colored text to manually assign colors
+3. Characters are detected automatically from the color block and locked by default
+4. Enable right-click context menu if you want to manually assign colors
+5. Right-click or long-press colored text to manually assign colors (when enabled)
 
 ### How It Works
 
@@ -83,6 +84,8 @@ Effects are visible in chat but stripped from the prompt context.
 | **Highlight mode** | Add background highlights to dialogue |
 | **Auto-scan on chat load** | Scan for characters when opening a chat |
 | **Auto-scan new messages** | Scan each new generated message for colors |
+| **Auto-lock detected characters** | Automatically lock newly detected characters |
+| **Enable right-click context menu** | Enable right-click/long-press color assignment |
 | **Show floating legend** | Overlay showing character colors |
 | **Disable narration** | Exclude narrator from coloring |
 | **Share colors globally** | Use same colors across all chats |
