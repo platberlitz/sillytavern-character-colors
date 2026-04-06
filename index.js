@@ -2,7 +2,7 @@
     'use strict';
 
     const { extension_settings, saveSettingsDebounced, getContext } = await import('../../../extensions.js');
-    const { eventSource, event_types, setExtensionPrompt, saveCharacterDebounced, getCharacters, extension_prompt_types, extension_prompt_roles, generateQuietPrompt, registerMacro } = await import('../../../../script.js');
+    const { eventSource, event_types, setExtensionPrompt, saveCharacterDebounced, getCharacters, extension_prompt_types, extension_prompt_roles, generateQuietPrompt, registerMacro, getRequestHeaders } = await import('../../../../script.js');
     const RUNTIME_GUARD_KEY = '__dialogueColorsRuntime_v1';
     if (globalThis[RUNTIME_GUARD_KEY]?.initialized) {
         console.warn('[Dialogue Colors] Runtime already initialized; skipping duplicate script execution.');
@@ -147,6 +147,8 @@
     const GLOBAL_TOGGLE_KEYS = Object.freeze(Object.keys(TOGGLE_SETTING_DEFAULTS));
     const GLOBAL_VISUAL_KEYS = Object.freeze(['thoughtSymbols', 'themeMode', 'colorTheme', 'brightness', 'promptDepth', 'promptRole', 'promptMode']);
     const GLOBAL_SETTINGS_V2_KEYS = Object.freeze([...new Set([...GLOBAL_VISUAL_KEYS, ...GLOBAL_TOGGLE_KEYS])]);
+    const LEGACY_AUTO_SYNC_ENABLED_KEY = 'dc_autosync_enabled';
+    const AUTO_SYNC_SAVE_TIMEOUT_MS = 15000;
     let lastCharKey = null;
     let lastProcessedMessageSignature = '';
     // Phase 6A: Batch selection state
@@ -163,6 +165,9 @@
     let autoSyncInterval = null;
     let autoSyncLastTimestamp = null;
     let autoSyncSequence = 0;
+    let autoSyncPendingRecord = null;
+    let autoSyncSaveTimeout = null;
+    let autoSyncStatusError = '';
 
     function parseStorageObject(key) {
         try {
@@ -184,6 +189,208 @@
         const subset = {};
         for (const key of keys) subset[key] = settings[key];
         return subset;
+    }
+
+    function getLegacyAutoSyncEnabledPreference() {
+        const legacy = localStorage.getItem(LEGACY_AUTO_SYNC_ENABLED_KEY);
+        if (legacy === 'true') return true;
+        if (legacy === 'false') return false;
+        return true;
+    }
+
+    function cleanupLegacyAutoSyncPreference() {
+        try {
+            localStorage.removeItem(LEGACY_AUTO_SYNC_ENABLED_KEY);
+        } catch {
+            // Ignore legacy cleanup failures.
+        }
+    }
+
+    function buildAutoSyncRecord(source = {}) {
+        const settingsSource = source?.settings && typeof source.settings === 'object' && !Array.isArray(source.settings) ? source.settings : {};
+        const normalizedSettings = {};
+        for (const key of GLOBAL_SETTINGS_V2_KEYS) {
+            if (settingsSource[key] !== undefined) normalizedSettings[key] = settingsSource[key];
+        }
+        const parsedVersion = Number(source?.version);
+        const parsedSequence = Number(source?.sequence);
+        return {
+            version: Number.isFinite(parsedVersion) ? parsedVersion : COLOR_SCHEMA_VERSION,
+            timestamp: typeof source?.timestamp === 'string' ? source.timestamp : '',
+            sequence: Number.isFinite(parsedSequence) ? parsedSequence : 0,
+            autoSyncEnabled: typeof source?.autoSyncEnabled === 'boolean' ? source.autoSyncEnabled : getLegacyAutoSyncEnabledPreference(),
+            settings: normalizedSettings,
+        };
+    }
+
+    function getAutoSyncRecord(create = false) {
+        const existing = extension_settings[MODULE_NAME];
+        if (existing && typeof existing === 'object' && !Array.isArray(existing)) {
+            const normalized = buildAutoSyncRecord(existing);
+            extension_settings[MODULE_NAME] = normalized;
+            return normalized;
+        }
+        if (!create) return null;
+        const created = buildAutoSyncRecord({});
+        extension_settings[MODULE_NAME] = created;
+        return created;
+    }
+
+    function hasAutoSyncSettingsPayload(record) {
+        return !!record && Object.keys(record.settings || {}).length > 0;
+    }
+
+    function areSettingsSubsetsEqual(left, right) {
+        for (const key of GLOBAL_SETTINGS_V2_KEYS) {
+            if (left?.[key] !== right?.[key]) return false;
+        }
+        return true;
+    }
+
+    function doAutoSyncMarkersMatch(left, right) {
+        if (!left || !right) return false;
+        return (left.timestamp || '') === (right.timestamp || '') && (left.sequence || 0) === (right.sequence || 0);
+    }
+
+    function getLatestKnownAutoSyncMarker() {
+        return autoSyncPendingRecord || { timestamp: autoSyncLastTimestamp || '', sequence: autoSyncSequence || 0 };
+    }
+
+    function isIncomingAutoSyncRecordNewer(record) {
+        const normalized = buildAutoSyncRecord(record);
+        const known = getLatestKnownAutoSyncMarker();
+        if (!normalized.timestamp && !normalized.sequence) return false;
+        if (!known.timestamp && !known.sequence) return true;
+        if (normalized.timestamp > (known.timestamp || '')) return true;
+        if (normalized.timestamp === (known.timestamp || '') && normalized.sequence > (known.sequence || 0)) return true;
+        return false;
+    }
+
+    function clearAutoSyncSaveTimeout() {
+        if (autoSyncSaveTimeout) {
+            clearTimeout(autoSyncSaveTimeout);
+            autoSyncSaveTimeout = null;
+        }
+    }
+
+    function setAutoSyncError(message = '') {
+        autoSyncStatusError = message;
+        updateAutoSyncUI();
+    }
+
+    function clearAutoSyncError() {
+        if (!autoSyncStatusError) return;
+        autoSyncStatusError = '';
+        updateAutoSyncUI();
+    }
+
+    function clearAutoSyncPending({ timedOut = false } = {}) {
+        clearAutoSyncSaveTimeout();
+        autoSyncPendingRecord = null;
+        if (timedOut) autoSyncStatusError = 'Save failed';
+        updateAutoSyncUI();
+    }
+
+    function markAutoSyncPending(record) {
+        autoSyncStatusError = '';
+        autoSyncPendingRecord = {
+            timestamp: record?.timestamp || '',
+            sequence: record?.sequence || 0,
+        };
+        clearAutoSyncSaveTimeout();
+        autoSyncSaveTimeout = setTimeout(() => {
+            console.warn('[Dialogue Colors] Auto-sync settings save timed out before confirmation.');
+            clearAutoSyncPending({ timedOut: true });
+        }, AUTO_SYNC_SAVE_TIMEOUT_MS);
+        updateAutoSyncUI();
+    }
+
+    function confirmAutoSyncRecord(record) {
+        const normalized = buildAutoSyncRecord(record);
+        autoSyncLastTimestamp = normalized.timestamp || null;
+        autoSyncSequence = Number.isFinite(normalized.sequence) ? normalized.sequence : 0;
+        autoSyncEnabled = normalized.autoSyncEnabled;
+        extension_settings[MODULE_NAME] = normalized;
+        autoSyncPendingRecord = null;
+        autoSyncStatusError = '';
+        clearAutoSyncSaveTimeout();
+        updateAutoSyncUI();
+        return normalized;
+    }
+
+    function syncAutoSyncPolling() {
+        if (autoSyncEnabled) {
+            startAutoSyncPolling();
+        } else {
+            stopAutoSyncPolling();
+        }
+    }
+
+    function applyAutoSyncRecord(record, { force = false } = {}) {
+        const normalized = buildAutoSyncRecord(record);
+        const matchesPending = doAutoSyncMarkersMatch(normalized, autoSyncPendingRecord);
+        const shouldAcceptRecord = force || matchesPending || isIncomingAutoSyncRecordNewer(normalized);
+        const previousAutoSyncEnabled = autoSyncEnabled;
+
+        extension_settings[MODULE_NAME] = normalized;
+        autoSyncEnabled = normalized.autoSyncEnabled;
+
+        if (shouldAcceptRecord && hasAutoSyncSettingsPayload(normalized)) {
+            let changed = false;
+            for (const key of GLOBAL_SETTINGS_V2_KEYS) {
+                if (normalized.settings[key] !== undefined && settings[key] !== normalized.settings[key]) {
+                    settings[key] = normalized.settings[key];
+                    changed = true;
+                }
+            }
+            normalizeToggleSettings();
+            if (changed) {
+                saveData({ skipAutoSync: true });
+            } else {
+                saveGlobalSettingsSnapshot();
+            }
+            syncUIWithSettings();
+            updateCharList();
+            injectPrompt();
+        }
+
+        if (shouldAcceptRecord) {
+            confirmAutoSyncRecord(normalized);
+        } else {
+            updateAutoSyncUI();
+        }
+
+        if (autoSyncEnabled !== previousAutoSyncEnabled) {
+            syncAutoSyncPolling();
+        }
+        cleanupLegacyAutoSyncPreference();
+    }
+
+    async function fetchAutoSyncRecordFromServer() {
+        const response = await fetch('/api/settings/get', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({}),
+            cache: 'no-cache',
+        });
+
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+
+        const data = await response.json();
+        if (data.result === 'file not find' || !data.settings) return null;
+
+        let parsedSettings = null;
+        try {
+            parsedSettings = JSON.parse(data.settings);
+        } catch {
+            throw new Error('Invalid settings payload');
+        }
+
+        const record = parsedSettings?.extension_settings?.[MODULE_NAME];
+        if (!record || typeof record !== 'object' || Array.isArray(record)) return null;
+        return buildAutoSyncRecord(record);
     }
 
     function saveGlobalSettingsSnapshot() {
@@ -1725,7 +1932,7 @@
         return false;
     }
 
-    function saveData() {
+    function saveData(options = {}) {
         normalizeToggleSettings();
         characterColors = normalizeCharacterColors(characterColors);
         settings.colorSchemaVersion = COLOR_SCHEMA_VERSION;
@@ -1734,8 +1941,8 @@
             localStorage.setItem(getStorageKey(), JSON.stringify({ colors: characterColors, settings }));
             saveGlobalSettingsSnapshot();
             // Trigger auto-sync if enabled
-            if (autoSyncEnabled) {
-                saveSettingsToFile();
+            if (autoSyncEnabled && !options.skipAutoSync) {
+                saveSettingsToStore();
             }
         } catch (e) {
             toast.warning('Storage full — could not save color data. Try clearing unused chats or characters.');
@@ -1905,79 +2112,63 @@
     }
 
     // Auto-sync functions
-    async function loadSettingsFromFile() {
+    async function loadSettingsFromServer() {
         try {
-            const response = await fetch('/scripts/extensions/third-party/sillytavern-character-colors/settings.json');
-            if (!response.ok) return;
-            const d = await response.json();
-            if (!d.settings || typeof d.settings !== 'object') return;
-
-            // Check if file is newer than our last sync
-            if (autoSyncLastTimestamp && d.timestamp <= autoSyncLastTimestamp) return;
-
-            Object.keys(d.settings).forEach(key => {
-                if (GLOBAL_SETTINGS_V2_KEYS.includes(key)) {
-                    settings[key] = d.settings[key];
-                }
-            });
-            autoSyncLastTimestamp = d.timestamp;
-            normalizeToggleSettings();
-            updateCharList();
-            injectPrompt();
+            const record = await fetchAutoSyncRecordFromServer();
+            clearAutoSyncError();
+            if (!record) return;
+            applyAutoSyncRecord(record);
         } catch (e) {
-            // File doesn't exist yet or parse error - ignore
+            console.warn('[Dialogue Colors] Auto-sync settings refresh failed:', e);
+            setAutoSyncError('Read failed');
         }
     }
 
-    async function saveSettingsToFile() {
-        if (!autoSyncEnabled) return;
-        try {
-            const settingsData = {};
-            GLOBAL_SETTINGS_V2_KEYS.forEach(key => {
-                if (settings[key] !== undefined) settingsData[key] = settings[key];
-            });
-            autoSyncSequence++;
-            const timestamp = new Date().toISOString();
-            autoSyncLastTimestamp = timestamp;
-            const exportObj = {
-                version: COLOR_SCHEMA_VERSION,
-                timestamp: timestamp,
-                sequence: autoSyncSequence,
-                settings: settingsData
-            };
+    function saveSettingsToStore(options = {}) {
+        const { force = false } = options;
+        const currentRecord = getAutoSyncRecord(true);
+        const settingsData = buildSettingsSubset(GLOBAL_SETTINGS_V2_KEYS);
+        const settingsChanged = !areSettingsSubsetsEqual(currentRecord.settings, settingsData);
+        const enabledChanged = currentRecord.autoSyncEnabled !== autoSyncEnabled;
 
-            await fetch('/api/files/write', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    path: 'data/default-user/extensions/third-party/sillytavern-character-colors/settings.json',
-                    data: JSON.stringify(exportObj, null, 2)
-                })
-            });
-        } catch (e) {
-            // Silently fail
-        }
+        if (!force && (!autoSyncEnabled || (!settingsChanged && !enabledChanged))) return false;
+
+        const nextRecord = buildAutoSyncRecord({
+            ...currentRecord,
+            version: COLOR_SCHEMA_VERSION,
+            timestamp: new Date().toISOString(),
+            sequence: (Number.isFinite(currentRecord.sequence) ? currentRecord.sequence : 0) + 1,
+            autoSyncEnabled,
+            settings: settingsData,
+        });
+
+        extension_settings[MODULE_NAME] = nextRecord;
+        markAutoSyncPending(nextRecord);
+        saveSettingsDebounced?.();
+        cleanupLegacyAutoSyncPreference();
+        return true;
     }
 
     function enableAutoSync() {
         autoSyncEnabled = true;
-        localStorage.setItem('dc_autosync_enabled', 'true');
         startAutoSyncPolling();
-        saveSettingsToFile();
+        saveSettingsToStore({ force: true });
         toast.success('Auto-sync enabled! Settings will sync across devices.');
     }
 
     function disableAutoSync() {
         autoSyncEnabled = false;
-        localStorage.removeItem('dc_autosync_enabled');
         stopAutoSyncPolling();
+        saveSettingsToStore({ force: true });
         toast.info('Auto-sync disabled');
     }
 
     function startAutoSyncPolling() {
         if (autoSyncInterval) return;
         const pollInterval = document.hidden ? 30000 : 5000;
-        autoSyncInterval = setInterval(loadSettingsFromFile, pollInterval);
+        autoSyncInterval = setInterval(() => {
+            void loadSettingsFromServer();
+        }, pollInterval);
         document.addEventListener('visibilitychange', handleVisibilityChange);
     }
 
@@ -1993,6 +2184,7 @@
         if (autoSyncEnabled) {
             stopAutoSyncPolling();
             startAutoSyncPolling();
+            void loadSettingsFromServer();
         }
     }
 
@@ -2005,27 +2197,39 @@
         if (autoSyncEnabled) {
             setupBtn.style.display = 'none';
             disableBtn.style.display = 'block';
-            status.textContent = '✓ Active';
-            status.style.color = 'var(--SmartThemeQuoteColor)';
         } else {
             setupBtn.style.display = 'block';
             disableBtn.style.display = 'none';
+        }
+
+        if (autoSyncStatusError) {
+            status.textContent = autoSyncStatusError;
+            status.style.color = 'var(--SmartThemeErrorColor, #ff6b6b)';
+        } else if (autoSyncPendingRecord) {
+            status.textContent = 'Saving...';
+            status.style.color = 'var(--SmartThemeQuoteColor)';
+        } else if (autoSyncEnabled) {
+            status.textContent = '✓ Active';
+            status.style.color = 'var(--SmartThemeQuoteColor)';
+        } else {
             status.textContent = '';
+            status.style.color = '';
         }
     }
 
     function initAutoSync() {
-        const enabled = localStorage.getItem('dc_autosync_enabled');
-        if (enabled === null) {
-            // First run - enable by default
-            autoSyncEnabled = true;
-            localStorage.setItem('dc_autosync_enabled', 'true');
-        } else {
-            autoSyncEnabled = enabled === 'true';
+        const hadLegacyPreference = localStorage.getItem(LEGACY_AUTO_SYNC_ENABLED_KEY) !== null;
+        const record = getAutoSyncRecord(true);
+        applyAutoSyncRecord(record, { force: true });
+        cleanupLegacyAutoSyncPreference();
+
+        if (hadLegacyPreference || !record.timestamp || !hasAutoSyncSettingsPayload(record)) {
+            saveSettingsToStore({ force: true });
         }
+
         if (autoSyncEnabled) {
             startAutoSyncPolling();
-            loadSettingsFromFile();
+            void loadSettingsFromServer();
         }
     }
 
@@ -3702,6 +3906,7 @@
         refreshPresetDropdown();
         refreshPaletteDropdown();
         updateSystemPromptDisplay();
+        updateAutoSyncUI();
     }
 
     // Phase 6C: Mobile-optimized UI with collapsible <details> sections
@@ -4128,11 +4333,19 @@
             generationAfterCommands: () => injectPrompt(),
             newMessage: onNewMessage,
             chatChanged: handleChatChanged,
+            settingsUpdated: () => {
+                const record = getAutoSyncRecord(false);
+                if (!record) return;
+                if (!autoSyncPendingRecord || doAutoSyncMarkersMatch(record, autoSyncPendingRecord)) {
+                    confirmAutoSyncRecord(record);
+                }
+            },
         };
         eventSource.on(event_types.GENERATION_AFTER_COMMANDS, runtimeState.eventHandlers.generationAfterCommands);
         eventSource.on(event_types.MESSAGE_RECEIVED, runtimeState.eventHandlers.newMessage);
         eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, runtimeState.eventHandlers.newMessage);
         eventSource.on(event_types.CHAT_CHANGED, runtimeState.eventHandlers.chatChanged);
+        eventSource.on(event_types.SETTINGS_UPDATED, runtimeState.eventHandlers.settingsUpdated);
         eventSource.on(event_types.CHAT_CHANGED, () => populateProfileDropdown());
         runtimeState.eventsRegistered = true;
     }

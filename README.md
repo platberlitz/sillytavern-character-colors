@@ -14,7 +14,7 @@ A SillyTavern extension that makes the LLM color-code each character's dialogue 
 - **Per-chat or global colors** - Store colors per character or share across all chats
 - **Auto-lock detected characters** - Automatically lock newly detected characters (default: on)
 - **Right-click/long-press reassignment** - Right-click (desktop) or long-press (mobile) on colored dialogue to reassign it to a different character with searchable dropdown (default: off)
-- **Auto-sync settings** - Settings automatically sync across all devices accessing the same SillyTavern instance (enabled by default)
+- **Auto-sync settings** - Settings automatically sync across all devices accessing the same SillyTavern instance via SillyTavern's managed extension settings store (enabled by default)
 
 ### Color Management
 - **Color lock** 🔒 - Lock a character's color to prevent changes
@@ -24,7 +24,7 @@ A SillyTavern extension that makes the LLM color-code each character's dialogue 
 - **Theme flip** ☀/🌙 - Instantly flip all colors between dark↔light suited variants
 - **Undo/Redo** ↶↷ - Full history with Ctrl+Z/Y shortcuts
 - **Export/Import** - Save and load color schemes as JSON
-- **Settings sync** - Export/import settings separately, or enable auto-sync to share settings across devices
+- **Settings sync** - Export/import settings separately, or enable auto-sync to share settings across devices without writing a separate extension `settings.json`
 - **Export as PNG** - Generate a theme-aware visual legend image (dark/light background)
 - **Color presets** - Save, load, and delete presets via dropdown UI
 - **Recolor messages** - Rewrite all existing message colors to match current assignments after changing a character's color
@@ -76,10 +76,15 @@ Effects are visible in chat but stripped from the prompt context.
 - **Collapsible UI sections** - Settings organized into Display, Behavior, Actions, and Characters sections
 - **Mobile-optimized** - Larger touch targets and responsive layout on small screens
 
+## What's New in 4.1.1
+
+- **Fixed auto-sync persistence** — settings sync now uses SillyTavern's managed extension settings store instead of trying to read/write a standalone extension `settings.json`.
+- **Fixed Docker/non-default user installs** — auto-sync no longer depends on extension-folder write permissions or hardcoded `default-user` file paths, which resolves the `403` save failures some users were seeing.
+
 ## What's New in 4.1.0
 
 - **Right-click character reassignment** — Right-click colored dialogue to reassign it to a different character using a searchable dropdown of existing characters. Color updates immediately in chat. No more manual HTML editing for misattributions!
-- **Settings sync** — Export/import settings separately from color data, or enable auto-sync (on by default) to automatically share settings across all devices accessing the same SillyTavern instance. Perfect for PC + mobile via Tailscale.
+- **Settings sync** — Export/import settings separately from color data, or enable auto-sync (on by default) to automatically share settings across all devices accessing the same SillyTavern instance through SillyTavern's own settings backend. Perfect for PC + mobile via Tailscale.
 
 ## What's New in 4.0.0
 
