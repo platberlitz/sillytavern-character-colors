@@ -1,8 +1,8 @@
 (async function () {
     'use strict';
 
-    const { extension_settings, saveSettingsDebounced, getContext } = await import('../../../extensions.js');
-    const { eventSource, event_types, setExtensionPrompt, saveCharacterDebounced, getCharacters, extension_prompt_types, extension_prompt_roles, generateQuietPrompt, registerMacro, getRequestHeaders } = await import('../../../../script.js');
+    const { extension_settings, getContext } = await import('../../../extensions.js');
+    const { eventSource, event_types, setExtensionPrompt, saveSettingsDebounced, saveCharacterDebounced, getCharacters, extension_prompt_types, extension_prompt_roles, generateQuietPrompt, registerMacro, getRequestHeaders } = await import('../../../../script.js');
     const RUNTIME_GUARD_KEY = '__dialogueColorsRuntime_v1';
     if (globalThis[RUNTIME_GUARD_KEY]?.initialized) {
         console.warn('[Dialogue Colors] Runtime already initialized; skipping duplicate script execution.');

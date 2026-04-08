@@ -76,6 +76,10 @@ Effects are visible in chat but stripped from the prompt context.
 - **Collapsible UI sections** - Settings organized into Display, Behavior, Actions, and Characters sections
 - **Mobile-optimized** - Larger touch targets and responsive layout on small screens
 
+## What's New in 4.1.2
+
+- **Fixed auto-sync saves not being triggered** — settings changes now call SillyTavern's exported `saveSettingsDebounced` function directly, so auto-sync writes persist across devices instead of timing out waiting for confirmation.
+
 ## What's New in 4.1.1
 
 - **Fixed auto-sync persistence** — settings sync now uses SillyTavern's managed extension settings store instead of trying to read/write a standalone extension `settings.json`.
