@@ -1,3 +1,4 @@
+import { converter } from '../../../../script.js';
 import { power_user } from '/scripts/power-user.js';
 import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
@@ -1928,10 +1929,11 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         // <q> elements are generated at render time from raw quoted strings in msg.mes.
         // e.g. "Hello world" in msg.mes → <q>"Hello world"</q> in the DOM.
         // So we need to find the raw text (including its surrounding quote chars) in msg.mes.
-        const rawQuoteText = String(qElement.textContent);
+        const rawQuoteText = String(qElement.innerHTML);
         if (!rawQuoteText) return false;
 
-        let escapedText = rawQuoteText.replace('…', '...'); // normalize fancy ellipsis...
+        let escapedText = converter.makeMarkdown(rawQuoteText);
+        // escapedText = escapedText.replace('…', '...'); // normalize fancy ellipsis...
         escapedText = escapeRegex(escapedText);
         const rawQuoteRegex = new RegExp(escapedText);
         if (!rawQuoteRegex.test(msg.mes)) return false;
