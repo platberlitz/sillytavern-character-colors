@@ -124,9 +124,8 @@
     let colorHistory = [];
     let historyIndex = -1;
     let swapMode = null;
-    let sortMode = 'name';
     let searchTerm = '';
-    let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, thoughtSymbols: '*', disableNarration: true, shareColorsGlobally: false, cssEffects: false, autoScanNewMessages: true, autoLockDetected: true, enableRightClick: false, llmEnhanceCustomPalettes: true, promptDepth: 4, showControlHelp: true, autoRecolor: true, disableToasts: false, autoColorize: false, llmConnectionProfile: null, colorSchemaVersion: COLOR_SCHEMA_VERSION, promptMode: 'inject', promptRole: 'system' };
+    let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, thoughtSymbols: '*', disableNarration: true, shareColorsGlobally: false, cssEffects: false, autoScanNewMessages: true, autoLockDetected: true, enableRightClick: false, llmEnhanceCustomPalettes: true, promptDepth: 4, showControlHelp: true, autoRecolor: true, disableToasts: false, autoColorize: false, llmConnectionProfile: null, colorSchemaVersion: COLOR_SCHEMA_VERSION, promptMode: 'inject', promptRole: 'system', sortMode: 'name' };
     const TOGGLE_SETTING_DEFAULTS = Object.freeze({
         enabled: true,
         highlightMode: false,
@@ -1511,8 +1510,8 @@
     // Phase 6B: Group sorting support
     function getSortedEntries() {
         const entries = Object.entries(characterColors).filter(([, v]) => !searchTerm || v.name.toLowerCase().includes(searchTerm.toLowerCase()));
-        if (sortMode === 'count') entries.sort((a, b) => (b[1].dialogueCount || 0) - (a[1].dialogueCount || 0));
-        else if (sortMode === 'group') entries.sort((a, b) => (a[1].group || '').localeCompare(b[1].group || '') || a[1].name.localeCompare(b[1].name));
+        if (settings.sortMode === 'count') entries.sort((a, b) => (b[1].dialogueCount || 0) - (a[1].dialogueCount || 0));
+        else if (settings.sortMode === 'group') entries.sort((a, b) => (a[1].group || '').localeCompare(b[1].group || '') || a[1].name.localeCompare(b[1].name));
         else entries.sort((a, b) => a[1].name.localeCompare(b[1].name));
         return entries;
     }
@@ -1792,9 +1791,8 @@
             const text = fontTag.textContent.substring(0, 30) + (fontTag.textContent.length > 30 ? '...' : '');
 
             // Build character list for datalist
-            const charList = Object.entries(characterColors)
-                .map(([k, v]) => ({ key: k, name: v.name }))
-                .sort((a, b) => a.name.localeCompare(b.name));
+            const charList = getSortedEntries()
+                .map(([k, v]) => ({ key: k, name: v.name }));
             const datalistOptions = charList.map(c => `<option value="${escapeAttr(c.name)}">`).join('');
 
             const menu = document.createElement('div');
@@ -3630,7 +3628,7 @@
             const safeColor = getEntryEffectiveColor(v);
             const pickerColor = getBaseColor(v, safeColor);
             let groupHeader = '';
-            if (sortMode === 'group') {
+            if (settings.sortMode === 'group') {
                 const g = v.group || '(ungrouped)';
                 if (g !== lastGroup) {
                     lastGroup = g;
@@ -3900,6 +3898,7 @@
         if ($('dc-prompt-depth')) $('dc-prompt-depth').value = settings.promptDepth ?? 4;
         if ($('dc-prompt-role')) $('dc-prompt-role').value = settings.promptRole || 'system';
         if ($('dc-prompt-mode')) $('dc-prompt-mode').value = settings.promptMode || 'inject';
+        if ($('dc-sort')) $('dc-sort').value = settings.sortMode || 'name';
         if ($('dc-help-toggle')) $('dc-help-toggle').checked = !!settings.showControlHelp;
         renderControlHelpPanel();
         applyControlHelpText();
@@ -3991,7 +3990,7 @@
                     <summary style="cursor:pointer;font-weight:bold;margin-bottom:4px;">Characters</summary>
                     <div style="display:flex;flex-direction:column;gap:4px;padding-left:4px;">
                         <div style="display:flex;gap:4px;"><input type="text" id="dc-search" placeholder="Search characters..." class="text_pole" style="flex:1;padding:3px;" data-help="Filter characters by name."></div>
-                        <div style="display:flex;gap:4px;align-items:center;"><label>Sort:</label><select id="dc-sort" class="text_pole" style="flex:1;" data-help="Sort character list by name, dialogue count, or group."><option value="name">Name</option><option value="count">Dialogue Count</option><option value="group">Group</option></select></div>
+                        <div style="display:flex;gap:4px;align-items:center;"><label>Sort:</label><select id="dc-sort" class="text_pole" style="flex:1;" data-help="Sort character list by name, dialogue count, or group. This preference is saved and restored across sessions."><option value="name">Name</option><option value="count">Dialogue Count</option><option value="group">Group</option></select></div>
                         <div style="display:flex;gap:4px;"><input type="text" id="dc-add-name" placeholder="Add character..." class="text_pole" style="flex:1;padding:3px;" data-help="Type a new character name to add manually."><button id="dc-add-btn" class="menu_button" style="padding:3px 8px;" data-help="Add typed character with a suggested color.">+</button></div>
                         <div id="dc-batch-bar" style="display:none;gap:4px;flex-wrap:wrap;padding:4px;background:var(--SmartThemeBlurTintColor);border-radius:4px;">
                             <button id="dc-batch-all" class="menu_button" style="padding:2px 6px;font-size:0.8em;" data-help="Select all characters for batch operations.">Select All</button>
@@ -4234,7 +4233,7 @@
             showUndoToast(`Reset ${changed} unlocked color${changed !== 1 ? 's' : ''}.`, restore);
         };
         $('dc-search').oninput = e => { searchTerm = e.target.value; updateCharList(); };
-        $('dc-sort').onchange = e => { sortMode = e.target.value; updateCharList(); };
+        $('dc-sort').onchange = e => { settings.sortMode = e.target.value; saveData(); updateCharList(); };
         $('dc-add-btn').onclick = () => { addCharacter($('dc-add-name').value); $('dc-add-name').value = ''; };
         $('dc-add-name').onkeypress = e => { if (e.key === 'Enter') $('dc-add-btn').click(); };
 
