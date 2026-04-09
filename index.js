@@ -1933,7 +1933,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         if (!rawQuoteText) return false;
 
         let escapedText = converter.makeMarkdown(rawQuoteText);
-        // escapedText = escapedText.replace('…', '...'); // normalize fancy ellipsis...
+        escapedText = escapedText.replace('…', '...'); // normalize fancy ellipsis...
         escapedText = escapeRegex(escapedText);
         const rawQuoteRegex = new RegExp(escapedText);
         if (!rawQuoteRegex.test(msg.mes)) return false;
