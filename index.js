@@ -1,5 +1,5 @@
 import { power_user } from '/scripts/power-user.js';
-import { escapeRegex } from '/scripts/utils.js';
+import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
 (async function () {
     'use strict';
@@ -30,16 +30,8 @@ import { escapeRegex } from '/scripts/utils.js';
     }
     function clearDomCache() { domCache.clear(); }
 
-    function escapeHtml(s) {
-        return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-    }
-
     function escapeAttr(s) {
         return escapeHtml(s);
-    }
-
-    function escapeRegExp(s) {
-        return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     }
 
     function normalizeBoolean(value, fallback = false) {
@@ -3072,7 +3064,7 @@ import { escapeRegex } from '/scripts/utils.js';
         }
         const patterns = [];
         for (const delimiter of delimiters) {
-            const escaped = escapeRegExp(delimiter);
+            const escaped = escapeRegex(delimiter);
             patterns.push(`${escaped}([^${escaped}]+)${escaped}`);
         }
         return patterns.length ? new RegExp(`(${patterns.join('|')})`, 'g') : null;
@@ -3129,7 +3121,7 @@ import { escapeRegex } from '/scripts/utils.js';
         for (const speakerKey of sortedLookupKeys) {
             const assignment = lookup.get(speakerKey);
             if (!assignment) continue;
-            const regex = new RegExp(`\\b${escapeRegExp(speakerKey)}(?:'s?)?\\b`, 'gi');
+            const regex = new RegExp(`\\b${escapeRegex(speakerKey)}(?:'s?)?\\b`, 'gi');
 
             // Search before-context: distance = chars from match end to quote start
             let match;
@@ -3214,7 +3206,7 @@ import { escapeRegex } from '/scripts/utils.js';
             // Tier 3: no name in prefix → carry forward previous speaker
             if (!assignment && lastResolvedSpeakerKey) {
                 const prefixMentionsSpeaker = hasMeaningfulPrefix && sortedLookupKeys.some(key =>
-                    new RegExp(`\\b${escapeRegExp(key)}\\b`, 'i').test(beforeSlice)
+                    new RegExp(`\\b${escapeRegex(key)}\\b`, 'i').test(beforeSlice)
                 );
                 if (!prefixMentionsSpeaker) {
                     assignment = lookup.get(lastResolvedSpeakerKey) || null;
