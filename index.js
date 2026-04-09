@@ -1,3 +1,7 @@
+import { converter } from '../../../../script.js';
+import { power_user } from '/scripts/power-user.js';
+import { escapeHtml, escapeRegex } from '/scripts/utils.js';
+
 (async function () {
     'use strict';
 
@@ -27,16 +31,8 @@
     }
     function clearDomCache() { domCache.clear(); }
 
-    function escapeHtml(s) {
-        return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-    }
-
     function escapeAttr(s) {
         return escapeHtml(s);
-    }
-
-    function escapeRegExp(s) {
-        return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     }
 
     function normalizeBoolean(value, fallback = false) {
@@ -1784,12 +1780,14 @@
         let longPressTimer = null;
         let longPressTarget = null;
 
-        const showMenu = (e, fontTag) => {
+        const showMenu = (e, fontTag, qElement = null) => {
             e.preventDefault();
             const existingMenu = document.getElementById('dc-context-menu');
             if (existingMenu) existingMenu.remove();
-            const color = normalizeHexColor(fontTag.getAttribute('color'));
-            const text = fontTag.textContent.substring(0, 30) + (fontTag.textContent.length > 30 ? '...' : '');
+            const isQElement = !fontTag && !!qElement;
+            const targetEl = isQElement ? qElement : fontTag;
+            const color = isQElement ? power_user.quote_text_color : normalizeHexColor(fontTag.getAttribute('color'));
+            const text = targetEl.textContent.substring(0, 30) + (targetEl.textContent.length > 30 ? '...' : '');
 
             // Build character list for datalist
             const charList = Object.entries(characterColors)
@@ -1803,7 +1801,7 @@
             const y = e.clientY ?? e.touches?.[0]?.clientY ?? 100;
             menu.style.cssText = `position:fixed;left:${x}px;top:${y}px;background:var(--SmartThemeBlurTintColor);border:1px solid var(--SmartThemeBorderColor);border-radius:6px;padding:8px;z-index:10001;min-width:180px;color:var(--SmartThemeTextColor);box-shadow:0 4px 12px rgba(0,0,0,0.5);`;
             menu.innerHTML = `
-                <div style="font-size:0.8em;opacity:0.7;margin-bottom:6px;">"${escapeHtml(text)}"</div>
+                <div style="font-size:0.8em;opacity:0.7;margin-bottom:6px;">${isQElement ? '<em style="font-size:0.9em;">(uncolored quote)</em><br>' : ''}"${escapeHtml(text)}"</div>
                 <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
                     <span style="width:12px;height:12px;border-radius:50%;background:${color};"></span>
                     <input type="color" id="dc-ctx-color" value="${color}" style="width:24px;height:20px;border:none;">
@@ -1838,7 +1836,6 @@
                 const pickerColor = normalizeHexColor(colorInput.value, color);
                 if (name) {
                     const key = name.toLowerCase();
-                    const originalColor = normalizeHexColor(fontTag.getAttribute('color'));
                     let finalColor = pickerColor;
                     let textUpdated = false;
 
@@ -1859,8 +1856,13 @@
                         characterColors[key] = built.entry;
                     }
 
-                    fontTag.setAttribute('color', finalColor);
-                    textUpdated = updateMessageTextForFontTag(fontTag, originalColor, finalColor);
+                    if (isQElement) {
+                        textUpdated = wrapQElementWithFontTag(qElement, finalColor);
+                    } else {
+                        const originalColor = normalizeHexColor(fontTag.getAttribute('color'));
+                        fontTag.setAttribute('color', finalColor);
+                        textUpdated = updateMessageTextForFontTag(fontTag, originalColor, finalColor);
+                    }
 
                     saveHistory(); saveData(); updateCharList(); injectPrompt();
 
@@ -1881,23 +1883,73 @@
 
         document.addEventListener('contextmenu', e => {
             if (!settings.enableRightClick) return;
-            const fontTag = e.target.closest('font[color]');
             const mesText = e.target.closest('.mes_text');
-            if (!fontTag || !mesText) return;
-            showMenu(e, fontTag);
+            if (!mesText) return;
+            const fontTag = e.target.closest('font[color]');
+            if (fontTag) { showMenu(e, fontTag, null); return; }
+            const qEl = e.target.closest('q');
+            if (qEl && !qEl.closest('font[color]')) { showMenu(e, null, qEl); return; }
         });
 
         document.addEventListener('touchstart', e => {
             if (!settings.enableRightClick) return;
-            const fontTag = e.target.closest('font[color]');
             const mesText = e.target.closest('.mes_text');
-            if (!fontTag || !mesText) return;
-            longPressTarget = fontTag;
-            longPressTimer = setTimeout(() => showMenu(e, fontTag), 500);
+            if (!mesText) return;
+            const fontTag = e.target.closest('font[color]');
+            if (fontTag) {
+                longPressTarget = fontTag;
+                longPressTimer = setTimeout(() => showMenu(e, fontTag, null), 500);
+                return;
+            }
+            const qEl = e.target.closest('q');
+            if (qEl && !qEl.closest('font[color]')) {
+                longPressTarget = qEl;
+                longPressTimer = setTimeout(() => showMenu(e, null, qEl), 500);
+            }
         }, { passive: true });
 
         document.addEventListener('touchend', () => { clearTimeout(longPressTimer); longPressTimer = null; });
         document.addEventListener('touchmove', () => { clearTimeout(longPressTimer); longPressTimer = null; });
+    }
+
+    function wrapQElementWithFontTag(qElement, color) {
+        const mesEl = qElement.closest('.mes');
+        if (!mesEl) return false;
+
+        const msgIndex = Number(mesEl.getAttribute('mesid'));
+        if (msgIndex === -1) return false;
+
+        const ctx = getContext();
+        const chat = ctx?.chat || [];
+        const msg = chat[msgIndex];
+        if (!msg || msg.is_user) return false;
+
+        const newHex = normalizeHexColor(color);
+
+        // <q> elements are generated at render time from raw quoted strings in msg.mes.
+        // e.g. "Hello world" in msg.mes → <q>"Hello world"</q> in the DOM.
+        // So we need to find the raw text (including its surrounding quote chars) in msg.mes.
+        const rawQuoteText = String(qElement.innerHTML);
+        if (!rawQuoteText) return false;
+
+        let escapedText = converter.makeMarkdown(rawQuoteText);
+        escapedText = escapedText.replace('…', '...'); // normalize fancy ellipsis...
+        escapedText = escapeRegex(escapedText);
+        const rawQuoteRegex = new RegExp(escapedText);
+        if (!rawQuoteRegex.test(msg.mes)) return false;
+
+        const updated = msg.mes.replace(rawQuoteRegex, `<font color="${newHex}">${rawQuoteText}</font>`);
+        if (updated === msg.mes) return false;
+
+        msg.mes = updated;
+
+        // Wrap in DOM: replace qElement with a font node containing it so the
+        // DOM reflects the persisted state immediately without a full re-render.
+        const fontNode = document.createElement('font');
+        fontNode.setAttribute('color', newHex);
+        qElement.replaceWith(fontNode);
+        fontNode.appendChild(qElement);
+        return true;
     }
 
     function updateMessageTextForFontTag(fontTag, oldColor, newColor) {
@@ -3014,7 +3066,7 @@
         }
         const patterns = [];
         for (const delimiter of delimiters) {
-            const escaped = escapeRegExp(delimiter);
+            const escaped = escapeRegex(delimiter);
             patterns.push(`${escaped}([^${escaped}]+)${escaped}`);
         }
         return patterns.length ? new RegExp(`(${patterns.join('|')})`, 'g') : null;
@@ -3071,7 +3123,7 @@
         for (const speakerKey of sortedLookupKeys) {
             const assignment = lookup.get(speakerKey);
             if (!assignment) continue;
-            const regex = new RegExp(`\\b${escapeRegExp(speakerKey)}(?:'s?)?\\b`, 'gi');
+            const regex = new RegExp(`\\b${escapeRegex(speakerKey)}(?:'s?)?\\b`, 'gi');
 
             // Search before-context: distance = chars from match end to quote start
             let match;
@@ -3156,7 +3208,7 @@
             // Tier 3: no name in prefix → carry forward previous speaker
             if (!assignment && lastResolvedSpeakerKey) {
                 const prefixMentionsSpeaker = hasMeaningfulPrefix && sortedLookupKeys.some(key =>
-                    new RegExp(`\\b${escapeRegExp(key)}\\b`, 'i').test(beforeSlice)
+                    new RegExp(`\\b${escapeRegex(key)}\\b`, 'i').test(beforeSlice)
                 );
                 if (!prefixMentionsSpeaker) {
                     assignment = lookup.get(lastResolvedSpeakerKey) || null;
