@@ -74,6 +74,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             baseColor,
             name,
             locked: !!entry?.locked,
+            keep: !!entry?.keep,
             aliases: normalizeAliases(entry?.aliases),
             style: VALID_STYLES.has(entry?.style) ? entry.style : '',
             dialogueCount: Number.isFinite(entry?.dialogueCount) && entry.dialogueCount > 0 ? Math.floor(entry.dialogueCount) : 0,
@@ -94,6 +95,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             }
             const existing = normalized[key];
             existing.locked = existing.locked || normalizedEntry.locked;
+            existing.keep = existing.keep || normalizedEntry.keep;
             existing.aliases = [...new Set([...existing.aliases, ...normalizedEntry.aliases])];
             existing.dialogueCount = Math.max(existing.dialogueCount || 0, normalizedEntry.dialogueCount || 0);
             if (!existing.group && normalizedEntry.group) existing.group = normalizedEntry.group;
@@ -113,7 +115,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     }
 
     const MODULE_NAME = 'dialogue-colors';
-    const COLOR_SCHEMA_VERSION = 3;
+    const COLOR_SCHEMA_VERSION = 4;
     const LEGACY_GLOBAL_SETTINGS_KEY = 'dc_global_settings';
     const GLOBAL_SETTINGS_V2_KEY = 'dc_global_settings_v2';
     let characterColors = {};
@@ -121,6 +123,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     let historyIndex = -1;
     let swapMode = null;
     let searchTerm = '';
+    let expandedCharacterRows = new Set();
     let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, thoughtSymbols: '*', disableNarration: true, shareColorsGlobally: false, cssEffects: false, autoScanNewMessages: true, autoLockDetected: true, enableRightClick: false, llmEnhanceCustomPalettes: true, promptDepth: 4, showControlHelp: true, autoRecolor: true, disableToasts: false, autoColorize: false, llmConnectionProfile: null, colorSchemaVersion: COLOR_SCHEMA_VERSION, promptMode: 'inject', promptRole: 'system', sortMode: 'name' };
     const TOGGLE_SETTING_DEFAULTS = Object.freeze({
         enabled: true,
@@ -398,89 +401,16 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         '.dc-batch-check': 'Select this character row for batch actions.',
         '.dc-color-dot': 'Click to open the color picker for this character.',
         '.dc-color-input': 'Pick a color directly. Double-click for harmony suggestions.',
-        '.dc-lock': 'Toggle lock for this character color.',
+        '.dc-keep': 'Pinned characters survive Clear and bulk delete tools.',
+        '.dc-lock': 'Lock this character color so reset/regen tools do not change it.',
+        '.dc-more': 'Show less common row tools like alias, group, style, and swap.',
         '.dc-swap': 'Choose two characters in sequence to swap their colors.',
         '.dc-style': 'Cycle style: none, bold, italic, then bold italic.',
         '.dc-alias': 'Add an alternate name that maps to this character.',
         '.dc-group': 'Assign this character to a group label.',
-        '.dc-del': 'Delete this character from the list.',
+        '.dc-del': 'Delete this character from the list. Turn off Keep first if pinned.',
         '.dc-alias-remove': 'Remove this alias from the character.'
     });
-
-    const CONTROL_HELP_PANEL_GROUPS = Object.freeze([
-        {
-            title: 'Display',
-            items: [
-                { label: 'Enable', key: 'dc-enabled' },
-                { label: 'Highlight mode', key: 'dc-highlight' },
-                { label: 'Floating legend', key: 'dc-legend' },
-                { label: 'CSS effects', key: 'dc-css-effects' },
-                { label: 'Theme', key: 'dc-theme' },
-                { label: 'Palette', key: 'dc-palette' },
-                { label: 'Gen / + / -', key: 'dc-gen-palette' },
-                { label: 'Palette editor', key: 'dc-palette-name-input' },
-                { label: 'Overwrite palette', key: 'dc-overwrite-existing' },
-                { label: 'Brightness', key: 'dc-brightness' },
-                { label: 'Auto-update generated colors', key: 'dc-auto-brightness' }
-            ]
-        },
-        {
-            title: 'Behavior',
-            items: [
-                { label: 'Auto-scan on load', key: 'dc-autoscan' },
-                { label: 'Auto-scan new', key: 'dc-autoscan-new' },
-                { label: 'Auto-lock', key: 'dc-auto-lock' },
-                { label: 'Right-click menu', key: 'dc-right-click' },
-                { label: 'Disable narration', key: 'dc-disable-narration' },
-                { label: 'Share global', key: 'dc-share-global' },
-                { label: 'LLM palette', key: 'dc-llm-palette' },
-                { label: 'Disable toasts', key: 'dc-disable-toasts' },
-                { label: 'Narrator color', key: 'dc-narrator' },
-                { label: 'Thought symbols', key: 'dc-thought-symbols' },
-                { label: 'Injection depth', key: 'dc-prompt-depth' }
-            ]
-        },
-        {
-            title: 'Actions',
-            items: [
-                { label: 'Scan / Clear / Stats', key: 'dc-scan' },
-                { label: 'Recolor messages', key: 'dc-recolor' },
-                { label: 'Colorize uncolored', key: 'dc-colorize' },
-                { label: 'Auto-recolor', key: 'dc-auto-recolor' },
-                { label: 'Auto-colorize fallback', key: 'dc-auto-colorize' },
-                { label: 'Undo / Redo / Fix', key: 'dc-undo' },
-                { label: 'Regen / Theme flip', key: 'dc-regen' },
-                { label: 'Presets', key: 'dc-save-preset' },
-                { label: 'Import / Export / PNG', key: 'dc-export' },
-                { label: 'Card tools', key: 'dc-card' },
-                { label: 'Lock / Unlock / Reset', key: 'dc-lock-all' },
-                { label: 'Delete tools', key: 'dc-del-locked' },
-                { label: 'Delete threshold', key: 'dc-del-least-threshold' }
-            ]
-        },
-        {
-            title: 'Characters',
-            items: [
-                { label: 'Search / Sort', key: 'dc-search' },
-                { label: 'Add (+)', key: 'dc-add-btn' },
-                { label: 'Batch controls', key: 'dc-batch-all' },
-                { label: 'Batch style', key: 'dc-batch-style-select' }
-            ]
-        },
-        {
-            title: 'Character Row',
-            items: [
-                { label: 'Checkbox', text: DYNAMIC_CONTROL_HELP_TEXT['.dc-batch-check'] },
-                { label: 'Color dot/picker', text: DYNAMIC_CONTROL_HELP_TEXT['.dc-color-input'] },
-                { label: 'Lock', text: DYNAMIC_CONTROL_HELP_TEXT['.dc-lock'] },
-                { label: 'Swap', text: DYNAMIC_CONTROL_HELP_TEXT['.dc-swap'] },
-                { label: 'Style', text: DYNAMIC_CONTROL_HELP_TEXT['.dc-style'] },
-                { label: 'Alias (+)', text: DYNAMIC_CONTROL_HELP_TEXT['.dc-alias'] },
-                { label: 'Group (G)', text: DYNAMIC_CONTROL_HELP_TEXT['.dc-group'] },
-                { label: 'Delete (x)', text: DYNAMIC_CONTROL_HELP_TEXT['.dc-del'] }
-            ]
-        }
-    ]);
 
     const COLOR_THEMES = {
         pastel: [[340, 70, 75], [200, 70, 75], [120, 50, 70], [45, 80, 70], [280, 60, 75], [170, 60, 70], [20, 80, 75], [240, 60, 75]],
@@ -549,9 +479,13 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     function createRestoreSnapshot() {
         const colorsSnapshot = JSON.stringify(characterColors);
         const keysSnapshot = [...selectedKeys];
+        const expandedSnapshot = [...expandedCharacterRows];
+        const swapSnapshot = swapMode;
         return function() {
             characterColors = JSON.parse(colorsSnapshot);
             selectedKeys = new Set(keysSnapshot);
+            expandedCharacterRows = new Set(expandedSnapshot);
+            swapMode = swapSnapshot;
             saveHistory(); saveData(); updateCharList(); injectPrompt();
         };
     }
@@ -594,6 +528,72 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const name = document.getElementById('dc-palette-name-input')?.value?.trim() || '';
         const notes = document.getElementById('dc-palette-notes-input')?.value || '';
         return { name, notes };
+    }
+
+    function isKeptCharacter(key) {
+        return !!characterColors[key]?.keep;
+    }
+
+    function getKeptKeys(keys = Object.keys(characterColors)) {
+        const list = Array.isArray(keys) ? keys : [keys];
+        return list.filter(key => isKeptCharacter(key));
+    }
+
+    function buildKeepAwareRemovalMessage(actionLabel, removedCount, keptCount, itemLabel = 'character') {
+        const removedText = `${actionLabel} ${removedCount} ${itemLabel}${removedCount !== 1 ? 's' : ''}`;
+        if (!keptCount) return `${removedText}.`;
+        return `${removedText}, kept ${keptCount} pinned character${keptCount !== 1 ? 's' : ''}.`;
+    }
+
+    function pruneExpandedCharacterRows() {
+        expandedCharacterRows = new Set([...expandedCharacterRows].filter(key => characterColors[key]));
+    }
+
+    function removeCharacterKeys(keys, { actionLabel, itemLabel = 'character', emptyMessage, blockedMessage, onComplete } = {}) {
+        const candidates = [...new Set((Array.isArray(keys) ? keys : [keys]).map(key => String(key ?? '').trim().toLowerCase()).filter(Boolean))]
+            .filter(key => characterColors[key]);
+        if (!candidates.length) {
+            if (emptyMessage) toast.info(emptyMessage);
+            return { removed: 0, kept: 0, skipped: [], removedKeys: [] };
+        }
+
+        const keptKeys = getKeptKeys(candidates);
+        const removedKeys = candidates.filter(key => !keptKeys.includes(key));
+        if (!removedKeys.length) {
+            toast.info(blockedMessage || 'Pinned characters stay until you turn off Keep.');
+            return { removed: 0, kept: keptKeys.length, skipped: keptKeys, removedKeys: [] };
+        }
+
+        const restore = createRestoreSnapshot();
+        removedKeys.forEach(key => {
+            delete characterColors[key];
+            selectedKeys.delete(key);
+            expandedCharacterRows.delete(key);
+            if (swapMode === key) swapMode = null;
+        });
+        pruneExpandedCharacterRows();
+        saveHistory();
+        saveData();
+        injectPrompt();
+        updateCharList();
+        if (typeof onComplete === 'function') onComplete({ removedKeys, keptKeys });
+        showUndoToast(buildKeepAwareRemovalMessage(actionLabel || 'Removed', removedKeys.length, keptKeys.length, itemLabel), restore);
+        return { removed: removedKeys.length, kept: keptKeys.length, skipped: keptKeys, removedKeys };
+    }
+
+    function keepCharacterKeysOnly(keysToKeep) {
+        const keepSet = new Set((Array.isArray(keysToKeep) ? keysToKeep : [keysToKeep]).map(key => String(key ?? '').trim().toLowerCase()).filter(Boolean));
+        const nextColors = {};
+        for (const [key, entry] of Object.entries(characterColors)) {
+            if (keepSet.has(key)) nextColors[key] = entry;
+            else {
+                expandedCharacterRows.delete(key);
+                if (swapMode === key) swapMode = null;
+            }
+        }
+        characterColors = nextColors;
+        selectedKeys = new Set([...selectedKeys].filter(key => keepSet.has(key)));
+        pruneExpandedCharacterRows();
     }
 
     function shouldOverwritePalette() {
@@ -728,7 +728,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             style: VALID_STYLES.has(v.style) ? v.style : '',
             aliases: normalizeAliases(v.aliases),
             group: String(v.group ?? '').trim(),
-            locked: !!v.locked
+            locked: !!v.locked,
+            keep: !!v.keep
         }));
         if (!persistPresets(presets)) return;
         nameInput.value = '';
@@ -1506,9 +1507,12 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     // Phase 6B: Group sorting support
     function getSortedEntries() {
         const entries = Object.entries(characterColors).filter(([, v]) => !searchTerm || v.name.toLowerCase().includes(searchTerm.toLowerCase()));
-        if (settings.sortMode === 'count') entries.sort((a, b) => (b[1].dialogueCount || 0) - (a[1].dialogueCount || 0));
-        else if (settings.sortMode === 'group') entries.sort((a, b) => (a[1].group || '').localeCompare(b[1].group || '') || a[1].name.localeCompare(b[1].name));
-        else entries.sort((a, b) => a[1].name.localeCompare(b[1].name));
+        entries.sort((a, b) => {
+            if (!!b[1].keep !== !!a[1].keep) return Number(b[1].keep) - Number(a[1].keep);
+            if (settings.sortMode === 'count') return (b[1].dialogueCount || 0) - (a[1].dialogueCount || 0) || a[1].name.localeCompare(b[1].name);
+            if (settings.sortMode === 'group') return (a[1].group || '').localeCompare(b[1].group || '') || a[1].name.localeCompare(b[1].name);
+            return a[1].name.localeCompare(b[1].name);
+        });
         return entries;
     }
 
@@ -1689,6 +1693,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 baseColor,
                 name: trimmedName,
                 locked: !!options.locked,
+                keep: !!options.keep,
                 aliases: normalizeAliases(options.aliases),
                 style: VALID_STYLES.has(options.style) ? options.style : '',
                 dialogueCount: Number.isFinite(options.dialogueCount) && options.dialogueCount > 0 ? Math.floor(options.dialogueCount) : 0,
@@ -2682,13 +2687,41 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         popup.querySelector('.dc-storage-clear').onclick = () => {
             const selected = [...checks()].filter(c => c.checked).map(c => c.dataset.key);
             if (!selected.length) { toast.info('Nothing selected'); return; }
-            if (!confirm(`Clear ${selected.length} stored color data entr${selected.length === 1 ? 'y' : 'ies'}?`)) return;
-            let clearedCurrent = false;
-            selected.forEach(k => { if (k === currentKey) clearedCurrent = true; localStorage.removeItem(k); });
+            const entryWord = selected.length === 1 ? 'entry' : 'entries';
+            const clearingCurrent = selected.includes(currentKey);
+            const keptCurrentKeys = clearingCurrent ? getKeptKeys() : [];
+            const keptCurrentCount = keptCurrentKeys.length;
+            const confirmMessage = keptCurrentCount
+                ? `Clear ${selected.length} stored color data ${entryWord}? Pinned characters in the current chat will be kept.`
+                : `Clear ${selected.length} stored color data ${entryWord}?`;
+            if (!confirm(confirmMessage)) return;
+
+            selected.forEach(k => {
+                if (k !== currentKey) localStorage.removeItem(k);
+            });
             popup.remove();
             document.removeEventListener('mousedown', closePopup);
-            if (clearedCurrent) { characterColors = {}; selectedKeys.clear(); saveHistory(); updateCharList(); injectPrompt(); }
-            toast.success(`Cleared ${selected.length} entr${selected.length === 1 ? 'y' : 'ies'}.`);
+            if (clearingCurrent) {
+                if (keptCurrentCount) {
+                    keepCharacterKeysOnly(keptCurrentKeys);
+                    saveHistory();
+                    saveData();
+                } else {
+                    localStorage.removeItem(currentKey);
+                    characterColors = {};
+                    selectedKeys.clear();
+                    expandedCharacterRows.clear();
+                    swapMode = null;
+                    saveHistory();
+                }
+                updateCharList();
+                injectPrompt();
+            }
+
+            const summary = keptCurrentCount
+                ? `Cleared ${selected.length} ${entryWord}. Current chat kept ${keptCurrentCount} pinned character${keptCurrentCount !== 1 ? 's' : ''}.`
+                : `Cleared ${selected.length} ${entryWord}.`;
+            toast.success(summary);
         };
 
         document.body.appendChild(popup);
@@ -3667,6 +3700,12 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         if (settings.autoRecolor) recolorAllMessages();
     }
 
+    function toggleCharacterRowExpansion(key) {
+        if (!key) return;
+        if (expandedCharacterRows.has(key)) expandedCharacterRows.delete(key);
+        else expandedCharacterRows.add(key);
+    }
+
     // Phase 5B: Alias chips, Phase 6A: Batch checkboxes, Phase 6B: Group headers, Phase 5D: Harmony on dblclick
     function updateCharList() {
         const list = document.getElementById('dc-char-list'); if (!list) return;
@@ -3679,35 +3718,56 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             const safeKey = escapeAttr(k);
             const safeColor = getEntryEffectiveColor(v);
             const pickerColor = getBaseColor(v, safeColor);
+            const rowExpanded = expandedCharacterRows.has(k);
+            const styleLabel = v.style || 'Normal';
+            const statusBadges = [
+                v.keep ? '<span class="dc-status-chip dc-status-chip-keep">Kept</span>' : '',
+                v.locked ? '<span class="dc-status-chip dc-status-chip-lock">Locked</span>' : '',
+                v.group ? `<span class="dc-status-chip">${escapeHtml(v.group)}</span>` : '',
+                v.style ? `<span class="dc-status-chip">${escapeHtml(styleLabel)}</span>` : '',
+                getBadge(v.dialogueCount || 0) ? `<span class="dc-status-chip">${getBadge(v.dialogueCount || 0)}</span>` : ''
+            ].filter(Boolean).join('');
             let groupHeader = '';
             if (settings.sortMode === 'group') {
                 const g = v.group || '(ungrouped)';
                 if (g !== lastGroup) {
                     lastGroup = g;
-                    groupHeader = `<div style="font-weight:bold;font-size:0.8em;opacity:0.7;margin-top:6px;padding:2px 4px;border-bottom:1px solid var(--SmartThemeBorderColor);">${escapeHtml(g)}</div>`;
+                    groupHeader = `<div class="dc-group-header">${escapeHtml(g)}</div>`;
                 }
             }
             const aliasChips = (v.aliases || []).map(a =>
-                `<span class="dc-alias-chip" style="display:inline-flex;align-items:center;gap:2px;background:var(--SmartThemeBlurTintColor);border:1px solid var(--SmartThemeBorderColor);border-radius:10px;padding:0 6px;font-size:0.7em;cursor:default;margin:1px;">${escapeHtml(a)}<span class="dc-alias-remove" data-key="${safeKey}" data-alias="${escapeAttr(a)}" style="cursor:pointer;opacity:0.7;margin-left:2px;" title="Remove alias">&times;</span></span>`
+                `<span class="dc-alias-chip">${escapeHtml(a)}<span class="dc-alias-remove" data-key="${safeKey}" data-alias="${escapeAttr(a)}" title="Remove alias">&times;</span></span>`
             ).join('');
             return groupHeader + `
-            <div class="dc-char ${swapMode === k ? 'dc-swap-selected' : ''} ${selectedKeys.has(k) ? 'dc-batch-selected' : ''}" data-key="${safeKey}" style="display:flex;flex-direction:column;gap:2px;margin:3px 0;padding:2px;border-radius:4px;${swapMode === k ? 'background:var(--SmartThemeQuoteColor);' : ''}${selectedKeys.has(k) ? 'outline:2px solid var(--SmartThemeQuoteColor);' : ''}">
-                <div style="display:flex;align-items:center;gap:4px;">
-                    <input type="checkbox" class="dc-batch-check" data-key="${safeKey}" ${selectedKeys.has(k) ? 'checked' : ''} style="width:10px;height:10px;margin:0;">
-                    <span class="dc-color-swatch" style="position:relative;display:inline-flex;align-items:center;gap:4px;flex-shrink:0;">
-                        <span class="dc-color-dot" style="width:8px;height:8px;border-radius:50%;background:${safeColor};cursor:pointer;"></span>
-                        <input type="color" value="${pickerColor}" data-key="${safeKey}" class="dc-color-input" style="width:18px;height:18px;padding:0;border:none;cursor:pointer;">
+            <div class="dc-char ${swapMode === k ? 'dc-swap-selected' : ''} ${selectedKeys.has(k) ? 'dc-batch-selected' : ''} ${v.keep ? 'dc-char-kept' : ''}" data-key="${safeKey}">
+                <div class="dc-char-main">
+                    <input type="checkbox" class="dc-batch-check" data-key="${safeKey}" ${selectedKeys.has(k) ? 'checked' : ''}>
+                    <span class="dc-color-swatch">
+                        <span class="dc-color-dot" style="background:${safeColor};"></span>
+                        <input type="color" value="${pickerColor}" data-key="${safeKey}" class="dc-color-input">
                     </span>
-                    <span style="flex:1;color:${safeColor};font-size:0.85em;" title="Dialogues: ${v.dialogueCount || 0}${v.aliases?.length ? '\nAliases: ' + escapeHtml(v.aliases.join(', ')) : ''}${v.group ? '\nGroup: ' + escapeHtml(v.group) : ''}">${escapeHtml(v.name)}${v.style ? ` [${v.style[0].toUpperCase()}]` : ''}${getBadge(v.dialogueCount || 0)}</span>
-                    <span style="font-size:0.7em;opacity:0.6;">${v.dialogueCount || 0}</span>
-                    <button class="dc-lock menu_button" data-key="${safeKey}" style="padding:1px 4px;font-size:0.7em;" title="Lock color">${v.locked ? '🔒' : '🔓'}</button>
-                    <button class="dc-swap menu_button" data-key="${safeKey}" style="padding:1px 4px;font-size:0.7em;" title="Swap colors">⇄</button>
-                    <button class="dc-style menu_button" data-key="${safeKey}" style="padding:1px 4px;font-size:0.7em;" title="Style">S</button>
-                    <button class="dc-alias menu_button" data-key="${safeKey}" style="padding:1px 4px;font-size:0.7em;" title="Add alias">+</button>
-                    <button class="dc-group menu_button" data-key="${safeKey}" style="padding:1px 4px;font-size:0.7em;" title="Assign group">G</button>
-                    <button class="dc-del menu_button" data-key="${safeKey}" style="padding:1px 4px;font-size:0.7em;">&times;</button>
+                    <div class="dc-char-name-wrap" title="Dialogues: ${v.dialogueCount || 0}${v.aliases?.length ? '\nAliases: ' + escapeHtml(v.aliases.join(', ')) : ''}${v.group ? '\nGroup: ' + escapeHtml(v.group) : ''}">
+                        <div class="dc-char-name" style="color:${safeColor};">${escapeHtml(v.name)}</div>
+                        <div class="dc-char-meta">
+                            <span class="dc-char-count">${v.dialogueCount || 0} lines</span>
+                            ${statusBadges}
+                        </div>
+                    </div>
+                    <button class="dc-keep menu_button ${v.keep ? 'dc-toggle-active' : ''}" data-key="${safeKey}" title="Keep this character even when clearing or bulk deleting">${v.keep ? 'Kept' : 'Keep'}</button>
+                    <button class="dc-lock menu_button ${v.locked ? 'dc-toggle-active' : ''}" data-key="${safeKey}" title="Lock color">${v.locked ? 'Locked' : 'Lock'}</button>
+                    <button class="dc-del menu_button dc-danger-button" data-key="${safeKey}" title="Delete character">Delete</button>
+                    <button class="dc-more menu_button" data-key="${safeKey}" title="Show more tools">${rowExpanded ? 'Less' : 'More'}</button>
                 </div>
-                ${aliasChips ? `<div style="display:flex;flex-wrap:wrap;gap:2px;padding-left:26px;">${aliasChips}</div>` : ''}
+                ${aliasChips ? `<div class="dc-alias-list">${aliasChips}</div>` : ''}
+                ${rowExpanded ? `
+                <div class="dc-char-advanced">
+                    <div class="dc-inline-toolbar">
+                        <button class="dc-swap menu_button" data-key="${safeKey}" title="Swap colors">Swap</button>
+                        <button class="dc-style menu_button" data-key="${safeKey}" title="Cycle text style">Style: ${escapeHtml(styleLabel)}</button>
+                        <button class="dc-alias menu_button" data-key="${safeKey}" title="Add alias">Add Alias</button>
+                        <button class="dc-group menu_button" data-key="${safeKey}" title="Assign group">${v.group ? 'Edit Group' : 'Set Group'}</button>
+                    </div>
+                </div>` : ''}
             </div>`;
         }).join('') : `<small style="opacity:0.6;">${searchTerm ? 'No matches' : 'No characters'}</small>`;
 
@@ -3739,7 +3799,32 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         list.querySelectorAll('.dc-color-dot').forEach(dot => {
             dot.onclick = () => { const input = dot.nextElementSibling; if (input?.classList.contains('dc-color-input')) input.click(); };
         });
-        list.querySelectorAll('.dc-del').forEach(b => { b.onclick = () => { delete characterColors[b.dataset.key]; selectedKeys.delete(b.dataset.key); saveHistory(); saveData(); injectPrompt(); updateCharList(); }; });
+        list.querySelectorAll('.dc-more').forEach(b => {
+            b.onclick = () => {
+                toggleCharacterRowExpansion(b.dataset.key);
+                updateCharList();
+            };
+        });
+        list.querySelectorAll('.dc-del').forEach(b => {
+            b.onclick = () => {
+                removeCharacterKeys([b.dataset.key], {
+                    actionLabel: 'Deleted',
+                    emptyMessage: 'Character already removed.',
+                    blockedMessage: 'Turn off Keep before deleting this character.'
+                });
+            };
+        });
+        list.querySelectorAll('.dc-keep').forEach(b => {
+            b.onclick = () => {
+                const key = b.dataset.key;
+                if (!characterColors[key]) return;
+                characterColors[key].keep = !characterColors[key].keep;
+                saveHistory();
+                saveData();
+                updateCharList();
+                toast.info(characterColors[key].keep ? `${characterColors[key].name} will now survive Clear and bulk delete.` : `${characterColors[key].name} can now be cleared or deleted normally.`);
+            };
+        });
         list.querySelectorAll('.dc-lock').forEach(b => {
             b.onclick = () => {
                 const key = b.dataset.key;
@@ -3847,7 +3932,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 if (cb.checked) selectedKeys.add(cb.dataset.key);
                 else selectedKeys.delete(cb.dataset.key);
                 updateBatchBar();
-                updateCharList();
+                cb.closest('.dc-char')?.classList.toggle('dc-batch-selected', cb.checked);
             };
         });
 
@@ -3884,33 +3969,6 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         }
     }
 
-    function getHelpTextByItem(item) {
-        if (item.text) return item.text;
-        if (item.key) return document.getElementById(item.key)?.dataset?.help || '';
-        return '';
-    }
-
-    function renderControlHelpPanel() {
-        const panel = document.getElementById('dc-help-panel');
-        if (!panel) return;
-        if (!settings.showControlHelp) {
-            panel.style.display = 'none';
-            panel.innerHTML = '';
-            return;
-        }
-        const html = CONTROL_HELP_PANEL_GROUPS.map(group => {
-            const rows = group.items.map(item => {
-                const text = getHelpTextByItem(item);
-                if (!text) return '';
-                return `<div class="dc-help-item"><span class="dc-help-name">${escapeHtml(item.label)}</span><span class="dc-help-desc">${escapeHtml(text)}</span></div>`;
-            }).filter(Boolean).join('');
-            if (!rows) return '';
-            return `<div class="dc-help-group"><div class="dc-help-group-title">${escapeHtml(group.title)}</div>${rows}</div>`;
-        }).filter(Boolean).join('');
-        panel.innerHTML = html;
-        panel.style.display = html ? 'block' : 'none';
-    }
-
     function autoAssignFromCard() {
         try {
             const ctx = getContext();
@@ -3923,7 +3981,6 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         } catch { }
     }
 
-    // Phase 1C: Sync UI elements with current settings (deduplicates createUI and CHAT_CHANGED)
     function syncUIWithSettings() {
         const $ = id => document.getElementById(id);
         normalizeToggleSettings();
@@ -3943,7 +4000,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         if ($('dc-llm-profile')) $('dc-llm-profile').value = settings.llmConnectionProfile || '';
         if ($('dc-disable-toasts')) $('dc-disable-toasts').checked = settings.disableToasts || false;
         if ($('dc-theme')) $('dc-theme').value = settings.themeMode;
-        if ($('dc-brightness')) { $('dc-brightness').value = settings.brightness || 0; }
+        if ($('dc-palette')) $('dc-palette').value = settings.colorTheme || 'pastel';
+        if ($('dc-brightness')) $('dc-brightness').value = settings.brightness || 0;
         if ($('dc-bright-val')) $('dc-bright-val').textContent = settings.brightness || 0;
         if ($('dc-narrator')) $('dc-narrator').value = settings.narratorColor || '#888888';
         if ($('dc-thought-symbols')) $('dc-thought-symbols').value = settings.thoughtSymbols || '';
@@ -3951,16 +4009,13 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         if ($('dc-prompt-role')) $('dc-prompt-role').value = settings.promptRole || 'system';
         if ($('dc-prompt-mode')) $('dc-prompt-mode').value = settings.promptMode || 'inject';
         if ($('dc-sort')) $('dc-sort').value = settings.sortMode || 'name';
-        if ($('dc-help-toggle')) $('dc-help-toggle').checked = !!settings.showControlHelp;
-        renderControlHelpPanel();
-        applyControlHelpText();
         refreshPresetDropdown();
         refreshPaletteDropdown();
         updateSystemPromptDisplay();
         updateAutoSyncUI();
+        applyControlHelpText();
     }
 
-    // Phase 6C: Mobile-optimized UI with collapsible <details> sections
     function createUI() {
         if (document.getElementById('dc-ext')) return;
         const html = `
@@ -3968,101 +4023,225 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             <div class="inline-drawer-toggle inline-drawer-header"><b>Dialogue Colors</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
             <div class="inline-drawer-content" style="padding:10px;font-size:0.9em;">
                 <details class="dc-section" open>
-                    <summary style="cursor:pointer;font-weight:bold;margin-bottom:4px;">Display</summary>
-                    <div style="display:flex;flex-direction:column;gap:4px;padding-left:4px;">
-                        <label class="checkbox_label"><input type="checkbox" id="dc-help-toggle" data-help="Show or hide the inline help panel explaining each control."><span>Show control help panel</span></label>
-                        <div id="dc-help-panel" class="dc-help-panel" style="display:none;"></div>
-                        <label class="checkbox_label"><input type="checkbox" id="dc-enabled" data-help="Enable or disable Dialogue Colors prompt injection and color formatting."><span>Enable</span></label>
-                        <label class="checkbox_label"><input type="checkbox" id="dc-highlight" data-help="Add background highlighting behind colored dialogue text."><span>Highlight mode</span></label>
-                        <label class="checkbox_label"><input type="checkbox" id="dc-legend" data-help="Show a draggable floating legend of active character colors."><span>Show floating legend</span></label>
-                        <label class="checkbox_label"><input type="checkbox" id="dc-css-effects" data-help="Allow transform-based CSS effects for intense dialogue moments."><span>CSS effects (emotion/magic transforms)</span></label>
-                        <div style="display:flex;gap:4px;align-items:center;"><label style="width:50px;">Theme:</label><select id="dc-theme" class="text_pole" style="flex:1;" data-help="Choose Auto, Dark, or Light targeting for generated color readability."><option value="auto">Auto</option><option value="dark">Dark</option><option value="light">Light</option></select></div>
-                        <div style="display:flex;gap:4px;align-items:center;"><label style="width:50px;">Palette:</label><select id="dc-palette" class="text_pole" style="flex:1;" data-help="Pick the color palette used for new or regenerated character colors."></select><button id="dc-gen-palette" class="menu_button" style="padding:2px 6px;font-size:0.8em;" title="Generate custom palette from words" data-help="Generate a custom palette from the name and notes fields.">Gen</button><button id="dc-save-palette" class="menu_button" style="padding:2px 6px;font-size:0.8em;" title="Save current colors as custom palette" data-help="Save current colors as a reusable custom palette.">+</button><button id="dc-del-palette" class="menu_button" style="padding:2px 6px;font-size:0.8em;" title="Delete custom palette" data-help="Delete the currently selected custom palette.">&minus;</button></div>
-                        <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;">
-                            <input type="text" id="dc-palette-name-input" placeholder="Palette name..." class="text_pole" style="flex:1;min-width:110px;padding:3px;" data-help="Name used for inline custom palette create/save actions.">
-                            <input type="text" id="dc-palette-notes-input" placeholder="Palette notes (optional)" class="text_pole" style="flex:1;min-width:140px;padding:3px;" data-help="Optional notes that guide generated palette style.">
-                            <button id="dc-palette-save-inline" class="menu_button" style="padding:2px 6px;font-size:0.8em;" title="Save current colors to named custom palette" data-help="Save current active colors to the named custom palette.">Save</button>
-                            <button id="dc-palette-generate-inline" class="menu_button" style="padding:2px 6px;font-size:0.8em;" title="Generate custom palette from name and notes" data-help="Generate a custom palette from the name and notes fields.">Generate</button>
+                    <summary>Basic</summary>
+                    <p class="dc-section-note">The everyday controls live here. Clear keeps any character marked with Keep.</p>
+                    <div class="dc-stack">
+                        <div class="dc-button-row dc-button-row-3">
+                            <button id="dc-scan" class="menu_button" data-help="Scan the current chat for characters and colors.">Scan Chat</button>
+                            <button id="dc-clear" class="menu_button dc-danger-button" data-help="Clear tracked characters, but keep anything pinned with Keep.">Clear Non-Kept</button>
+                            <button id="dc-recolor" class="menu_button" data-help="Rewrite message colors to match the current character assignments.">Recolor Chat</button>
                         </div>
-                        <label class="checkbox_label"><input type="checkbox" id="dc-overwrite-existing" data-help="Allow replacing an existing custom palette with the same name."><span>Overwrite existing custom palette</span></label>
-                        <div style="display:flex;gap:4px;align-items:center;"><label style="width:50px;">Bright:</label><input type="range" id="dc-brightness" min="-100" max="100" value="0" style="flex:1;" data-help="Bias newly generated or regenerated colors lighter or darker. Established character assignments stay unchanged until you explicitly change them."><span id="dc-bright-val">0</span></div>
-                    </div>
-                </details>
-                <details class="dc-section">
-                    <summary style="cursor:pointer;font-weight:bold;margin-bottom:4px;">Behavior</summary>
-                    <div style="display:flex;flex-direction:column;gap:4px;padding-left:4px;">
-                        <label class="checkbox_label"><input type="checkbox" id="dc-autoscan" data-help="Automatically scan existing chat messages after chat load."><span>Auto-scan on chat load</span></label>
-                        <label class="checkbox_label"><input type="checkbox" id="dc-autoscan-new" data-help="Automatically scan newly arriving messages for speakers/colors."><span>Auto-scan new messages</span></label>
-                        <label class="checkbox_label"><input type="checkbox" id="dc-auto-lock" data-help="Automatically lock newly detected characters to preserve assignments."><span>Auto-lock detected characters</span></label>
-                        <label class="checkbox_label"><input type="checkbox" id="dc-auto-recolor" data-help="Automatically recolor and reload chat when character colors change."><span>Auto-recolor on change</span></label>
-                        <label class="checkbox_label"><input type="checkbox" id="dc-auto-colorize" data-help="Automatically colorize messages when the model doesn't output color tags. Useful for models that ignore color instructions."><span>Auto-colorize fallback</span></label>
-                        <label class="checkbox_label"><input type="checkbox" id="dc-right-click" data-help="Enable right-click or long-press assign-color menu on messages."><span>Enable right-click context menu</span></label>
-                        <label class="checkbox_label"><input type="checkbox" id="dc-disable-narration" data-help="Skip narrator color assignment in generated prompt instructions."><span>Disable narration coloring</span></label>
-                        <label class="checkbox_label"><input type="checkbox" id="dc-share-global" data-help="Use one shared color table for all chats instead of per-chat storage."><span>Share colors across all chats</span></label>
-                        <label class="checkbox_label"><input type="checkbox" id="dc-llm-palette" data-help="Use LLM assistance to refine generated custom palettes."><span>Enhance generated palettes with LLM</span></label>
-                        <div style="display:flex;gap:4px;align-items:center;margin-top:4px;"><label style="width:50px;">LLM Profile:</label><select id="dc-llm-profile" class="text_pole" style="flex:1;" data-help="Connection profile to use for LLM colorization. Default uses the main chat AI."><option value="">-- Use main chat AI --</option></select></div>
-                        <label class="checkbox_label"><input type="checkbox" id="dc-disable-toasts" data-help="Suppress all pop-up toast notifications from this extension."><span>Disable toast notifications</span></label>
-                        <div style="display:flex;gap:4px;align-items:center;"><label style="width:50px;">Narr:</label><input type="color" id="dc-narrator" value="#888888" style="width:24px;height:20px;" data-help="Set narrator fallback color used when narration coloring is enabled."><button id="dc-narrator-clear" class="menu_button" style="padding:2px 6px;font-size:0.8em;" data-help="Clear custom narrator color and return to default.">Clear</button></div>
-                        <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;"><label style="width:50px;" title="Symbols for inner thoughts (*etc)">Think:</label><input type="text" id="dc-thought-symbols" placeholder="*" class="text_pole" style="width:60px;padding:3px;" data-help="Symbols used to detect and color inner-thought dialogue."><button id="dc-thought-add" class="menu_button" style="padding:2px 6px;font-size:0.8em;" data-help="Append another thought symbol to the list.">+</button><button id="dc-thought-clear" class="menu_button" style="padding:2px 6px;font-size:0.8em;" data-help="Remove all thought symbols.">Clear</button></div>
-                        <div style="display:flex;gap:4px;align-items:center;" title="How many messages from the end to inject the color prompt. Lower = closer to latest message. Try 1-4 if the model ignores colors."><label style="width:50px;">Depth:</label><input type="number" id="dc-prompt-depth" min="0" max="99" value="4" class="text_pole" style="width:60px;padding:3px;" data-help="How far from the chat end the system color prompt is injected."></div>
-                        <div style="display:flex;gap:4px;align-items:center;"><label style="width:50px;">Role:</label><select id="dc-prompt-role" class="text_pole" style="flex:1;" data-help="System: inject as system message. User: inject as user message (stronger for some models with None/Merge post-processing)."><option value="system">System</option><option value="user">User</option></select></div>
-                        <div style="display:flex;gap:4px;align-items:center;"><label style="width:50px;">Mode:</label><select id="dc-prompt-mode" class="text_pole" style="flex:1;" data-help="Inject: auto-inject prompt at depth. Macro: use {{dialoguecolors}} in your prompt."><option value="inject">Inject</option><option value="macro">Macro</option></select></div>
-                        <div id="dc-system-prompt-container" style="display:none;margin-top:8px;">
-                            <label style="font-weight:bold;margin-bottom:4px;display:block;">Add to your system prompt:</label>
-                            <textarea id="dc-system-prompt-text" readonly class="text_pole" style="width:100%;min-height:60px;font-size:0.75em;font-family:monospace;resize:vertical;">{{dialoguecolors}}</textarea>
-                            <button id="dc-copy-system-prompt" class="menu_button" style="margin-top:4px;width:100%;">Copy Macro</button>
+                        <div class="dc-button-row dc-button-row-2">
+                            <button id="dc-colorize" class="menu_button" data-help="Colorize uncolored messages. Shift-click for only the latest message.">Colorize Missing</button>
+                            <button id="dc-stats" class="menu_button" data-help="Open dialogue statistics for tracked characters.">Show Stats</button>
                         </div>
-                    </div>
-                </details>
-                <details class="dc-section">
-                    <summary style="cursor:pointer;font-weight:bold;margin-bottom:4px;">Actions</summary>
-                    <div style="display:flex;flex-direction:column;gap:4px;padding-left:4px;">
-                        <div style="display:flex;gap:4px;"><button id="dc-scan" class="menu_button" style="flex:1;" data-help="Scan all chat messages for [COLORS:] blocks, extract characters and colors, and reset dialogue counts.">Scan</button><button id="dc-clear" class="menu_button" style="flex:1;" data-help="Remove all tracked characters and color assignments.">Clear</button><button id="dc-stats" class="menu_button" style="flex:1;" title="Dialogue statistics" data-help="Open dialogue statistics for currently tracked characters.">Stats</button></div>
-                        <div style="display:flex;gap:4px;"><button id="dc-recolor" class="menu_button" style="flex:1;" title="Recolor all messages with current color assignments" data-help="Rewrite font colors in all messages to match current color assignments and reload chat.">Recolor</button><button id="dc-colorize" class="menu_button" style="flex:1;" title="Add color tags to uncolored messages (Shift+click = last message only)" data-help="Wrap dialogue in uncolored messages with character colors. Shift+click to colorize only the last message.">Colorize</button></div>
-                        <div style="display:flex;gap:4px;"><button id="dc-undo" class="menu_button" style="flex:1;" data-help="Undo the last color-table change.">&#8630;</button><button id="dc-redo" class="menu_button" style="flex:1;" data-help="Redo the most recently undone change.">&#8631;</button><button id="dc-fix-conflicts" class="menu_button" style="flex:1;" title="Auto-fix color conflicts" data-help="Auto-resolve colors that are too visually similar and report which pairs were changed.">Fix</button></div>
-                        <div style="display:flex;gap:4px;"><button id="dc-regen" class="menu_button" style="flex:1;" title="Regenerate all colors" data-help="Regenerate colors for unlocked characters — tries name-based suggestions first, then falls back to palette.">Regen</button><button id="dc-flip-theme" class="menu_button" style="flex:1;" title="Flip colors for Dark/Light theme switch" data-help="Invert color lightness to quickly adapt to light/dark theme changes.">&#9728;/&#127769;</button></div>
-                        <hr style="margin:4px 0;opacity:0.15;">
-                        <div style="display:flex;gap:4px;align-items:center;"><input type="text" id="dc-preset-name" placeholder="Preset name..." class="text_pole" style="flex:1;padding:3px;" data-help="Preset name used when saving current color assignments."><button id="dc-save-preset" class="menu_button" style="padding:3px 8px;" title="Save preset" data-help="Save current assignments into a named preset.">Save</button></div>
-                        <div style="display:flex;gap:4px;align-items:center;"><select id="dc-preset-select" class="text_pole" style="flex:1;" data-help="Select a preset to load into or remove from this chat."><option value="">-- Select Preset --</option></select><button id="dc-load-preset" class="menu_button" style="padding:3px 8px;" title="Load preset" data-help="Load selected preset colors into current character list.">Load</button><button id="dc-delete-preset" class="menu_button" style="padding:3px 8px;" title="Delete preset" data-help="Delete the selected preset from local storage.">Del</button></div>
-                        <hr style="margin:4px 0;opacity:0.15;">
-                        <div style="display:flex;gap:4px;"><button id="dc-export" class="menu_button" style="flex:1;" data-help="Export colors and settings to a JSON file.">Export</button><button id="dc-import" class="menu_button" style="flex:1;" data-help="Import colors and settings from a JSON file.">Import</button><button id="dc-export-png" class="menu_button" style="flex:1;" title="Export legend as image" data-help="Export the floating legend as an image.">PNG</button></div>
-                        <div style="display:flex;gap:4px;"><button id="dc-export-settings" class="menu_button" style="flex:1;" data-help="Export only settings (no colors) to sync across devices.">Export Settings</button><button id="dc-import-settings" class="menu_button" style="flex:1;" data-help="Import settings from another device (preserves local colors).">Import Settings</button></div>
-                        <div style="display:flex;gap:4px;align-items:center;"><button id="dc-setup-autosync" class="menu_button" style="flex:1;" data-help="Enable automatic settings sync across all devices accessing this SillyTavern instance.">Enable Auto-Sync</button><button id="dc-disable-autosync" class="menu_button" style="flex:1;display:none;" data-help="Disable automatic settings synchronization.">Disable Auto-Sync</button><span id="dc-autosync-status" style="font-size:0.7em;opacity:0.6;"></span></div>
-                        <input type="file" id="dc-import-settings-file" accept=".json" style="display:none;">
-                        <div style="display:flex;gap:4px;"><button id="dc-card" class="menu_button" style="flex:1;" title="Add from card" data-help="Add current card character to the color list if missing.">+Card</button><button id="dc-avatar-color" class="menu_button" style="flex:1;" title="Suggest color from avatar" data-help="Extract the dominant color from the current character avatar and assign it.">Avatar</button><button id="dc-save-card" class="menu_button" style="flex:1;" title="Save to card" data-help="Save this chat color data into character card extensions.">Save&rarr;Card</button><button id="dc-load-card" class="menu_button" style="flex:1;" title="Load from card" data-help="Load saved color data from character card extensions.">Card&rarr;Load</button></div>
-                        <hr style="margin:4px 0;opacity:0.15;">
-                        <div style="display:flex;gap:4px;"><button id="dc-lock-all" class="menu_button" style="flex:1;" title="Lock all characters" data-help="Lock every tracked character color.">🔒All</button><button id="dc-unlock-all" class="menu_button" style="flex:1;" title="Unlock all characters" data-help="Unlock every tracked character color.">🔓All</button><button id="dc-reset" class="menu_button" style="flex:1;" title="Reset to default colors" data-help="Reassign random palette colors to all unlocked characters (no name-based suggestions).">Reset</button></div>
-                        <div style="display:flex;gap:4px;align-items:center;"><button id="dc-del-locked" class="menu_button" style="flex:1;" title="Delete all locked characters" data-help="Delete all locked characters.">DelLocked</button><button id="dc-del-unlocked" class="menu_button" style="flex:1;" title="Delete all unlocked characters" data-help="Delete all unlocked characters.">DelUnlocked</button><button id="dc-del-least" class="menu_button" style="flex:1;" title="Delete characters below dialogue threshold" data-help="Delete characters below a dialogue-count threshold.">DelLeast</button><input type="number" id="dc-del-least-threshold" min="0" value="3" class="text_pole" style="width:52px;padding:2px 4px;" title="Minimum dialogues to keep" data-help="Minimum dialogue count to keep when using DelLeast."></div>
-                        <div style="display:flex;gap:4px;"><button id="dc-del-dupes" class="menu_button" style="flex:1;" title="Delete duplicate colors, keep highest dialogue count" data-help="Delete duplicate-color characters, keeping highest dialogue count.">DelDupes</button></div>
-                        <div style="display:flex;gap:4px;"><button id="dc-storage" class="menu_button" style="flex:1;" title="Manage stored color data across all chats" data-help="Browse and clear stored color data for any character chat. Useful for freeing storage or fixing corrupted data.">Storage</button></div>
-                        <input type="file" id="dc-import-file" accept=".json" style="display:none;">
+                        <div class="dc-field-row">
+                            <label class="dc-inline-label" for="dc-theme">Theme</label>
+                            <select id="dc-theme" class="text_pole" data-help="Choose Auto, Dark, or Light targeting for generated color readability."><option value="auto">Auto</option><option value="dark">Dark</option><option value="light">Light</option></select>
+                        </div>
+                        <div class="dc-field-row">
+                            <label class="dc-inline-label" for="dc-palette">Palette</label>
+                            <select id="dc-palette" class="text_pole" data-help="Pick the color palette used for new or regenerated character colors."></select>
+                        </div>
+                        <div class="dc-field-row">
+                            <label class="dc-inline-label" for="dc-brightness">Brightness</label>
+                            <input type="range" id="dc-brightness" min="-100" max="100" value="0" data-help="Bias newly generated colors lighter or darker.">
+                            <span id="dc-bright-val" class="dc-inline-value">0</span>
+                        </div>
+                        <div class="dc-toggle-grid">
+                            <label class="checkbox_label"><input type="checkbox" id="dc-enabled" data-help="Enable or disable Dialogue Colors."><span>Enable Dialogue Colors</span></label>
+                            <label class="checkbox_label"><input type="checkbox" id="dc-highlight" data-help="Add background highlights behind colored dialogue."><span>Highlight dialogue</span></label>
+                            <label class="checkbox_label"><input type="checkbox" id="dc-legend" data-help="Show a floating legend of active character colors."><span>Show floating legend</span></label>
+                            <label class="checkbox_label"><input type="checkbox" id="dc-auto-recolor" data-help="Automatically recolor chat after color changes."><span>Auto-recolor after changes</span></label>
+                        </div>
                     </div>
                 </details>
                 <details class="dc-section" open>
-                    <summary style="cursor:pointer;font-weight:bold;margin-bottom:4px;">Characters</summary>
-                    <div style="display:flex;flex-direction:column;gap:4px;padding-left:4px;">
-                        <div style="display:flex;gap:4px;"><input type="text" id="dc-search" placeholder="Search characters..." class="text_pole" style="flex:1;padding:3px;" data-help="Filter characters by name."></div>
-                        <div style="display:flex;gap:4px;align-items:center;"><label>Sort:</label><select id="dc-sort" class="text_pole" style="flex:1;" data-help="Sort character list by name, dialogue count, or group. This preference is saved and restored across sessions."><option value="name">Name</option><option value="count">Dialogue Count</option><option value="group">Group</option></select></div>
-                        <div style="display:flex;gap:4px;"><input type="text" id="dc-add-name" placeholder="Add character..." class="text_pole" style="flex:1;padding:3px;" data-help="Type a new character name to add manually."><button id="dc-add-btn" class="menu_button" style="padding:3px 8px;" data-help="Add typed character with a suggested color.">+</button></div>
-                        <div id="dc-batch-bar" style="display:none;gap:4px;flex-wrap:wrap;padding:4px;background:var(--SmartThemeBlurTintColor);border-radius:4px;">
-                            <button id="dc-batch-all" class="menu_button" style="padding:2px 6px;font-size:0.8em;" data-help="Select all characters for batch operations.">Select All</button>
-                            <button id="dc-batch-none" class="menu_button" style="padding:2px 6px;font-size:0.8em;" data-help="Clear all current character selections.">Deselect All</button>
-                            <button id="dc-batch-del" class="menu_button" style="padding:2px 6px;font-size:0.8em;" data-help="Delete selected characters.">Delete</button>
-                            <button id="dc-batch-lock" class="menu_button" style="padding:2px 6px;font-size:0.8em;" data-help="Lock selected characters.">Lock</button>
-                            <button id="dc-batch-unlock" class="menu_button" style="padding:2px 6px;font-size:0.8em;" data-help="Unlock selected characters.">Unlock</button>
-                            <select id="dc-batch-style-select" class="text_pole" style="padding:1px 4px;font-size:0.8em;min-width:92px;" data-help="Style to apply to selected characters.">
-                                <option value="">Style: none</option>
+                    <summary>Characters</summary>
+                    <p class="dc-section-note">Keep marks main characters so they survive Clear and all bulk delete tools.</p>
+                    <div class="dc-stack">
+                        <div class="dc-field-row dc-field-row-wrap">
+                            <input type="text" id="dc-search" placeholder="Search characters..." class="text_pole" data-help="Filter characters by name.">
+                            <select id="dc-sort" class="text_pole" data-help="Sort by name, dialogue count, or group. This preference is saved and restored across sessions."><option value="name">Sort: Name</option><option value="count">Sort: Dialogue Count</option><option value="group">Sort: Group</option></select>
+                        </div>
+                        <div class="dc-field-row dc-field-row-wrap">
+                            <input type="text" id="dc-add-name" placeholder="Add character..." class="text_pole" data-help="Type a new character name to add manually.">
+                            <button id="dc-add-btn" class="menu_button" data-help="Add the typed character with a suggested color.">Add Character</button>
+                        </div>
+                        <div id="dc-batch-bar" class="dc-batch-bar" style="display:none;">
+                            <button id="dc-batch-all" class="menu_button" data-help="Select all characters for batch actions.">Select All</button>
+                            <button id="dc-batch-none" class="menu_button" data-help="Clear the current selection.">Clear Selection</button>
+                            <button id="dc-batch-del" class="menu_button dc-danger-button" data-help="Delete the selected characters, except any kept ones.">Delete Selected</button>
+                            <button id="dc-batch-lock" class="menu_button" data-help="Lock selected characters.">Lock Selected</button>
+                            <button id="dc-batch-unlock" class="menu_button" data-help="Unlock selected characters.">Unlock Selected</button>
+                            <select id="dc-batch-style-select" class="text_pole" data-help="Style to apply to selected characters.">
+                                <option value="">Style: normal</option>
                                 <option value="bold">Style: bold</option>
                                 <option value="italic">Style: italic</option>
                                 <option value="bold italic">Style: bold italic</option>
                             </select>
-                            <button id="dc-batch-style-apply" class="menu_button" style="padding:2px 6px;font-size:0.8em;" data-help="Apply the selected style to all selected characters.">Apply Style</button>
+                            <button id="dc-batch-style-apply" class="menu_button" data-help="Apply the selected style to all selected characters.">Apply Style</button>
                         </div>
                         <small>Characters: <span id="dc-count">0</span> (⭐=50+, 💎=100+)</small>
-                        <div id="dc-char-list" style="max-height:300px;overflow-y:auto;"></div>
+                        <div id="dc-char-list" class="dc-char-list"></div>
                     </div>
                 </details>
-                <hr style="margin:2px 0;opacity:0.2;">
+                <details class="dc-section">
+                    <summary>Advanced</summary>
+                    <p class="dc-section-note">Less common tools live here so the main workflow stays simple.</p>
+                    <div class="dc-stack">
+                        <details class="dc-subsection">
+                            <summary>Automation</summary>
+                            <div class="dc-stack">
+                                <div class="dc-toggle-grid">
+                                    <label class="checkbox_label"><input type="checkbox" id="dc-autoscan" data-help="Automatically scan existing chat messages after chat load."><span>Auto-scan on chat load</span></label>
+                                    <label class="checkbox_label"><input type="checkbox" id="dc-autoscan-new" data-help="Automatically scan newly arriving messages for speakers/colors."><span>Auto-scan new messages</span></label>
+                                    <label class="checkbox_label"><input type="checkbox" id="dc-auto-lock" data-help="Automatically lock newly detected characters."><span>Auto-lock new characters</span></label>
+                                    <label class="checkbox_label"><input type="checkbox" id="dc-auto-colorize" data-help="Automatically colorize messages when the model skips color tags."><span>Auto-colorize fallback</span></label>
+                                    <label class="checkbox_label"><input type="checkbox" id="dc-right-click" data-help="Enable right-click or long-press reassignment on dialogue."><span>Enable right-click reassignment</span></label>
+                                    <label class="checkbox_label"><input type="checkbox" id="dc-disable-narration" data-help="Skip narrator color instructions."><span>Disable narration coloring</span></label>
+                                    <label class="checkbox_label"><input type="checkbox" id="dc-share-global" data-help="Use one shared color table across all chats."><span>Share colors across chats</span></label>
+                                    <label class="checkbox_label"><input type="checkbox" id="dc-css-effects" data-help="Allow transform-based CSS effects for dramatic dialogue."><span>Enable CSS effects</span></label>
+                                    <label class="checkbox_label"><input type="checkbox" id="dc-llm-palette" data-help="Use LLM assistance when generating palettes."><span>Enhance generated palettes with LLM</span></label>
+                                    <label class="checkbox_label"><input type="checkbox" id="dc-disable-toasts" data-help="Suppress non-error toast notifications."><span>Reduce toast popups</span></label>
+                                </div>
+                                <div class="dc-field-row">
+                                    <label class="dc-inline-label" for="dc-llm-profile">LLM Profile</label>
+                                    <select id="dc-llm-profile" class="text_pole" data-help="Connection profile to use for LLM colorization."><option value="">-- Use main chat AI --</option></select>
+                                </div>
+                            </div>
+                        </details>
+                        <details class="dc-subsection">
+                            <summary>Prompt & narration</summary>
+                            <div class="dc-stack">
+                                <div class="dc-field-row">
+                                    <label class="dc-inline-label" for="dc-narrator">Narrator</label>
+                                    <input type="color" id="dc-narrator" value="#888888" data-help="Set narrator fallback color.">
+                                    <button id="dc-narrator-clear" class="menu_button" data-help="Reset narrator color to default.">Reset Narrator</button>
+                                </div>
+                                <div class="dc-field-row dc-field-row-wrap">
+                                    <label class="dc-inline-label" for="dc-thought-symbols">Thoughts</label>
+                                    <input type="text" id="dc-thought-symbols" placeholder="*" class="text_pole" data-help="Symbols used to detect inner-thought dialogue.">
+                                    <button id="dc-thought-add" class="menu_button" data-help="Append another thought symbol.">Add Symbol</button>
+                                    <button id="dc-thought-clear" class="menu_button" data-help="Remove all thought symbols.">Clear Symbols</button>
+                                </div>
+                                <div class="dc-field-row">
+                                    <label class="dc-inline-label" for="dc-prompt-depth">Depth</label>
+                                    <input type="number" id="dc-prompt-depth" min="0" max="99" value="4" class="text_pole" data-help="How far from the chat end the prompt is injected.">
+                                </div>
+                                <div class="dc-field-row">
+                                    <label class="dc-inline-label" for="dc-prompt-role">Role</label>
+                                    <select id="dc-prompt-role" class="text_pole" data-help="Inject the prompt as a system or user message."><option value="system">System</option><option value="user">User</option></select>
+                                </div>
+                                <div class="dc-field-row">
+                                    <label class="dc-inline-label" for="dc-prompt-mode">Mode</label>
+                                    <select id="dc-prompt-mode" class="text_pole" data-help="Inject automatically or use the macro manually."><option value="inject">Inject</option><option value="macro">Macro</option></select>
+                                </div>
+                                <div id="dc-system-prompt-container" style="display:none;">
+                                    <label style="font-weight:bold;margin-bottom:4px;display:block;">Add to your system prompt:</label>
+                                    <textarea id="dc-system-prompt-text" readonly class="text_pole" style="width:100%;min-height:60px;font-size:0.75em;font-family:monospace;resize:vertical;">{{dialoguecolors}}</textarea>
+                                    <button id="dc-copy-system-prompt" class="menu_button" style="margin-top:4px;width:100%;">Copy Macro</button>
+                                </div>
+                            </div>
+                        </details>
+                        <details class="dc-subsection">
+                            <summary>Palette tools</summary>
+                            <div class="dc-stack">
+                                <div class="dc-field-row dc-field-row-wrap">
+                                    <input type="text" id="dc-palette-name-input" placeholder="Palette name..." class="text_pole" data-help="Name used when creating or saving a custom palette.">
+                                    <input type="text" id="dc-palette-notes-input" placeholder="Palette notes (optional)" class="text_pole" data-help="Optional notes for generated palettes.">
+                                </div>
+                                <label class="checkbox_label"><input type="checkbox" id="dc-overwrite-existing" data-help="Allow replacing an existing custom palette with the same name."><span>Overwrite existing custom palette</span></label>
+                                <div class="dc-button-row dc-button-row-3">
+                                    <button id="dc-gen-palette" class="menu_button" data-help="Generate a custom palette from the name and notes fields.">Generate Palette</button>
+                                    <button id="dc-save-palette" class="menu_button" data-help="Save current character colors as a custom palette.">Save Current As Palette</button>
+                                    <button id="dc-del-palette" class="menu_button dc-danger-button" data-help="Delete the currently selected custom palette.">Delete Selected Palette</button>
+                                </div>
+                            </div>
+                        </details>
+                        <details class="dc-subsection">
+                            <summary>Presets & import/export</summary>
+                            <div class="dc-stack">
+                                <div class="dc-field-row dc-field-row-wrap">
+                                    <input type="text" id="dc-preset-name" placeholder="Preset name..." class="text_pole" data-help="Preset name used when saving current assignments.">
+                                    <button id="dc-save-preset" class="menu_button" data-help="Save current assignments into a named preset.">Save Preset</button>
+                                </div>
+                                <div class="dc-field-row dc-field-row-wrap">
+                                    <select id="dc-preset-select" class="text_pole" data-help="Select a preset to load or delete."><option value="">-- Select Preset --</option></select>
+                                    <button id="dc-load-preset" class="menu_button" data-help="Load the selected preset into the current character list.">Load Preset</button>
+                                    <button id="dc-delete-preset" class="menu_button dc-danger-button" data-help="Delete the selected preset.">Delete Preset</button>
+                                </div>
+                                <div class="dc-button-row dc-button-row-3">
+                                    <button id="dc-export" class="menu_button" data-help="Export colors and settings to JSON.">Export Colors</button>
+                                    <button id="dc-import" class="menu_button" data-help="Import colors and settings from JSON.">Import Colors</button>
+                                    <button id="dc-export-png" class="menu_button" data-help="Export the floating legend as an image.">Export Legend PNG</button>
+                                </div>
+                                <div class="dc-button-row dc-button-row-2">
+                                    <button id="dc-export-settings" class="menu_button" data-help="Export only settings to JSON.">Export Settings</button>
+                                    <button id="dc-import-settings" class="menu_button" data-help="Import settings without overwriting local colors.">Import Settings</button>
+                                </div>
+                                <input type="file" id="dc-import-file" accept=".json" style="display:none;">
+                                <input type="file" id="dc-import-settings-file" accept=".json" style="display:none;">
+                            </div>
+                        </details>
+                        <details class="dc-subsection">
+                            <summary>Card & sync</summary>
+                            <div class="dc-stack">
+                                <div class="dc-button-row dc-button-row-2">
+                                    <button id="dc-card" class="menu_button" data-help="Add the current card character if missing.">Add Current Card</button>
+                                    <button id="dc-avatar-color" class="menu_button" data-help="Use the current avatar's dominant color.">Use Avatar Color</button>
+                                </div>
+                                <div class="dc-button-row dc-button-row-2">
+                                    <button id="dc-save-card" class="menu_button" data-help="Save this chat color data into the character card.">Save To Card</button>
+                                    <button id="dc-load-card" class="menu_button" data-help="Load saved color data from the character card.">Load From Card</button>
+                                </div>
+                                <div class="dc-button-row dc-button-row-2">
+                                    <button id="dc-setup-autosync" class="menu_button" data-help="Enable automatic settings sync across devices.">Enable Auto-Sync</button>
+                                    <button id="dc-disable-autosync" class="menu_button" style="display:none;" data-help="Disable automatic settings synchronization.">Disable Auto-Sync</button>
+                                </div>
+                                <span id="dc-autosync-status" class="dc-status-text"></span>
+                            </div>
+                        </details>
+                        <details class="dc-subsection">
+                            <summary>Maintenance</summary>
+                            <div class="dc-stack">
+                                <div class="dc-button-row dc-button-row-3">
+                                    <button id="dc-undo" class="menu_button" data-help="Undo the last color-table change.">Undo</button>
+                                    <button id="dc-redo" class="menu_button" data-help="Redo the last undone change.">Redo</button>
+                                    <button id="dc-fix-conflicts" class="menu_button" data-help="Auto-resolve colors that are too similar.">Fix Similar Colors</button>
+                                </div>
+                                <div class="dc-button-row dc-button-row-3">
+                                    <button id="dc-regen" class="menu_button" data-help="Regenerate colors for unlocked characters.">Regenerate Unlocked</button>
+                                    <button id="dc-flip-theme" class="menu_button" data-help="Flip color lightness for theme switching.">Flip For Theme</button>
+                                    <button id="dc-storage" class="menu_button" data-help="Browse and clear stored color data across chats.">Storage Manager</button>
+                                </div>
+                            </div>
+                        </details>
+                    </div>
+                </details>
+                <details class="dc-section dc-danger-zone">
+                    <summary>Danger Zone</summary>
+                    <p class="dc-section-note">Pinned characters are protected here too. Turn off Keep first if you really want to remove them.</p>
+                    <div class="dc-stack">
+                        <div class="dc-button-row dc-button-row-3">
+                            <button id="dc-lock-all" class="menu_button" data-help="Lock every tracked character color.">Lock All</button>
+                            <button id="dc-unlock-all" class="menu_button" data-help="Unlock every tracked character color.">Unlock All</button>
+                            <button id="dc-reset" class="menu_button dc-danger-button" data-help="Reassign random palette colors to all unlocked characters.">Reset Unlocked Colors</button>
+                        </div>
+                        <div class="dc-button-row dc-button-row-2">
+                            <button id="dc-del-locked" class="menu_button dc-danger-button" data-help="Delete all locked characters except kept ones.">Delete Locked</button>
+                            <button id="dc-del-unlocked" class="menu_button dc-danger-button" data-help="Delete all unlocked characters except kept ones.">Delete Unlocked</button>
+                        </div>
+                        <div class="dc-field-row dc-field-row-wrap">
+                            <input type="number" id="dc-del-least-threshold" min="0" value="3" class="text_pole" data-help="Minimum dialogue count to keep when using the threshold delete tool.">
+                            <button id="dc-del-least" class="menu_button dc-danger-button" data-help="Delete characters below the dialogue threshold, except kept ones.">Delete Below Threshold</button>
+                        </div>
+                        <div class="dc-button-row dc-button-row-1">
+                            <button id="dc-del-dupes" class="menu_button dc-danger-button" data-help="Delete duplicate-color characters, keeping the highest dialogue count and any kept characters.">Delete Duplicate Colors</button>
+                        </div>
+                    </div>
+                </details>
+                <hr style="margin:8px 0 4px;opacity:0.2;">
                 <small>Preview:</small>
                 <div id="dc-prompt-preview" style="font-size:0.75em;max-height:40px;overflow-y:auto;padding:3px;background:var(--SmartThemeBlurTintColor);border-radius:3px;"></div>
             </div>
@@ -4071,10 +4250,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
         const $ = id => document.getElementById(id);
 
-        // Use syncUIWithSettings for initial checkbox/select state
         syncUIWithSettings();
 
-        // Wire up event handlers
         $('dc-enabled').onchange = e => { settings.enabled = e.target.checked; saveData(); injectPrompt(); };
         $('dc-highlight').onchange = e => { settings.highlightMode = e.target.checked; saveData(); injectPrompt(); };
         $('dc-autoscan').onchange = e => { settings.autoScanOnLoad = e.target.checked; saveData(); };
@@ -4092,48 +4269,48 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         $('dc-disable-toasts').onchange = e => { settings.disableToasts = e.target.checked; saveData(); };
         $('dc-theme').onchange = e => { settings.themeMode = e.target.value; invalidateThemeCache(); syncAllEffectiveColors(); saveData(); updateCharList(); injectPrompt(); if (settings.autoRecolor) recolorAllMessages(); };
         $('dc-palette').onchange = e => { settings.colorTheme = e.target.value; saveData(); injectPrompt(); };
-        $('dc-brightness').oninput = e => { settings.brightness = parseInt(e.target.value); $('dc-bright-val').textContent = e.target.value; invalidateThemeCache(); syncAllEffectiveColors(); saveData(); updateCharList(); injectPrompt(); };
+        $('dc-brightness').oninput = e => { settings.brightness = parseInt(e.target.value, 10) || 0; $('dc-bright-val').textContent = e.target.value; invalidateThemeCache(); syncAllEffectiveColors(); saveData(); updateCharList(); injectPrompt(); };
         $('dc-brightness').onchange = () => { invalidateThemeCache(); syncAllEffectiveColors(); saveData(); updateCharList(); injectPrompt(); };
         $('dc-narrator').oninput = e => { settings.narratorColor = e.target.value; saveData(); injectPrompt(); };
         $('dc-narrator-clear').onclick = () => { settings.narratorColor = ''; $('dc-narrator').value = '#888888'; saveData(); injectPrompt(); };
         $('dc-thought-symbols').oninput = e => { settings.thoughtSymbols = e.target.value; saveData(); injectPrompt(); };
         $('dc-thought-add').onclick = () => { const s = prompt('Add thought symbol (e.g., *, 「, 『):'); if (s?.trim()) { settings.thoughtSymbols = (settings.thoughtSymbols || '') + s.trim(); $('dc-thought-symbols').value = settings.thoughtSymbols; saveData(); injectPrompt(); } };
         $('dc-thought-clear').onclick = () => { settings.thoughtSymbols = ''; $('dc-thought-symbols').value = ''; saveData(); injectPrompt(); };
-        $('dc-prompt-depth').oninput = e => { settings.promptDepth = parseInt(e.target.value) || 0; saveData(); injectPrompt(); };
+        $('dc-prompt-depth').oninput = e => { settings.promptDepth = parseInt(e.target.value, 10) || 0; saveData(); injectPrompt(); };
         $('dc-prompt-role').onchange = e => { settings.promptRole = e.target.value; saveData(); injectPrompt(); };
         $('dc-prompt-mode').onchange = e => { settings.promptMode = e.target.value; saveData(); injectPrompt(); };
         $('dc-copy-system-prompt').onclick = () => {
             const textarea = $('dc-system-prompt-text');
-            if (textarea) {
-                textarea.select();
-                document.execCommand('copy');
-                $('dc-copy-system-prompt').textContent = 'Copied!';
-                setTimeout(() => { $('dc-copy-system-prompt').textContent = 'Copy Macro'; }, 1500);
-            }
+            if (!textarea) return;
+            textarea.select();
+            document.execCommand('copy');
+            $('dc-copy-system-prompt').textContent = 'Copied!';
+            setTimeout(() => { $('dc-copy-system-prompt').textContent = 'Copy Macro'; }, 1500);
         };
-        $('dc-help-toggle').onchange = e => { settings.showControlHelp = e.target.checked; saveData(); renderControlHelpPanel(); };
         $('dc-scan').onclick = scanAllMessages;
         $('dc-clear').onclick = () => {
-            const count = Object.keys(characterColors).length;
-            if (!count) { toast.info('No characters to clear'); return; }
+            const allKeys = Object.keys(characterColors);
+            const keptKeys = getKeptKeys(allKeys);
+            if (!allKeys.length) { toast.info('No characters to clear'); return; }
+            if (keptKeys.length === allKeys.length) {
+                toast.info('Only pinned characters remain. Turn off Keep to clear them.');
+                return;
+            }
             const restore = createRestoreSnapshot();
-            characterColors = {};
-            selectedKeys.clear();
-            saveHistory(); saveData(); injectPrompt(); updateCharList();
-            showUndoToast(`Cleared ${count} character${count !== 1 ? 's' : ''}.`, restore);
+            keepCharacterKeysOnly(keptKeys);
+            saveHistory();
+            saveData();
+            injectPrompt();
+            updateCharList();
+            showUndoToast(buildKeepAwareRemovalMessage('Cleared', allKeys.length - keptKeys.length, keptKeys.length), restore);
         };
         $('dc-stats').onclick = showStatsPopup;
         $('dc-recolor').onclick = () => {
-            if (confirm('Recolor all messages with current color assignments?')) {
-                recolorAllMessages();
-            }
+            if (confirm('Recolor all messages with current color assignments?')) recolorAllMessages();
         };
         $('dc-colorize').onclick = (e) => {
-            if (e.shiftKey) {
-                colorizeMessages('last');
-            } else if (confirm('Colorize all uncolored messages with known character colors?')) {
-                colorizeMessages('all');
-            }
+            if (e.shiftKey) colorizeMessages('last');
+            else if (confirm('Colorize all uncolored messages with known character colors?')) colorizeMessages('all');
         };
         $('dc-fix-conflicts').onclick = autoResolveConflicts;
         $('dc-regen').onclick = regenerateAllColors;
@@ -4143,10 +4320,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         $('dc-delete-preset').onclick = deleteColorPreset;
         $('dc-gen-palette').onclick = async () => { await generateCustomPaletteFromWords(); };
         $('dc-save-palette').onclick = saveCustomPalette;
-        $('dc-palette-generate-inline').onclick = async () => { await generateCustomPaletteFromWords(); };
-        $('dc-palette-save-inline').onclick = saveCustomPalette;
-        $('dc-palette-name-input').onkeypress = e => { if (e.key === 'Enter') $('dc-palette-generate-inline').click(); };
-        $('dc-palette-notes-input').onkeypress = e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) $('dc-palette-generate-inline').click(); };
+        $('dc-palette-name-input').onkeypress = e => { if (e.key === 'Enter') $('dc-gen-palette').click(); };
+        $('dc-palette-notes-input').onkeypress = e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) $('dc-gen-palette').click(); };
         $('dc-del-palette').onclick = deleteCustomPalette;
         $('dc-card').onclick = autoAssignFromCard;
         $('dc-avatar-color').onclick = async () => {
@@ -4156,30 +4331,25 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 if (!char?.avatar) { toast.info('No avatar found'); return; }
                 const avatarUrl = `/characters/${encodeURIComponent(char.avatar)}`;
                 const color = await extractAvatarColor(avatarUrl);
-                if (color) {
-                    const key = char.name.toLowerCase();
-                    if (characterColors[key]) {
-                        setEntryFromBaseColor(characterColors[key], color);
-                    } else {
-                        const built = buildCharacterEntry(char.name, {
-                            color,
-                            colorMode: 'base',
-                            locked: false,
-                            dialogueCount: 0
-                        });
-                        if (!built.entry) return;
-                        characterColors[key] = built.entry;
-                    }
-                    saveHistory(); saveData(); updateCharList(); injectPrompt();
-                    toast.success(`Set ${char.name} to ${color}`);
+                if (!color) { toast.error('Could not extract color'); return; }
+                const key = char.name.toLowerCase();
+                if (characterColors[key]) {
+                    setEntryFromBaseColor(characterColors[key], color);
                 } else {
-                    toast.error('Could not extract color');
+                    const built = buildCharacterEntry(char.name, { color, colorMode: 'base', locked: false, dialogueCount: 0 });
+                    if (!built.entry) return;
+                    characterColors[key] = built.entry;
                 }
-            } catch (e) { toast.error('Failed to extract avatar color'); }
+                saveHistory(); saveData(); updateCharList(); injectPrompt();
+                toast.success(`Set ${char.name} to ${color}`);
+            } catch {
+                toast.error('Failed to extract avatar color');
+            }
         };
         $('dc-save-card').onclick = saveToCard;
         $('dc-load-card').onclick = loadFromCard;
-        $('dc-undo').onclick = undo; $('dc-redo').onclick = redo;
+        $('dc-undo').onclick = undo;
+        $('dc-redo').onclick = redo;
         $('dc-export').onclick = exportColors;
         $('dc-import').onclick = () => $('dc-import-file').click();
         $('dc-export-png').onclick = exportLegendPng;
@@ -4187,65 +4357,53 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         $('dc-export-settings').onclick = exportSettings;
         $('dc-import-settings').onclick = () => $('dc-import-settings-file').click();
         $('dc-import-settings-file').onchange = e => { if (e.target.files[0]) importSettings(e.target.files[0]); };
-        $('dc-setup-autosync').onclick = () => {
-            enableAutoSync();
-            updateAutoSyncUI();
-        };
-        $('dc-disable-autosync').onclick = () => {
-            disableAutoSync();
-            updateAutoSyncUI();
-        };
+        $('dc-setup-autosync').onclick = () => { enableAutoSync(); updateAutoSyncUI(); };
+        $('dc-disable-autosync').onclick = () => { disableAutoSync(); updateAutoSyncUI(); };
         $('dc-del-locked').onclick = () => {
-            const restore = createRestoreSnapshot();
-            let count = 0;
-            Object.keys(characterColors).forEach(k => { if (characterColors[k].locked) { delete characterColors[k]; selectedKeys.delete(k); count++; } });
-            if (!count) { toast.info('No locked characters to delete'); return; }
-            saveHistory(); saveData(); injectPrompt(); updateCharList();
-            showUndoToast(`Deleted ${count} locked character${count !== 1 ? 's' : ''}.`, restore);
+            removeCharacterKeys(Object.keys(characterColors).filter(k => characterColors[k]?.locked), {
+                actionLabel: 'Deleted',
+                itemLabel: 'locked character',
+                emptyMessage: 'No locked characters to delete',
+                blockedMessage: 'Only pinned locked characters remain. Turn off Keep first.'
+            });
         };
         $('dc-del-unlocked').onclick = () => {
-            const restore = createRestoreSnapshot();
-            let count = 0;
-            Object.keys(characterColors).forEach(k => { if (!characterColors[k].locked) { delete characterColors[k]; selectedKeys.delete(k); count++; } });
-            if (!count) { toast.info('No unlocked characters to delete'); return; }
-            saveHistory(); saveData(); injectPrompt(); updateCharList();
-            showUndoToast(`Deleted ${count} unlocked character${count !== 1 ? 's' : ''}.`, restore);
+            removeCharacterKeys(Object.keys(characterColors).filter(k => characterColors[k] && !characterColors[k].locked), {
+                actionLabel: 'Deleted',
+                itemLabel: 'unlocked character',
+                emptyMessage: 'No unlocked characters to delete',
+                blockedMessage: 'Only pinned unlocked characters remain. Turn off Keep first.'
+            });
         };
         $('dc-del-least').onclick = () => {
-            const thresholdField = $('dc-del-least-threshold');
-            const min = parseInt(thresholdField?.value || '3', 10);
+            const min = parseInt($('dc-del-least-threshold')?.value || '3', 10);
             if (isNaN(min) || min < 0) { toast.warning('Invalid threshold'); return; }
-            const restore = createRestoreSnapshot();
-            let count = 0;
-            Object.keys(characterColors).forEach(k => {
-                if ((characterColors[k].dialogueCount || 0) < min) {
-                    delete characterColors[k]; selectedKeys.delete(k); count++;
-                }
+            removeCharacterKeys(Object.keys(characterColors).filter(k => (characterColors[k]?.dialogueCount || 0) < min), {
+                actionLabel: 'Deleted',
+                itemLabel: 'low-dialogue character',
+                emptyMessage: `No characters below ${min} dialogues`,
+                blockedMessage: 'Only pinned low-dialogue characters remain. Turn off Keep first.'
             });
-            if (!count) { toast.info(`No characters below ${min} dialogues`); return; }
-            saveHistory(); saveData(); injectPrompt(); updateCharList();
-            showUndoToast(`Deleted ${count} character${count !== 1 ? 's' : ''} with <${min} dialogues.`, restore);
         };
         $('dc-del-dupes').onclick = () => {
-            const restore = createRestoreSnapshot();
+            const duplicateKeys = [];
             const colorGroups = {};
             Object.entries(characterColors).forEach(([k, v]) => {
-                const c = getEntryEffectiveColor(v).toLowerCase();
-                if (!colorGroups[c]) colorGroups[c] = [];
-                colorGroups[c].push({ key: k, count: v.dialogueCount || 0 });
+                const color = getEntryEffectiveColor(v).toLowerCase();
+                if (!colorGroups[color]) colorGroups[color] = [];
+                colorGroups[color].push({ key: k, count: v.dialogueCount || 0, keep: !!v.keep });
             });
-            let deleted = 0;
             Object.values(colorGroups).forEach(group => {
-                if (group.length > 1) {
-                    group.sort((a, b) => b.count - a.count);
-                    group.slice(1).forEach(({ key }) => {
-                        delete characterColors[key]; selectedKeys.delete(key); deleted++;
-                    });
-                }
+                if (group.length < 2) return;
+                group.sort((a, b) => Number(b.keep) - Number(a.keep) || b.count - a.count);
+                group.slice(1).forEach(({ key }) => duplicateKeys.push(key));
             });
-            if (!deleted) { toast.info('No duplicate colors found'); return; }
-            saveHistory(); saveData(); injectPrompt(); updateCharList();
-            showUndoToast(`Deleted ${deleted} duplicate-color character${deleted !== 1 ? 's' : ''}.`, restore);
+            removeCharacterKeys(duplicateKeys, {
+                actionLabel: 'Deleted',
+                itemLabel: 'duplicate-color character',
+                emptyMessage: 'No duplicate colors found',
+                blockedMessage: 'Only pinned duplicate-color characters remain. Turn off Keep first.'
+            });
         };
         $('dc-storage').onclick = showStorageManager;
         $('dc-lock-all').onclick = () => {
@@ -4289,17 +4447,16 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         $('dc-add-btn').onclick = () => { addCharacter($('dc-add-name').value); $('dc-add-name').value = ''; };
         $('dc-add-name').onkeypress = e => { if (e.key === 'Enter') $('dc-add-btn').click(); };
 
-        // Phase 6A: Batch operations
         $('dc-batch-all').onclick = () => { Object.keys(characterColors).forEach(k => selectedKeys.add(k)); updateCharList(); };
         $('dc-batch-none').onclick = () => { selectedKeys.clear(); updateCharList(); };
         $('dc-batch-del').onclick = () => {
             if (!selectedKeys.size) return;
-            const restore = createRestoreSnapshot();
-            const count = selectedKeys.size;
-            selectedKeys.forEach(k => delete characterColors[k]);
-            selectedKeys.clear();
-            saveHistory(); saveData(); injectPrompt(); updateCharList();
-            showUndoToast(`Deleted ${count} selected character${count !== 1 ? 's' : ''}.`, restore);
+            removeCharacterKeys([...selectedKeys], {
+                actionLabel: 'Deleted',
+                itemLabel: 'selected character',
+                emptyMessage: 'No selected characters to delete',
+                blockedMessage: 'All selected characters are pinned. Turn off Keep first.'
+            });
         };
         $('dc-batch-lock').onclick = () => {
             let changed = false;
@@ -4339,7 +4496,6 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         };
 
         registerKeyboardShortcuts();
-
         applyControlHelpText();
         updateCharList();
         injectPrompt();
@@ -4361,6 +4517,9 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         clearDomCache();
         const currentCharKey = getCharKey();
         if (currentCharKey !== lastCharKey) {
+            selectedKeys.clear();
+            expandedCharacterRows.clear();
+            swapMode = null;
             loadData();
             if (!Object.keys(characterColors).length) tryLoadFromCard();
             lastCharKey = currentCharKey;
