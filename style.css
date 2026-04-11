@@ -31,7 +31,7 @@
     align-items: center;
     gap: 8px;
     cursor: pointer;
-    padding: 6px 8px;
+    padding: 4px 6px;
     border: 1px solid transparent;
     border-radius: 10px;
     background: var(--dc-surface-soft);
@@ -53,9 +53,9 @@
     max-width: 16px !important;
     max-height: 16px !important;
     flex: 0 0 auto !important;
-    border: 2px solid var(--dc-border) !important;
+    border: 2px solid rgba(255, 255, 255, 0.45) !important;
     border-radius: 50% !important;
-    background: transparent !important;
+    background: rgba(255, 255, 255, 0.06) !important;
     cursor: pointer !important;
     margin: 0 !important;
     padding: 0 !important;
@@ -63,10 +63,24 @@
     outline: none !important;
     box-sizing: border-box !important;
     vertical-align: middle !important;
+    transition: background 0.15s ease, border-color 0.15s ease !important;
 }
 
 #dc-ext label.checkbox_label input[type="checkbox"]::before {
     content: none !important;
+}
+
+#dc-ext label.checkbox_label input[type="checkbox"]::after {
+    content: '' !important;
+    position: absolute !important;
+    top: 50% !important;
+    left: 50% !important;
+    width: 6px !important;
+    height: 3px !important;
+    border-left: 2px solid transparent !important;
+    border-bottom: 2px solid transparent !important;
+    transform: translate(-50%, -60%) rotate(-45deg) !important;
+    transition: border-color 0.15s ease !important;
 }
 
 #dc-ext label.checkbox_label input[type="checkbox"]:focus-visible {
@@ -77,6 +91,11 @@
 #dc-ext label.checkbox_label input[type="checkbox"]:checked {
     background: var(--dc-accent) !important;
     border-color: var(--dc-accent) !important;
+}
+
+#dc-ext label.checkbox_label input[type="checkbox"]:checked::after {
+    border-left-color: #fff !important;
+    border-bottom-color: #fff !important;
 }
 
 #dc-ext .dc-section,
@@ -111,7 +130,7 @@
     gap: 8px;
     cursor: pointer;
     font-weight: 700;
-    padding: 12px 14px;
+    padding: 10px 12px;
 }
 
 #dc-ext .dc-section > summary::before,
@@ -129,7 +148,7 @@
 
 #dc-ext .dc-section > summary + *,
 #dc-ext .dc-subsection > summary + * {
-    padding: 0 14px 14px;
+    padding: 0 10px 10px;
 }
 
 #dc-ext .dc-section-note {
@@ -142,35 +161,55 @@
 #dc-ext .dc-stack {
     display: flex;
     flex-direction: column;
-    gap: 10px;
-}
-
-#dc-ext .dc-button-row,
-#dc-ext .dc-field-row {
-    display: grid;
     gap: 8px;
 }
 
-#dc-ext .dc-button-row-1 {
-    grid-template-columns: 1fr;
+#dc-ext .dc-button-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
 }
 
-#dc-ext .dc-button-row-2 {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-#dc-ext .dc-button-row-3 {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+#dc-ext .dc-button-row > .menu_button {
+    flex: 1 1 auto;
+    min-width: 0;
+    white-space: nowrap;
 }
 
 #dc-ext .dc-field-row {
-    grid-template-columns: minmax(80px, 110px) minmax(0, 1fr);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
     align-items: center;
 }
 
+#dc-ext .dc-field-row > .dc-inline-label {
+    flex: 0 0 auto;
+}
+
+#dc-ext .dc-field-row > .text_pole,
+#dc-ext .dc-field-row > input[type="range"],
+#dc-ext .dc-field-row > input[type="color"],
+#dc-ext .dc-field-row > input[type="number"] {
+    flex: 1 1 100px;
+    min-width: 80px;
+}
+
+#dc-ext .dc-field-row > .menu_button {
+    flex: 0 1 auto;
+    white-space: nowrap;
+}
+
 #dc-ext .dc-field-row-wrap {
-    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-    align-items: stretch;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+}
+
+#dc-ext .dc-field-row-wrap > * {
+    flex: 1 1 120px;
+    min-width: 0;
 }
 
 #dc-ext .dc-inline-label {
@@ -186,8 +225,8 @@
 
 #dc-ext .dc-toggle-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
-    gap: 8px;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 6px;
 }
 
 #dc-ext .dc-danger-zone {
@@ -409,9 +448,9 @@
     max-height: 14px !important;
     flex-shrink: 0 !important;
     cursor: pointer !important;
-    border: 1px solid var(--dc-border) !important;
+    border: 1px solid rgba(255, 255, 255, 0.4) !important;
     border-radius: 4px !important;
-    background: transparent !important;
+    background: rgba(255, 255, 255, 0.06) !important;
     padding: 0 !important;
     margin: 0 !important;
     box-sizing: border-box !important;
@@ -483,9 +522,9 @@
     min-width: 16px !important;
     min-height: 16px !important;
     flex-shrink: 0 !important;
-    border: 2px solid var(--SmartThemeBorderColor, #888) !important;
+    border: 2px solid rgba(255, 255, 255, 0.45) !important;
     border-radius: 50% !important;
-    background: transparent !important;
+    background: rgba(255, 255, 255, 0.06) !important;
     cursor: pointer !important;
     margin: 0 !important;
     padding: 0 !important;
@@ -530,10 +569,9 @@
         max-height: 18px !important;
     }
 
-    #dc-ext .dc-button-row-2,
-    #dc-ext .dc-button-row-3,
     #dc-ext .dc-field-row {
-        grid-template-columns: 1fr;
+        flex-direction: column;
+        align-items: stretch;
     }
 
     #dc-ext .dc-char-main {
