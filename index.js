@@ -57,6 +57,12 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         return /^#[0-9a-fA-F]{6}$/.test(color) ? color.toLowerCase() : fallback;
     }
 
+    function normalizeManualColorInput(value, fallback = null) {
+        const color = String(value ?? '').trim();
+        const withHash = color.startsWith('#') ? color : `#${color}`;
+        return normalizeHexColor(withHash, fallback);
+    }
+
     const VALID_STYLES = new Set(['', 'bold', 'italic', 'bold italic']);
 
     function normalizeAliases(aliases) {
@@ -3706,6 +3712,28 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         else expandedCharacterRows.add(key);
     }
 
+    function applyCharacterBaseColor(key, color) {
+        const entry = characterColors[key];
+        const nextColor = normalizeHexColor(color, null);
+        if (!entry || !nextColor) return false;
+        setEntryFromBaseColor(entry, nextColor);
+        entry.aliases?.forEach(alias => {
+            const aliasKey = alias.toLowerCase();
+            if (characterColors[aliasKey]) setEntryFromBaseColor(characterColors[aliasKey], nextColor);
+        });
+        saveHistory(); saveData(); injectPrompt(); updateCharList();
+        return true;
+    }
+
+    function maybeAutoRecolorAfterColorChange() {
+        if (!settings.autoRecolor) return;
+        if (!autoRecolorHintShown) {
+            autoRecolorHintShown = true;
+            toast.info('Auto-recolor is enabled; color changes will update chat automatically.');
+        }
+        recolorAllMessages();
+    }
+
     // Phase 5B: Alias chips, Phase 6A: Batch checkboxes, Phase 6B: Group headers, Phase 5D: Harmony on dblclick
     function updateCharList() {
         const list = document.getElementById('dc-char-list'); if (!list) return;
@@ -3746,6 +3774,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                         <span class="dc-color-dot" style="background:${safeColor};"></span>
                         <input type="color" value="${pickerColor}" data-key="${safeKey}" class="dc-color-input">
                     </span>
+                    <input type="text" value="${escapeAttr(pickerColor)}" data-key="${safeKey}" class="dc-color-hex text_pole" inputmode="text" autocapitalize="none" autocomplete="off" spellcheck="false" maxlength="7" aria-label="Hex color for ${escapeAttr(v.name)}" title="Enter a hex color like #ff66cc">
                     <div class="dc-char-name-wrap" title="Dialogues: ${v.dialogueCount || 0}${v.aliases?.length ? '\nAliases: ' + escapeHtml(v.aliases.join(', ')) : ''}${v.group ? '\nGroup: ' + escapeHtml(v.group) : ''}">
                         <div class="dc-char-name" style="color:${safeColor};">${escapeHtml(v.name)}</div>
                         <div class="dc-char-meta">
@@ -3778,23 +3807,34 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             i.oninput = () => {
                 const c = characterColors[i.dataset.key];
                 if (!c) return;
-                const nextColor = normalizeHexColor(i.value, getBaseColor(c));
-                setEntryFromBaseColor(c, nextColor);
-                c.aliases?.forEach(a => {
-                    const ak = a.toLowerCase();
-                    if (characterColors[ak]) setEntryFromBaseColor(characterColors[ak], nextColor);
-                });
-                saveHistory(); saveData(); injectPrompt(); updateCharList();
+                applyCharacterBaseColor(i.dataset.key, normalizeHexColor(i.value, getBaseColor(c)));
+            };
+            i.onchange = maybeAutoRecolorAfterColorChange;
+            i.ondblclick = (e) => { e.preventDefault(); showHarmonyPopup(i.dataset.key, i); };
+        });
+        list.querySelectorAll('.dc-color-hex').forEach(i => {
+            const applyHexInput = () => {
+                const c = characterColors[i.dataset.key];
+                if (!c) return false;
+                const nextColor = normalizeManualColorInput(i.value, null);
+                if (!nextColor) {
+                    i.value = getBaseColor(c);
+                    toast.warning('Enter a hex color like #ff66cc.');
+                    return false;
+                }
+                applyCharacterBaseColor(i.dataset.key, nextColor);
+                return true;
+            };
+            i.onkeydown = (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    if (applyHexInput()) maybeAutoRecolorAfterColorChange();
+                    i.blur();
+                }
             };
             i.onchange = () => {
-                if (!settings.autoRecolor) return;
-                if (!autoRecolorHintShown) {
-                    autoRecolorHintShown = true;
-                    toast.info('Auto-recolor is enabled; color changes will update chat automatically.');
-                }
-                recolorAllMessages();
+                if (applyHexInput()) maybeAutoRecolorAfterColorChange();
             };
-            i.ondblclick = (e) => { e.preventDefault(); showHarmonyPopup(i.dataset.key, i); };
         });
         list.querySelectorAll('.dc-color-dot').forEach(dot => {
             dot.onclick = () => { const input = dot.nextElementSibling; if (input?.classList.contains('dc-color-input')) input.click(); };

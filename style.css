@@ -299,7 +299,7 @@
 
 #dc-ext .dc-char-main {
     display: grid;
-    grid-template-columns: auto auto minmax(0, 1fr) auto auto auto auto;
+    grid-template-columns: auto auto auto minmax(0, 1fr) auto auto auto auto;
     gap: 6px;
     align-items: center;
 }
@@ -376,6 +376,14 @@
     inset: 0;
     opacity: 0;
     cursor: pointer;
+}
+
+#dc-ext .dc-color-hex {
+    width: 74px !important;
+    min-width: 74px !important;
+    max-width: 74px !important;
+    font-family: monospace !important;
+    text-transform: lowercase;
 }
 
 #dc-ext .dc-toggle-active {
@@ -632,6 +640,10 @@
 
     #dc-ext .dc-char-main > .dc-color-swatch {
         flex: 0 0 auto;
+    }
+
+    #dc-ext .dc-char-main > .dc-color-hex {
+        flex: 0 0 74px;
     }
 
     #dc-ext .dc-char-main > .dc-char-name-wrap {
