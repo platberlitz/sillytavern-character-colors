@@ -112,12 +112,15 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         return pruneReducibleCompositeEntries(normalized);
     }
 
+    const COLOR_CONFLICT_HUE_THRESHOLD = 12;
+    const COLOR_CONFLICT_LIGHTNESS_THRESHOLD = 8;
+
     // Optimized color distance calculation
     function colorDistance(color1, color2) {
         const [h1, , l1] = hexToHsl(color1);
         const [h2, , l2] = hexToHsl(color2);
         const hDiff = Math.min(Math.abs(h1 - h2), 360 - Math.abs(h1 - h2));
-        return hDiff < 25 && Math.abs(l1 - l2) < 15;
+        return hDiff < COLOR_CONFLICT_HUE_THRESHOLD && Math.abs(l1 - l2) < COLOR_CONFLICT_LIGHTNESS_THRESHOLD;
     }
 
     const MODULE_NAME = 'dialogue-colors';
@@ -130,7 +133,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     let swapMode = null;
     let searchTerm = '';
     let expandedCharacterRows = new Set();
-    let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, thoughtSymbols: '*', disableNarration: true, shareColorsGlobally: false, cssEffects: false, autoScanNewMessages: true, autoLockDetected: true, enableRightClick: false, llmEnhanceCustomPalettes: true, promptDepth: 4, showControlHelp: true, autoRecolor: true, disableToasts: false, autoColorize: false, llmConnectionProfile: null, colorSchemaVersion: COLOR_SCHEMA_VERSION, promptMode: 'inject', promptRole: 'system', sortMode: 'name' };
+    let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, thoughtSymbols: '*', disableNarration: true, shareColorsGlobally: false, cssEffects: false, autoScanNewMessages: true, autoLockDetected: true, enableRightClick: false, llmEnhanceCustomPalettes: true, promptDepth: 4, showControlHelp: true, autoRecolor: true, autoRemapOnReceive: false, disableToasts: false, autoColorize: false, llmConnectionProfile: null, colorSchemaVersion: COLOR_SCHEMA_VERSION, promptMode: 'inject', promptRole: 'system', sortMode: 'name' };
     const TOGGLE_SETTING_DEFAULTS = Object.freeze({
         enabled: true,
         highlightMode: false,
@@ -145,6 +148,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         llmEnhanceCustomPalettes: true,
         showControlHelp: true,
         autoRecolor: true,
+        autoRemapOnReceive: false,
         disableToasts: false,
         autoColorize: false,
     });
@@ -648,7 +652,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 const [h1, , l1] = hslCache[i].hsl;
                 const [h2, , l2] = hslCache[j].hsl;
                 const hDiff = Math.min(Math.abs(h1 - h2), 360 - Math.abs(h1 - h2));
-                if (hDiff < 25 && Math.abs(l1 - l2) < 15) {
+                if (hDiff < COLOR_CONFLICT_HUE_THRESHOLD && Math.abs(l1 - l2) < COLOR_CONFLICT_LIGHTNESS_THRESHOLD) {
                     conflicts.push([hslCache[i].name, hslCache[j].name]);
                 }
             }
@@ -1988,6 +1992,36 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
         if (updated !== msg.mes) {
             msg.mes = updated;
+            return true;
+        }
+        return false;
+    }
+
+    function refreshMessageDom(messageIndex, message) {
+        if (!Number.isFinite(messageIndex) || messageIndex < 0) return false;
+        const ctx = getContext();
+        if (typeof ctx?.updateMessageBlock === 'function') {
+            ctx.updateMessageBlock(messageIndex, message ?? ctx?.chat?.[messageIndex]);
+            return true;
+        }
+        const mesEl = document.querySelector(`.mes[mesid="${messageIndex}"]`) || document.querySelectorAll('.mes')[messageIndex];
+        const mesText = mesEl?.querySelector?.('.mes_text');
+        if (mesText && message) {
+            const rawText = stripColorBlocks(message.mes || '');
+            let formatted = '';
+            try {
+                if (typeof ctx?.messageFormatting === 'function') {
+                    formatted = ctx.messageFormatting(rawText, message.name || '', message.is_system || false, message.is_user || false, messageIndex);
+                }
+            } catch (e) {
+                console.warn('[Dialogue Colors] Message formatting fallback failed:', e);
+            }
+            if (!formatted && typeof converter?.makeHtml === 'function') formatted = converter.makeHtml(rawText);
+            mesText.innerHTML = formatted || escapeHtml(rawText).replace(/\n/g, '<br>');
+            return true;
+        }
+        if (typeof eventSource?.emit === 'function' && event_types?.MESSAGE_UPDATED) {
+            eventSource.emit(event_types.MESSAGE_UPDATED, messageIndex);
             return true;
         }
         return false;
@@ -3400,18 +3434,10 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 }
             }
 
-            // Step 4: Persist and reload
+            // Step 4: Persist; DOM font attributes were already updated above.
             if (recoloredCount > 0) {
                 if (typeof ctx?.saveChat === 'function') await ctx.saveChat();
-                if (typeof ctx?.reloadCurrentChat === 'function') {
-                    toast.info(`Recolored ${recoloredCount} message${recoloredCount !== 1 ? 's' : ''}. Reloading chat...`);
-                    await ctx.reloadCurrentChat();
-                } else if (typeof eventSource?.emit === 'function' && event_types?.CHAT_CHANGED) {
-                    toast.info(`Recolored ${recoloredCount} message${recoloredCount !== 1 ? 's' : ''}. Refreshing chat...`);
-                    eventSource.emit(event_types.CHAT_CHANGED);
-                } else {
-                    toast.info(`Recolored ${recoloredCount} message${recoloredCount !== 1 ? 's' : ''}.`);
-                }
+                toast.info(`Recolored ${recoloredCount} message${recoloredCount !== 1 ? 's' : ''}.`);
             } else if (ambiguousSkippedCount > 0) {
                 toast.info(`No messages recolored; skipped ${ambiguousSkippedCount} ambiguous legacy color mapping${ambiguousSkippedCount !== 1 ? 's' : ''}.`);
             } else {
@@ -3459,6 +3485,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
         try {
             syncAllEffectiveColors();
+            let createdCharacters = false;
 
             // Pre-register all unique non-user speaker names so attribution can find them
             const allSpeakers = new Set();
@@ -3476,7 +3503,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
             let colorizedCount = 0;
             let skippedNoColor = 0;
-            let createdCharacters = false;
+            const updatedMessageIndices = new Set();
             const eligibleIndices = [];
             for (let i = startIdx; i < chat.length; i++) {
                 const msg = chat[i];
@@ -3511,6 +3538,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                         chat[result.msgIndex].mes = result.updatedText;
                         colorizedCount++;
                         processedIndices.add(result.msgIndex);
+                        updatedMessageIndices.add(result.msgIndex);
                     }
                 }
 
@@ -3542,6 +3570,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
                     msg.mes = result.updatedText;
                     colorizedCount++;
+                    updatedMessageIndices.add(i);
                 }
             }
 
@@ -3550,18 +3579,11 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 saveData(); updateCharList(); injectPrompt();
             }
 
-            // Persist and reload
+            // Persist and refresh only the affected message DOM nodes.
             if (colorizedCount > 0) {
                 if (typeof ctx?.saveChat === 'function') await ctx.saveChat();
-                if (typeof ctx?.reloadCurrentChat === 'function') {
-                    toast.info(`Colorized ${colorizedCount} message${colorizedCount !== 1 ? 's' : ''}${skippedNoColor > 0 ? ` (${skippedNoColor} skipped — no speaker/color match)` : ''}. Reloading chat...`);
-                    await ctx.reloadCurrentChat();
-                } else if (typeof eventSource?.emit === 'function' && event_types?.CHAT_CHANGED) {
-                    toast.info(`Colorized ${colorizedCount} message${colorizedCount !== 1 ? 's' : ''}. Refreshing chat...`);
-                    eventSource.emit(event_types.CHAT_CHANGED);
-                } else {
-                    toast.info(`Colorized ${colorizedCount} message${colorizedCount !== 1 ? 's' : ''}.`);
-                }
+                for (const index of updatedMessageIndices) refreshMessageDom(index, chat[index]);
+                toast.info(`Colorized ${colorizedCount} message${colorizedCount !== 1 ? 's' : ''}${skippedNoColor > 0 ? ` (${skippedNoColor} skipped — no speaker/color match)` : ''}.`);
             } else if (skippedNoColor > 0) {
                 toast.info(`No uncolored dialogue found; ${skippedNoColor} message${skippedNoColor !== 1 ? 's' : ''} skipped (no known speaker/color could be resolved).`);
             } else {
@@ -3608,8 +3630,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             saveData(); updateCharList(); injectPrompt();
             stripColorBlockFromElement(document.querySelector('.mes:last-child .mes_text'));
 
-            // Trigger immediate recolor if remapping occurred
-            if (hadRemapping && settings.autoRecolor) {
+            // Trigger immediate recolor only when the user opts into receive-time remapping.
+            if (hadRemapping && settings.autoRemapOnReceive && settings.autoRecolor) {
                 await recolorAllMessages();
             }
 
@@ -3655,19 +3677,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                                 await ctx2.saveChat();
                             }
 
-                            // Force immediate reload
-                            if (typeof ctx2?.reloadCurrentChat === 'function') {
-                                toast.info('Auto-colorized latest message. Reloading chat...');
-                                await ctx2.reloadCurrentChat();
-                            } else if (typeof eventSource?.emit === 'function' && event_types?.MESSAGE_UPDATED) {
-                                toast.info('Auto-colorized latest message. Refreshing chat...');
-                                eventSource.emit(event_types.MESSAGE_UPDATED);
-                            } else if (typeof eventSource?.emit === 'function' && event_types?.CHAT_CHANGED) {
-                                toast.info('Auto-colorized latest message. Refreshing chat...');
-                                eventSource.emit(event_types.CHAT_CHANGED);
-                            } else {
-                                toast.info('Auto-colorized latest message.');
-                            }
+                            refreshMessageDom(chat.length - 1, lastMsg);
+                            toast.info('Auto-colorized latest message.');
                         }
                     } finally {
                         isAutoColorizing = false;
@@ -4030,6 +4041,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         if ($('dc-autoscan-new')) $('dc-autoscan-new').checked = settings.autoScanNewMessages !== false;
         if ($('dc-auto-lock')) $('dc-auto-lock').checked = settings.autoLockDetected !== false;
         if ($('dc-auto-recolor')) $('dc-auto-recolor').checked = settings.autoRecolor !== false;
+        if ($('dc-auto-remap-receive')) $('dc-auto-remap-receive').checked = settings.autoRemapOnReceive || false;
         if ($('dc-auto-colorize')) $('dc-auto-colorize').checked = settings.autoColorize || false;
         if ($('dc-right-click')) $('dc-right-click').checked = settings.enableRightClick;
         if ($('dc-legend')) $('dc-legend').checked = settings.showLegend;
@@ -4137,6 +4149,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                                     <label class="checkbox_label"><input type="checkbox" id="dc-autoscan" data-help="Automatically scan existing chat messages after chat load."><span>Auto-scan on chat load</span></label>
                                     <label class="checkbox_label"><input type="checkbox" id="dc-autoscan-new" data-help="Automatically scan newly arriving messages for speakers/colors."><span>Auto-scan new messages</span></label>
                                     <label class="checkbox_label"><input type="checkbox" id="dc-auto-lock" data-help="Automatically lock newly detected characters."><span>Auto-lock new characters</span></label>
+                                    <label class="checkbox_label"><input type="checkbox" id="dc-auto-remap-receive" data-help="Immediately recolor chat when a received color is remapped for similarity. Off avoids chat lifecycle loops."><span>Auto-fix similar colors on receive</span></label>
                                     <label class="checkbox_label"><input type="checkbox" id="dc-auto-colorize" data-help="Automatically colorize messages when the model skips color tags."><span>Auto-colorize fallback</span></label>
                                     <label class="checkbox_label"><input type="checkbox" id="dc-right-click" data-help="Enable right-click or long-press reassignment on dialogue."><span>Enable right-click reassignment</span></label>
                                     <label class="checkbox_label"><input type="checkbox" id="dc-disable-narration" data-help="Skip narrator color instructions."><span>Disable narration coloring</span></label>
@@ -4298,6 +4311,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         $('dc-autoscan-new').onchange = e => { settings.autoScanNewMessages = e.target.checked; saveData(); };
         $('dc-auto-lock').onchange = e => { settings.autoLockDetected = e.target.checked; saveData(); };
         $('dc-auto-recolor').onchange = e => { settings.autoRecolor = e.target.checked; saveData(); };
+        $('dc-auto-remap-receive').onchange = e => { settings.autoRemapOnReceive = e.target.checked; saveData(); };
         $('dc-auto-colorize').onchange = e => { settings.autoColorize = e.target.checked; saveData(); };
         $('dc-right-click').onchange = e => { settings.enableRightClick = e.target.checked; saveData(); };
         $('dc-legend').onchange = e => { settings.showLegend = e.target.checked; saveData(); updateLegend(); };
@@ -4592,7 +4606,6 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             },
         };
         eventSource.on(event_types.GENERATION_AFTER_COMMANDS, runtimeState.eventHandlers.generationAfterCommands);
-        eventSource.on(event_types.MESSAGE_RECEIVED, runtimeState.eventHandlers.newMessage);
         eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, runtimeState.eventHandlers.newMessage);
         eventSource.on(event_types.CHAT_CHANGED, runtimeState.eventHandlers.chatChanged);
         eventSource.on(event_types.SETTINGS_UPDATED, runtimeState.eventHandlers.settingsUpdated);
