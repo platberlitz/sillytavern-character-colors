@@ -127,6 +127,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     const COLOR_SCHEMA_VERSION = 4;
     const LEGACY_GLOBAL_SETTINGS_KEY = 'dc_global_settings';
     const GLOBAL_SETTINGS_V2_KEY = 'dc_global_settings_v2';
+    const PRESETS_KEY = 'dc_presets';
+    const LEGEND_POSITION_KEY = 'dc_legend_position';
     let characterColors = {};
     let colorHistory = [];
     let historyIndex = -1;
@@ -177,10 +179,22 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     let autoSyncSaveTimeout = null;
     let autoSyncStatusError = '';
 
+    function isPlainObject(value) {
+        return !!value && typeof value === 'object' && !Array.isArray(value);
+    }
+
     function parseStorageObject(key) {
         try {
-            const parsed = JSON.parse(localStorage.getItem(key));
+            const parsed = JSON.parse(getLegacyLocalStorageValue(key));
             return parsed && typeof parsed === 'object' ? parsed : null;
+        } catch {
+            return null;
+        }
+    }
+
+    function getLegacyLocalStorageValue(key) {
+        try {
+            return localStorage.getItem(key);
         } catch {
             return null;
         }
@@ -199,27 +213,52 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         return subset;
     }
 
+    function buildFullSettingsSnapshot() {
+        return { ...settings, colorSchemaVersion: COLOR_SCHEMA_VERSION };
+    }
+
+    function normalizeStoredSettings(source) {
+        if (!isPlainObject(source)) return {};
+        const normalized = {};
+        for (const key of Object.keys(settings)) {
+            if (source[key] !== undefined) normalized[key] = source[key];
+        }
+        if (source.colorSchemaVersion !== undefined) normalized.colorSchemaVersion = source.colorSchemaVersion;
+        return normalized;
+    }
+
+    function applyStoredSettingsSnapshot(source, { includeColorSchemaVersion = true } = {}) {
+        const normalized = normalizeStoredSettings(source);
+        if (!includeColorSchemaVersion) delete normalized.colorSchemaVersion;
+        if (!Object.keys(normalized).length) return false;
+        Object.assign(settings, normalized);
+        normalizeToggleSettings();
+        return true;
+    }
+
+    function buildSettingsSubsetFromSource(source, keys) {
+        const subset = {};
+        if (!isPlainObject(source)) return subset;
+        for (const key of keys) {
+            if (source[key] !== undefined) subset[key] = source[key];
+        }
+        return subset;
+    }
+
     function getLegacyAutoSyncEnabledPreference() {
-        const legacy = localStorage.getItem(LEGACY_AUTO_SYNC_ENABLED_KEY);
+        const legacy = getLegacyLocalStorageValue(LEGACY_AUTO_SYNC_ENABLED_KEY);
         if (legacy === 'true') return true;
         if (legacy === 'false') return false;
         return true;
     }
 
     function cleanupLegacyAutoSyncPreference() {
-        try {
-            localStorage.removeItem(LEGACY_AUTO_SYNC_ENABLED_KEY);
-        } catch {
-            // Ignore legacy cleanup failures.
-        }
+        // localStorage is now read-only legacy input; do not write back to browser storage.
     }
 
     function buildAutoSyncRecord(source = {}) {
-        const settingsSource = source?.settings && typeof source.settings === 'object' && !Array.isArray(source.settings) ? source.settings : {};
-        const normalizedSettings = {};
-        for (const key of GLOBAL_SETTINGS_V2_KEYS) {
-            if (settingsSource[key] !== undefined) normalizedSettings[key] = settingsSource[key];
-        }
+        const settingsSource = isPlainObject(source?.settings) ? source.settings : {};
+        const normalizedSettings = buildSettingsSubsetFromSource(settingsSource, GLOBAL_SETTINGS_V2_KEYS);
         const parsedVersion = Number(source?.version);
         const parsedSequence = Number(source?.sequence);
         return {
@@ -228,7 +267,38 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             sequence: Number.isFinite(parsedSequence) ? parsedSequence : 0,
             autoSyncEnabled: typeof source?.autoSyncEnabled === 'boolean' ? source.autoSyncEnabled : getLegacyAutoSyncEnabledPreference(),
             settings: normalizedSettings,
+            globalSettings: normalizeStoredSettings(source?.globalSettings),
+            colorData: isPlainObject(source?.colorData) ? source.colorData : {},
+            presets: isPlainObject(source?.presets) ? source.presets : {},
+            customPalettes: isPlainObject(source?.customPalettes) ? source.customPalettes : {},
+            customPaletteMeta: isPlainObject(source?.customPaletteMeta) ? source.customPaletteMeta : {},
+            ui: isPlainObject(source?.ui) ? source.ui : {},
+            legacyLocalStorageMigrated: !!source?.legacyLocalStorageMigrated,
         };
+    }
+
+    function mergeIncomingAutoSyncRecord(source) {
+        const current = getAutoSyncRecord(true);
+        const incoming = buildAutoSyncRecord(source);
+        return buildAutoSyncRecord({
+            ...current,
+            ...incoming,
+            settings: Object.keys(incoming.settings || {}).length ? incoming.settings : current.settings,
+            globalSettings: Object.keys(incoming.globalSettings || {}).length ? incoming.globalSettings : current.globalSettings,
+            colorData: Object.keys(incoming.colorData || {}).length ? incoming.colorData : current.colorData,
+            presets: Object.keys(incoming.presets || {}).length ? incoming.presets : current.presets,
+            customPalettes: Object.keys(incoming.customPalettes || {}).length ? incoming.customPalettes : current.customPalettes,
+            customPaletteMeta: Object.keys(incoming.customPaletteMeta || {}).length ? incoming.customPaletteMeta : current.customPaletteMeta,
+            ui: Object.keys(incoming.ui || {}).length ? incoming.ui : current.ui,
+            legacyLocalStorageMigrated: current.legacyLocalStorageMigrated || incoming.legacyLocalStorageMigrated,
+        });
+    }
+
+    function persistModuleStore(record, { debounce = true } = {}) {
+        const normalized = buildAutoSyncRecord(record || getAutoSyncRecord(true));
+        extension_settings[MODULE_NAME] = normalized;
+        if (debounce) saveSettingsDebounced?.();
+        return normalized;
     }
 
     function getAutoSyncRecord(create = false) {
@@ -314,11 +384,11 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     }
 
     function confirmAutoSyncRecord(record) {
-        const normalized = buildAutoSyncRecord(record);
+        const normalized = mergeIncomingAutoSyncRecord(record);
         autoSyncLastTimestamp = normalized.timestamp || null;
         autoSyncSequence = Number.isFinite(normalized.sequence) ? normalized.sequence : 0;
         autoSyncEnabled = normalized.autoSyncEnabled;
-        extension_settings[MODULE_NAME] = normalized;
+        persistModuleStore(normalized, { debounce: false });
         autoSyncPendingRecord = null;
         autoSyncStatusError = '';
         clearAutoSyncSaveTimeout();
@@ -335,15 +405,23 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     }
 
     function applyAutoSyncRecord(record, { force = false } = {}) {
-        const normalized = buildAutoSyncRecord(record);
+        const normalized = mergeIncomingAutoSyncRecord(record);
         const matchesPending = doAutoSyncMarkersMatch(normalized, autoSyncPendingRecord);
         const shouldAcceptRecord = force || matchesPending || isIncomingAutoSyncRecordNewer(normalized);
         const previousAutoSyncEnabled = autoSyncEnabled;
 
-        extension_settings[MODULE_NAME] = normalized;
+        if (!shouldAcceptRecord) {
+            updateAutoSyncUI();
+            cleanupLegacyAutoSyncPreference();
+            return;
+        }
+
+        persistModuleStore(normalized, { debounce: false });
         autoSyncEnabled = normalized.autoSyncEnabled;
 
-        if (shouldAcceptRecord && hasAutoSyncSettingsPayload(normalized)) {
+        if (force) applyStoredSettingsSnapshot(normalized.globalSettings);
+
+        if (hasAutoSyncSettingsPayload(normalized)) {
             let changed = false;
             for (const key of GLOBAL_SETTINGS_V2_KEYS) {
                 if (normalized.settings[key] !== undefined && settings[key] !== normalized.settings[key]) {
@@ -362,11 +440,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             injectPrompt();
         }
 
-        if (shouldAcceptRecord) {
-            confirmAutoSyncRecord(normalized);
-        } else {
-            updateAutoSyncUI();
-        }
+        confirmAutoSyncRecord(normalized);
 
         if (autoSyncEnabled !== previousAutoSyncEnabled) {
             syncAutoSyncPolling();
@@ -402,9 +476,10 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     }
 
     function saveGlobalSettingsSnapshot() {
-        localStorage.setItem(GLOBAL_SETTINGS_V2_KEY, JSON.stringify(buildSettingsSubset(GLOBAL_SETTINGS_V2_KEYS)));
-        // Keep legacy global key for backwards compatibility with older versions.
-        localStorage.setItem(LEGACY_GLOBAL_SETTINGS_KEY, JSON.stringify(buildSettingsSubset(GLOBAL_VISUAL_KEYS)));
+        const record = getAutoSyncRecord(true);
+        record.globalSettings = buildFullSettingsSnapshot();
+        record.settings = buildSettingsSubset(GLOBAL_SETTINGS_V2_KEYS);
+        persistModuleStore(record);
     }
 
     const DYNAMIC_CONTROL_HELP_TEXT = Object.freeze({
@@ -520,16 +595,18 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     };
 
     function getPresets() {
-        const parsed = parseStorageObject('dc_presets');
-        return parsed && !Array.isArray(parsed) ? parsed : {};
+        const presets = getAutoSyncRecord(true).presets;
+        return isPlainObject(presets) ? presets : {};
     }
 
     function persistPresets(presets) {
         try {
-            localStorage.setItem('dc_presets', JSON.stringify(presets || {}));
+            const record = getAutoSyncRecord(true);
+            record.presets = isPlainObject(presets) ? presets : {};
+            persistModuleStore(record);
             return true;
         } catch {
-            toast.warning('Storage full — could not save presets.');
+            toast.warning('Could not save presets to your user settings.');
             return false;
         }
     }
@@ -812,6 +889,18 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     const CUSTOM_PALETTE_META_KEY = 'dc_custom_palette_meta';
     const CUSTOM_PALETTE_SIZE = 8;
 
+    function normalizeCustomPalettes(raw) {
+        if (!isPlainObject(raw)) return {};
+        const cleaned = {};
+        for (const [name, colors] of Object.entries(raw)) {
+            const palette = Array.isArray(colors)
+                ? colors.map(c => normalizeHexColor(c, null)).filter(Boolean)
+                : [];
+            if (palette.length) cleaned[String(name)] = [...new Set(palette)];
+        }
+        return cleaned;
+    }
+
     const PALETTE_STOPWORDS = new Set([
         'the', 'a', 'an', 'and', 'or', 'of', 'to', 'with', 'for', 'in', 'on', 'at', 'from', 'by',
         'style', 'theme', 'vibe', 'tones', 'tone', 'colors', 'color', 'palette', 'pal', 'like', 'as'
@@ -854,33 +943,24 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     };
 
     function getCustomPalettes() {
-        try {
-            const raw = JSON.parse(localStorage.getItem(CUSTOM_PALETTE_KEY) || '{}');
-            if (!raw || typeof raw !== 'object') return {};
-            const cleaned = {};
-            for (const [name, colors] of Object.entries(raw)) {
-                const palette = Array.isArray(colors)
-                    ? colors.map(c => normalizeHexColor(c, null)).filter(Boolean)
-                    : [];
-                if (palette.length) cleaned[String(name)] = [...new Set(palette)];
-            }
-            return cleaned;
-        } catch {
-            return {};
-        }
+        return normalizeCustomPalettes(getAutoSyncRecord(true).customPalettes);
     }
 
     function getCustomPaletteMeta() {
-        try {
-            const raw = JSON.parse(localStorage.getItem(CUSTOM_PALETTE_META_KEY) || '{}');
-            return raw && typeof raw === 'object' ? raw : {};
-        } catch {
-            return {};
-        }
+        const meta = getAutoSyncRecord(true).customPaletteMeta;
+        return isPlainObject(meta) ? meta : {};
     }
 
     function saveCustomPaletteMeta(meta) {
-        try { localStorage.setItem(CUSTOM_PALETTE_META_KEY, JSON.stringify(meta || {})); } catch { }
+        const record = getAutoSyncRecord(true);
+        record.customPaletteMeta = isPlainObject(meta) ? meta : {};
+        persistModuleStore(record);
+    }
+
+    function saveCustomPalettes(customs) {
+        const record = getAutoSyncRecord(true);
+        record.customPalettes = normalizeCustomPalettes(customs);
+        persistModuleStore(record);
     }
 
     function setCustomPaletteMetaEntry(name, entry) {
@@ -1393,7 +1473,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         }
 
         customs[name] = finalPalette;
-        localStorage.setItem(CUSTOM_PALETTE_KEY, JSON.stringify(customs));
+        saveCustomPalettes(customs);
         setCustomPaletteMetaEntry(name, { source, notes: notes.trim(), createdAt: Date.now() });
         refreshPaletteDropdown();
         const label = source === 'llm' ? 'LLM-enhanced' : (source === 'hybrid-fallback' ? 'local fallback' : 'local');
@@ -1414,7 +1494,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             return;
         }
         customs[name] = colors;
-        localStorage.setItem(CUSTOM_PALETTE_KEY, JSON.stringify(customs));
+        saveCustomPalettes(customs);
         setCustomPaletteMetaEntry(name, { source: 'heuristic', notes: '', createdAt: Date.now() });
         refreshPaletteDropdown();
         toast.success(`Custom palette "${name}" saved`);
@@ -1426,7 +1506,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const paletteName = select.value.slice(7);
         const customs = getCustomPalettes();
         delete customs[paletteName];
-        localStorage.setItem(CUSTOM_PALETTE_KEY, JSON.stringify(customs));
+        saveCustomPalettes(customs);
         deleteCustomPaletteMetaEntry(paletteName);
         settings.colorTheme = 'pastel';
         saveData();
@@ -1732,6 +1812,116 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     function getStorageKey() { return settings.shareColorsGlobally ? 'dc_global' : `dc_char_${getCharKey() || 'default'}`; }
     function getLegacyStorageKey() { return settings.shareColorsGlobally ? 'dc_global' : `dc_char_${getLegacyCharKey() || 'default'}`; }
 
+    function getStorageLabelForKey(key) {
+        return key === 'dc_global' ? 'Global shared colors' : String(key || '').replace(/^dc_char_/, '');
+    }
+
+    function normalizeColorDataEntry(source) {
+        if (!isPlainObject(source)) return null;
+        const colors = normalizeCharacterColors(source.colors || {});
+        const storedSettings = normalizeStoredSettings(source.settings);
+        return {
+            colors,
+            settings: storedSettings,
+            updatedAt: typeof source.updatedAt === 'string' ? source.updatedAt : '',
+        };
+    }
+
+    function getUserColorDataStore() {
+        const record = getAutoSyncRecord(true);
+        if (!isPlainObject(record.colorData)) record.colorData = {};
+        return record.colorData;
+    }
+
+    function getStoredColorData(key) {
+        return normalizeColorDataEntry(getUserColorDataStore()[key]);
+    }
+
+    function setStoredColorData(key, colors, storedSettings = settings) {
+        const record = getAutoSyncRecord(true);
+        if (!isPlainObject(record.colorData)) record.colorData = {};
+        record.colorData[key] = {
+            colors: normalizeCharacterColors(colors || {}),
+            settings: normalizeStoredSettings(storedSettings),
+            updatedAt: new Date().toISOString(),
+        };
+        persistModuleStore(record);
+    }
+
+    function removeStoredColorData(key) {
+        const record = getAutoSyncRecord(true);
+        if (!isPlainObject(record.colorData) || !Object.prototype.hasOwnProperty.call(record.colorData, key)) return false;
+        delete record.colorData[key];
+        persistModuleStore(record);
+        return true;
+    }
+
+    function getUiState() {
+        const record = getAutoSyncRecord(true);
+        if (!isPlainObject(record.ui)) record.ui = {};
+        return record.ui;
+    }
+
+    function getLegendPosition() {
+        const position = getUiState().legendPosition;
+        return isPlainObject(position) ? position : {};
+    }
+
+    function saveLegendPosition(position) {
+        const record = getAutoSyncRecord(true);
+        const nextPosition = isPlainObject(position) ? position : {};
+        record.ui = { ...(isPlainObject(record.ui) ? record.ui : {}), legendPosition: nextPosition };
+        persistModuleStore(record);
+    }
+
+    function migrateLegacyLocalStorageIfNeeded() {
+        const record = getAutoSyncRecord(true);
+        if (record.legacyLocalStorageMigrated) return;
+
+        if (!isPlainObject(record.globalSettings) || !Object.keys(record.globalSettings).length) {
+            const legacyGlobal = parseStorageObject(LEGACY_GLOBAL_SETTINGS_KEY);
+            const globalV2 = parseStorageObject(GLOBAL_SETTINGS_V2_KEY);
+            if (hasAutoSyncSettingsPayload(record)) applySettingsSubset(record.settings, GLOBAL_SETTINGS_V2_KEYS);
+            applySettingsSubset(legacyGlobal, GLOBAL_VISUAL_KEYS);
+            if (globalV2) applySettingsSubset(globalV2, GLOBAL_SETTINGS_V2_KEYS);
+            record.globalSettings = buildFullSettingsSnapshot();
+        }
+
+        applyStoredSettingsSnapshot(record.globalSettings, { includeColorSchemaVersion: false });
+
+        for (const key of [PRESETS_KEY, CUSTOM_PALETTE_KEY, CUSTOM_PALETTE_META_KEY, LEGEND_POSITION_KEY]) {
+            const value = parseStorageObject(key);
+            if (!value) continue;
+            if (key === PRESETS_KEY && !Object.keys(record.presets || {}).length) {
+                record.presets = isPlainObject(value) ? value : {};
+            } else if (key === CUSTOM_PALETTE_KEY && !Object.keys(record.customPalettes || {}).length) {
+                record.customPalettes = normalizeCustomPalettes(value);
+            } else if (key === CUSTOM_PALETTE_META_KEY && !Object.keys(record.customPaletteMeta || {}).length) {
+                record.customPaletteMeta = isPlainObject(value) ? value : {};
+            } else if (key === LEGEND_POSITION_KEY && !isPlainObject(record.ui?.legendPosition)) {
+                record.ui = { ...(isPlainObject(record.ui) ? record.ui : {}), legendPosition: value };
+            }
+        }
+
+        try {
+            for (let i = 0; i < localStorage.length; i++) {
+                const key = localStorage.key(i);
+                if (!key || !(key.startsWith('dc_char_') || key === 'dc_global')) continue;
+                if (record.colorData?.[key]) continue;
+                const value = parseStorageObject(key);
+                const normalized = normalizeColorDataEntry(value);
+                if (!normalized) continue;
+                if (!isPlainObject(record.colorData)) record.colorData = {};
+                record.colorData[key] = normalized;
+            }
+        } catch {
+            // Browser storage is a best-effort legacy migration source only.
+        }
+
+        record.legacyLocalStorageMigrated = true;
+        persistModuleStore(record);
+    }
+
     // Extract dominant color from avatar image
     async function extractAvatarColor(imgSrc) {
         return new Promise(resolve => {
@@ -2033,14 +2223,15 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         settings.colorSchemaVersion = COLOR_SCHEMA_VERSION;
         syncAllEffectiveColors();
         try {
-            localStorage.setItem(getStorageKey(), JSON.stringify({ colors: characterColors, settings }));
+            setStoredColorData(getStorageKey(), characterColors, settings);
             saveGlobalSettingsSnapshot();
             // Trigger auto-sync if enabled
             if (autoSyncEnabled && !options.skipAutoSync) {
                 saveSettingsToStore();
             }
         } catch (e) {
-            toast.warning('Storage full — could not save color data. Try clearing unused chats or characters.');
+            console.warn('[Dialogue Colors] Failed to save user settings:', e);
+            toast.warning('Could not save color data to your user settings.');
         }
     }
 
@@ -2083,47 +2274,42 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         return changed;
     }
 
-    // Phase 2B: Legacy key fallback in loadData
+    function applyStoredColorData(data) {
+        if (!data) return false;
+        if (data.colors) characterColors = normalizeCharacterColors(data.colors);
+        if (data.settings) {
+            Object.assign(settings, data.settings);
+            if (data.settings.colorSchemaVersion === undefined) settings.colorSchemaVersion = 0;
+        } else if (data.colors) {
+            settings.colorSchemaVersion = 0;
+        }
+        return !!data.colors;
+    }
+
+    // Legacy localStorage fallback is intentionally read-only and only seeds user settings.
     function loadData() {
         characterColors = {};
-        const legacyGlobal = parseStorageObject(LEGACY_GLOBAL_SETTINGS_KEY);
-        const globalV2 = parseStorageObject(GLOBAL_SETTINGS_V2_KEY);
+        const record = getAutoSyncRecord(true);
+        applyStoredSettingsSnapshot(record.globalSettings, { includeColorSchemaVersion: false });
         const primaryKey = getStorageKey();
         let loaded = false;
-        try {
-            const d = JSON.parse(localStorage.getItem(primaryKey));
-            if (d?.colors) { characterColors = normalizeCharacterColors(d.colors); loaded = true; }
-            if (d?.settings) {
-                Object.assign(settings, d.settings);
-                if (d.settings.colorSchemaVersion === undefined) settings.colorSchemaVersion = 0;
-            } else if (d?.colors) {
-                settings.colorSchemaVersion = 0;
-            }
-        } catch { }
+
+        loaded = applyStoredColorData(getStoredColorData(primaryKey));
+        if (!loaded) {
+            const legacyData = parseStorageObject(primaryKey);
+            if (legacyData) loaded = applyStoredColorData(normalizeColorDataEntry(legacyData));
+            if (loaded) setStoredColorData(primaryKey, characterColors, settings);
+        }
         if (!loaded) {
             const legacyKey = getLegacyStorageKey();
             if (legacyKey !== primaryKey) {
-                try {
-                    const d = JSON.parse(localStorage.getItem(legacyKey));
-                    if (d?.colors) { characterColors = normalizeCharacterColors(d.colors); loaded = true; }
-                    if (d?.settings) {
-                        Object.assign(settings, d.settings);
-                        if (d.settings.colorSchemaVersion === undefined) settings.colorSchemaVersion = 0;
-                    } else if (d?.colors) {
-                        settings.colorSchemaVersion = 0;
-                    }
-                } catch { }
+                const legacyData = parseStorageObject(legacyKey);
+                if (legacyData) loaded = applyStoredColorData(normalizeColorDataEntry(legacyData));
+                if (loaded) setStoredColorData(primaryKey, characterColors, settings);
             }
         }
-        // Legacy key only has visual settings, but still serves as fallback.
-        applySettingsSubset(legacyGlobal, GLOBAL_VISUAL_KEYS);
-        // V2 is source-of-truth for shared global settings (including toggles).
-        if (globalV2) applySettingsSubset(globalV2, GLOBAL_SETTINGS_V2_KEYS);
+        applyStoredSettingsSnapshot(record.globalSettings, { includeColorSchemaVersion: false });
         normalizeToggleSettings();
-        // First-run migration: seed v2 globals from currently loaded settings.
-        if (!globalV2) {
-            try { saveGlobalSettingsSnapshot(); } catch { }
-        }
         if (migrateColorSchemaIfNeeded()) {
             saveData();
         }
@@ -2237,7 +2423,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             settings: settingsData,
         });
 
-        extension_settings[MODULE_NAME] = nextRecord;
+        persistModuleStore(nextRecord, { debounce: false });
         markAutoSyncPending(nextRecord);
         saveSettingsDebounced?.();
         cleanupLegacyAutoSyncPreference();
@@ -2313,12 +2499,13 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     }
 
     function initAutoSync() {
-        const hadLegacyPreference = localStorage.getItem(LEGACY_AUTO_SYNC_ENABLED_KEY) !== null;
+        const hadLegacyPreference = getLegacyLocalStorageValue(LEGACY_AUTO_SYNC_ENABLED_KEY) !== null;
         const record = getAutoSyncRecord(true);
+        applyStoredSettingsSnapshot(record.globalSettings, { includeColorSchemaVersion: false });
         applyAutoSyncRecord(record, { force: true });
         cleanupLegacyAutoSyncPreference();
 
-        if (hadLegacyPreference || !record.timestamp || !hasAutoSyncSettingsPayload(record)) {
+        if (autoSyncEnabled && (hadLegacyPreference || !record.timestamp || !hasAutoSyncSettingsPayload(record))) {
             saveSettingsToStore({ force: true });
         }
 
@@ -2582,7 +2769,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             legend = document.createElement('div');
             legend.id = 'dc-legend-float';
 
-            const savedPos = parseStorageObject('dc_legend_position') || {};
+            const savedPos = getLegendPosition();
             const top = Number.isFinite(savedPos.top) ? savedPos.top : 60;
             const left = Number.isFinite(savedPos.left) ? savedPos.left : undefined;
             const right = Number.isFinite(savedPos.right) ? savedPos.right : 10;
@@ -2626,7 +2813,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 if (isDragging) {
                     isDragging = false;
                     const rect = legend.getBoundingClientRect();
-                    localStorage.setItem('dc_legend_position', JSON.stringify({ top: rect.top, left: rect.left }));
+                    saveLegendPosition({ top: rect.top, left: rect.left });
                 }
             };
 
@@ -2686,25 +2873,19 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
     function showStorageManager() {
         const currentKey = getStorageKey();
-        const keys = [];
-        for (let i = 0; i < localStorage.length; i++) {
-            const k = localStorage.key(i);
-            if ((k.startsWith('dc_char_') || k === 'dc_global') && k !== 'dc_global_settings') keys.push(k);
-        }
+        const colorData = getUserColorDataStore();
+        const keys = Object.keys(colorData).filter(k => k.startsWith('dc_char_') || k === 'dc_global');
         if (!keys.length) { toast.info('No stored color data found'); return; }
 
         const entries = keys.map(k => {
-            const raw = localStorage.getItem(k);
+            const entry = normalizeColorDataEntry(colorData[k]) || { colors: {} };
+            const raw = JSON.stringify(entry);
             const size = new Blob([raw]).size;
-            let names = [], colorCount = 0;
-            try {
-                const parsed = JSON.parse(raw);
-                const colors = parsed.colors || {};
-                colorCount = Object.keys(colors).length;
-                names = Object.values(colors).map(v => v.name).filter(Boolean).slice(0, 3);
-            } catch { /* corrupted data — still show it */ }
+            const colors = entry.colors || {};
+            const colorCount = Object.keys(colors).length;
+            const names = Object.values(colors).map(v => v.name).filter(Boolean).slice(0, 3);
             const isCurrent = k === currentKey;
-            const label = names.length ? names.join(', ') + (colorCount > 3 ? ` (+${colorCount - 3})` : '') : k;
+            const label = names.length ? names.join(', ') + (colorCount > 3 ? ` (+${colorCount - 3})` : '') : getStorageLabelForKey(k);
             const sizeStr = size < 1024 ? `${size} B` : `${(size / 1024).toFixed(1)} KB`;
             return { key: k, label, colorCount, sizeStr, size, isCurrent };
         });
@@ -2737,7 +2918,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             if (!confirm(confirmMessage)) return;
 
             selected.forEach(k => {
-                if (k !== currentKey) localStorage.removeItem(k);
+                if (k !== currentKey) removeStoredColorData(k);
             });
             popup.remove();
             document.removeEventListener('mousedown', closePopup);
@@ -2747,7 +2928,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                     saveHistory();
                     saveData();
                 } else {
-                    localStorage.removeItem(currentKey);
+                    removeStoredColorData(currentKey);
                     characterColors = {};
                     selectedKeys.clear();
                     expandedCharacterRows.clear();
@@ -4633,6 +4814,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     }
 
     function init() {
+        migrateLegacyLocalStorageIfNeeded();
         loadData();
         initAutoSync();
         setTimeout(() => ensureRegexScript(), 1000);
