@@ -169,7 +169,15 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     let isRecoloring = false;
     let isColorizing = false;
     let isAutoColorizing = false;
-    let brightnessRecolorTimer = null;
+    const LIVE_CHAT_SAVE_DELAY_MS = 350;
+    const COLOR_STATE_SAVE_DELAY_MS = 180;
+    let liveChatSaveTimer = null;
+    let colorStateSaveTimer = null;
+    let pendingLiveChatSave = false;
+    let pendingColorStateSaveData = false;
+    let pendingColorStateHistory = false;
+    let pendingColorStateUpdateList = false;
+    let pendingColorStateInjectPrompt = false;
     // Auto-sync state
     let autoSyncEnabled = false;
     let autoSyncInterval = null;
@@ -554,11 +562,23 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     }
 
     function undo() {
-        if (historyIndex > 0) { historyIndex--; characterColors = JSON.parse(colorHistory[historyIndex]); saveData(); updateCharList(); injectPrompt(); }
+        if (historyIndex > 0) {
+            const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
+            historyIndex--;
+            characterColors = JSON.parse(colorHistory[historyIndex]);
+            applyLiveColorChangesFromSnapshot(snapshot, Object.keys(characterColors).filter(key => snapshot[key]), { saveImmediately: true });
+            saveData(); updateCharList(); injectPrompt();
+        }
     }
 
     function redo() {
-        if (historyIndex < colorHistory.length - 1) { historyIndex++; characterColors = JSON.parse(colorHistory[historyIndex]); saveData(); updateCharList(); injectPrompt(); }
+        if (historyIndex < colorHistory.length - 1) {
+            const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
+            historyIndex++;
+            characterColors = JSON.parse(colorHistory[historyIndex]);
+            applyLiveColorChangesFromSnapshot(snapshot, Object.keys(characterColors).filter(key => snapshot[key]), { saveImmediately: true });
+            saveData(); updateCharList(); injectPrompt();
+        }
     }
 
     function createRestoreSnapshot() {
@@ -567,10 +587,12 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const expandedSnapshot = [...expandedCharacterRows];
         const swapSnapshot = swapMode;
         return function() {
+            const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
             characterColors = JSON.parse(colorsSnapshot);
             selectedKeys = new Set(keysSnapshot);
             expandedCharacterRows = new Set(expandedSnapshot);
             swapMode = swapSnapshot;
+            applyLiveColorChangesFromSnapshot(snapshot, Object.keys(characterColors).filter(key => snapshot[key]), { saveImmediately: true });
             saveHistory(); saveData(); updateCharList(); injectPrompt();
         };
     }
@@ -757,15 +779,18 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         invalidateThemeCache();
         const sortedEntries = Object.entries(characterColors)
             .sort((a, b) => (a[1].dialogueCount || 0) - (b[1].dialogueCount || 0));
+        const changedKeys = [];
+        const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
 
-        for (const [, char] of sortedEntries) {
+        for (const [key, char] of sortedEntries) {
             if (!char.locked) {
                 setEntryFromBaseColor(char, suggestColorForName(char.name) || getNextColor());
+                changedKeys.push(key);
             }
         }
+        applyLiveColorChangesFromSnapshot(snapshot, changedKeys);
         saveHistory(); saveData(); updateCharList(); injectPrompt();
         toast.success('Colors regenerated');
-        if (settings.autoRecolor) recolorAllMessages();
     }
 
     // Phase 4B: Improved conflict resolution feedback listing pairs
@@ -773,33 +798,38 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const conflicts = checkColorConflicts();
         if (!conflicts.length) { toast.info('No conflicts found'); return; }
         const fixedPairs = [];
+        const changedKeys = [];
+        const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
         conflicts.forEach(([name1, name2]) => {
             const key1 = name1.toLowerCase(), key2 = name2.toLowerCase();
             if (characterColors[key1] && !characterColors[key1].locked) {
                 setEntryFromBaseColor(characterColors[key1], getNextColor());
+                changedKeys.push(key1);
                 fixedPairs.push(`${name1} & ${name2} (changed ${name1})`);
             } else if (characterColors[key2] && !characterColors[key2].locked) {
                 setEntryFromBaseColor(characterColors[key2], getNextColor());
+                changedKeys.push(key2);
                 fixedPairs.push(`${name1} & ${name2} (changed ${name2})`);
             }
         });
+        applyLiveColorChangesFromSnapshot(snapshot, changedKeys);
         saveHistory(); saveData(); updateCharList(); injectPrompt();
-        if (settings.autoRecolor) recolorAllMessages();
         toast.success(`Fixed: ${fixedPairs.join('; ')}`);
     }
 
     function flipColorsForTheme() {
         const entries = Object.entries(characterColors);
         if (!entries.length) { toast.info('No characters to flip'); return; }
+        const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
         for (const [, char] of entries) {
             const [h, s, l] = hexToHsl(getEntryEffectiveColor(char));
             const newL = 100 - l;
             const clampedL = Math.max(25, Math.min(85, newL));
             setEntryFromEffectiveColor(char, hslToHex(h, s, clampedL));
         }
+        applyLiveColorChangesFromSnapshot(snapshot, entries.map(([key]) => key));
         saveHistory(); saveData(); updateCharList(); injectPrompt();
         toast.success('Colors flipped for theme switch');
-        if (settings.autoRecolor) recolorAllMessages();
     }
 
     // Phase 5A: Preset management with dropdown UI
@@ -833,6 +863,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const presetData = presets[name];
         if (!Array.isArray(presetData)) { toast.error('Preset is invalid'); return; }
         let changed = false;
+        const changedKeys = [];
+        const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
         for (const p of presetData) {
             const normalized = normalizeCharacterEntry(p, p?.name);
             if (!normalized) continue;
@@ -842,8 +874,11 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 ...normalized,
                 dialogueCount: existing?.dialogueCount || 0
             };
+            if (!characterColors[key].locked) setEntryFromBaseColor(characterColors[key], getBaseColor(characterColors[key]));
+            changedKeys.push(key);
             changed = true;
         }
+        if (changed) applyLiveColorChangesFromSnapshot(snapshot, changedKeys);
         if (changed) saveHistory();
         saveData(); updateCharList(); injectPrompt();
         toast.success(`Preset "${name}" loaded`);
@@ -1241,6 +1276,287 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         return String(text ?? '').replace(/\n?\[COLORS?:[^\]]*\]/gi, '');
     }
 
+    function normalizeColorReplacementMap(replacements) {
+        const normalized = {};
+        if (!replacements || typeof replacements !== 'object') return normalized;
+        for (const [oldColor, newColor] of Object.entries(replacements)) {
+            const oldHex = normalizeHexColor(oldColor, null);
+            const newHex = normalizeHexColor(newColor, null);
+            if (!oldHex || !newHex || oldHex === newHex) continue;
+            normalized[oldHex] = newHex;
+        }
+        return normalized;
+    }
+
+    function normalizeNameColorMap(nameToNewColor) {
+        const normalized = {};
+        if (!nameToNewColor || typeof nameToNewColor !== 'object') return normalized;
+        for (const [name, color] of Object.entries(nameToNewColor)) {
+            const nameKey = String(name ?? '').trim().toLowerCase();
+            const nextColor = normalizeHexColor(color, null);
+            if (nameKey && nextColor) normalized[nameKey] = nextColor;
+        }
+        return normalized;
+    }
+
+    function updateTextColorReferences(rawText, replacements) {
+        const normalized = normalizeColorReplacementMap(replacements);
+        if (!Object.keys(normalized).length) return { updatedText: rawText, changed: false };
+        const fontTagRegex = /<font\b[^>]*\bcolor\s*=\s*["']?(#[0-9a-fA-F]{6})["']?[^>]*>/gi;
+        const colorBlockRegex = /\[COLORS?:([^\]]*)\]/gi;
+        let updated = String(rawText ?? '').replace(fontTagRegex, (match, oldHex) => {
+            const replacement = normalized[normalizeHexColor(oldHex, null)];
+            if (!replacement) return match;
+            return match.replace(/(\bcolor\s*=\s*["']?)(#[0-9a-fA-F]{6})(["']?)/i, `$1${replacement}$3`);
+        });
+        updated = updated.replace(colorBlockRegex, (fullMatch, pairsStr) => {
+            const newPairs = pairsStr.split(',').map(pair => {
+                const eqIdx = pair.indexOf('=');
+                if (eqIdx === -1) return pair;
+                const namePart = pair.substring(0, eqIdx);
+                const rawColor = pair.substring(eqIdx + 1).trim();
+                const replacement = normalized[normalizeHexColor(rawColor, null)];
+                return replacement ? `${namePart}=${replacement}` : pair;
+            }).join(',');
+            return fullMatch.replace(pairsStr, newPairs);
+        });
+        return { updatedText: updated, changed: updated !== String(rawText ?? '') };
+    }
+
+    function updateVisibleMessageColors(messageIndex, replacements) {
+        const normalized = normalizeColorReplacementMap(replacements);
+        if (!Object.keys(normalized).length) return false;
+        const mesEl = document.querySelector(`.mes[mesid="${messageIndex}"]`) || document.querySelectorAll('.mes')[messageIndex];
+        if (!mesEl) return false;
+        let changed = false;
+        mesEl.querySelectorAll('font[color]').forEach(fontEl => {
+            const replacement = normalized[normalizeHexColor(fontEl.getAttribute('color'), null)];
+            if (!replacement) return;
+            fontEl.setAttribute('color', replacement);
+            changed = true;
+        });
+        return changed;
+    }
+
+    function queueChatSave() {
+        pendingLiveChatSave = true;
+        if (liveChatSaveTimer) clearTimeout(liveChatSaveTimer);
+        liveChatSaveTimer = setTimeout(() => {
+            liveChatSaveTimer = null;
+            if (!pendingLiveChatSave) return;
+            pendingLiveChatSave = false;
+            const ctx = getContext();
+            if (typeof ctx?.saveChat === 'function') {
+                ctx.saveChat().catch(err => console.error('[Dialogue Colors] Failed to save chat:', err));
+            }
+        }, LIVE_CHAT_SAVE_DELAY_MS);
+    }
+
+    function flushChatSave() {
+        if (liveChatSaveTimer) {
+            clearTimeout(liveChatSaveTimer);
+            liveChatSaveTimer = null;
+        }
+        if (!pendingLiveChatSave) return;
+        pendingLiveChatSave = false;
+        const ctx = getContext();
+        if (typeof ctx?.saveChat === 'function') {
+            ctx.saveChat().catch(err => console.error('[Dialogue Colors] Failed to save chat:', err));
+        }
+    }
+
+    function buildGlobalColorAssignmentLookup(chat) {
+        const latestByColor = {};
+        const namesByColor = {};
+        for (const msg of chat || []) {
+            const parsed = parseColorAssignmentsFromText(msg?.mes || '');
+            for (const [color, name] of Object.entries(parsed.latestByColor)) {
+                latestByColor[color] = name;
+            }
+            for (const [color, names] of Object.entries(parsed.namesByColor)) {
+                if (!namesByColor[color]) namesByColor[color] = new Set();
+                for (const name of names) namesByColor[color].add(name);
+            }
+        }
+        return { latestByColor, namesByColor };
+    }
+
+    function buildMessageLiveReplacements(rawText, fallbackReplacements, nameToNewColor, globalAssignments) {
+        const replacements = { ...fallbackReplacements };
+        if (!Object.keys(nameToNewColor).length) return replacements;
+        const localParsed = parseColorAssignmentsFromText(rawText);
+        const fontColorsInMessage = collectFontColorsFromText(rawText);
+        const candidateColors = new Set([...fontColorsInMessage, ...Object.keys(localParsed.latestByColor)]);
+        for (const oldColor of candidateColors) {
+            const oldHex = normalizeHexColor(oldColor, null);
+            if (!oldHex) continue;
+            let mappedName = '';
+            const localNames = localParsed.namesByColor[oldHex];
+            if (localNames) {
+                if (localNames.size !== 1) { delete replacements[oldHex]; continue; }
+                mappedName = localParsed.latestByColor[oldHex];
+            } else {
+                const globalNames = globalAssignments?.namesByColor?.[oldHex];
+                if (!globalNames) continue;
+                if (globalNames.size !== 1) { delete replacements[oldHex]; continue; }
+                mappedName = globalAssignments.latestByColor[oldHex];
+            }
+            const newColor = nameToNewColor[mappedName];
+            if (newColor && oldHex !== newColor) replacements[oldHex] = newColor;
+            else delete replacements[oldHex];
+        }
+        return replacements;
+    }
+
+    function applyLiveColorReplacements(replacements, options = {}) {
+        const fallbackReplacements = normalizeColorReplacementMap(replacements);
+        const nameToNewColor = normalizeNameColorMap(options.nameToNewColor);
+        if (!Object.keys(fallbackReplacements).length && !Object.keys(nameToNewColor).length) return 0;
+        const ctx = getContext();
+        const chat = ctx?.chat || [];
+        const globalAssignments = Object.keys(nameToNewColor).length ? buildGlobalColorAssignmentLookup(chat) : null;
+        let changedCount = 0;
+        for (let i = 0; i < chat.length; i++) {
+            const msg = chat[i];
+            if (!msg || msg.is_user) continue;
+            const messageReplacements = buildMessageLiveReplacements(msg.mes || '', fallbackReplacements, nameToNewColor, globalAssignments);
+            if (!Object.keys(messageReplacements).length) continue;
+            const result = updateTextColorReferences(msg.mes || '', messageReplacements);
+            if (result.changed) {
+                msg.mes = result.updatedText;
+                changedCount++;
+            }
+            updateVisibleMessageColors(i, messageReplacements);
+        }
+        if (changedCount) {
+            pendingLiveChatSave = true;
+            if (options.saveImmediately) flushChatSave();
+            else queueChatSave();
+        }
+        return changedCount;
+    }
+
+    function captureEffectiveColorSnapshot(keys = Object.keys(characterColors)) {
+        const snapshot = {};
+        const list = Array.isArray(keys) ? keys : [keys];
+        for (const key of list) {
+            const entry = characterColors[key];
+            if (!entry) continue;
+            snapshot[key] = getEntryEffectiveColor(entry);
+        }
+        return snapshot;
+    }
+
+    function buildColorReplacementsFromSnapshot(snapshot, keys = Object.keys(snapshot || {})) {
+        const replacements = {};
+        const ambiguous = new Set();
+        const targetKeys = new Set(Array.isArray(keys) ? keys : [keys]);
+        const snapshotColors = {};
+        for (const [key, color] of Object.entries(snapshot || {})) {
+            const oldColor = normalizeHexColor(color, null);
+            if (!oldColor) continue;
+            if (!snapshotColors[oldColor]) snapshotColors[oldColor] = [];
+            snapshotColors[oldColor].push(key);
+        }
+        const list = Array.isArray(keys) ? keys : [keys];
+        for (const key of list) {
+            const oldColor = normalizeHexColor(snapshot?.[key], null);
+            const newColor = normalizeHexColor(getEntryEffectiveColor(characterColors[key]), null);
+            if (!oldColor || !newColor || oldColor === newColor) continue;
+            const sharedOldColorKeys = snapshotColors[oldColor] || [];
+            if (sharedOldColorKeys.some(snapshotKey => {
+                if (!targetKeys.has(snapshotKey)) return true;
+                return normalizeHexColor(getEntryEffectiveColor(characterColors[snapshotKey]), null) !== newColor;
+            })) {
+                ambiguous.add(oldColor);
+                continue;
+            }
+            if (replacements[oldColor] && replacements[oldColor] !== newColor) {
+                ambiguous.add(oldColor);
+                continue;
+            }
+            replacements[oldColor] = newColor;
+        }
+        for (const oldColor of ambiguous) delete replacements[oldColor];
+        return replacements;
+    }
+
+    function buildNameToCurrentColorForKeys(keys = Object.keys(characterColors)) {
+        const nameToNewColor = {};
+        const list = Array.isArray(keys) ? keys : [keys];
+        for (const key of list) {
+            const entry = characterColors[key];
+            if (!entry) continue;
+            const color = getEntryEffectiveColor(entry);
+            nameToNewColor[entry.name] = color;
+            for (const alias of entry.aliases || []) nameToNewColor[alias] = color;
+        }
+        if (settings.narratorColor) {
+            nameToNewColor.Narrator = applyThemeReadabilityAndBrightness(settings.narratorColor);
+        }
+        return nameToNewColor;
+    }
+
+    function applyFastColorUiUpdates(keys = Object.keys(characterColors)) {
+        const list = Array.isArray(keys) ? keys : [keys];
+        for (const key of list) {
+            const entry = characterColors[key];
+            if (!entry) continue;
+            const row = Array.from(document.querySelectorAll('#dc-char-list .dc-char')).find(el => el.dataset.key === key);
+            if (!row) continue;
+            const effectiveColor = getEntryEffectiveColor(entry);
+            const pickerColor = getBaseColor(entry, effectiveColor);
+            const dot = row.querySelector('.dc-color-dot');
+            const name = row.querySelector('.dc-char-name');
+            const colorInput = row.querySelector('.dc-color-input');
+            const hexInput = row.querySelector('.dc-color-hex');
+            if (dot) dot.style.background = effectiveColor;
+            if (name) name.style.color = effectiveColor;
+            if (colorInput && colorInput.value !== pickerColor) colorInput.value = pickerColor;
+            if (hexInput && hexInput.value !== pickerColor) hexInput.value = pickerColor;
+        }
+        updateLegend();
+    }
+
+    function applyLiveColorChangesFromSnapshot(snapshot, keys = Object.keys(snapshot || {}), options = {}) {
+        if (!settings.autoRecolor && !options.force) return 0;
+        const list = Array.isArray(keys) ? keys : [keys];
+        return applyLiveColorReplacements(buildColorReplacementsFromSnapshot(snapshot, list), {
+            nameToNewColor: buildNameToCurrentColorForKeys(list),
+            saveImmediately: options.saveImmediately,
+        });
+    }
+
+    function queueColorStateSave(options = {}) {
+        pendingColorStateSaveData = true;
+        pendingColorStateHistory = pendingColorStateHistory || options.history !== false;
+        pendingColorStateUpdateList = pendingColorStateUpdateList || options.updateList !== false;
+        pendingColorStateInjectPrompt = pendingColorStateInjectPrompt || options.injectPrompt !== false;
+        if (colorStateSaveTimer) clearTimeout(colorStateSaveTimer);
+        colorStateSaveTimer = setTimeout(() => flushColorStateSave(), COLOR_STATE_SAVE_DELAY_MS);
+    }
+
+    function flushColorStateSave() {
+        if (colorStateSaveTimer) {
+            clearTimeout(colorStateSaveTimer);
+            colorStateSaveTimer = null;
+        }
+        if (!pendingColorStateSaveData && !pendingColorStateHistory && !pendingColorStateUpdateList && !pendingColorStateInjectPrompt) return;
+        const shouldSaveHistory = pendingColorStateHistory;
+        const shouldSaveData = pendingColorStateSaveData;
+        const shouldUpdateList = pendingColorStateUpdateList;
+        const shouldInjectPrompt = pendingColorStateInjectPrompt;
+        pendingColorStateSaveData = false;
+        pendingColorStateHistory = false;
+        pendingColorStateUpdateList = false;
+        pendingColorStateInjectPrompt = false;
+        if (shouldSaveHistory) saveHistory();
+        if (shouldSaveData) saveData();
+        if (shouldInjectPrompt) injectPrompt();
+        if (shouldUpdateList) updateCharList();
+        updateLegend();
+    }
+
     function normalizeColorizedTextForComparison(text) {
         return stripColorBlocks(stripFontTags(String(text ?? '').replace(/\r\n?/g, '\n'))).trim();
     }
@@ -1584,10 +1900,11 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             swatch.onmouseenter = () => { swatch.style.borderColor = '#fff'; };
             swatch.onmouseleave = () => { swatch.style.borderColor = 'transparent'; };
             swatch.onclick = () => {
+                const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
                 setEntryFromBaseColor(char, swatch.dataset.color);
+                applyLiveColorChangesFromSnapshot(snapshot, [key]);
                 saveHistory(); saveData(); updateCharList(); injectPrompt();
                 popup.remove();
-                if (settings.autoRecolor) recolorAllMessages();
             };
         });
         const closePopup = e => { if (!popup.contains(e.target)) { popup.remove(); document.removeEventListener('mousedown', closePopup); } };
@@ -2041,13 +2358,21 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                     const key = name.toLowerCase();
                     let finalColor = pickerColor;
                     let textUpdated = false;
+                    let existingColorChanged = false;
+                    const existingSnapshot = characterColors[key]
+                        ? captureEffectiveColorSnapshot(Object.keys(characterColors))
+                        : null;
+                    const originalFontColor = !isQElement
+                        ? normalizeHexColor(fontTag.getAttribute('color'), null)
+                        : null;
 
                     if (characterColors[key]) {
                         const existingColor = getEntryEffectiveColor(characterColors[key]);
                         if (normalizeHexColor(pickerColor) !== normalizeHexColor(existingColor)) {
                             setEntryFromEffectiveColor(characterColors[key], pickerColor);
+                            existingColorChanged = true;
                         }
-                        finalColor = pickerColor;
+                        finalColor = getEntryEffectiveColor(characterColors[key]);
                     } else {
                         const built = buildCharacterEntry(name, {
                             color: pickerColor,
@@ -2059,21 +2384,22 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                         characterColors[key] = built.entry;
                     }
 
+                    if (existingColorChanged) {
+                        applyLiveColorChangesFromSnapshot(existingSnapshot, [key], { saveImmediately: true });
+                    }
+
                     if (isQElement) {
                         textUpdated = wrapQElementWithFontTag(qElement, finalColor);
                     } else {
-                        const originalColor = normalizeHexColor(fontTag.getAttribute('color'));
                         fontTag.setAttribute('color', finalColor);
-                        textUpdated = updateMessageTextForFontTag(fontTag, originalColor, finalColor);
+                        textUpdated = updateMessageTextForFontTag(fontTag, originalFontColor, finalColor);
                     }
 
                     saveHistory(); saveData(); updateCharList(); injectPrompt();
 
                     if (textUpdated) {
-                        const ctx = getContext();
-                        if (typeof ctx?.saveChat === 'function') {
-                            ctx.saveChat().catch(err => console.error('Failed to save chat:', err));
-                        }
+                        queueChatSave();
+                        flushChatSave();
                     }
 
                     toast.success(`Assigned to ${name}`);
@@ -2159,8 +2485,9 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const mesEl = fontTag.closest('.mes');
         if (!mesEl) return false;
 
+        const mesId = Number(mesEl.getAttribute('mesid'));
         const messageEls = Array.from(document.querySelectorAll('.mes'));
-        const msgIndex = messageEls.indexOf(mesEl);
+        const msgIndex = Number.isFinite(mesId) && mesId >= 0 ? mesId : messageEls.indexOf(mesEl);
         if (msgIndex === -1) return false;
 
         const ctx = getContext();
@@ -2168,17 +2495,11 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const msg = chat[msgIndex];
         if (!msg || msg.is_user) return false;
 
-        const oldHex = normalizeHexColor(oldColor);
-        const newHex = normalizeHexColor(newColor);
-        if (oldHex === newHex) return false;
+        const oldHex = normalizeHexColor(oldColor, null);
+        const newHex = normalizeHexColor(newColor, null);
+        if (!oldHex || !newHex || oldHex === newHex) return false;
 
-        const fontTagRegex = /<font\b[^>]*\bcolor\s*=\s*["']?(#[0-9a-fA-F]{6})["']?[^>]*>/gi;
-        let updated = msg.mes.replace(fontTagRegex, (match, colorHex) => {
-            if (normalizeHexColor(colorHex) === oldHex) {
-                return match.replace(/(\bcolor\s*=\s*["']?)(#[0-9a-fA-F]{6})(["']?)/i, `$1${newHex}$3`);
-            }
-            return match;
-        });
+        const { updatedText: updated } = updateTextColorReferences(msg.mes, { [oldHex]: newHex });
 
         if (updated !== msg.mes) {
             msg.mes = updated;
@@ -2327,6 +2648,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         reader.onload = e => {
             try {
                 const d = JSON.parse(e.target.result);
+                const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
                 if (d.colors) characterColors = normalizeCharacterColors(d.colors);
                 if (d.settings) {
                     Object.assign(settings, d.settings);
@@ -2335,7 +2657,10 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                     settings.colorSchemaVersion = 0;
                 }
                 normalizeToggleSettings();
+                invalidateThemeCache();
                 migrateColorSchemaIfNeeded();
+                syncAllEffectiveColors();
+                applyLiveColorChangesFromSnapshot(snapshot, Object.keys(characterColors).filter(key => snapshot[key]), { saveImmediately: true });
                 saveHistory(); saveData(); updateCharList(); injectPrompt();
                 toast.success('Imported!');
             } catch {
@@ -2380,6 +2705,10 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                     }
                 });
                 normalizeToggleSettings();
+                const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
+                invalidateThemeCache();
+                syncAllEffectiveColors();
+                applyLiveColorChangesFromSnapshot(snapshot, Object.keys(characterColors), { saveImmediately: true });
                 saveData();
                 saveGlobalSettingsSnapshot();
                 updateCharList();
@@ -2974,6 +3303,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 const char = ctx?.characters?.[charId];
                 const data = char?.data?.extensions?.dialogueColors;
                 if (data?.colors) {
+                    const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
                     characterColors = normalizeCharacterColors(data.colors);
                     if (data.settings) {
                         Object.assign(settings, data.settings);
@@ -2982,7 +3312,10 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                         settings.colorSchemaVersion = 0;
                     }
                     normalizeToggleSettings();
+                    invalidateThemeCache();
                     migrateColorSchemaIfNeeded();
+                    syncAllEffectiveColors();
+                    applyLiveColorChangesFromSnapshot(snapshot, Object.keys(characterColors).filter(key => snapshot[key]), { saveImmediately: true });
                     saveHistory(); saveData(); updateCharList(); injectPrompt();
                     toast.success('Loaded from card');
                 } else {
@@ -3776,14 +4109,6 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         }
     }
 
-    function triggerBrightnessAutoRecolor(immediate = false) {
-        if (brightnessRecolorTimer) {
-            clearTimeout(brightnessRecolorTimer);
-            brightnessRecolorTimer = null;
-        }
-        return immediate;
-    }
-
     function onNewMessage() {
         if (!settings.enabled || !settings.autoScanNewMessages) return;
         setTimeout(async () => {
@@ -3874,8 +4199,10 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     function addCharacter(name, color) {
         if (!name.trim()) return;
         const key = name.trim().toLowerCase();
+        const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
         if (characterColors[key]) {
             setEntryFromBaseColor(characterColors[key], normalizeHexColor(color, suggestColorForName(name) || getNextColor()));
+            applyLiveColorChangesFromSnapshot(snapshot, [key]);
         } else {
             const built = buildCharacterEntry(name.trim(), {
                 color,
@@ -3890,12 +4217,13 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     }
 
     function swapColors(key1, key2) {
+        const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
         const color1 = getEntryEffectiveColor(characterColors[key1]);
         const color2 = getEntryEffectiveColor(characterColors[key2]);
         setEntryFromEffectiveColor(characterColors[key1], color2);
         setEntryFromEffectiveColor(characterColors[key2], color1);
+        applyLiveColorChangesFromSnapshot(snapshot, [key1, key2]);
         saveHistory(); saveData(); updateCharList(); injectPrompt();
-        if (settings.autoRecolor) recolorAllMessages();
     }
 
     function toggleCharacterRowExpansion(key) {
@@ -3908,22 +4236,37 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const entry = characterColors[key];
         const nextColor = normalizeHexColor(color, null);
         if (!entry || !nextColor) return false;
-        setEntryFromBaseColor(entry, nextColor);
+        const keys = [key];
         entry.aliases?.forEach(alias => {
             const aliasKey = alias.toLowerCase();
-            if (characterColors[aliasKey]) setEntryFromBaseColor(characterColors[aliasKey], nextColor);
+            if (characterColors[aliasKey] && !keys.includes(aliasKey)) keys.push(aliasKey);
         });
-        saveHistory(); saveData(); injectPrompt(); updateCharList();
+        const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
+        setEntryFromBaseColor(entry, nextColor);
+        keys.slice(1).forEach(aliasKey => setEntryFromBaseColor(characterColors[aliasKey], nextColor));
+        applyLiveColorChangesFromSnapshot(snapshot, keys);
+        applyFastColorUiUpdates(keys);
         return true;
     }
 
     function maybeAutoRecolorAfterColorChange() {
+        flushColorStateSave();
+        flushChatSave();
         if (!settings.autoRecolor) return;
         if (!autoRecolorHintShown) {
             autoRecolorHintShown = true;
             toast.info('Auto-recolor is enabled; color changes will update chat automatically.');
         }
-        recolorAllMessages();
+    }
+
+    function applyThemeOrBrightnessChange(mutator, options = {}) {
+        const keys = Object.keys(characterColors);
+        const snapshot = captureEffectiveColorSnapshot(keys);
+        mutator();
+        invalidateThemeCache();
+        syncAllEffectiveColors();
+        applyLiveColorChangesFromSnapshot(snapshot, keys, { saveImmediately: options.saveImmediately });
+        applyFastColorUiUpdates(keys);
     }
 
     // Phase 5B: Alias chips, Phase 6A: Batch checkboxes, Phase 6B: Group headers, Phase 5D: Harmony on dblclick
@@ -3999,7 +4342,9 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             i.oninput = () => {
                 const c = characterColors[i.dataset.key];
                 if (!c) return;
-                applyCharacterBaseColor(i.dataset.key, normalizeHexColor(i.value, getBaseColor(c)));
+                if (applyCharacterBaseColor(i.dataset.key, normalizeHexColor(i.value, getBaseColor(c)))) {
+                    queueColorStateSave();
+                }
             };
             i.onchange = maybeAutoRecolorAfterColorChange;
             i.ondblclick = (e) => { e.preventDefault(); showHarmonyPopup(i.dataset.key, i); };
@@ -4014,7 +4359,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                     toast.warning('Enter a hex color like #ff66cc.');
                     return false;
                 }
-                applyCharacterBaseColor(i.dataset.key, nextColor);
+                if (applyCharacterBaseColor(i.dataset.key, nextColor)) queueColorStateSave();
                 return true;
             };
             i.onkeydown = (e) => {
@@ -4502,10 +4847,18 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         $('dc-llm-palette').onchange = e => { settings.llmEnhanceCustomPalettes = e.target.checked; saveData(); };
         $('dc-llm-profile').onchange = e => { settings.llmConnectionProfile = e.target.value || null; saveData(); };
         $('dc-disable-toasts').onchange = e => { settings.disableToasts = e.target.checked; saveData(); };
-        $('dc-theme').onchange = e => { settings.themeMode = e.target.value; invalidateThemeCache(); syncAllEffectiveColors(); saveData(); updateCharList(); injectPrompt(); if (settings.autoRecolor) recolorAllMessages(); };
+        $('dc-theme').onchange = e => {
+            applyThemeOrBrightnessChange(() => { settings.themeMode = e.target.value; }, { saveImmediately: true });
+            saveData(); updateCharList(); injectPrompt(); flushChatSave();
+        };
         $('dc-palette').onchange = e => { settings.colorTheme = e.target.value; saveData(); injectPrompt(); };
-        $('dc-brightness').oninput = e => { settings.brightness = parseInt(e.target.value, 10) || 0; $('dc-bright-val').textContent = e.target.value; invalidateThemeCache(); syncAllEffectiveColors(); saveData(); updateCharList(); injectPrompt(); };
-        $('dc-brightness').onchange = () => { invalidateThemeCache(); syncAllEffectiveColors(); saveData(); updateCharList(); injectPrompt(); };
+        $('dc-brightness').oninput = e => {
+            const brightness = parseInt(e.target.value, 10) || 0;
+            $('dc-bright-val').textContent = String(brightness);
+            applyThemeOrBrightnessChange(() => { settings.brightness = brightness; });
+            queueColorStateSave({ history: false });
+        };
+        $('dc-brightness').onchange = () => { flushColorStateSave(); flushChatSave(); };
         $('dc-narrator').oninput = e => { settings.narratorColor = e.target.value; saveData(); injectPrompt(); };
         $('dc-narrator-clear').onclick = () => { settings.narratorColor = ''; $('dc-narrator').value = '#888888'; saveData(); injectPrompt(); };
         $('dc-thought-symbols').oninput = e => { settings.thoughtSymbols = e.target.value; saveData(); injectPrompt(); };
@@ -4568,8 +4921,10 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 const color = await extractAvatarColor(avatarUrl);
                 if (!color) { toast.error('Could not extract color'); return; }
                 const key = char.name.toLowerCase();
+                const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
                 if (characterColors[key]) {
                     setEntryFromBaseColor(characterColors[key], color);
+                    applyLiveColorChangesFromSnapshot(snapshot, [key]);
                 } else {
                     const built = buildCharacterEntry(char.name, { color, colorMode: 'base', locked: false, dialogueCount: 0 });
                     if (!built.entry) return;
@@ -4667,13 +5022,17 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             if (!confirm('Reset all colors?')) return;
             const restore = createRestoreSnapshot();
             let changed = 0;
-            Object.values(characterColors).forEach(c => {
+            const changedKeys = [];
+            const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
+            Object.entries(characterColors).forEach(([key, c]) => {
                 if (!c.locked) {
                     setEntryFromBaseColor(c, getNextColor());
+                    changedKeys.push(key);
                     changed++;
                 }
             });
             if (!changed) { toast.info('No unlocked colors to reset'); return; }
+            applyLiveColorChangesFromSnapshot(snapshot, changedKeys);
             saveHistory(); saveData(); updateCharList(); injectPrompt();
             showUndoToast(`Reset ${changed} unlocked color${changed !== 1 ? 's' : ''}.`, restore);
         };
