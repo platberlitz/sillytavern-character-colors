@@ -136,7 +136,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     let swapMode = null;
     let searchTerm = '';
     let expandedCharacterRows = new Set();
-    let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, thoughtSymbols: '*', disableNarration: true, shareColorsGlobally: false, cssEffects: false, autoScanNewMessages: true, autoLockDetected: true, enableRightClick: false, promptDepth: 4, autoRecolor: true, autoColorize: false, llmConnectionProfile: null, colorSchemaVersion: COLOR_SCHEMA_VERSION, promptMode: 'inject', promptRole: 'system', sortMode: 'name' };
+    let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, thoughtSymbols: '*', disableNarration: true, shareColorsGlobally: false, cssEffects: false, autoScanNewMessages: true, autoLockDetected: true, enableRightClick: false, promptDepth: 4, autoRecolor: true, autoColorize: false, disableToasts: false, llmConnectionProfile: null, colorSchemaVersion: COLOR_SCHEMA_VERSION, promptMode: 'inject', promptRole: 'system', sortMode: 'name' };
     const TOGGLE_SETTING_DEFAULTS = Object.freeze({
         enabled: true,
         highlightMode: false,
@@ -150,6 +150,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         enableRightClick: false,
         autoRecolor: true,
         autoColorize: false,
+        disableToasts: false,
     });
     const GLOBAL_TOGGLE_KEYS = Object.freeze(Object.keys(TOGGLE_SETTING_DEFAULTS));
     const GLOBAL_VISUAL_KEYS = Object.freeze(['thoughtSymbols', 'themeMode', 'colorTheme', 'brightness', 'promptDepth', 'promptRole', 'promptMode']);
@@ -603,6 +604,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     }
 
     function showUndoToast(message, restoreFn) {
+        if (settings.disableToasts) return;
         if (!toastr?.info) return;
         toastr.info(`${message} Click this toast to undo.`, 'Undo Available', {
             closeButton: true,
@@ -614,9 +616,9 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     }
 
     const toast = {
-        info:    (...a) => toastr?.info?.(...a),
-        success: (...a) => toastr?.success?.(...a),
-        warning: (...a) => toastr?.warning?.(...a),
+        info:    (...a) => !settings.disableToasts && toastr?.info?.(...a),
+        success: (...a) => !settings.disableToasts && toastr?.success?.(...a),
+        warning: (...a) => !settings.disableToasts && toastr?.warning?.(...a),
         error:   (...a) => toastr?.error?.(...a),
     };
 
@@ -4610,6 +4612,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         if ($('dc-disable-narration')) $('dc-disable-narration').checked = settings.disableNarration !== false;
         if ($('dc-share-global')) $('dc-share-global').checked = settings.shareColorsGlobally || false;
         if ($('dc-css-effects')) $('dc-css-effects').checked = settings.cssEffects || false;
+        if ($('dc-disable-toasts')) $('dc-disable-toasts').checked = settings.disableToasts || false;
         if ($('dc-llm-profile')) $('dc-llm-profile').value = settings.llmConnectionProfile || '';
         if ($('dc-theme')) $('dc-theme').value = settings.themeMode;
         if ($('dc-palette')) $('dc-palette').value = settings.colorTheme || 'pastel';
@@ -4664,6 +4667,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                             <label class="checkbox_label"><input type="checkbox" id="dc-enabled" data-help="Enable or disable Dialogue Colors."><span>Enable Dialogue Colors</span></label>
                             <label class="checkbox_label"><input type="checkbox" id="dc-highlight" data-help="Add background highlights behind colored dialogue."><span>Highlight dialogue</span></label>
                             <label class="checkbox_label"><input type="checkbox" id="dc-legend" data-help="Show a floating legend of active character colors."><span>Show floating legend</span></label>
+                            <label class="checkbox_label"><input type="checkbox" id="dc-css-effects" data-help="Allow transform-based CSS effects for dramatic dialogue."><span>Enable CSS effects</span></label>
                             <label class="checkbox_label"><input type="checkbox" id="dc-auto-recolor" data-help="Automatically recolor chat after color changes."><span>Auto-recolor after changes</span></label>
                         </div>
                     </div>
@@ -4699,7 +4703,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                                     <label class="checkbox_label"><input type="checkbox" id="dc-right-click" data-help="Enable right-click or long-press reassignment on dialogue."><span>Enable right-click reassignment</span></label>
                                     <label class="checkbox_label"><input type="checkbox" id="dc-disable-narration" data-help="Skip narrator color instructions."><span>Disable narration coloring</span></label>
                                     <label class="checkbox_label"><input type="checkbox" id="dc-share-global" data-help="Use one shared color table across all chats."><span>Share colors across chats</span></label>
-                                    <label class="checkbox_label"><input type="checkbox" id="dc-css-effects" data-help="Allow transform-based CSS effects for dramatic dialogue."><span>Enable CSS effects</span></label>
+                                    <label class="checkbox_label"><input type="checkbox" id="dc-disable-toasts" data-help="Suppress non-error toast notifications."><span>Reduce toast popups</span></label>
                                 </div>
                                 <div class="dc-field-row">
                                     <label class="dc-inline-label" for="dc-llm-profile">LLM Profile</label>
@@ -4864,6 +4868,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         $('dc-disable-narration').onchange = e => { settings.disableNarration = e.target.checked; saveData(); injectPrompt(); };
         $('dc-share-global').onchange = e => { settings.shareColorsGlobally = e.target.checked; saveData(); loadData(); updateCharList(); injectPrompt(); };
         $('dc-css-effects').onchange = e => { settings.cssEffects = e.target.checked; saveData(); injectPrompt(); };
+        $('dc-disable-toasts').onchange = e => { settings.disableToasts = e.target.checked; saveData(); };
         $('dc-llm-profile').onchange = e => { settings.llmConnectionProfile = e.target.value || null; saveData(); };
         $('dc-theme').onchange = e => {
             applyThemeOrBrightnessChange(() => { settings.themeMode = e.target.value; }, { saveImmediately: true });
