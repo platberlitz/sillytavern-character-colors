@@ -461,62 +461,6 @@
     opacity: 0.68;
 }
 
-#dc-ext .dc-batch-bar {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    padding: 10px;
-    border-radius: 12px;
-    border: 1px solid color-mix(in srgb, var(--dc-accent) 45%, var(--dc-border));
-    background: color-mix(in srgb, var(--dc-accent) 8%, var(--dc-surface));
-    transition: opacity 0.15s ease, max-height 0.15s ease;
-    overflow: hidden;
-}
-
-#dc-ext .dc-batch-bar > * {
-    flex: 1 1 140px;
-}
-
-#dc-ext .dc-batch-bar select {
-    min-width: 150px;
-}
-
-#dc-ext .dc-char input.dc-batch-check[type="checkbox"] {
-    -webkit-appearance: none !important;
-    appearance: none !important;
-    display: inline-block !important;
-    width: 14px !important;
-    height: 14px !important;
-    min-width: 14px !important;
-    min-height: 14px !important;
-    max-width: 14px !important;
-    max-height: 14px !important;
-    flex-shrink: 0 !important;
-    cursor: pointer !important;
-    border: 1px solid rgba(255, 255, 255, 0.4) !important;
-    border-radius: 4px !important;
-    background: rgba(255, 255, 255, 0.06) !important;
-    padding: 0 !important;
-    margin: 0 !important;
-    box-sizing: border-box !important;
-    outline: none !important;
-}
-
-#dc-ext .dc-char input.dc-batch-check[type="checkbox"]:focus-visible {
-    outline: 2px solid var(--dc-accent) !important;
-    outline-offset: 1px !important;
-}
-
-#dc-ext .dc-char input.dc-batch-check[type="checkbox"]:checked {
-    background: var(--dc-accent) !important;
-    border-color: var(--dc-accent) !important;
-}
-
-#dc-ext .dc-batch-selected {
-    outline: 2px solid color-mix(in srgb, var(--dc-accent) 80%, transparent) !important;
-    outline-offset: 0 !important;
-}
-
 #dc-ext .dc-swap-selected {
     animation: dc-swap-pulse 1s ease-in-out infinite alternate;
 }
@@ -634,10 +578,6 @@
         align-items: center;
     }
 
-    #dc-ext .dc-char-main > .dc-batch-check {
-        flex: 0 0 auto;
-    }
-
     #dc-ext .dc-char-main > .dc-color-swatch {
         flex: 0 0 auto;
     }
@@ -683,21 +623,8 @@
         border-radius: 6px;
     }
 
-    #dc-ext .dc-char input.dc-batch-check[type="checkbox"] {
-        width: 16px !important;
-        height: 16px !important;
-        min-width: 16px !important;
-        min-height: 16px !important;
-        max-width: 16px !important;
-        max-height: 16px !important;
-    }
-
     #dc-ext .dc-toggle-grid {
         grid-template-columns: 1fr;
-    }
-
-    #dc-ext .dc-batch-bar > * {
-        flex-basis: auto;
     }
 
     #dc-ext .dc-section-note {

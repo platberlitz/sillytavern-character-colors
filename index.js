@@ -47,6 +47,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     }
 
     function normalizeToggleSettings() {
+        pruneInactiveSettings();
         for (const [key, fallback] of Object.entries(TOGGLE_SETTING_DEFAULTS)) {
             settings[key] = normalizeBoolean(settings[key], fallback);
         }
@@ -135,7 +136,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     let swapMode = null;
     let searchTerm = '';
     let expandedCharacterRows = new Set();
-    let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, thoughtSymbols: '*', disableNarration: true, shareColorsGlobally: false, cssEffects: false, autoScanNewMessages: true, autoLockDetected: true, enableRightClick: false, llmEnhanceCustomPalettes: true, promptDepth: 4, showControlHelp: true, autoRecolor: true, autoRemapOnReceive: false, disableToasts: false, autoColorize: false, llmConnectionProfile: null, colorSchemaVersion: COLOR_SCHEMA_VERSION, promptMode: 'inject', promptRole: 'system', sortMode: 'name' };
+    let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, thoughtSymbols: '*', disableNarration: true, shareColorsGlobally: false, cssEffects: false, autoScanNewMessages: true, autoLockDetected: true, enableRightClick: false, promptDepth: 4, autoRecolor: true, autoColorize: false, llmConnectionProfile: null, colorSchemaVersion: COLOR_SCHEMA_VERSION, promptMode: 'inject', promptRole: 'system', sortMode: 'name' };
     const TOGGLE_SETTING_DEFAULTS = Object.freeze({
         enabled: true,
         highlightMode: false,
@@ -147,22 +148,17 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         autoScanNewMessages: true,
         autoLockDetected: true,
         enableRightClick: false,
-        llmEnhanceCustomPalettes: true,
-        showControlHelp: true,
         autoRecolor: true,
-        autoRemapOnReceive: false,
-        disableToasts: false,
         autoColorize: false,
     });
     const GLOBAL_TOGGLE_KEYS = Object.freeze(Object.keys(TOGGLE_SETTING_DEFAULTS));
     const GLOBAL_VISUAL_KEYS = Object.freeze(['thoughtSymbols', 'themeMode', 'colorTheme', 'brightness', 'promptDepth', 'promptRole', 'promptMode']);
     const GLOBAL_SETTINGS_V2_KEYS = Object.freeze([...new Set([...GLOBAL_VISUAL_KEYS, ...GLOBAL_TOGGLE_KEYS])]);
+    const ACTIVE_SETTING_KEYS = Object.freeze([...new Set([...GLOBAL_SETTINGS_V2_KEYS, 'narratorColor', 'llmConnectionProfile', 'colorSchemaVersion', 'sortMode'])]);
     const LEGACY_AUTO_SYNC_ENABLED_KEY = 'dc_autosync_enabled';
     const AUTO_SYNC_SAVE_TIMEOUT_MS = 15000;
     let lastCharKey = null;
     let lastProcessedMessageSignature = '';
-    // Phase 6A: Batch selection state
-    let selectedKeys = new Set();
     // Phase 3A: Legend event listener cleanup
     let legendListeners = null;
     let autoRecolorHintShown = false;
@@ -221,14 +217,26 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         return subset;
     }
 
+    function pruneInactiveSettings() {
+        if (!settings || typeof settings !== 'object') return;
+        for (const key of Object.keys(settings)) {
+            if (!ACTIVE_SETTING_KEYS.includes(key)) delete settings[key];
+        }
+    }
+
     function buildFullSettingsSnapshot() {
-        return { ...settings, colorSchemaVersion: COLOR_SCHEMA_VERSION };
+        const snapshot = {};
+        for (const key of ACTIVE_SETTING_KEYS) {
+            if (settings[key] !== undefined) snapshot[key] = settings[key];
+        }
+        snapshot.colorSchemaVersion = COLOR_SCHEMA_VERSION;
+        return snapshot;
     }
 
     function normalizeStoredSettings(source) {
         if (!isPlainObject(source)) return {};
         const normalized = {};
-        for (const key of Object.keys(settings)) {
+        for (const key of ACTIVE_SETTING_KEYS) {
             if (source[key] !== undefined) normalized[key] = source[key];
         }
         if (source.colorSchemaVersion !== undefined) normalized.colorSchemaVersion = source.colorSchemaVersion;
@@ -491,7 +499,6 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     }
 
     const DYNAMIC_CONTROL_HELP_TEXT = Object.freeze({
-        '.dc-batch-check': 'Select this character row for batch actions.',
         '.dc-color-dot': 'Click to open the color picker for this character.',
         '.dc-color-input': 'Pick a color directly. Double-click for harmony suggestions.',
         '.dc-keep': 'Pinned characters survive Clear and bulk delete tools.',
@@ -583,13 +590,11 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
     function createRestoreSnapshot() {
         const colorsSnapshot = JSON.stringify(characterColors);
-        const keysSnapshot = [...selectedKeys];
         const expandedSnapshot = [...expandedCharacterRows];
         const swapSnapshot = swapMode;
         return function() {
             const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
             characterColors = JSON.parse(colorsSnapshot);
-            selectedKeys = new Set(keysSnapshot);
             expandedCharacterRows = new Set(expandedSnapshot);
             swapMode = swapSnapshot;
             applyLiveColorChangesFromSnapshot(snapshot, Object.keys(characterColors).filter(key => snapshot[key]), { saveImmediately: true });
@@ -598,7 +603,6 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     }
 
     function showUndoToast(message, restoreFn) {
-        if (settings.disableToasts) return;
         if (!toastr?.info) return;
         toastr.info(`${message} Click this toast to undo.`, 'Undo Available', {
             closeButton: true,
@@ -610,9 +614,9 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     }
 
     const toast = {
-        info:    (...a) => !settings.disableToasts && toastr?.info?.(...a),
-        success: (...a) => !settings.disableToasts && toastr?.success?.(...a),
-        warning: (...a) => !settings.disableToasts && toastr?.warning?.(...a),
+        info:    (...a) => toastr?.info?.(...a),
+        success: (...a) => toastr?.success?.(...a),
+        warning: (...a) => toastr?.warning?.(...a),
         error:   (...a) => toastr?.error?.(...a),
     };
 
@@ -676,7 +680,6 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const restore = createRestoreSnapshot();
         removedKeys.forEach(key => {
             delete characterColors[key];
-            selectedKeys.delete(key);
             expandedCharacterRows.delete(key);
             if (swapMode === key) swapMode = null;
         });
@@ -701,7 +704,6 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             }
         }
         characterColors = nextColors;
-        selectedKeys = new Set([...selectedKeys].filter(key => keepSet.has(key)));
         pruneExpandedCharacterRows();
     }
 
@@ -1777,15 +1779,13 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         let finalPalette = basePalette;
         let source = 'heuristic';
 
-        if (settings.llmEnhanceCustomPalettes !== false) {
-            const enhanced = await enhancePaletteWithLLM(name, notes, basePalette, profile, CUSTOM_PALETTE_SIZE);
-            if (enhanced) {
-                finalPalette = enhanced;
-                source = 'llm';
-            } else {
-                source = 'hybrid-fallback';
-                toast.info('LLM enhancement unavailable, used local palette');
-            }
+        const enhanced = await enhancePaletteWithLLM(name, notes, basePalette, profile, CUSTOM_PALETTE_SIZE);
+        if (enhanced) {
+            finalPalette = enhanced;
+            source = 'llm';
+        } else {
+            source = 'hybrid-fallback';
+            toast.info('LLM enhancement unavailable, used local palette');
         }
 
         customs[name] = finalPalette;
@@ -2599,7 +2599,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         if (!data) return false;
         if (data.colors) characterColors = normalizeCharacterColors(data.colors);
         if (data.settings) {
-            Object.assign(settings, data.settings);
+            applyStoredSettingsSnapshot(data.settings);
             if (data.settings.colorSchemaVersion === undefined) settings.colorSchemaVersion = 0;
         } else if (data.colors) {
             settings.colorSchemaVersion = 0;
@@ -2651,7 +2651,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
                 if (d.colors) characterColors = normalizeCharacterColors(d.colors);
                 if (d.settings) {
-                    Object.assign(settings, d.settings);
+                    applyStoredSettingsSnapshot(d.settings);
                     if (d.settings.colorSchemaVersion === undefined) settings.colorSchemaVersion = 0;
                 } else if (d.colors) {
                     settings.colorSchemaVersion = 0;
@@ -2719,6 +2719,63 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             }
         };
         reader.readAsText(file);
+    }
+
+    function applySettingsSnapshotWithRefresh(snapshot) {
+        const keys = Object.keys(characterColors);
+        const colorSnapshot = captureEffectiveColorSnapshot(keys);
+        pruneInactiveSettings();
+        applyStoredSettingsSnapshot(snapshot);
+        invalidateThemeCache();
+        syncAllEffectiveColors();
+        applyLiveColorChangesFromSnapshot(colorSnapshot, keys, { saveImmediately: true });
+        saveData();
+        saveGlobalSettingsSnapshot();
+        syncUIWithSettings();
+        updateCharList();
+        injectPrompt();
+    }
+
+    function restoreAllSettingsToDefaults() {
+        const confirmed = confirm(
+            'Restore all settings to defaults?\n\n' +
+            'This will reset:\n' +
+            '- All toggle settings (auto-scan, auto-lock, etc.)\n' +
+            '- Visual settings (theme, palette, brightness)\n' +
+            '- Narrator color\n' +
+            '- Thought symbols\n' +
+            '- Prompt settings (depth, role, mode)\n' +
+            '- Sort mode\n' +
+            '- LLM profile\n\n' +
+            'Character colors and presets will NOT be affected.\n\n' +
+            'This action can be undone from the undo toast.'
+        );
+
+        if (!confirmed) return;
+
+        const previousSettings = buildFullSettingsSnapshot();
+
+        Object.entries(TOGGLE_SETTING_DEFAULTS).forEach(([key, defaultValue]) => {
+            settings[key] = defaultValue;
+        });
+
+        settings.themeMode = 'auto';
+        settings.colorTheme = 'pastel';
+        settings.brightness = 0;
+        settings.thoughtSymbols = '*';
+        settings.narratorColor = '';
+        settings.promptDepth = 4;
+        settings.promptRole = 'system';
+        settings.promptMode = 'inject';
+        settings.sortMode = 'name';
+        settings.llmConnectionProfile = null;
+        settings.colorSchemaVersion = COLOR_SCHEMA_VERSION;
+
+        applySettingsSnapshotWithRefresh(settings);
+        showUndoToast('All settings restored to defaults.', () => {
+            applySettingsSnapshotWithRefresh(previousSettings);
+            toast.success('Previous settings restored.');
+        });
     }
 
     // Auto-sync functions
@@ -2893,11 +2950,19 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 saveSettingsDebounced?.();
             }
 
-            if (!extension_settings.regex.some(r => r?.scriptName === 'Trim CSS Effects (Prompt)')) {
+            const cssEffectsTrimRegex = '/<span[^>]*style=["\'][^"\']*(?:transform|skew|rotate|scale|opacity|filter|text-shadow|translate)[^"\']*["\'][^>]*>(.*?)<\\/span>/gi';
+            const cssEffectsTrim = extension_settings.regex.find(r => r?.scriptName === 'Trim CSS Effects (Prompt)');
+            if (cssEffectsTrim) {
+                if (cssEffectsTrim.findRegex !== cssEffectsTrimRegex || cssEffectsTrim.replaceString !== '$1') {
+                    cssEffectsTrim.findRegex = cssEffectsTrimRegex;
+                    cssEffectsTrim.replaceString = '$1';
+                    saveSettingsDebounced?.();
+                }
+            } else {
                 extension_settings.regex.push({
                     id: uuidv4(),
                     scriptName: 'Trim CSS Effects (Prompt)',
-                    findRegex: '/<span[^>]*style=["\'][^"\']*(?:transform|skew|rotate|scale)[^"\']*["\'][^>]*>(.*?)<\\/span>/gi',
+                    findRegex: cssEffectsTrimRegex,
                     replaceString: '$1',
                     trimStrings: [],
                     placement: [2],
@@ -2980,7 +3045,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         if (!settings.disableNarration && settings.narratorColor) parts.push(`Narrator: ${applyThemeReadabilityAndBrightness(settings.narratorColor)}.`);
         if (thoughtSymbols.length) parts.push(`For inner thoughts, use these literal delimiters and color both the delimiters and enclosed text with the speaker's color: ${thoughtSymbols.map(formatPromptLiteralSymbol).join(', ')}.`);
         if (settings.highlightMode) parts.push('Add background highlight.');
-        if (settings.cssEffects) parts.push(`For intense emotion/magic/distortion, use CSS transforms: chaos=rotate(2deg) skew(5deg), magic=scale(1.2), unease=skew(-10deg), rage=uppercase, whispers=lowercase. Wrap in <span style='transform:X; display:inline-block; background:transparent;'>text</span>.`);
+        if (settings.cssEffects) parts.push(`For intense emotion, magic, distortion, or dramatic effect, use CSS transforms. Available effects: chaos=rotate(2deg) skew(5deg); magic=scale(1.2); unease=skew(-10deg); rage=uppercase; whispers=lowercase; glitch=skew(8deg) translate(2px, -1px); tremble=rotate(1deg) translate(1px, 1px); echo=opacity:0.7, text-shadow:2px 2px currentColor; fade=opacity:0.6; glow=text-shadow:0 0 8px currentColor; shadow=text-shadow:3px 3px 2px rgba(0,0,0,0.5); blur=filter:blur(1px); shimmer=filter:brightness(1.3); distort=skew(-5deg) scale(1.05); warp=rotate(-3deg) skew(4deg); bounce=translateY(-2px); sink=translateY(2px); stretch=scaleX(1.15); squash=scaleY(0.9); tilt=rotate(5deg); spin=rotate(15deg); shrink=scale(0.9); grow=scale(1.15); drift=translateX(3px); shudder=skew(-3deg) rotate(-1deg); pulse=scale(1.08); flicker=opacity:0.8; haze=filter:blur(0.5px) opacity:0.85; static=skew(2deg) translateY(1px); void=opacity:0.5 filter:blur(2px). Wrap in <span style='transform:X; display:inline-block; background:transparent;'>text</span> for transforms, or <span style='X'>text</span> for opacity/filter/text-shadow effects.`);
         parts.push('Give every newly introduced character a unique color.');
         parts.push('End your response with: [COLORS:Name=#RRGGBB,Name2=#RRGGBB] for all speakers.');
         if (!settings.disableNarration) parts.push('Include Narrator=#RRGGBB if narration is used.');
@@ -3048,7 +3113,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         }
         if (settings.highlightMode) parts.push('Add background highlight.');
         if (settings.cssEffects) {
-            parts.push(`CSS effects: chaos=rotate(2deg) skew(5deg), magic=scale(1.2), unease=skew(-10deg), rage=uppercase, whispers=lowercase in <span style='transform:X; display:inline-block; background:transparent;'>text</span>.`);
+            parts.push(`CSS effects: chaos=rotate(2deg) skew(5deg), magic=scale(1.2), unease=skew(-10deg), rage=uppercase, whispers=lowercase, glitch=skew(8deg) translate(2px, -1px), tremble=rotate(1deg) translate(1px, 1px), echo=opacity:0.7 text-shadow:2px 2px, fade=opacity:0.6, glow=text-shadow:0 0 8px, shadow=text-shadow:3px 3px 2px, blur=filter:blur(1px), shimmer=filter:brightness(1.3), distort=skew(-5deg) scale(1.05), warp=rotate(-3deg) skew(4deg), bounce=translateY(-2px), sink=translateY(2px), stretch=scaleX(1.15), squash=scaleY(0.9), tilt=rotate(5deg), spin=rotate(15deg), shrink=scale(0.9), grow=scale(1.15), drift=translateX(3px), shudder=skew(-3deg) rotate(-1deg), pulse=scale(1.08), flicker=opacity:0.8, haze=filter:blur(0.5px) opacity:0.85, static=skew(2deg) translateY(1px), void=opacity:0.5 filter:blur(2px) in <span style='transform:X; display:inline-block; background:transparent;'>text</span> or <span style='X'>text</span>.`);
         }
 
         parts.push(`End with: [COLORS:Name=#RRGGBB,Name2=#RRGGBB${!settings.disableNarration ? ',Narrator=#RRGGBB' : ''},Name(Nick)=#RRGGBB]`);
@@ -3259,7 +3324,6 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 } else {
                     removeStoredColorData(currentKey);
                     characterColors = {};
-                    selectedKeys.clear();
                     expandedCharacterRows.clear();
                     swapMode = null;
                     saveHistory();
@@ -4136,8 +4200,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             saveData(); updateCharList(); injectPrompt();
             stripColorBlockFromElement(document.querySelector('.mes:last-child .mes_text'));
 
-            // Trigger immediate recolor only when the user opts into receive-time remapping.
-            if (hadRemapping && settings.autoRemapOnReceive && settings.autoRecolor) {
+            // Keep chat colors in sync when receive-time color conflict remapping happens.
+            if (hadRemapping && settings.autoRecolor) {
                 await recolorAllMessages();
             }
 
@@ -4269,7 +4333,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         applyFastColorUiUpdates(keys);
     }
 
-    // Phase 5B: Alias chips, Phase 6A: Batch checkboxes, Phase 6B: Group headers, Phase 5D: Harmony on dblclick
+    // Phase 5B: Alias chips, Phase 6B: Group headers, Phase 5D: Harmony on dblclick
     function updateCharList() {
         const list = document.getElementById('dc-char-list'); if (!list) return;
         const entries = getSortedEntries();
@@ -4302,9 +4366,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 `<span class="dc-alias-chip">${escapeHtml(a)}<span class="dc-alias-remove" data-key="${safeKey}" data-alias="${escapeAttr(a)}" title="Remove alias">&times;</span></span>`
             ).join('');
             return groupHeader + `
-            <div class="dc-char ${swapMode === k ? 'dc-swap-selected' : ''} ${selectedKeys.has(k) ? 'dc-batch-selected' : ''} ${v.keep ? 'dc-char-kept' : ''}" data-key="${safeKey}">
+            <div class="dc-char ${swapMode === k ? 'dc-swap-selected' : ''} ${v.keep ? 'dc-char-kept' : ''}" data-key="${safeKey}">
                 <div class="dc-char-main">
-                    <input type="checkbox" class="dc-batch-check" data-key="${safeKey}" ${selectedKeys.has(k) ? 'checked' : ''}>
                     <span class="dc-color-swatch">
                         <span class="dc-color-dot" style="background:${safeColor};"></span>
                         <input type="color" value="${pickerColor}" data-key="${safeKey}" class="dc-color-input">
@@ -4503,33 +4566,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 inp.onkeydown = e => { if (e.key === 'Enter') submit(); if (e.key === 'Escape') inputRow.remove(); };
             };
         });
-        // Phase 6A: Batch selection checkboxes
-        list.querySelectorAll('.dc-batch-check').forEach(cb => {
-            cb.onchange = () => {
-                if (cb.checked) selectedKeys.add(cb.dataset.key);
-                else selectedKeys.delete(cb.dataset.key);
-                updateBatchBar();
-                cb.closest('.dc-char')?.classList.toggle('dc-batch-selected', cb.checked);
-            };
-        });
-
-        updateBatchBar();
         updateLegend();
-    }
-
-    // Phase 6A: Show/hide batch bar based on selection
-    function updateBatchBar() {
-        const bar = document.getElementById('dc-batch-bar');
-        if (!bar) return;
-        if (selectedKeys.size > 0) {
-            bar.style.display = 'flex';
-            bar.style.opacity = '1';
-            bar.style.maxHeight = '100px';
-        } else {
-            bar.style.opacity = '0';
-            bar.style.maxHeight = '0';
-            setTimeout(() => { if (!selectedKeys.size) bar.style.display = 'none'; }, 150);
-        }
     }
 
     function setControlHelp(element, text) {
@@ -4567,16 +4604,13 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         if ($('dc-autoscan-new')) $('dc-autoscan-new').checked = settings.autoScanNewMessages !== false;
         if ($('dc-auto-lock')) $('dc-auto-lock').checked = settings.autoLockDetected !== false;
         if ($('dc-auto-recolor')) $('dc-auto-recolor').checked = settings.autoRecolor !== false;
-        if ($('dc-auto-remap-receive')) $('dc-auto-remap-receive').checked = settings.autoRemapOnReceive || false;
         if ($('dc-auto-colorize')) $('dc-auto-colorize').checked = settings.autoColorize || false;
         if ($('dc-right-click')) $('dc-right-click').checked = settings.enableRightClick;
         if ($('dc-legend')) $('dc-legend').checked = settings.showLegend;
         if ($('dc-disable-narration')) $('dc-disable-narration').checked = settings.disableNarration !== false;
         if ($('dc-share-global')) $('dc-share-global').checked = settings.shareColorsGlobally || false;
         if ($('dc-css-effects')) $('dc-css-effects').checked = settings.cssEffects || false;
-        if ($('dc-llm-palette')) $('dc-llm-palette').checked = settings.llmEnhanceCustomPalettes !== false;
         if ($('dc-llm-profile')) $('dc-llm-profile').value = settings.llmConnectionProfile || '';
-        if ($('dc-disable-toasts')) $('dc-disable-toasts').checked = settings.disableToasts || false;
         if ($('dc-theme')) $('dc-theme').value = settings.themeMode;
         if ($('dc-palette')) $('dc-palette').value = settings.colorTheme || 'pastel';
         if ($('dc-brightness')) $('dc-brightness').value = settings.brightness || 0;
@@ -4646,20 +4680,6 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                             <input type="text" id="dc-add-name" placeholder="Add character..." class="text_pole" data-help="Type a new character name to add manually.">
                             <button id="dc-add-btn" class="menu_button" data-help="Add the typed character with a suggested color.">Add Character</button>
                         </div>
-                        <div id="dc-batch-bar" class="dc-batch-bar" style="display:none;">
-                            <button id="dc-batch-all" class="menu_button" data-help="Select all characters for batch actions.">Select All</button>
-                            <button id="dc-batch-none" class="menu_button" data-help="Clear the current selection.">Clear Selection</button>
-                            <button id="dc-batch-del" class="menu_button dc-danger-button" data-help="Delete the selected characters, except any kept ones.">Delete Selected</button>
-                            <button id="dc-batch-lock" class="menu_button" data-help="Lock selected characters.">Lock Selected</button>
-                            <button id="dc-batch-unlock" class="menu_button" data-help="Unlock selected characters.">Unlock Selected</button>
-                            <select id="dc-batch-style-select" class="text_pole" data-help="Style to apply to selected characters.">
-                                <option value="">Style: normal</option>
-                                <option value="bold">Style: bold</option>
-                                <option value="italic">Style: italic</option>
-                                <option value="bold italic">Style: bold italic</option>
-                            </select>
-                            <button id="dc-batch-style-apply" class="menu_button" data-help="Apply the selected style to all selected characters.">Apply Style</button>
-                        </div>
                         <small>Characters: <span id="dc-count">0</span> (⭐=50+, 💎=100+)</small>
                         <div id="dc-char-list" class="dc-char-list"></div>
                     </div>
@@ -4675,14 +4695,11 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                                     <label class="checkbox_label"><input type="checkbox" id="dc-autoscan" data-help="Automatically scan existing chat messages after chat load."><span>Auto-scan on chat load</span></label>
                                     <label class="checkbox_label"><input type="checkbox" id="dc-autoscan-new" data-help="Automatically scan newly arriving messages for speakers/colors."><span>Auto-scan new messages</span></label>
                                     <label class="checkbox_label"><input type="checkbox" id="dc-auto-lock" data-help="Automatically lock newly detected characters."><span>Auto-lock new characters</span></label>
-                                    <label class="checkbox_label"><input type="checkbox" id="dc-auto-remap-receive" data-help="Immediately recolor chat when a received color is remapped for similarity. Off avoids chat lifecycle loops."><span>Auto-fix similar colors on receive</span></label>
                                     <label class="checkbox_label"><input type="checkbox" id="dc-auto-colorize" data-help="Automatically colorize messages when the model skips color tags."><span>Auto-colorize fallback</span></label>
                                     <label class="checkbox_label"><input type="checkbox" id="dc-right-click" data-help="Enable right-click or long-press reassignment on dialogue."><span>Enable right-click reassignment</span></label>
                                     <label class="checkbox_label"><input type="checkbox" id="dc-disable-narration" data-help="Skip narrator color instructions."><span>Disable narration coloring</span></label>
                                     <label class="checkbox_label"><input type="checkbox" id="dc-share-global" data-help="Use one shared color table across all chats."><span>Share colors across chats</span></label>
                                     <label class="checkbox_label"><input type="checkbox" id="dc-css-effects" data-help="Allow transform-based CSS effects for dramatic dialogue."><span>Enable CSS effects</span></label>
-                                    <label class="checkbox_label"><input type="checkbox" id="dc-llm-palette" data-help="Use LLM assistance when generating palettes."><span>Enhance generated palettes with LLM</span></label>
-                                    <label class="checkbox_label"><input type="checkbox" id="dc-disable-toasts" data-help="Suppress non-error toast notifications."><span>Reduce toast popups</span></label>
                                 </div>
                                 <div class="dc-field-row">
                                     <label class="dc-inline-label" for="dc-llm-profile">LLM Profile</label>
@@ -4741,6 +4758,10 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                         <details class="dc-subsection">
                             <summary>Presets & import/export</summary>
                             <div class="dc-stack">
+                                <div class="dc-button-row dc-button-row-1">
+                                    <button id="dc-restore-defaults" class="menu_button dc-danger-button" data-help="Reset all settings to their default values. Character colors are preserved.">Restore All Settings to Defaults</button>
+                                </div>
+                                <hr style="margin:8px 0;opacity:0.2;">
                                 <div class="dc-field-row dc-field-row-wrap">
                                     <input type="text" id="dc-preset-name" placeholder="Preset name..." class="text_pole" data-help="Preset name used when saving current assignments.">
                                     <button id="dc-save-preset" class="menu_button" data-help="Save current assignments into a named preset.">Save Preset</button>
@@ -4837,16 +4858,13 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         $('dc-autoscan-new').onchange = e => { settings.autoScanNewMessages = e.target.checked; saveData(); };
         $('dc-auto-lock').onchange = e => { settings.autoLockDetected = e.target.checked; saveData(); };
         $('dc-auto-recolor').onchange = e => { settings.autoRecolor = e.target.checked; saveData(); };
-        $('dc-auto-remap-receive').onchange = e => { settings.autoRemapOnReceive = e.target.checked; saveData(); };
         $('dc-auto-colorize').onchange = e => { settings.autoColorize = e.target.checked; saveData(); };
         $('dc-right-click').onchange = e => { settings.enableRightClick = e.target.checked; saveData(); };
         $('dc-legend').onchange = e => { settings.showLegend = e.target.checked; saveData(); updateLegend(); };
         $('dc-disable-narration').onchange = e => { settings.disableNarration = e.target.checked; saveData(); injectPrompt(); };
         $('dc-share-global').onchange = e => { settings.shareColorsGlobally = e.target.checked; saveData(); loadData(); updateCharList(); injectPrompt(); };
         $('dc-css-effects').onchange = e => { settings.cssEffects = e.target.checked; saveData(); injectPrompt(); };
-        $('dc-llm-palette').onchange = e => { settings.llmEnhanceCustomPalettes = e.target.checked; saveData(); };
         $('dc-llm-profile').onchange = e => { settings.llmConnectionProfile = e.target.value || null; saveData(); };
-        $('dc-disable-toasts').onchange = e => { settings.disableToasts = e.target.checked; saveData(); };
         $('dc-theme').onchange = e => {
             applyThemeOrBrightnessChange(() => { settings.themeMode = e.target.value; }, { saveImmediately: true });
             saveData(); updateCharList(); injectPrompt(); flushChatSave();
@@ -4903,6 +4921,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         $('dc-fix-conflicts').onclick = autoResolveConflicts;
         $('dc-regen').onclick = regenerateAllColors;
         $('dc-flip-theme').onclick = flipColorsForTheme;
+        $('dc-restore-defaults').onclick = restoreAllSettingsToDefaults;
         $('dc-save-preset').onclick = saveColorPreset;
         $('dc-load-preset').onclick = loadColorPreset;
         $('dc-delete-preset').onclick = deleteColorPreset;
@@ -5041,54 +5060,6 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         $('dc-add-btn').onclick = () => { addCharacter($('dc-add-name').value); $('dc-add-name').value = ''; };
         $('dc-add-name').onkeypress = e => { if (e.key === 'Enter') $('dc-add-btn').click(); };
 
-        $('dc-batch-all').onclick = () => { Object.keys(characterColors).forEach(k => selectedKeys.add(k)); updateCharList(); };
-        $('dc-batch-none').onclick = () => { selectedKeys.clear(); updateCharList(); };
-        $('dc-batch-del').onclick = () => {
-            if (!selectedKeys.size) return;
-            removeCharacterKeys([...selectedKeys], {
-                actionLabel: 'Deleted',
-                itemLabel: 'selected character',
-                emptyMessage: 'No selected characters to delete',
-                blockedMessage: 'All selected characters are pinned. Turn off Keep first.'
-            });
-        };
-        $('dc-batch-lock').onclick = () => {
-            let changed = false;
-            selectedKeys.forEach(k => {
-                if (characterColors[k] && !characterColors[k].locked) {
-                    characterColors[k].locked = true;
-                    changed = true;
-                }
-            });
-            if (changed) saveHistory();
-            saveData(); updateCharList(); toast.info('Locked selected characters');
-        };
-        $('dc-batch-unlock').onclick = () => {
-            let changed = false;
-            selectedKeys.forEach(k => {
-                if (characterColors[k] && characterColors[k].locked) {
-                    characterColors[k].locked = false;
-                    changed = true;
-                }
-            });
-            if (changed) saveHistory();
-            saveData(); updateCharList(); toast.info('Unlocked selected characters');
-        };
-        $('dc-batch-style-apply').onclick = () => {
-            if (!selectedKeys.size) { toast.info('Select at least one character first'); return; }
-            const validStyle = $('dc-batch-style-select')?.value || '';
-            let changed = false;
-            selectedKeys.forEach(k => {
-                if (characterColors[k] && characterColors[k].style !== validStyle) {
-                    characterColors[k].style = validStyle;
-                    changed = true;
-                }
-            });
-            if (!changed) { toast.info('Selected characters already use that style'); return; }
-            saveHistory();
-            saveData(); injectPrompt(); updateCharList();
-        };
-
         registerKeyboardShortcuts();
         applyControlHelpText();
         updateCharList();
@@ -5111,7 +5082,6 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         clearDomCache();
         const currentCharKey = getCharKey();
         if (currentCharKey !== lastCharKey) {
-            selectedKeys.clear();
             expandedCharacterRows.clear();
             swapMode = null;
             loadData();
@@ -5206,7 +5176,6 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 #dc-ext input[type="checkbox"] { width: 18px; height: 18px; }
                 #dc-ext .dc-char .menu_button { min-height: 30px; min-width: 30px; }
                 #dc-ext input[type="color"] { width: 28px !important; height: 28px !important; }
-                #dc-ext .dc-batch-check { width: 18px !important; height: 18px !important; }
                 #dc-ext details summary { padding: 8px 4px; }
                 #dc-harmony-popup { flex-wrap: wrap; max-width: 200px; }
                 #dc-harmony-popup .dc-harmony-swatch { width: 32px !important; height: 32px !important; }
