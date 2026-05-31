@@ -3520,6 +3520,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     function processColorPairs(pairsString) {
         let foundNew = false;
         let hadRemapping = false;
+        const remappedAssignments = [];
         const colorPairs = pairsString.split(',');
         for (const pair of colorPairs) {
             const eqIdx = pair.indexOf('=');
@@ -3546,7 +3547,13 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 if (!built.entry) continue;
                 characterColors[key] = built.entry;
                 foundNew = true;
-                if (built.remapped) hadRemapping = true;
+                if (built.remapped) {
+                    const finalColor = normalizeHexColor(getEntryEffectiveColor(built.entry), null);
+                    hadRemapping = true;
+                    if (finalColor && finalColor !== assignedColor) {
+                        remappedAssignments.push({ name, key, oldColor: assignedColor, newColor: finalColor });
+                    }
+                }
             }
             if (nicknames.length) {
                 characterColors[key].aliases = characterColors[key].aliases || [];
@@ -3557,7 +3564,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 });
             }
         }
-        return { foundNew, hadRemapping };
+        return { foundNew, hadRemapping, remappedAssignments };
     }
 
     function parseColorBlock(element) {
@@ -3941,7 +3948,6 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             // Step 3: Process each non-user message
             let recoloredCount = 0;
             let ambiguousSkippedCount = 0;
-            const messageEls = document.querySelectorAll('.mes');
             for (let i = 0; i < chat.length; i++) {
                 const msg = chat[i];
                 if (!msg || msg.is_user) continue;
@@ -4002,16 +4008,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 }
 
                 // Update DOM font[color] attributes for this message
-                const mesEl = messageEls[i];
-                if (mesEl) {
-                    const fontEls = mesEl.querySelectorAll('font[color]');
-                    for (const fontEl of fontEls) {
-                        const oldAttr = (fontEl.getAttribute('color') || '').toLowerCase();
-                        if (replacements[oldAttr]) {
-                            fontEl.setAttribute('color', replacements[oldAttr]);
-                        }
-                    }
-                }
+                updateVisibleMessageColors(i, replacements);
             }
 
             // Step 4: Persist; DOM font attributes were already updated above.
@@ -4194,17 +4191,57 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             let match;
             let foundColorBlock = false;
             let hadRemapping = false;
+            const remappedAssignments = [];
             while ((match = colorBlockRegex.exec(text)) !== null) {
                 const result = processColorPairs(match[1]);
                 foundColorBlock = true;
                 if (result.hadRemapping) hadRemapping = true;
+                if (Array.isArray(result.remappedAssignments)) remappedAssignments.push(...result.remappedAssignments);
             }
             saveData(); updateCharList(); injectPrompt();
+
+            let latestRemapChanged = false;
+            if (remappedAssignments.length) {
+                const latestTextForRemap = lastMsg.mes || text;
+                const latestParsedAssignments = parseColorAssignmentsFromText(latestTextForRemap);
+                const remapReplacements = {};
+                const ambiguousRemapColors = new Set();
+                for (const assignment of remappedAssignments) {
+                    const oldHex = normalizeHexColor(assignment.oldColor, null);
+                    const newHex = normalizeHexColor(assignment.newColor, null);
+                    if (!oldHex || !newHex || oldHex === newHex) continue;
+                    const localNames = latestParsedAssignments.namesByColor[oldHex];
+                    if (localNames && localNames.size > 1) {
+                        delete remapReplacements[oldHex];
+                        ambiguousRemapColors.add(oldHex);
+                        continue;
+                    }
+                    if (remapReplacements[oldHex] && remapReplacements[oldHex] !== newHex) {
+                        delete remapReplacements[oldHex];
+                        ambiguousRemapColors.add(oldHex);
+                        continue;
+                    }
+                    if (!ambiguousRemapColors.has(oldHex)) remapReplacements[oldHex] = newHex;
+                }
+
+                if (Object.keys(remapReplacements).length) {
+                    const latestRemap = updateTextColorReferences(latestTextForRemap, remapReplacements);
+                    if (latestRemap.changed) {
+                        lastMsg.mes = latestRemap.updatedText;
+                        lastProcessedMessageSignature = `${chat.length}|${sigId}|${lastMsg.mes}`;
+                        latestRemapChanged = true;
+                    }
+                    updateVisibleMessageColors(chat.length - 1, remapReplacements);
+                }
+            }
             stripColorBlockFromElement(document.querySelector('.mes:last-child .mes_text'));
 
             // Keep chat colors in sync when receive-time color conflict remapping happens.
             if (hadRemapping && settings.autoRecolor) {
                 await recolorAllMessages();
+            }
+            if (latestRemapChanged && typeof ctx?.saveChat === 'function') {
+                await ctx.saveChat();
             }
 
             // Auto-colorize fallback: if model produced no color output at all
