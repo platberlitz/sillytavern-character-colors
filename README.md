@@ -1,12 +1,14 @@
 # Dialogue Colors
 
-A SillyTavern extension that makes the LLM color-code each character's dialogue automatically. It keeps the fast visual readability of the original extension, but the UI is now organized around a simpler daily workflow so the common actions are easier to find and harder to misuse.
+A SillyTavern extension that color-codes each character's dialogue automatically. Use the LLM engine to write persistent `<font color>` tags, or the local DOM-only engine to color rendered quotes without editing chat text.
 
 ---
 
 ## Highlights
 
+- **Two coloring engines** - Choose persistent LLM coloring or local DOM-only coloring from the **Basic** section
 - **Auto-coloring** - Instructs the LLM to wrap dialogue in `<font color>` tags
+- **DOM-only coloring** - Colors rendered dialogue locally without modifying `msg.mes` or saving chat text
 - **LLM color blocks** - Reads `[COLORS:Name=#RRGGBB,...]` blocks and removes them from display
 - **Keep / pin protection** - Mark important characters with **Keep** so they survive `Clear Non-Kept`, batch delete tools, duplicate cleanup, and other destructive bulk actions
 - **Safer destructive tools** - Heavy cleanup actions now live in a dedicated **Danger Zone** and respect kept characters
@@ -14,6 +16,7 @@ A SillyTavern extension that makes the LLM color-code each character's dialogue 
 - **Per-chat or global colors** - Store colors per chat or share them across all chats
 - **Auto-lock detected characters** - Newly detected characters can still lock automatically by default
 - **Right-click/long-press reassignment** - Optional manual reassignment on dialogue text
+- **Per-chat quote overrides** - DOM-mode manual quote assignments are stored in chat metadata and reapplied on render
 - **Undo/Redo** - Undo destructive or accidental changes quickly
 - **Custom palettes and presets** - Save reusable color setups without losing advanced flexibility
 
@@ -24,9 +27,10 @@ A SillyTavern extension that makes the LLM color-code each character's dialogue 
 This section is meant to be the only place most users need most of the time.
 
 - **Scan Chat** - Scan the current chat for characters and colors
+- **Coloring engine** - Pick `LLM` for persistent font tags or `Local (DOM-only)` for reversible local decoration
 - **Clear Non-Kept** - Clear tracked characters except anything marked with **Keep**
-- **Recolor Chat** - Rewrite message colors to match the current assignments
-- **Colorize Missing** - Colorize uncolored messages
+- **Recolor Chat / Refresh DOM Colors** - Rewrite persistent font tags in LLM mode, or refresh local decorations in DOM mode
+- **Colorize Missing** - Colorize uncolored messages in LLM mode
 - **Show Stats** - Open dialogue statistics
 - **Theme / Palette / Brightness** - Control the look of newly generated colors
 - **Enable Dialogue Colors / Highlight dialogue / Show floating legend / Auto-recolor after changes** - Core visual toggles
@@ -53,7 +57,7 @@ Advanced options are still there, but they are intentionally tucked away so they
 - Auto-scan on chat load
 - Auto-scan new messages
 - Auto-lock new characters
-- Auto-colorize fallback
+- Auto-colorize fallback, LLM mode only
 - Right-click reassignment
 - Narration toggle
 - Global color sharing
@@ -66,10 +70,10 @@ Advanced options are still there, but they are intentionally tucked away so they
 
 - Narrator color
 - Thought symbols
-- Prompt depth
-- Prompt role
-- Prompt mode
-- Macro copy helper
+- Prompt depth, LLM mode only
+- Prompt role, LLM mode only
+- Prompt mode, LLM mode only
+- Macro copy helper, LLM mode only
 
 ### Palette tools
 
@@ -134,8 +138,11 @@ This makes it useful for main cast members or card characters you never want to 
 ### Core
 
 - **Auto-coloring** - Instructs the LLM to wrap dialogue in `<font color>` tags
+- **Local DOM-only engine** - Applies reversible styles to rendered `<q>` dialogue and detected thought emphasis without writing tags into chat messages
 - **LLM color blocks** - LLM outputs `[COLORS:Name=#RRGGBB,...]` at end of messages for reliable character detection
 - **Text-safe colorize fallback** - Rejects LLM rewrites that alter dialogue text, then falls back to deterministic matching
+- **Persona message support in DOM mode** - Local decoration also attributes and colors user/persona messages
+- **Metadata quote overrides** - Right-click or long-press a DOM-colored quote to store a per-chat speaker override guarded by message content hash
 - **Auto-detect nicknames/usernames** - Parenthesized nicknames in the color block become aliases automatically
 - **Per-chat or global colors** - Store colors per character or share across all chats
 - **Auto-sync settings** - Settings can sync across devices through SillyTavern's managed extension settings store
@@ -151,7 +158,7 @@ This makes it useful for main cast members or card characters you never want to 
 - **Undo/Redo** - History with Ctrl+Z / Ctrl+Y support inside the extension panel
 - **Export/Import** - Save and load color schemes as JSON
 - **Color presets** - Save, load, and delete preset assignments
-- **Recolor messages** - Rewrite existing message colors after changing assignments
+- **Recolor messages** - Rewrite existing message colors after changing assignments in LLM mode, or refresh local decorations in DOM mode
 - **Auto-recolor** - Optionally recolor chat automatically when colors change
 - **Smart color suggestions** - Name-based color suggestions for some characters
 - **Color harmony** - Double-click a color picker for harmony suggestions
@@ -168,10 +175,11 @@ This makes it useful for main cast members or card characters you never want to 
 ## Quick Start
 
 1. Enable the extension in the **Basic** section.
-2. Start chatting so the model can emit a `[COLORS:...]` block.
-3. Use **Scan Chat** if you want to pull colors from existing messages immediately.
-4. Mark your main characters with **Keep** in the **Characters** list.
-5. Use **Clear Non-Kept** when you want to clean out temporary NPCs without losing pinned characters.
+2. Choose **LLM** if you want persistent colored chat text, or **Local (DOM-only)** if you want reversible local coloring.
+3. Start chatting so the selected engine can color dialogue. In LLM mode the model can emit a `[COLORS:...]` block; in DOM mode rendered quotes are decorated locally.
+4. Use **Scan Chat** if you want to pull colors from existing LLM color blocks immediately.
+5. Mark your main characters with **Keep** in the **Characters** list.
+6. Use **Clear Non-Kept** when you want to clean out temporary NPCs without losing pinned characters.
 
 ## Installation
 
@@ -183,6 +191,7 @@ This makes it useful for main cast members or card characters you never want to 
 
 - Storage and import/export still preserve advanced data like aliases, styles, groups, locks, and keep state.
 - Card save/load also preserves keep state because the full normalized color table is stored.
+- DOM-only quote overrides are stored in the current chat's metadata, not in the message text. If the message text changes, the override is ignored instead of being applied to the wrong quote.
 - The floating legend, stats popup, right-click reassignment, and palette generation workflows are still available; they are just no longer competing for space in the default UI.
 
 ## Credits

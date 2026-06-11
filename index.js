@@ -51,6 +51,11 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         for (const [key, fallback] of Object.entries(TOGGLE_SETTING_DEFAULTS)) {
             settings[key] = normalizeBoolean(settings[key], fallback);
         }
+        settings.coloringEngine = settings.coloringEngine === 'dom' ? 'dom' : 'llm';
+    }
+
+    function isDomEngine() {
+        return settings.coloringEngine === 'dom';
     }
 
     function normalizeHexColor(value, fallback = '#888888') {
@@ -136,7 +141,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     let swapMode = null;
     let searchTerm = '';
     let expandedCharacterRows = new Set();
-    let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, thoughtSymbols: '*', disableNarration: true, shareColorsGlobally: false, cssEffects: false, autoScanNewMessages: true, autoLockDetected: true, enableRightClick: false, promptDepth: 4, autoRecolor: true, autoColorize: false, disableToasts: false, llmConnectionProfile: null, colorSchemaVersion: COLOR_SCHEMA_VERSION, promptMode: 'inject', promptRole: 'system', sortMode: 'name' };
+    let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, thoughtSymbols: '*', disableNarration: true, shareColorsGlobally: false, cssEffects: false, autoScanNewMessages: true, autoLockDetected: true, enableRightClick: false, promptDepth: 4, autoRecolor: true, autoColorize: false, disableToasts: false, llmConnectionProfile: null, colorSchemaVersion: COLOR_SCHEMA_VERSION, promptMode: 'inject', promptRole: 'system', sortMode: 'name', coloringEngine: 'llm' };
     const TOGGLE_SETTING_DEFAULTS = Object.freeze({
         enabled: true,
         highlightMode: false,
@@ -153,7 +158,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         disableToasts: false,
     });
     const GLOBAL_TOGGLE_KEYS = Object.freeze(Object.keys(TOGGLE_SETTING_DEFAULTS));
-    const GLOBAL_VISUAL_KEYS = Object.freeze(['thoughtSymbols', 'themeMode', 'colorTheme', 'brightness', 'promptDepth', 'promptRole', 'promptMode']);
+    const GLOBAL_VISUAL_KEYS = Object.freeze(['thoughtSymbols', 'themeMode', 'colorTheme', 'brightness', 'promptDepth', 'promptRole', 'promptMode', 'coloringEngine']);
     const GLOBAL_SETTINGS_V2_KEYS = Object.freeze([...new Set([...GLOBAL_VISUAL_KEYS, ...GLOBAL_TOGGLE_KEYS])]);
     const ACTIVE_SETTING_KEYS = Object.freeze([...new Set([...GLOBAL_SETTINGS_V2_KEYS, 'narratorColor', 'llmConnectionProfile', 'colorSchemaVersion', 'sortMode'])]);
     const LEGACY_AUTO_SYNC_ENABLED_KEY = 'dc_autosync_enabled';
@@ -1524,6 +1529,11 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
     function applyLiveColorChangesFromSnapshot(snapshot, keys = Object.keys(snapshot || {}), options = {}) {
         if (!settings.autoRecolor && !options.force) return 0;
+        if (isDomEngine()) {
+            if (options.saveImmediately) decorateAllMessages();
+            else scheduleDecorateAll();
+            return 0;
+        }
         const list = Array.isArray(keys) ? keys : [keys];
         return applyLiveColorReplacements(buildColorReplacementsFromSnapshot(snapshot, list), {
             nameToNewColor: buildNameToCurrentColorForKeys(list),
@@ -2307,9 +2317,15 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             e.preventDefault();
             const existingMenu = document.getElementById('dc-context-menu');
             if (existingMenu) existingMenu.remove();
-            const isQElement = !fontTag && !!qElement;
-            const targetEl = isQElement ? qElement : fontTag;
-            const color = isQElement ? power_user.quote_text_color : normalizeHexColor(fontTag.getAttribute('color'));
+            const isDomSegment = isDomEngine() && !fontTag && !!qElement;
+            const isBareQuote = !isDomSegment && !fontTag && !!qElement;
+            const targetEl = (isDomSegment || isBareQuote) ? qElement : fontTag;
+            const domSpeakerKey = isDomSegment ? targetEl.getAttribute('data-dc-speaker') : '';
+            const domSpeakerColor = domSpeakerKey && characterColors[domSpeakerKey] ? getEntryEffectiveColor(characterColors[domSpeakerKey]) : null;
+            const quoteFallbackColor = normalizeHexColor(power_user.quote_text_color, '#888888');
+            const color = isDomSegment
+                ? normalizeHexColor(domSpeakerColor, quoteFallbackColor)
+                : isBareQuote ? quoteFallbackColor : normalizeHexColor(fontTag.getAttribute('color'));
             const text = targetEl.textContent.substring(0, 30) + (targetEl.textContent.length > 30 ? '...' : '');
 
             // Build character list for datalist
@@ -2323,7 +2339,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             const y = e.clientY ?? e.touches?.[0]?.clientY ?? 100;
             menu.style.cssText = `position:fixed;left:${x}px;top:${y}px;background:var(--SmartThemeBlurTintColor);border:1px solid var(--SmartThemeBorderColor);border-radius:6px;padding:8px;z-index:10001;min-width:180px;color:var(--SmartThemeTextColor);box-shadow:0 4px 12px rgba(0,0,0,0.5);`;
             menu.innerHTML = `
-                <div style="font-size:0.8em;opacity:0.7;margin-bottom:6px;">${isQElement ? '<em style="font-size:0.9em;">(uncolored quote)</em><br>' : ''}"${escapeHtml(text)}"</div>
+                <div style="font-size:0.8em;opacity:0.7;margin-bottom:6px;">${isDomSegment ? '<em style="font-size:0.9em;">(DOM override)</em><br>' : isBareQuote ? '<em style="font-size:0.9em;">(uncolored quote)</em><br>' : ''}"${escapeHtml(text)}"</div>
                 <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
                     <span style="width:12px;height:12px;border-radius:50%;background:${color};"></span>
                     <input type="color" id="dc-ctx-color" value="${color}" style="width:24px;height:20px;border:none;">
@@ -2341,6 +2357,9 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
             const nameInput = menu.querySelector('#dc-ctx-name');
             const colorInput = menu.querySelector('#dc-ctx-color');
+            if (isDomSegment && domSpeakerKey && characterColors[domSpeakerKey]) {
+                nameInput.value = characterColors[domSpeakerKey].name;
+            }
 
             nameInput.addEventListener('input', () => {
                 const name = nameInput.value.trim();
@@ -2364,7 +2383,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                     const existingSnapshot = characterColors[key]
                         ? captureEffectiveColorSnapshot(Object.keys(characterColors))
                         : null;
-                    const originalFontColor = !isQElement
+                    const originalFontColor = fontTag
                         ? normalizeHexColor(fontTag.getAttribute('color'), null)
                         : null;
 
@@ -2390,7 +2409,23 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                         applyLiveColorChangesFromSnapshot(existingSnapshot, [key], { saveImmediately: true });
                     }
 
-                    if (isQElement) {
+                    if (isDomSegment) {
+                        const mesIndex = getMessageIndexFromElement(targetEl);
+                        const ctx = getContext();
+                        const msg = ctx?.chat?.[mesIndex];
+                        const segmentIndex = Number(targetEl.getAttribute('data-dc-seg'));
+                        if (!msg || !Number.isFinite(segmentIndex)) {
+                            toast.error('Could not map this dialogue segment.');
+                            menu.remove();
+                            return;
+                        }
+                        if (!setMessageQuoteOverride(mesIndex, msg, segmentIndex, name)) {
+                            toast.error('Could not save quote override.');
+                            menu.remove();
+                            return;
+                        }
+                        decorateAllMessages();
+                    } else if (isBareQuote) {
                         textUpdated = wrapQElementWithFontTag(qElement, finalColor);
                     } else {
                         fontTag.setAttribute('color', finalColor);
@@ -2399,7 +2434,9 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
                     saveHistory(); saveData(); updateCharList(); injectPrompt();
 
-                    if (textUpdated) {
+                    if (isDomSegment) {
+                        updateLegend();
+                    } else if (textUpdated) {
                         queueChatSave();
                         flushChatSave();
                     }
@@ -2416,6 +2453,13 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             if (!settings.enableRightClick) return;
             const mesText = e.target.closest('.mes_text');
             if (!mesText) return;
+            if (isDomEngine()) {
+                const segmentEl = e.target.closest('[data-dc-seg]');
+                if (segmentEl && mesText.contains(segmentEl) && !segmentEl.closest('font[color]')) {
+                    showMenu(e, null, segmentEl);
+                }
+                return;
+            }
             const fontTag = e.target.closest('font[color]');
             if (fontTag) { showMenu(e, fontTag, null); return; }
             const qEl = e.target.closest('q');
@@ -2426,6 +2470,14 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             if (!settings.enableRightClick) return;
             const mesText = e.target.closest('.mes_text');
             if (!mesText) return;
+            if (isDomEngine()) {
+                const segmentEl = e.target.closest('[data-dc-seg]');
+                if (segmentEl && mesText.contains(segmentEl) && !segmentEl.closest('font[color]')) {
+                    longPressTarget = segmentEl;
+                    longPressTimer = setTimeout(() => showMenu(e, null, segmentEl), 500);
+                }
+                return;
+            }
             const fontTag = e.target.closest('font[color]');
             if (fontTag) {
                 longPressTarget = fontTag;
@@ -2770,6 +2822,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         settings.promptRole = 'system';
         settings.promptMode = 'inject';
         settings.sortMode = 'name';
+        settings.coloringEngine = 'llm';
         settings.llmConnectionProfile = null;
         settings.colorSchemaVersion = COLOR_SCHEMA_VERSION;
 
@@ -3125,6 +3178,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
     function buildColoredPromptPreview() {
         if (!settings.enabled) return '<span style="opacity:0.5">(disabled)</span>';
+        if (isDomEngine()) return '<span style="opacity:0.5">(local DOM engine: no prompt injected)</span>';
         const entries = Object.entries(characterColors);
         if (!entries.length) return '<span style="opacity:0.5">(no characters)</span>';
         return entries.map(([, v]) => `<span style="color:${getEntryEffectiveColor(v)}">${escapeHtml(v.name)}</span>`).join(', ');
@@ -3134,7 +3188,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         if (injectDebouncedTimer) clearTimeout(injectDebouncedTimer);
         injectDebouncedTimer = setTimeout(() => {
             let promptText = '';
-            if (settings.enabled && settings.promptMode !== 'macro') {
+            if (settings.enabled && !isDomEngine() && settings.promptMode !== 'macro') {
                 promptText = buildMinimalPromptInstruction();
             }
             const role = settings.promptRole === 'user' ? extension_prompt_roles.USER : extension_prompt_roles.SYSTEM;
@@ -3149,7 +3203,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const container = document.getElementById('dc-system-prompt-container');
         if (!container) return;
 
-        if (settings.promptMode === 'macro' && settings.enabled) {
+        if (settings.promptMode === 'macro' && settings.enabled && !isDomEngine()) {
             container.style.display = 'block';
             const textarea = document.getElementById('dc-system-prompt-text');
             if (textarea) textarea.value = '{{dialoguecolors}}';
@@ -3608,6 +3662,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
         saveHistory(); saveData(); updateCharList(); injectPrompt();
         stripColorBlocksFromDisplay();
+        if (isDomEngine()) decorateAllMessages();
         const conflicts = checkColorConflicts();
         if (conflicts.length) toast.warning(`Similar: ${conflicts.slice(0, 3).map(c => c.join(' & ')).join(', ')}`);
         toast.info(`Found ${Object.keys(characterColors).length} characters`);
@@ -3809,11 +3864,10 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         return { key, entry: characterColors[key], created: true };
     }
 
-    function colorizeMessageText(rawText, messageSpeakerName = '', options = {}) {
+    function attributeDialogueSegments(rawText, messageSpeakerName = '', options = {}) {
+        const result = { segments: [], hadDialogueMatches: false, hadResolvableSpeaker: false, createdCharacters: false, usedAssignments: [] };
         const dialogueRegex = buildDialogueRegex();
-        if (!dialogueRegex) {
-            return { updatedText: rawText, changed: false, hadDialogueMatches: false, hadResolvableSpeaker: false, createdCharacters: false, usedAssignments: [] };
-        }
+        if (!dialogueRegex) return result;
 
         const localAssignments = parseNamedColorAssignmentsFromText(rawText);
         const lookup = buildNameColorLookup(localAssignments);
@@ -3821,7 +3875,6 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             .filter(key => !isCompositeSpeakerLabel(lookup.get(key)?.name || key))
             .sort((left, right) => right.length - left.length);
         const trimmedSpeakerName = String(messageSpeakerName ?? '').trim();
-        let createdCharacters = false;
         let defaultSpeaker = resolveSingleSpeakerAssignment(trimmedSpeakerName, lookup);
 
         if (!defaultSpeaker && localAssignments.length === 1) {
@@ -3832,7 +3885,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             if (defaultSpeaker || !options.autoAddMessageSpeaker || !trimmedSpeakerName || isCompositeSpeakerLabel(trimmedSpeakerName)) return defaultSpeaker;
             const ensured = ensureCharacterEntry(trimmedSpeakerName);
             if (!ensured?.entry) return null;
-            if (ensured.created) createdCharacters = true;
+            if (ensured.created) result.createdCharacters = true;
             registerLookupAssignment(lookup, ensured.entry.name, getEntryEffectiveColor(ensured.entry), ensured.entry.aliases);
             defaultSpeaker = lookup.get(trimmedSpeakerName.toLowerCase()) || lookup.get(ensured.key) || null;
             if (defaultSpeaker && !sortedLookupKeys.includes(ensured.key)) {
@@ -3842,20 +3895,31 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             return defaultSpeaker;
         };
 
-        const usedAssignments = [];
+        const overrides = options.overrides && typeof options.overrides === 'object' ? options.overrides : null;
         const usedCanonicalKeys = new Set();
-        let hadDialogueMatches = false;
-        let hadResolvableSpeaker = false;
         let lastResolvedSpeakerKey = defaultSpeaker?.key || '';
+        let segmentIndex = -1;
+        let match;
+        dialogueRegex.lastIndex = 0;
 
-        const updatedText = rawText.replace(dialogueRegex, (match, ...args) => {
-            hadDialogueMatches = true;
-            const offset = args[args.length - 2];
+        while ((match = dialogueRegex.exec(rawText)) !== null) {
+            result.hadDialogueMatches = true;
+            segmentIndex++;
+            const offset = match.index;
+            const matchText = match[0];
             const beforeSlice = rawText.slice(Math.max(0, offset - 180), offset).replace(/<[^>]+>/g, ' ').replace(/[*_`~]/g, '');
             const hasMeaningfulPrefix = /[a-z0-9]/i.test(beforeSlice);
 
+            // Tier 1: explicit per-segment override
+            let assignment = null;
+            const overrideName = overrides ? overrides[segmentIndex] : undefined;
+            if (overrideName) {
+                assignment = resolveSingleSpeakerAssignment(String(overrideName), lookup);
+            }
             // Tier 2: soft context - closest mentioned character name near quote
-            let assignment = findClosestMentionedSpeakerInContext(rawText, offset, offset + match.length, lookup, sortedLookupKeys);
+            if (!assignment) {
+                assignment = findClosestMentionedSpeakerInContext(rawText, offset, offset + matchText.length, lookup, sortedLookupKeys);
+            }
             // Tier 3: no name in prefix → carry forward previous speaker
             if (!assignment && lastResolvedSpeakerKey) {
                 const prefixMentionsSpeaker = hasMeaningfulPrefix && sortedLookupKeys.some(key =>
@@ -3869,16 +3933,38 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             if (!assignment) {
                 assignment = defaultSpeaker || ensureDefaultSpeaker();
             }
-            if (!assignment) return match;
 
-            hadResolvableSpeaker = true;
-            lastResolvedSpeakerKey = assignment.key;
-            if (!usedCanonicalKeys.has(assignment.key)) {
-                usedCanonicalKeys.add(assignment.key);
-                usedAssignments.push({ name: assignment.name, color: assignment.color });
+            if (assignment) {
+                result.hadResolvableSpeaker = true;
+                lastResolvedSpeakerKey = assignment.key;
+                if (!usedCanonicalKeys.has(assignment.key)) {
+                    usedCanonicalKeys.add(assignment.key);
+                    result.usedAssignments.push({ name: assignment.name, color: assignment.color });
+                }
             }
-            return `<font color="${assignment.color}">${match}</font>`;
-        });
+
+            result.segments.push({
+                index: segmentIndex,
+                start: offset,
+                end: offset + matchText.length,
+                text: matchText,
+                delimiter: matchText.charAt(0),
+                assignment: assignment ? { key: assignment.key, name: assignment.name, color: assignment.color } : null
+            });
+        }
+
+        return result;
+    }
+
+    function colorizeMessageText(rawText, messageSpeakerName = '', options = {}) {
+        const { segments, hadDialogueMatches, hadResolvableSpeaker, createdCharacters, usedAssignments } = attributeDialogueSegments(rawText, messageSpeakerName, options);
+
+        let updatedText = rawText;
+        for (let i = segments.length - 1; i >= 0; i--) {
+            const seg = segments[i];
+            if (!seg.assignment) continue;
+            updatedText = `${updatedText.slice(0, seg.start)}<font color="${seg.assignment.color}">${seg.text}</font>${updatedText.slice(seg.end)}`;
+        }
 
         let finalText = updatedText;
         if (updatedText !== rawText && usedAssignments.length && !/\[COLORS?:([^\]]*)\]/i.test(finalText)) {
@@ -3895,10 +3981,240 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         };
     }
 
+    // ===== DOM coloring engine (non-destructive) =====
+    const OVERRIDES_METADATA_KEY = 'dialogue_colors_overrides';
+    let decorateAllTimer = null;
+
+    function hashMessageText(text) {
+        const str = String(text ?? '');
+        let hash = 5381;
+        for (let i = 0; i < str.length; i++) hash = ((hash << 5) + hash + str.charCodeAt(i)) | 0;
+        return hash.toString(36);
+    }
+
+    function getChatMetadataStore() {
+        const ctx = getContext();
+        const metadata = ctx?.chatMetadata || ctx?.chat_metadata;
+        return isPlainObject(metadata) ? metadata : null;
+    }
+
+    function saveChatMetadata() {
+        const ctx = getContext();
+        if (typeof ctx?.saveMetadataDebounced === 'function') ctx.saveMetadataDebounced();
+        else if (typeof ctx?.saveMetadata === 'function') ctx.saveMetadata();
+    }
+
+    function getQuoteOverridesMap(create = false) {
+        const metadata = getChatMetadataStore();
+        if (!metadata) return null;
+        if (!isPlainObject(metadata[OVERRIDES_METADATA_KEY])) {
+            if (!create) return null;
+            metadata[OVERRIDES_METADATA_KEY] = {};
+        }
+        return metadata[OVERRIDES_METADATA_KEY];
+    }
+
+    function getMessageQuoteOverrides(mesIndex, msg) {
+        const map = getQuoteOverridesMap(false);
+        const entry = map?.[String(mesIndex)];
+        if (!isPlainObject(entry) || !isPlainObject(entry.segments)) return null;
+        if (entry.hash !== hashMessageText(msg?.mes)) return null;
+        return entry.segments;
+    }
+
+    function setMessageQuoteOverride(mesIndex, msg, segmentIndex, speakerName) {
+        const map = getQuoteOverridesMap(true);
+        if (!map) return false;
+        const key = String(mesIndex);
+        const hash = hashMessageText(msg?.mes);
+        let entry = map[key];
+        if (!isPlainObject(entry) || entry.hash !== hash || !isPlainObject(entry.segments)) {
+            entry = { hash, segments: {} };
+            map[key] = entry;
+        }
+        entry.segments[String(segmentIndex)] = String(speakerName);
+        saveChatMetadata();
+        return true;
+    }
+
+    function getMessageIndexFromElement(el) {
+        const mesEl = el?.closest?.('.mes');
+        if (!mesEl) return -1;
+        const mesId = Number(mesEl.getAttribute('mesid'));
+        if (Number.isFinite(mesId) && mesId >= 0) return mesId;
+        return Array.from(document.querySelectorAll('.mes')).indexOf(mesEl);
+    }
+
+    function refreshDomDialogueCounts(chat = getContext()?.chat || []) {
+        const nextCounts = {};
+        let createdCharacters = false;
+
+        for (let i = 0; i < chat.length; i++) {
+            const msg = chat[i];
+            if (!msg || msg.is_system || !msg.mes || collectFontColorsFromText(msg.mes).size) continue;
+            const attribution = attributeDialogueSegments(msg.mes, msg.name, {
+                autoAddMessageSpeaker: true,
+                overrides: getMessageQuoteOverrides(i, msg),
+            });
+            if (attribution.createdCharacters) createdCharacters = true;
+            for (const seg of attribution.segments) {
+                const key = seg.assignment?.key;
+                if (!key || !characterColors[key]) continue;
+                nextCounts[key] = (nextCounts[key] || 0) + 1;
+            }
+        }
+
+        let changed = createdCharacters;
+        for (const [key, entry] of Object.entries(characterColors)) {
+            const nextCount = nextCounts[key] || 0;
+            if ((entry.dialogueCount || 0) !== nextCount) {
+                entry.dialogueCount = nextCount;
+                changed = true;
+            }
+        }
+
+        return { changed, createdCharacters };
+    }
+
+    function normalizeSegmentText(text) {
+        return String(text ?? '')
+            .replace(/[\u201c\u201d\u00ab\u00bb\u201e]/g, '"')
+            .replace(/[\u2018\u2019]/g, "'")
+            .replace(/\u2026/g, '...')
+            .replace(/[*_`~]/g, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
+    function matchSegmentsToElements(segments, elements, getTargetText, onMatch) {
+        let elementIndex = 0;
+        for (const seg of segments) {
+            if (elementIndex >= elements.length) break;
+            const target = getTargetText(seg);
+            if (!target) continue;
+            let foundIndex = -1;
+            for (let i = elementIndex; i < elements.length; i++) {
+                if (normalizeSegmentText(elements[i].textContent) === target) {
+                    foundIndex = i;
+                    break;
+                }
+            }
+            if (foundIndex === -1) continue;
+            onMatch(seg, elements[foundIndex]);
+            elementIndex = foundIndex + 1;
+        }
+    }
+
+    function clearSegmentDecoration(el) {
+        el.style.color = '';
+        el.style.backgroundColor = '';
+        if (!el.getAttribute('style')) el.removeAttribute('style');
+        el.removeAttribute('data-dc-colored');
+        el.removeAttribute('data-dc-speaker');
+        el.removeAttribute('data-dc-seg');
+    }
+
+    function undecorateMessageDom(mesElement) {
+        const mesText = mesElement?.querySelector?.('.mes_text');
+        if (!mesText) return;
+        mesText.querySelectorAll('[data-dc-colored], [data-dc-seg]').forEach(clearSegmentDecoration);
+        if (mesText.hasAttribute('data-dc-narrator')) {
+            mesText.style.color = '';
+            if (!mesText.getAttribute('style')) mesText.removeAttribute('style');
+            mesText.removeAttribute('data-dc-narrator');
+        }
+    }
+
+    function decorateMessageDom(mesElement, msg, mesIndex) {
+        const mesText = mesElement?.querySelector?.('.mes_text');
+        if (!mesText) return { decorated: false, createdCharacters: false };
+        undecorateMessageDom(mesElement);
+        if (!settings.enabled || !isDomEngine() || !msg || msg.is_system) {
+            return { decorated: false, createdCharacters: false };
+        }
+        // Leave messages with persisted font colors (LLM engine output) untouched.
+        if (mesText.querySelector('font[color]') || collectFontColorsFromText(msg.mes).size) {
+            return { decorated: false, createdCharacters: false };
+        }
+
+        const attribution = attributeDialogueSegments(msg.mes, msg.name, {
+            autoAddMessageSpeaker: true,
+            overrides: getMessageQuoteOverrides(mesIndex, msg),
+        });
+
+        let decorated = false;
+        const applyDecoration = (seg, el) => {
+            el.setAttribute('data-dc-seg', String(seg.index));
+            if (!seg.assignment) return;
+            el.style.color = seg.assignment.color;
+            if (settings.highlightMode) el.style.backgroundColor = `${seg.assignment.color}26`;
+            el.setAttribute('data-dc-colored', '1');
+            el.setAttribute('data-dc-speaker', seg.assignment.key);
+            decorated = true;
+        };
+
+        const quoteSegments = attribution.segments.filter(seg => seg.delimiter === '"');
+        const emphasisSegments = attribution.segments.filter(seg => seg.delimiter === '*' || seg.delimiter === '_');
+        const qElements = Array.from(mesText.querySelectorAll('q'));
+        const emElements = Array.from(mesText.querySelectorAll('em'));
+
+        matchSegmentsToElements(quoteSegments, qElements, seg => normalizeSegmentText(seg.text), applyDecoration);
+        matchSegmentsToElements(emphasisSegments, emElements, seg => normalizeSegmentText(seg.text.slice(1, -1)), applyDecoration);
+
+        if (!settings.disableNarration && settings.narratorColor) {
+            mesText.style.color = settings.narratorColor;
+            mesText.setAttribute('data-dc-narrator', '1');
+        }
+
+        return { decorated, createdCharacters: attribution.createdCharacters, segments: attribution.segments };
+    }
+
+    function undecorateAllMessages() {
+        document.querySelectorAll('#chat .mes[mesid]').forEach(undecorateMessageDom);
+    }
+
+    function decorateAllMessages() {
+        if (!settings.enabled || !isDomEngine()) {
+            undecorateAllMessages();
+            return;
+        }
+        const ctx = getContext();
+        const chat = ctx?.chat || [];
+        const countResult = refreshDomDialogueCounts(chat);
+        let changedColorData = countResult.changed;
+        document.querySelectorAll('#chat .mes[mesid]').forEach(mesElement => {
+            const mesIndex = Number(mesElement.getAttribute('mesid'));
+            const msg = chat[mesIndex];
+            if (!msg) return;
+            const result = decorateMessageDom(mesElement, msg, mesIndex);
+            if (result.createdCharacters) changedColorData = true;
+        });
+        if (changedColorData) {
+            saveData();
+            updateCharList();
+        }
+        updateLegend();
+    }
+
+    function scheduleDecorateAll(delay = 100) {
+        if (!isDomEngine()) return;
+        clearTimeout(decorateAllTimer);
+        decorateAllTimer = setTimeout(() => {
+            decorateAllTimer = null;
+            decorateAllMessages();
+        }, delay);
+    }
+
     async function recolorAllMessages() {
         const ctx = getContext();
         const chat = ctx?.chat || [];
         if (!chat.length) { toast.info('No messages to recolor.'); return; }
+        if (isDomEngine()) {
+            syncAllEffectiveColors();
+            decorateAllMessages();
+            toast.info('Refreshed DOM colors without editing chat text.');
+            return;
+        }
         if (isRecoloring) { toast.info('Recolor is already running.'); return; }
         isRecoloring = true;
         setRecolorButtonBusy(true);
@@ -4059,6 +4375,11 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const ctx = getContext();
         const chat = ctx?.chat || [];
         if (!chat.length) { toast.info('No messages to colorize.'); return; }
+        if (isDomEngine()) {
+            decorateAllMessages();
+            toast.info('Refreshed DOM colors without editing chat text.');
+            return;
+        }
         if (isColorizing) { toast.info('Colorize is already running.'); return; }
         isColorizing = true;
         setColorizeButtonBusy(true);
@@ -4187,6 +4508,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             const signature = `${chat.length}|${sigId}|${text}`;
             if (signature === lastProcessedMessageSignature) {
                 stripColorBlockFromElement(document.querySelector('.mes:last-child .mes_text'));
+                scheduleDecorateAll();
                 return;
             }
             lastProcessedMessageSignature = signature;
@@ -4204,7 +4526,13 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
             // Keep chat colors in sync when receive-time color conflict remapping happens.
             if (hadRemapping && settings.autoRecolor) {
-                await recolorAllMessages();
+                if (isDomEngine()) scheduleDecorateAll(0);
+                else await recolorAllMessages();
+            }
+
+            if (isDomEngine()) {
+                scheduleDecorateAll(0);
+                return;
             }
 
             // Auto-colorize fallback: if model produced no color output at all
@@ -4585,6 +4913,21 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         }
     }
 
+    function updateEngineVisibility() {
+        const domMode = isDomEngine();
+        document.querySelectorAll('#dc-ext .dc-llm-only').forEach(el => {
+            el.style.display = domMode ? 'none' : '';
+        });
+        document.querySelectorAll('#dc-ext .dc-dom-only').forEach(el => {
+            el.style.display = domMode ? '' : 'none';
+        });
+        const recolorButton = document.getElementById('dc-recolor');
+        if (recolorButton && !recolorButton.disabled) {
+            recolorButton.textContent = domMode ? 'Refresh DOM Colors' : 'Recolor Chat';
+        }
+        updateSystemPromptDisplay();
+    }
+
     function autoAssignFromCard() {
         try {
             const ctx = getContext();
@@ -4613,6 +4956,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         if ($('dc-share-global')) $('dc-share-global').checked = settings.shareColorsGlobally || false;
         if ($('dc-css-effects')) $('dc-css-effects').checked = settings.cssEffects || false;
         if ($('dc-disable-toasts')) $('dc-disable-toasts').checked = settings.disableToasts || false;
+        if ($('dc-engine')) $('dc-engine').value = settings.coloringEngine || 'llm';
         if ($('dc-llm-profile')) $('dc-llm-profile').value = settings.llmConnectionProfile || '';
         if ($('dc-theme')) $('dc-theme').value = settings.themeMode;
         if ($('dc-palette')) $('dc-palette').value = settings.colorTheme || 'pastel';
@@ -4627,6 +4971,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         refreshPresetDropdown();
         refreshPaletteDropdown();
         updateSystemPromptDisplay();
+        updateEngineVisibility();
         updateAutoSyncUI();
         applyControlHelpText();
     }
@@ -4641,13 +4986,18 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                     <summary>Basic</summary>
                     <p class="dc-section-note">The everyday controls live here. Clear keeps any character marked with Keep.</p>
                     <div class="dc-stack">
+                        <div class="dc-field-row">
+                            <label class="dc-inline-label" for="dc-engine">Coloring engine</label>
+                            <select id="dc-engine" class="text_pole" data-help="Choose LLM prompt-based coloring or local DOM-only coloring that never edits chat text."><option value="llm">LLM</option><option value="dom">Local (DOM-only)</option></select>
+                            <small class="dc-dom-only" style="display:none;opacity:0.72;flex-basis:100%;">DOM mode colors rendered quotes locally and stores manual quote overrides in chat metadata.</small>
+                        </div>
                         <div class="dc-button-row dc-button-row-3">
                             <button id="dc-scan" class="menu_button" data-help="Scan the current chat for characters and colors.">Scan Chat</button>
                             <button id="dc-clear" class="menu_button dc-danger-button" data-help="Clear tracked characters, but keep anything pinned with Keep.">Clear Non-Kept</button>
                             <button id="dc-recolor" class="menu_button" data-help="Rewrite message colors to match the current character assignments.">Recolor Chat</button>
                         </div>
                         <div class="dc-button-row dc-button-row-2">
-                            <button id="dc-colorize" class="menu_button" data-help="Colorize uncolored messages. Shift-click for only the latest message.">Colorize Missing</button>
+                            <button id="dc-colorize" class="menu_button dc-llm-only" data-help="Colorize uncolored messages. Shift-click for only the latest message.">Colorize Missing</button>
                             <button id="dc-stats" class="menu_button" data-help="Open dialogue statistics for tracked characters.">Show Stats</button>
                         </div>
                         <div class="dc-field-row">
@@ -4699,13 +5049,13 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                                     <label class="checkbox_label"><input type="checkbox" id="dc-autoscan" data-help="Automatically scan existing chat messages after chat load."><span>Auto-scan on chat load</span></label>
                                     <label class="checkbox_label"><input type="checkbox" id="dc-autoscan-new" data-help="Automatically scan newly arriving messages for speakers/colors."><span>Auto-scan new messages</span></label>
                                     <label class="checkbox_label"><input type="checkbox" id="dc-auto-lock" data-help="Automatically lock newly detected characters."><span>Auto-lock new characters</span></label>
-                                    <label class="checkbox_label"><input type="checkbox" id="dc-auto-colorize" data-help="Automatically colorize messages when the model skips color tags."><span>Auto-colorize fallback</span></label>
+                                    <label class="checkbox_label dc-llm-only"><input type="checkbox" id="dc-auto-colorize" data-help="Automatically colorize messages when the model skips color tags."><span>Auto-colorize fallback</span></label>
                                     <label class="checkbox_label"><input type="checkbox" id="dc-right-click" data-help="Enable right-click or long-press reassignment on dialogue."><span>Enable right-click reassignment</span></label>
                                     <label class="checkbox_label"><input type="checkbox" id="dc-disable-narration" data-help="Skip narrator color instructions."><span>Disable narration coloring</span></label>
                                     <label class="checkbox_label"><input type="checkbox" id="dc-share-global" data-help="Use one shared color table across all chats."><span>Share colors across chats</span></label>
                                     <label class="checkbox_label"><input type="checkbox" id="dc-disable-toasts" data-help="Suppress non-error toast notifications."><span>Reduce toast popups</span></label>
                                 </div>
-                                <div class="dc-field-row">
+                                <div class="dc-field-row dc-llm-only">
                                     <label class="dc-inline-label" for="dc-llm-profile">LLM Profile</label>
                                     <select id="dc-llm-profile" class="text_pole" data-help="Connection profile to use for LLM colorization."><option value="">-- Use main chat AI --</option></select>
                                 </div>
@@ -4725,19 +5075,19 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                                     <button id="dc-thought-add" class="menu_button" data-help="Append another thought symbol.">Add Symbol</button>
                                     <button id="dc-thought-clear" class="menu_button" data-help="Remove all thought symbols.">Clear Symbols</button>
                                 </div>
-                                <div class="dc-field-row">
+                                <div class="dc-field-row dc-llm-only">
                                     <label class="dc-inline-label" for="dc-prompt-depth">Depth</label>
                                     <input type="number" id="dc-prompt-depth" min="0" max="99" value="4" class="text_pole" data-help="How far from the chat end the prompt is injected.">
                                 </div>
-                                <div class="dc-field-row">
+                                <div class="dc-field-row dc-llm-only">
                                     <label class="dc-inline-label" for="dc-prompt-role">Role</label>
                                     <select id="dc-prompt-role" class="text_pole" data-help="Inject the prompt as a system or user message."><option value="system">System</option><option value="user">User</option></select>
                                 </div>
-                                <div class="dc-field-row">
+                                <div class="dc-field-row dc-llm-only">
                                     <label class="dc-inline-label" for="dc-prompt-mode">Mode</label>
                                     <select id="dc-prompt-mode" class="text_pole" data-help="Inject automatically or use the macro manually."><option value="inject">Inject</option><option value="macro">Macro</option></select>
                                 </div>
-                                <div id="dc-system-prompt-container" style="display:none;">
+                                <div id="dc-system-prompt-container" class="dc-llm-only" style="display:none;">
                                     <label style="font-weight:bold;margin-bottom:4px;display:block;">Add to your system prompt:</label>
                                     <textarea id="dc-system-prompt-text" readonly class="text_pole" style="width:100%;min-height:60px;font-size:0.75em;font-family:monospace;resize:vertical;">{{dialoguecolors}}</textarea>
                                     <button id="dc-copy-system-prompt" class="menu_button" style="margin-top:4px;width:100%;">Copy Macro</button>
@@ -4856,8 +5206,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
         syncUIWithSettings();
 
-        $('dc-enabled').onchange = e => { settings.enabled = e.target.checked; saveData(); injectPrompt(); };
-        $('dc-highlight').onchange = e => { settings.highlightMode = e.target.checked; saveData(); injectPrompt(); };
+        $('dc-enabled').onchange = e => { settings.enabled = e.target.checked; saveData(); injectPrompt(); scheduleDecorateAll(0); };
+        $('dc-highlight').onchange = e => { settings.highlightMode = e.target.checked; saveData(); injectPrompt(); scheduleDecorateAll(0); };
         $('dc-autoscan').onchange = e => { settings.autoScanOnLoad = e.target.checked; saveData(); };
         $('dc-autoscan-new').onchange = e => { settings.autoScanNewMessages = e.target.checked; saveData(); };
         $('dc-auto-lock').onchange = e => { settings.autoLockDetected = e.target.checked; saveData(); };
@@ -4865,10 +5215,19 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         $('dc-auto-colorize').onchange = e => { settings.autoColorize = e.target.checked; saveData(); };
         $('dc-right-click').onchange = e => { settings.enableRightClick = e.target.checked; saveData(); };
         $('dc-legend').onchange = e => { settings.showLegend = e.target.checked; saveData(); updateLegend(); };
-        $('dc-disable-narration').onchange = e => { settings.disableNarration = e.target.checked; saveData(); injectPrompt(); };
+        $('dc-disable-narration').onchange = e => { settings.disableNarration = e.target.checked; saveData(); injectPrompt(); scheduleDecorateAll(0); };
         $('dc-share-global').onchange = e => { settings.shareColorsGlobally = e.target.checked; saveData(); loadData(); updateCharList(); injectPrompt(); };
         $('dc-css-effects').onchange = e => { settings.cssEffects = e.target.checked; saveData(); injectPrompt(); };
         $('dc-disable-toasts').onchange = e => { settings.disableToasts = e.target.checked; saveData(); };
+        $('dc-engine').onchange = e => {
+            const wasDomEngine = isDomEngine();
+            settings.coloringEngine = e.target.value === 'dom' ? 'dom' : 'llm';
+            saveData();
+            injectPrompt();
+            updateEngineVisibility();
+            if (isDomEngine()) decorateAllMessages();
+            else if (wasDomEngine) undecorateAllMessages();
+        };
         $('dc-llm-profile').onchange = e => { settings.llmConnectionProfile = e.target.value || null; saveData(); };
         $('dc-theme').onchange = e => {
             applyThemeOrBrightnessChange(() => { settings.themeMode = e.target.value; }, { saveImmediately: true });
@@ -4882,11 +5241,11 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             queueColorStateSave({ history: false });
         };
         $('dc-brightness').onchange = () => { flushColorStateSave(); flushChatSave(); };
-        $('dc-narrator').oninput = e => { settings.narratorColor = e.target.value; saveData(); injectPrompt(); };
-        $('dc-narrator-clear').onclick = () => { settings.narratorColor = ''; $('dc-narrator').value = '#888888'; saveData(); injectPrompt(); };
-        $('dc-thought-symbols').oninput = e => { settings.thoughtSymbols = e.target.value; saveData(); injectPrompt(); };
-        $('dc-thought-add').onclick = () => { const s = prompt('Add thought symbol (e.g., *, 「, 『):'); if (s?.trim()) { settings.thoughtSymbols = (settings.thoughtSymbols || '') + s.trim(); $('dc-thought-symbols').value = settings.thoughtSymbols; saveData(); injectPrompt(); } };
-        $('dc-thought-clear').onclick = () => { settings.thoughtSymbols = ''; $('dc-thought-symbols').value = ''; saveData(); injectPrompt(); };
+        $('dc-narrator').oninput = e => { settings.narratorColor = e.target.value; saveData(); injectPrompt(); scheduleDecorateAll(); };
+        $('dc-narrator-clear').onclick = () => { settings.narratorColor = ''; $('dc-narrator').value = '#888888'; saveData(); injectPrompt(); scheduleDecorateAll(0); };
+        $('dc-thought-symbols').oninput = e => { settings.thoughtSymbols = e.target.value; saveData(); injectPrompt(); scheduleDecorateAll(); };
+        $('dc-thought-add').onclick = () => { const s = prompt('Add thought symbol (e.g., *, 「, 『):'); if (s?.trim()) { settings.thoughtSymbols = (settings.thoughtSymbols || '') + s.trim(); $('dc-thought-symbols').value = settings.thoughtSymbols; saveData(); injectPrompt(); scheduleDecorateAll(0); } };
+        $('dc-thought-clear').onclick = () => { settings.thoughtSymbols = ''; $('dc-thought-symbols').value = ''; saveData(); injectPrompt(); scheduleDecorateAll(0); };
         $('dc-prompt-depth').oninput = e => { settings.promptDepth = parseInt(e.target.value, 10) || 0; saveData(); injectPrompt(); };
         $('dc-prompt-role').onchange = e => { settings.promptRole = e.target.value; saveData(); injectPrompt(); };
         $('dc-prompt-mode').onchange = e => { settings.promptMode = e.target.value; saveData(); injectPrompt(); };
@@ -5071,7 +5430,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         injectPrompt();
     }
 
-    globalThis.DialogueColorsInterceptor = async function (chat, contextSize, abort, type) { if (type !== 'quiet' && settings.enabled) injectPrompt(); };
+    globalThis.DialogueColorsInterceptor = async function (chat, contextSize, abort, type) { if (type !== 'quiet' && settings.enabled && !isDomEngine()) injectPrompt(); };
 
     function registerKeyboardShortcuts() {
         if (runtimeState.keyboardSetup) return;
@@ -5098,10 +5457,12 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         updateCharList();
         injectPrompt();
         stripColorBlocksFromDisplay();
+        scheduleDecorateAll(150);
         if (settings.autoScanOnLoad !== false && !Object.keys(characterColors).length) {
             setTimeout(() => {
                 if (document.querySelectorAll('.mes').length) scanAllMessages();
                 stripColorBlocksFromDisplay();
+                scheduleDecorateAll(0);
             }, 1000);
         }
     }
@@ -5110,7 +5471,9 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         if (runtimeState.eventsRegistered) return;
         runtimeState.eventHandlers = {
             generationAfterCommands: () => injectPrompt(),
-            newMessage: onNewMessage,
+            characterMessageRendered: () => { onNewMessage(); scheduleDecorateAll(120); },
+            messageRendered: () => scheduleDecorateAll(120),
+            messageUpdated: () => scheduleDecorateAll(80),
             chatChanged: handleChatChanged,
             settingsUpdated: () => {
                 const record = getAutoSyncRecord(false);
@@ -5121,7 +5484,10 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             },
         };
         eventSource.on(event_types.GENERATION_AFTER_COMMANDS, runtimeState.eventHandlers.generationAfterCommands);
-        eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, runtimeState.eventHandlers.newMessage);
+        eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, runtimeState.eventHandlers.characterMessageRendered);
+        if (event_types.USER_MESSAGE_RENDERED) eventSource.on(event_types.USER_MESSAGE_RENDERED, runtimeState.eventHandlers.messageRendered);
+        if (event_types.MESSAGE_UPDATED) eventSource.on(event_types.MESSAGE_UPDATED, runtimeState.eventHandlers.messageUpdated);
+        if (event_types.MESSAGE_SWIPED) eventSource.on(event_types.MESSAGE_SWIPED, runtimeState.eventHandlers.messageUpdated);
         eventSource.on(event_types.CHAT_CHANGED, runtimeState.eventHandlers.chatChanged);
         eventSource.on(event_types.SETTINGS_UPDATED, runtimeState.eventHandlers.settingsUpdated);
         eventSource.on(event_types.CHAT_CHANGED, () => populateProfileDropdown());
@@ -5132,7 +5498,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         try {
             const context = getContext();
             const macroCallback = () => {
-                if (!settings.enabled) return '';
+                if (!settings.enabled || isDomEngine()) return '';
                 return buildMinimalPromptInstruction();
             };
 
@@ -5199,6 +5565,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 clearDomCache();
                 injectPrompt();
                 populateProfileDropdown();
+                scheduleDecorateAll(150);
             } else if (waitAttempts > 60) {
                 clearInterval(waitUI);
             }
