@@ -145,7 +145,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     let swapMode = null;
     let searchTerm = '';
     let expandedCharacterRows = new Set();
-    let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, thoughtSymbols: '*', disableNarration: true, shareColorsGlobally: false, cssEffects: false, autoScanNewMessages: true, autoLockDetected: true, enableRightClick: false, promptDepth: 1, autoRecolor: true, autoColorize: false, llmAttributionCheck: false, disableToasts: false, llmConnectionProfile: null, colorSchemaVersion: COLOR_SCHEMA_VERSION, promptMode: 'inject', promptRole: 'user', sortMode: 'name', coloringEngine: 'llm' };
+    let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, thoughtSymbols: '*', disableNarration: true, shareColorsGlobally: false, cssEffects: false, autoScanNewMessages: true, autoLockDetected: true, enableRightClick: false, promptDepth: 1, autoRecolor: true, autoColorize: false, llmAttributionCheck: false, domStealthColors: true, disableToasts: false, llmConnectionProfile: null, attributionConnectionProfile: null, colorSchemaVersion: COLOR_SCHEMA_VERSION, promptMode: 'inject', promptRole: 'user', sortMode: 'name', coloringEngine: 'llm' };
     const TOGGLE_SETTING_DEFAULTS = Object.freeze({
         enabled: true,
         highlightMode: false,
@@ -160,12 +160,13 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         autoRecolor: true,
         autoColorize: false,
         llmAttributionCheck: false,
+        domStealthColors: true,
         disableToasts: false,
     });
     const GLOBAL_TOGGLE_KEYS = Object.freeze(Object.keys(TOGGLE_SETTING_DEFAULTS));
     const GLOBAL_VISUAL_KEYS = Object.freeze(['thoughtSymbols', 'themeMode', 'colorTheme', 'brightness', 'promptDepth', 'promptRole', 'promptMode', 'coloringEngine']);
     const GLOBAL_SETTINGS_V2_KEYS = Object.freeze([...new Set([...GLOBAL_VISUAL_KEYS, ...GLOBAL_TOGGLE_KEYS])]);
-    const ACTIVE_SETTING_KEYS = Object.freeze([...new Set([...GLOBAL_SETTINGS_V2_KEYS, 'narratorColor', 'llmConnectionProfile', 'colorSchemaVersion', 'sortMode'])]);
+    const ACTIVE_SETTING_KEYS = Object.freeze([...new Set([...GLOBAL_SETTINGS_V2_KEYS, 'narratorColor', 'llmConnectionProfile', 'attributionConnectionProfile', 'colorSchemaVersion', 'sortMode'])]);
     const LEGACY_AUTO_SYNC_ENABLED_KEY = 'dc_autosync_enabled';
     const AUTO_SYNC_SAVE_TIMEOUT_MS = 15000;
     let lastCharKey = null;
@@ -1217,7 +1218,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     }
 
     async function callLLMWithProfile(instruction, options = {}) {
-        const profileId = settings.llmConnectionProfile;
+        const profileId = options.profileId ?? settings.llmConnectionProfile;
         const quietOptions = {
             skipWIAN: true,
             quietName: options.quietName || `DC_${Date.now()}`,
@@ -3320,9 +3321,42 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         return parts.join(' ');
     }
 
+    function buildDomStealthColorsInstruction() {
+        if (!settings.enabled) return '';
+        const { mode, minLightness, maxLightness } = getThemeLightnessBounds();
+        const colorEntries = Object.entries(characterColors)
+            .filter(([, v]) => v && getEntryEffectiveColor(v));
+        const colorList = colorEntries
+            .map(([, v]) => `${v.name}=${getEntryEffectiveColor(v)}`)
+            .join(', ');
+        const reservedColors = [...new Set(colorEntries.map(([, v]) => getEntryEffectiveColor(v)))].join(', ');
+        const brightnessOffset = getBrightnessOffset();
+        const parts = [];
+        const modeGuidance = mode === 'dark'
+            ? `readable colors for dark background (${minLightness}-${maxLightness}% lightness, medium-to-light)`
+            : `readable colors for light background (${minLightness}-${maxLightness}% lightness, medium-to-dark)`;
+        const brightnessClause = brightnessOffset !== 0
+            ? ` New speakers: ${brightnessOffset > 0 ? '+' : ''}${brightnessOffset}% lightness bias.`
+            : '';
+        parts.push(`For speaker tracking: end your response with [COLORS:Name=#RRGGBB] listing each speaker in your reply that is not already established below. Use Name(Nick)=#RRGGBB for nicknames. Omit the block if there are no new speakers. Output it as plain text on the final line.`);
+        parts.push(`Use ${modeGuidance}.${brightnessClause}`);
+        const customPalettePrompt = buildCustomPalettePrompt();
+        if (customPalettePrompt) parts.push(customPalettePrompt);
+        else {
+            const paletteDesc = PALETTE_DESCRIPTIONS[settings.colorTheme];
+            if (paletteDesc) parts.push(paletteDesc);
+        }
+        if (colorList) parts.push(`Established: ${colorList}.`);
+        if (reservedColors) parts.push(`${reservedColors} are taken. New speakers need distinct colors not closely matching these.`);
+        return parts.join(' ');
+    }
+
     function buildColoredPromptPreview() {
         if (!settings.enabled) return '<span style="opacity:0.5">(disabled)</span>';
-        if (isDomEngine()) return '<span style="opacity:0.5">(local DOM engine: no prompt injected)</span>';
+        if (isDomEngine()) {
+            if (settings.domStealthColors) return '<span style="opacity:0.5">(local DOM engine + stealth colors block)</span>';
+            return '<span style="opacity:0.5">(local DOM engine: no prompt injected)</span>';
+        }
         const entries = Object.entries(characterColors);
         if (!entries.length) return '<span style="opacity:0.5">(no characters)</span>';
         return entries.map(([, v]) => `<span style="color:${getEntryEffectiveColor(v)}">${escapeHtml(v.name)}</span>`).join(', ');
@@ -3334,6 +3368,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             let promptText = '';
             if (settings.enabled && !isDomEngine() && settings.promptMode !== 'macro') {
                 promptText = buildMinimalPromptInstruction();
+            } else if (settings.enabled && isDomEngine() && settings.domStealthColors) {
+                promptText = buildDomStealthColorsInstruction();
             }
             const role = settings.promptRole === 'user' ? extension_prompt_roles.USER : extension_prompt_roles.SYSTEM;
             setExtensionPrompt(MODULE_NAME, promptText, extension_prompt_types.IN_CHAT, settings.promptDepth, false, role);
@@ -4707,6 +4743,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         let corrections = null;
         try {
             const response = await callLLMWithProfile(buildAttributionVerifierPrompt(msg, mesIndex, segments, lookup), {
+                profileId: settings.attributionConnectionProfile,
                 quietName: `DC_Attr_${mesIndex}_${Date.now()}`,
                 jsonSchema,
                 maxTokens: 500,
@@ -4714,12 +4751,14 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             corrections = parseAttributionVerifierResponse(response);
         } catch (e) {
             console.warn('[Dialogue Colors] LLM attribution verification failed:', e);
+            toast.warning('Color verification failed (see console).');
             persistCreatedCharacters();
             return { checked: false, corrections: 0, createdCharacters: false };
         }
 
         if (!Array.isArray(corrections)) {
             console.warn('[Dialogue Colors] LLM attribution verification returned invalid JSON.');
+            toast.warning('Color verification failed (see console).');
             persistCreatedCharacters();
             return { checked: false, corrections: 0, createdCharacters: false };
         }
@@ -4758,15 +4797,21 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
     async function verifyLatestAttributionsWithLLM(options = {}) {
         const chat = getContext()?.chat || [];
-        for (let i = chat.length - 1; i >= 0; i--) {
-            const msg = chat[i];
-            if (!isMessageEligibleForAttributionVerification(msg) || isMessageAttributionVerified(i, msg)) continue;
-            const result = await verifyAttributionsWithLLM(i, options);
-            if (result.corrections > 0) toast.info(`Verified DOM colors: applied ${result.corrections} correction${result.corrections !== 1 ? 's' : ''}.`);
-            return result;
+        if (!chat.length) {
+            if (options.manual) toast.info('No messages to verify.');
+            return { checked: false, corrections: 0, createdCharacters: false };
         }
-        if (options.manual) toast.info('No unverified DOM messages to check.');
-        return { checked: false, corrections: 0, createdCharacters: false };
+        const lastIdx = chat.length - 1;
+        const msg = chat[lastIdx];
+        if (!isMessageEligibleForAttributionVerification(msg) || isMessageAttributionVerified(lastIdx, msg)) {
+            if (options.manual) toast.info('Latest message already verified or not eligible.');
+            return { checked: false, corrections: 0, createdCharacters: false };
+        }
+        toast.info('Verifying dialogue colors with LLM...');
+        const result = await verifyAttributionsWithLLM(lastIdx, options);
+        if (result.checked && result.corrections > 0) toast.info(`Verified DOM colors: applied ${result.corrections} correction${result.corrections !== 1 ? 's' : ''}.`);
+        else if (result.checked && result.corrections === 0) toast.info('Verified colors: no corrections needed.');
+        return result;
     }
 
     async function verifyVisibleAttributionsWithLLM(options = {}) {
@@ -4777,6 +4822,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             .reverse();
         let checked = 0;
         let corrections = 0;
+        toast.info('Verifying visible messages with LLM...');
         for (const index of indices) {
             const msg = chat[index];
             if (!isMessageEligibleForAttributionVerification(msg) || isMessageAttributionVerified(index, msg)) continue;
@@ -4786,6 +4832,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         }
         if (corrections > 0) toast.info(`Verified DOM colors: applied ${corrections} correction${corrections !== 1 ? 's' : ''}.`);
         else if (options.manual && !checked) toast.info('No unverified visible DOM messages to check.');
+        else if (options.manual && checked) toast.info('Verified visible colors: no corrections needed.');
         return { checked: checked > 0, corrections, createdCharacters: false };
     }
 
@@ -4934,8 +4981,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         }
     }
 
-    function populateProfileDropdown() {
-        const select = document.getElementById('dc-llm-profile');
+    function populateProfileSelect(elementId, selectedProfileId) {
+        const select = document.getElementById(elementId);
         if (!select) return;
         select.innerHTML = '<option value="">-- Use main chat AI --</option>';
         try {
@@ -4950,7 +4997,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 const opt = document.createElement('option');
                 opt.value = p.id;
                 opt.textContent = p.name || p.id;
-                if (p.id === settings.llmConnectionProfile) opt.selected = true;
+                if (p.id === selectedProfileId) opt.selected = true;
                 select.appendChild(opt);
             }
             select.disabled = false;
@@ -4958,6 +5005,11 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             console.warn('[DC] Failed to load profiles:', e);
             select.innerHTML += '<option value="" disabled>Error loading profiles</option>';
         }
+    }
+
+    function populateProfileDropdown() {
+        populateProfileSelect('dc-llm-profile', settings.llmConnectionProfile);
+        populateProfileSelect('dc-attr-profile', settings.attributionConnectionProfile);
     }
 
     async function colorizeMessages(targetMode = 'all') {
@@ -5580,6 +5632,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         if ($('dc-auto-recolor')) $('dc-auto-recolor').checked = settings.autoRecolor !== false;
         if ($('dc-auto-colorize')) $('dc-auto-colorize').checked = settings.autoColorize || false;
         if ($('dc-llm-attr-check')) $('dc-llm-attr-check').checked = settings.llmAttributionCheck || false;
+        if ($('dc-stealth-colors')) $('dc-stealth-colors').checked = settings.domStealthColors !== false;
         if ($('dc-right-click')) $('dc-right-click').checked = settings.enableRightClick;
         if ($('dc-legend')) $('dc-legend').checked = settings.showLegend;
         if ($('dc-disable-narration')) $('dc-disable-narration').checked = settings.disableNarration !== false;
@@ -5588,6 +5641,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         if ($('dc-disable-toasts')) $('dc-disable-toasts').checked = settings.disableToasts || false;
         if ($('dc-engine')) $('dc-engine').value = settings.coloringEngine || 'llm';
         if ($('dc-llm-profile')) $('dc-llm-profile').value = settings.llmConnectionProfile || '';
+        if ($('dc-attr-profile')) $('dc-attr-profile').value = settings.attributionConnectionProfile || '';
         if ($('dc-theme')) $('dc-theme').value = settings.themeMode;
         if ($('dc-palette')) $('dc-palette').value = settings.colorTheme || 'pastel';
         if ($('dc-brightness')) $('dc-brightness').value = settings.brightness || 0;
@@ -5650,7 +5704,12 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                             <label class="checkbox_label"><input type="checkbox" id="dc-legend" data-help="Show a floating legend of active character colors."><span>Show floating legend</span></label>
                             <label class="checkbox_label"><input type="checkbox" id="dc-css-effects" data-help="Allow transform-based CSS effects for dramatic dialogue."><span>Enable CSS effects</span></label>
                             <label class="checkbox_label"><input type="checkbox" id="dc-auto-recolor" data-help="Automatically recolor chat after color changes."><span>Auto-recolor after changes</span></label>
+                            <label class="checkbox_label dc-dom-only"><input type="checkbox" id="dc-stealth-colors" data-help="In DOM mode, inject a slim instruction for the model to include [COLORS:Name=#RRGGBB] for new speakers."><span>Stealth colors block</span></label>
                             <label class="checkbox_label dc-dom-only"><input type="checkbox" id="dc-llm-attr-check" data-help="After generation ends in DOM mode, ask the selected LLM profile to verify quote attribution and save metadata corrections."><span>LLM attribution check</span></label>
+                        </div>
+                        <div class="dc-field-row dc-dom-only">
+                            <label class="dc-inline-label" for="dc-attr-profile">Verify profile</label>
+                            <select id="dc-attr-profile" class="text_pole" data-help="Connection profile to use for LLM attribution verification."><option value="">-- Use main chat AI --</option></select>
                         </div>
                         <div class="dc-field-row dc-llm-only">
                             <label class="dc-inline-label" for="dc-prompt-depth">Depth</label>
@@ -5846,6 +5905,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         $('dc-auto-recolor').onchange = e => { settings.autoRecolor = e.target.checked; saveData(); };
         $('dc-auto-colorize').onchange = e => { settings.autoColorize = e.target.checked; saveData(); };
         $('dc-llm-attr-check').onchange = e => { settings.llmAttributionCheck = e.target.checked; saveData(); };
+        $('dc-stealth-colors').onchange = e => { settings.domStealthColors = e.target.checked; saveData(); injectPrompt(); };
         $('dc-right-click').onchange = e => { settings.enableRightClick = e.target.checked; saveData(); };
         $('dc-legend').onchange = e => { settings.showLegend = e.target.checked; saveData(); updateLegend(); };
         $('dc-disable-narration').onchange = e => { settings.disableNarration = e.target.checked; saveData(); injectPrompt(); scheduleDecorateAll(0); };
@@ -5865,6 +5925,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             else if (wasDomEngine) undecorateAllMessages();
         };
         $('dc-llm-profile').onchange = e => { settings.llmConnectionProfile = e.target.value || null; saveData(); };
+        $('dc-attr-profile').onchange = e => { settings.attributionConnectionProfile = e.target.value || null; saveData(); };
         $('dc-theme').onchange = e => {
             applyThemeOrBrightnessChange(() => { settings.themeMode = e.target.value; }, { saveImmediately: true });
             saveData(); updateCharList(); injectPrompt(); flushChatSave();
