@@ -18,6 +18,10 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         keyboardSetup: false,
         eventsRegistered: false,
         eventHandlers: null,
+        chatObserver: null,
+        chatObserverTarget: null,
+        chatObserverTimer: null,
+        pendingObservedMessages: new Set(),
     };
     globalThis[RUNTIME_GUARD_KEY] = runtimeState;
 
@@ -141,7 +145,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     let swapMode = null;
     let searchTerm = '';
     let expandedCharacterRows = new Set();
-    let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, thoughtSymbols: '*', disableNarration: true, shareColorsGlobally: false, cssEffects: false, autoScanNewMessages: true, autoLockDetected: true, enableRightClick: false, promptDepth: 1, autoRecolor: true, autoColorize: false, disableToasts: false, llmConnectionProfile: null, colorSchemaVersion: COLOR_SCHEMA_VERSION, promptMode: 'inject', promptRole: 'user', sortMode: 'name', coloringEngine: 'llm' };
+    let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, thoughtSymbols: '*', disableNarration: true, shareColorsGlobally: false, cssEffects: false, autoScanNewMessages: true, autoLockDetected: true, enableRightClick: false, promptDepth: 1, autoRecolor: true, autoColorize: false, llmAttributionCheck: false, disableToasts: false, llmConnectionProfile: null, colorSchemaVersion: COLOR_SCHEMA_VERSION, promptMode: 'inject', promptRole: 'user', sortMode: 'name', coloringEngine: 'llm' };
     const TOGGLE_SETTING_DEFAULTS = Object.freeze({
         enabled: true,
         highlightMode: false,
@@ -155,6 +159,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         enableRightClick: false,
         autoRecolor: true,
         autoColorize: false,
+        llmAttributionCheck: false,
         disableToasts: false,
     });
     const GLOBAL_TOGGLE_KEYS = Object.freeze(Object.keys(TOGGLE_SETTING_DEFAULTS));
@@ -171,6 +176,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     let isRecoloring = false;
     let isColorizing = false;
     let isAutoColorizing = false;
+    let isVerifyingAttribution = false;
     const LIVE_CHAT_SAVE_DELAY_MS = 350;
     const COLOR_STATE_SAVE_DELAY_MS = 180;
     let liveChatSaveTimer = null;
@@ -3839,6 +3845,19 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         button.textContent = button.dataset.defaultLabel || 'Colorize';
     }
 
+    function setVerifyAttributionButtonBusy(isBusyState) {
+        const button = document.getElementById('dc-verify-attr');
+        if (!button) return;
+        if (isBusyState) {
+            if (!button.dataset.defaultLabel) button.dataset.defaultLabel = button.textContent || 'Verify Colors (LLM)';
+            button.disabled = true;
+            button.textContent = 'Verifying...';
+            return;
+        }
+        button.disabled = false;
+        button.textContent = button.dataset.defaultLabel || 'Verify Colors (LLM)';
+    }
+
     function showAutoColorizeIndicator(mesElement) {
         if (!mesElement) return;
         let indicator = mesElement.querySelector('.dc-auto-colorize-indicator');
@@ -3962,35 +3981,94 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         return lookup;
     }
 
-    function findClosestMentionedSpeakerInContext(text, segmentStart, segmentEnd, lookup, sortedLookupKeys) {
-        const beforeText = text.slice(Math.max(0, segmentStart - 300), segmentStart);
-        const afterText = text.slice(segmentEnd, Math.min(text.length, segmentEnd + 140));
-        const cleanBefore = beforeText.replace(/<[^>]+>/g, ' ').replace(/[*_`~]/g, '');
-        const cleanAfter = afterText.replace(/<[^>]+>/g, ' ').replace(/[*_`~]/g, '');
+    function makeLengthPreservingSearchText(text) {
+        return String(text ?? '')
+            .replace(/<[^>]+>/g, match => ' '.repeat(match.length))
+            .replace(/&(?:[a-z]+|#[0-9]+|#x[0-9a-f]+);/gi, match => ' '.repeat(match.length))
+            .replace(/[*_`~]/g, ' ');
+    }
 
-        let bestAssignment = null;
-        let bestDistance = Infinity;
+    function buildMaskedDialogueText(text, segments) {
+        const raw = String(text ?? '');
+        if (!segments.length) return raw;
+        let masked = '';
+        let cursor = 0;
+        for (const seg of segments) {
+            masked += raw.slice(cursor, seg.start);
+            masked += ' '.repeat(Math.max(0, seg.end - seg.start));
+            cursor = seg.end;
+        }
+        return masked + raw.slice(cursor);
+    }
+
+    function getDialogueParagraphRange(text, start, end) {
+        const raw = String(text ?? '');
+        let rangeStart = 0;
+        for (let i = Math.max(0, start) - 1; i >= 0; i--) {
+            if (raw[i] === '\n' || raw[i] === '\r') {
+                rangeStart = i + 1;
+                break;
+            }
+        }
+        let rangeEnd = raw.length;
+        for (let i = Math.min(raw.length, end); i < raw.length; i++) {
+            if (raw[i] === '\n' || raw[i] === '\r') {
+                rangeEnd = i;
+                break;
+            }
+        }
+        return { start: rangeStart, end: rangeEnd };
+    }
+
+    function isSameDialogueParagraph(left, right) {
+        return !!left && !!right && left.start === right.start && left.end === right.end;
+    }
+
+    function isBetterSpeakerCandidate(candidate, best) {
+        if (!best) return true;
+        const afterTagWindow = 30;
+        const nearTie = 20;
+        const candidateAfterTag = candidate.side === 'after' && candidate.distance <= afterTagWindow;
+        const bestAfterTag = best.side === 'after' && best.distance <= afterTagWindow;
+        if (candidateAfterTag && !bestAfterTag && candidate.distance <= best.distance + nearTie) return true;
+        if (bestAfterTag && !candidateAfterTag && best.distance <= candidate.distance + nearTie) return false;
+        return candidate.distance < best.distance;
+    }
+
+    function findClosestMentionedSpeakerInContext(maskedText, windowStart, windowEnd, segmentStart, segmentEnd, lookup, sortedLookupKeys) {
+        const text = String(maskedText ?? '');
+        const boundedStart = Math.max(0, Math.min(text.length, windowStart));
+        const boundedEnd = Math.max(boundedStart, Math.min(text.length, windowEnd));
+        if (boundedStart >= boundedEnd) return null;
+
+        const cleanWindow = makeLengthPreservingSearchText(text.slice(boundedStart, boundedEnd));
+        let best = null;
 
         for (const speakerKey of sortedLookupKeys) {
             const assignment = lookup.get(speakerKey);
             if (!assignment) continue;
             const regex = new RegExp(`\\b${escapeRegex(speakerKey)}(?:'s?)?\\b`, 'gi');
-
-            // Search before-context: distance = chars from match end to quote start
             let match;
-            while ((match = regex.exec(cleanBefore)) !== null) {
-                const dist = cleanBefore.length - (match.index + match[0].length);
-                if (dist < bestDistance) { bestDistance = dist; bestAssignment = assignment; }
-            }
-
-            // Search after-context: distance = chars from quote end to match start
-            regex.lastIndex = 0;
-            while ((match = regex.exec(cleanAfter)) !== null) {
-                const dist = match.index;
-                if (dist < bestDistance) { bestDistance = dist; bestAssignment = assignment; }
+            while ((match = regex.exec(cleanWindow)) !== null) {
+                const matchStart = boundedStart + match.index;
+                const matchEnd = matchStart + match[0].length;
+                let side = '';
+                let distance = Infinity;
+                if (matchEnd <= segmentStart) {
+                    side = 'before';
+                    distance = segmentStart - matchEnd;
+                } else if (matchStart >= segmentEnd) {
+                    side = 'after';
+                    distance = matchStart - segmentEnd;
+                } else {
+                    continue;
+                }
+                const candidate = { assignment, distance, side };
+                if (isBetterSpeakerCandidate(candidate, best)) best = candidate;
             }
         }
-        return bestAssignment;
+
+        return best?.assignment || null;
     }
 
     function ensureCharacterEntry(name, color) {
@@ -4014,7 +4092,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const dialogueRegex = buildDialogueRegex();
         if (!dialogueRegex) return result;
 
-        const localAssignments = parseNamedColorAssignmentsFromText(rawText);
+        const raw = String(rawText ?? '');
+        const localAssignments = parseNamedColorAssignmentsFromText(raw);
         const lookup = buildNameColorLookup(localAssignments);
         const sortedLookupKeys = Array.from(lookup.keys())
             .filter(key => !isCompositeSpeakerLabel(lookup.get(key)?.name || key))
@@ -4042,39 +4121,74 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
         const overrides = options.overrides && typeof options.overrides === 'object' ? options.overrides : null;
         const usedCanonicalKeys = new Set();
-        let lastResolvedSpeakerKey = defaultSpeaker?.key || '';
+        const recentSpeakerKeys = defaultSpeaker?.key ? [defaultSpeaker.key] : [];
+        let lastResolvedSpeakerKey = '';
         let segmentIndex = -1;
         let match;
+        const collectedSegments = [];
         dialogueRegex.lastIndex = 0;
 
-        while ((match = dialogueRegex.exec(rawText)) !== null) {
+        while ((match = dialogueRegex.exec(raw)) !== null) {
             result.hadDialogueMatches = true;
             segmentIndex++;
             const offset = match.index;
             const matchText = match[0];
-            const beforeSlice = rawText.slice(Math.max(0, offset - 180), offset).replace(/<[^>]+>/g, ' ').replace(/[*_`~]/g, '');
-            const hasMeaningfulPrefix = /[a-z0-9]/i.test(beforeSlice);
+            collectedSegments.push({
+                index: segmentIndex,
+                start: offset,
+                end: offset + matchText.length,
+                text: matchText,
+                delimiter: matchText.charAt(0),
+                paragraph: getDialogueParagraphRange(raw, offset, offset + matchText.length),
+            });
+        }
 
-            // Tier 1: explicit per-segment override
+        const maskedText = buildMaskedDialogueText(raw, collectedSegments);
+        const rememberSpeaker = assignment => {
+            if (!assignment?.key) return;
+            const lastKey = recentSpeakerKeys[recentSpeakerKeys.length - 1];
+            if (lastKey !== assignment.key) recentSpeakerKeys.push(assignment.key);
+            while (recentSpeakerKeys.length > 2) recentSpeakerKeys.shift();
+        };
+        const getAlternatingAssignment = () => {
+            if (!lastResolvedSpeakerKey) return null;
+            for (let i = recentSpeakerKeys.length - 2; i >= 0; i--) {
+                const key = recentSpeakerKeys[i];
+                if (key && key !== lastResolvedSpeakerKey) return lookup.get(key) || null;
+            }
+            if (defaultSpeaker?.key && defaultSpeaker.key !== lastResolvedSpeakerKey) return defaultSpeaker;
+            return null;
+        };
+        let previousParagraph = null;
+
+        for (const segment of collectedSegments) {
+            const sameParagraphAsPrevious = isSameDialogueParagraph(segment.paragraph, previousParagraph);
             let assignment = null;
-            const overrideName = overrides ? overrides[segmentIndex] : undefined;
+
+            // Tier 1: explicit per-segment override.
+            const overrideName = overrides ? overrides[segment.index] : undefined;
             if (overrideName) {
                 assignment = resolveSingleSpeakerAssignment(String(overrideName), lookup);
             }
-            // Tier 2: soft context - closest mentioned character name near quote
+
+            // Tier 2: masked, paragraph-scoped proximity near the quote.
             if (!assignment) {
-                assignment = findClosestMentionedSpeakerInContext(rawText, offset, offset + matchText.length, lookup, sortedLookupKeys);
+                const windowStart = Math.max(segment.paragraph.start, segment.start - 240);
+                const windowEnd = Math.min(segment.paragraph.end, segment.end + 120);
+                assignment = findClosestMentionedSpeakerInContext(maskedText, windowStart, windowEnd, segment.start, segment.end, lookup, sortedLookupKeys);
             }
-            // Tier 3: no name in prefix → carry forward previous speaker
-            if (!assignment && lastResolvedSpeakerKey) {
-                const prefixMentionsSpeaker = hasMeaningfulPrefix && sortedLookupKeys.some(key =>
-                    new RegExp(`\\b${escapeRegex(key)}\\b`, 'i').test(beforeSlice)
-                );
-                if (!prefixMentionsSpeaker) {
-                    assignment = lookup.get(lastResolvedSpeakerKey) || null;
-                }
+
+            // Tier 3: carry only within the same paragraph/line.
+            if (!assignment && sameParagraphAsPrevious && lastResolvedSpeakerKey) {
+                assignment = lookup.get(lastResolvedSpeakerKey) || null;
             }
-            // Tier 4: default speaker
+
+            // Tier 4: alternate speakers across unattributed new paragraphs.
+            if (!assignment && !sameParagraphAsPrevious) {
+                assignment = getAlternatingAssignment();
+            }
+
+            // Tier 5: default message speaker.
             if (!assignment) {
                 assignment = defaultSpeaker || ensureDefaultSpeaker();
             }
@@ -4082,6 +4196,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             if (assignment) {
                 result.hadResolvableSpeaker = true;
                 lastResolvedSpeakerKey = assignment.key;
+                rememberSpeaker(assignment);
                 if (!usedCanonicalKeys.has(assignment.key)) {
                     usedCanonicalKeys.add(assignment.key);
                     result.usedAssignments.push({ name: assignment.name, color: assignment.color });
@@ -4089,13 +4204,14 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             }
 
             result.segments.push({
-                index: segmentIndex,
-                start: offset,
-                end: offset + matchText.length,
-                text: matchText,
-                delimiter: matchText.charAt(0),
+                index: segment.index,
+                start: segment.start,
+                end: segment.end,
+                text: segment.text,
+                delimiter: segment.delimiter,
                 assignment: assignment ? { key: assignment.key, name: assignment.name, color: assignment.color } : null
             });
+            previousParagraph = segment.paragraph;
         }
 
         return result;
@@ -4129,6 +4245,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     // ===== DOM coloring engine (non-destructive) =====
     const OVERRIDES_METADATA_KEY = 'dialogue_colors_overrides';
     let decorateAllTimer = null;
+    let decorateLastTimer = null;
+    let isDecoratingDom = false;
 
     function hashMessageText(text) {
         const str = String(text ?? '');
@@ -4160,26 +4278,51 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     }
 
     function getMessageQuoteOverrides(mesIndex, msg) {
-        const map = getQuoteOverridesMap(false);
-        const entry = map?.[String(mesIndex)];
-        if (!isPlainObject(entry) || !isPlainObject(entry.segments)) return null;
-        if (entry.hash !== hashMessageText(msg?.mes)) return null;
-        return entry.segments;
+        const entry = getMessageQuoteOverrideEntry(mesIndex, msg, false);
+        return entry?.segments || null;
     }
 
-    function setMessageQuoteOverride(mesIndex, msg, segmentIndex, speakerName) {
-        const map = getQuoteOverridesMap(true);
-        if (!map) return false;
+    function getMessageQuoteOverrideEntry(mesIndex, msg, create = false) {
+        const map = getQuoteOverridesMap(create);
+        if (!map) return null;
         const key = String(mesIndex);
         const hash = hashMessageText(msg?.mes);
         let entry = map[key];
-        if (!isPlainObject(entry) || entry.hash !== hash || !isPlainObject(entry.segments)) {
+        if (!isPlainObject(entry) || entry.hash !== hash) {
+            if (!create) return null;
             entry = { hash, segments: {} };
             map[key] = entry;
         }
+        if (!isPlainObject(entry.segments)) {
+            if (!create) return null;
+            entry.segments = {};
+        }
+        return entry;
+    }
+
+    function setMessageQuoteOverride(mesIndex, msg, segmentIndex, speakerName, options = {}) {
+        const entry = getMessageQuoteOverrideEntry(mesIndex, msg, true);
+        if (!entry) return false;
         entry.segments[String(segmentIndex)] = String(speakerName);
+        if (!isPlainObject(entry.sources)) entry.sources = {};
+        entry.sources[String(segmentIndex)] = options.source || 'manual';
         saveChatMetadata();
         return true;
+    }
+
+    function markMessageAttributionVerified(mesIndex, msg) {
+        const entry = getMessageQuoteOverrideEntry(mesIndex, msg, true);
+        if (!entry) return false;
+        entry.verifiedHash = hashMessageText(msg?.mes);
+        entry.verifiedAt = Date.now();
+        saveChatMetadata();
+        return true;
+    }
+
+    function isMessageAttributionVerified(mesIndex, msg) {
+        const entry = getMessageQuoteOverrideEntry(mesIndex, msg, false);
+        const hash = hashMessageText(msg?.mes);
+        return !!entry && entry.hash === hash && entry.verifiedHash === hash;
     }
 
     function getMessageIndexFromElement(el) {
@@ -4319,26 +4462,69 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     }
 
     function decorateAllMessages() {
-        if (!settings.enabled || !isDomEngine()) {
-            undecorateAllMessages();
-            return;
+        const previousDecoratingState = isDecoratingDom;
+        isDecoratingDom = true;
+        try {
+            if (!settings.enabled || !isDomEngine()) {
+                undecorateAllMessages();
+                return;
+            }
+            const ctx = getContext();
+            const chat = ctx?.chat || [];
+            const countResult = refreshDomDialogueCounts(chat);
+            let changedColorData = countResult.changed;
+            document.querySelectorAll('#chat .mes[mesid]').forEach(mesElement => {
+                const mesIndex = Number(mesElement.getAttribute('mesid'));
+                const msg = chat[mesIndex];
+                if (!msg) return;
+                const result = decorateMessageDom(mesElement, msg, mesIndex);
+                if (result.createdCharacters) changedColorData = true;
+            });
+            if (changedColorData) {
+                saveData();
+                updateCharList();
+            }
+            updateLegend();
+        } finally {
+            isDecoratingDom = previousDecoratingState;
         }
-        const ctx = getContext();
-        const chat = ctx?.chat || [];
-        const countResult = refreshDomDialogueCounts(chat);
-        let changedColorData = countResult.changed;
-        document.querySelectorAll('#chat .mes[mesid]').forEach(mesElement => {
-            const mesIndex = Number(mesElement.getAttribute('mesid'));
-            const msg = chat[mesIndex];
-            if (!msg) return;
-            const result = decorateMessageDom(mesElement, msg, mesIndex);
-            if (result.createdCharacters) changedColorData = true;
-        });
-        if (changedColorData) {
+    }
+
+    function decorateMessageElementByIndex(mesElement, mesIndex) {
+        if (!mesElement || !Number.isFinite(mesIndex) || mesIndex < 0) return { decorated: false, createdCharacters: false };
+        const msg = getContext()?.chat?.[mesIndex];
+        if (!msg) return { decorated: false, createdCharacters: false };
+        return decorateMessageDom(mesElement, msg, mesIndex);
+    }
+
+    function decorateObservedMessages(elements) {
+        if (!settings.enabled || !isDomEngine() || !elements?.length) return;
+        const previousDecoratingState = isDecoratingDom;
+        isDecoratingDom = true;
+        let createdCharacters = false;
+        try {
+            for (const mesElement of elements) {
+                if (!mesElement?.isConnected) continue;
+                const mesIndex = Number(mesElement.getAttribute('mesid'));
+                const result = decorateMessageElementByIndex(mesElement, mesIndex);
+                if (result.createdCharacters) createdCharacters = true;
+            }
+        } finally {
+            isDecoratingDom = previousDecoratingState;
+        }
+        if (createdCharacters) {
             saveData();
             updateCharList();
         }
         updateLegend();
+    }
+
+    function decorateLastMessageDom() {
+        if (!settings.enabled || !isDomEngine()) return;
+        const messages = document.querySelectorAll('#chat .mes[mesid]');
+        const mesElement = messages[messages.length - 1];
+        if (!mesElement) return;
+        decorateObservedMessages([mesElement]);
     }
 
     function scheduleDecorateAll(delay = 100) {
@@ -4348,6 +4534,274 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             decorateAllTimer = null;
             decorateAllMessages();
         }, delay);
+    }
+
+    function scheduleDecorateLast(delay = 80) {
+        if (!settings.enabled || !isDomEngine()) return;
+        clearTimeout(decorateLastTimer);
+        decorateLastTimer = setTimeout(() => {
+            decorateLastTimer = null;
+            decorateLastMessageDom();
+        }, delay);
+    }
+
+    function disconnectChatObserver() {
+        if (runtimeState.chatObserver) runtimeState.chatObserver.disconnect();
+        runtimeState.chatObserver = null;
+        runtimeState.chatObserverTarget = null;
+        if (runtimeState.chatObserverTimer) clearTimeout(runtimeState.chatObserverTimer);
+        runtimeState.chatObserverTimer = null;
+        runtimeState.pendingObservedMessages?.clear?.();
+    }
+
+    function queueObservedMessageDecoration(mesElement) {
+        if (!mesElement || !settings.enabled || !isDomEngine()) return;
+        runtimeState.pendingObservedMessages.add(mesElement);
+        if (runtimeState.chatObserverTimer) clearTimeout(runtimeState.chatObserverTimer);
+        runtimeState.chatObserverTimer = setTimeout(() => {
+            runtimeState.chatObserverTimer = null;
+            const pending = Array.from(runtimeState.pendingObservedMessages || []);
+            runtimeState.pendingObservedMessages.clear();
+            decorateObservedMessages(pending);
+        }, 80);
+    }
+
+    function collectMutatedMessageElements(mutation) {
+        const elements = [];
+        const pushMessage = node => {
+            if (!node) return;
+            const element = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+            const direct = element?.matches?.('.mes[mesid]') ? element : element?.closest?.('.mes[mesid]');
+            if (direct) elements.push(direct);
+            element?.querySelectorAll?.('.mes[mesid]')?.forEach(mesElement => elements.push(mesElement));
+        };
+        pushMessage(mutation.target);
+        mutation.addedNodes?.forEach(pushMessage);
+        return elements;
+    }
+
+    function setupChatObserver() {
+        const chatEl = document.getElementById('chat');
+        if (!chatEl) return;
+        if (runtimeState.chatObserver && runtimeState.chatObserverTarget === chatEl) return;
+        disconnectChatObserver();
+        runtimeState.pendingObservedMessages = new Set();
+        runtimeState.chatObserverTarget = chatEl;
+        runtimeState.chatObserver = new MutationObserver(mutations => {
+            if (isDecoratingDom || !settings.enabled || !isDomEngine()) return;
+            for (const mutation of mutations) {
+                for (const mesElement of collectMutatedMessageElements(mutation)) {
+                    queueObservedMessageDecoration(mesElement);
+                }
+            }
+        });
+        runtimeState.chatObserver.observe(chatEl, { childList: true, subtree: true, characterData: true });
+    }
+
+    function isMessageEligibleForAttributionVerification(msg) {
+        return !!msg && !msg.is_system && !!msg.mes && !collectFontColorsFromText(msg.mes).size;
+    }
+
+    function parseAttributionVerifierResponse(responseText) {
+        const cleaned = unwrapCodeFence(responseText);
+        const candidates = [cleaned];
+        const objectMatch = cleaned.match(/\{[\s\S]*\}/);
+        if (objectMatch && objectMatch[0] !== cleaned) candidates.push(objectMatch[0]);
+        for (const candidate of candidates) {
+            try {
+                const parsed = JSON.parse(candidate);
+                const corrections = Array.isArray(parsed) ? parsed : parsed?.corrections;
+                return Array.isArray(corrections) ? corrections : [];
+            } catch { /* try next candidate */ }
+        }
+        return null;
+    }
+
+    function buildAttributionVerifierPrompt(msg, mesIndex, segments, lookup) {
+        const knownNames = [];
+        const seenNames = new Set();
+        const addKnownName = name => {
+            const trimmed = String(name ?? '').trim();
+            const key = trimmed.toLowerCase();
+            if (!trimmed || seenNames.has(key) || isCompositeSpeakerLabel(trimmed)) return;
+            seenNames.add(key);
+            knownNames.push(trimmed);
+        };
+        for (const entry of Object.values(characterColors)) {
+            addKnownName(entry.name);
+            for (const alias of entry.aliases || []) addKnownName(alias);
+        }
+        for (const assignment of lookup.values()) addKnownName(assignment.name);
+        addKnownName(msg?.name);
+
+        const quoteList = segments
+            .map(seg => `${seg.index}. current=${seg.assignment?.name || 'Unknown'} quote=${JSON.stringify(seg.text)}`)
+            .join('\n');
+        const knownList = knownNames.length ? knownNames.join(', ') : '(none)';
+
+        return `You verify dialogue speaker attribution for a local DOM-only colorizer.\nReturn JSON only: {"corrections":[{"index":0,"speaker":"Name"}]}\nOnly include quotes whose current speaker is clearly wrong. If unsure, omit the quote. Use one speaker name only, preferably from Known speakers. Do not invent speaker names unless the message makes the name explicit.\n\nMessage index: ${mesIndex}\nMessage speaker/fallback: ${msg?.name || 'Unknown'}\nKnown speakers and aliases: ${knownList}\n\nFull message text:\n${msg?.mes || ''}\n\nNumbered dialogue segments:\n${quoteList}`;
+    }
+
+    function resolveVerifierSpeakerName(rawName, lookup) {
+        const speakerName = String(rawName ?? '').trim();
+        if (!speakerName || speakerName.length > 80 || isCompositeSpeakerLabel(speakerName)) return { assignment: null, created: false };
+        const normalized = speakerName.toLowerCase();
+        if (['unknown', 'unclear', 'narrator', 'none', 'n/a'].includes(normalized)) return { assignment: null, created: false };
+
+        let assignment = resolveSingleSpeakerAssignment(speakerName, lookup);
+        if (assignment) return { assignment, created: false };
+
+        const ensured = ensureCharacterEntry(speakerName);
+        if (!ensured?.entry) return { assignment: null, created: false };
+        registerLookupAssignment(lookup, ensured.entry.name, getEntryEffectiveColor(ensured.entry), ensured.entry.aliases);
+        assignment = lookup.get(speakerName.toLowerCase()) || lookup.get(ensured.key) || null;
+        return { assignment, created: !!ensured.created };
+    }
+
+    async function verifyAttributionsWithLLM(mesIndex, options = {}) {
+        if (!settings.enabled || !isDomEngine()) return { checked: false, corrections: 0, createdCharacters: false };
+        const ctx = getContext();
+        const msg = ctx?.chat?.[mesIndex];
+        if (!isMessageEligibleForAttributionVerification(msg)) return { checked: false, corrections: 0, createdCharacters: false };
+        if (isMessageAttributionVerified(mesIndex, msg)) return { checked: false, corrections: 0, createdCharacters: false };
+
+        const localAssignments = parseNamedColorAssignmentsFromText(msg.mes);
+        const lookup = buildNameColorLookup(localAssignments);
+        const existingEntry = getMessageQuoteOverrideEntry(mesIndex, msg, false);
+        const attribution = attributeDialogueSegments(msg.mes, msg.name, {
+            autoAddMessageSpeaker: true,
+            overrides: existingEntry?.segments || null,
+        });
+        const persistCreatedCharacters = () => {
+            if (!attribution.createdCharacters) return;
+            saveData();
+            updateCharList();
+        };
+        const segments = attribution.segments.filter(seg => seg.assignment);
+        if (!segments.length) {
+            markMessageAttributionVerified(mesIndex, msg);
+            persistCreatedCharacters();
+            return { checked: true, corrections: 0, createdCharacters: attribution.createdCharacters };
+        }
+
+        const jsonSchema = {
+            type: 'object',
+            properties: {
+                corrections: {
+                    type: 'array',
+                    items: {
+                        type: 'object',
+                        properties: {
+                            index: { type: 'integer' },
+                            speaker: { type: 'string' },
+                        },
+                        required: ['index', 'speaker'],
+                        additionalProperties: false,
+                    },
+                },
+            },
+            required: ['corrections'],
+            additionalProperties: false,
+        };
+
+        let corrections = null;
+        try {
+            const response = await callLLMWithProfile(buildAttributionVerifierPrompt(msg, mesIndex, segments, lookup), {
+                quietName: `DC_Attr_${mesIndex}_${Date.now()}`,
+                jsonSchema,
+                maxTokens: 500,
+            });
+            corrections = parseAttributionVerifierResponse(response);
+        } catch (e) {
+            console.warn('[Dialogue Colors] LLM attribution verification failed:', e);
+            persistCreatedCharacters();
+            return { checked: false, corrections: 0, createdCharacters: false };
+        }
+
+        if (!Array.isArray(corrections)) {
+            console.warn('[Dialogue Colors] LLM attribution verification returned invalid JSON.');
+            persistCreatedCharacters();
+            return { checked: false, corrections: 0, createdCharacters: false };
+        }
+
+        const segmentByIndex = new Map(segments.map(seg => [seg.index, seg]));
+        let appliedCorrections = 0;
+        let createdCharacters = !!attribution.createdCharacters;
+        for (const correction of corrections) {
+            const index = Number(correction?.index);
+            if (!Number.isInteger(index) || !segmentByIndex.has(index)) continue;
+            const seg = segmentByIndex.get(index);
+            const { assignment, created } = resolveVerifierSpeakerName(correction?.speaker, lookup);
+            if (!assignment || assignment.key === seg.assignment?.key) continue;
+
+            const latestEntry = getMessageQuoteOverrideEntry(mesIndex, msg, true);
+            const existingOverride = latestEntry?.segments?.[String(index)];
+            const existingSource = latestEntry?.sources?.[String(index)];
+            if (existingOverride && existingSource !== 'llm') continue;
+
+            if (setMessageQuoteOverride(mesIndex, msg, index, assignment.name, { source: 'llm' })) {
+                appliedCorrections++;
+                if (created) createdCharacters = true;
+            }
+        }
+
+        markMessageAttributionVerified(mesIndex, msg);
+        if (createdCharacters) {
+            saveData();
+            updateCharList();
+        }
+        const mesElement = document.querySelector(`#chat .mes[mesid="${mesIndex}"]`) || document.querySelectorAll('#chat .mes[mesid]')[mesIndex];
+        if (mesElement) decorateObservedMessages([mesElement]);
+
+        return { checked: true, corrections: appliedCorrections, createdCharacters };
+    }
+
+    async function verifyLatestAttributionsWithLLM(options = {}) {
+        const chat = getContext()?.chat || [];
+        for (let i = chat.length - 1; i >= 0; i--) {
+            const msg = chat[i];
+            if (!isMessageEligibleForAttributionVerification(msg) || isMessageAttributionVerified(i, msg)) continue;
+            const result = await verifyAttributionsWithLLM(i, options);
+            if (result.corrections > 0) toast.info(`Verified DOM colors: applied ${result.corrections} correction${result.corrections !== 1 ? 's' : ''}.`);
+            return result;
+        }
+        if (options.manual) toast.info('No unverified DOM messages to check.');
+        return { checked: false, corrections: 0, createdCharacters: false };
+    }
+
+    async function verifyVisibleAttributionsWithLLM(options = {}) {
+        const chat = getContext()?.chat || [];
+        const indices = Array.from(document.querySelectorAll('#chat .mes[mesid]'))
+            .map(el => Number(el.getAttribute('mesid')))
+            .filter(index => Number.isInteger(index) && index >= 0)
+            .reverse();
+        let checked = 0;
+        let corrections = 0;
+        for (const index of indices) {
+            const msg = chat[index];
+            if (!isMessageEligibleForAttributionVerification(msg) || isMessageAttributionVerified(index, msg)) continue;
+            const result = await verifyAttributionsWithLLM(index, options);
+            if (result.checked) checked++;
+            corrections += result.corrections || 0;
+        }
+        if (corrections > 0) toast.info(`Verified DOM colors: applied ${corrections} correction${corrections !== 1 ? 's' : ''}.`);
+        else if (options.manual && !checked) toast.info('No unverified visible DOM messages to check.');
+        return { checked: checked > 0, corrections, createdCharacters: false };
+    }
+
+    async function runAttributionVerification(action, options = {}) {
+        if (isVerifyingAttribution) {
+            if (options.manual) toast.info('Attribution verification is already running.');
+            return { checked: false, corrections: 0, createdCharacters: false };
+        }
+        isVerifyingAttribution = true;
+        setVerifyAttributionButtonBusy(true);
+        try {
+            return await action();
+        } finally {
+            isVerifyingAttribution = false;
+            setVerifyAttributionButtonBusy(false);
+        }
     }
 
     async function recolorAllMessages() {
@@ -5125,6 +5579,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         if ($('dc-auto-lock')) $('dc-auto-lock').checked = settings.autoLockDetected !== false;
         if ($('dc-auto-recolor')) $('dc-auto-recolor').checked = settings.autoRecolor !== false;
         if ($('dc-auto-colorize')) $('dc-auto-colorize').checked = settings.autoColorize || false;
+        if ($('dc-llm-attr-check')) $('dc-llm-attr-check').checked = settings.llmAttributionCheck || false;
         if ($('dc-right-click')) $('dc-right-click').checked = settings.enableRightClick;
         if ($('dc-legend')) $('dc-legend').checked = settings.showLegend;
         if ($('dc-disable-narration')) $('dc-disable-narration').checked = settings.disableNarration !== false;
@@ -5164,15 +5619,16 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                         <div class="dc-field-row">
                             <label class="dc-inline-label" for="dc-engine">Coloring engine</label>
                             <select id="dc-engine" class="text_pole" data-help="Choose LLM prompt-based coloring or local DOM-only coloring that never edits chat text."><option value="llm">LLM</option><option value="dom">Local (DOM-only)</option></select>
-                            <small class="dc-dom-only" style="display:none;opacity:0.72;flex-basis:100%;">DOM mode colors rendered quotes locally and stores manual quote overrides in chat metadata.</small>
+                            <small class="dc-dom-only" style="display:none;opacity:0.72;flex-basis:100%;">DOM mode colors rendered quotes locally, stores quote overrides in chat metadata, and can optionally use the selected LLM profile to verify attribution after generation.</small>
                         </div>
                         <div class="dc-button-row dc-button-row-3">
                             <button id="dc-scan" class="menu_button" data-help="Scan the current chat for characters and colors.">Scan Chat</button>
                             <button id="dc-clear" class="menu_button dc-danger-button" data-help="Clear tracked characters, but keep anything pinned with Keep.">Clear Non-Kept</button>
                             <button id="dc-recolor" class="menu_button" data-help="Rewrite message colors to match the current character assignments.">Recolor Chat</button>
                         </div>
-                        <div class="dc-button-row dc-button-row-2">
+                        <div class="dc-button-row dc-button-row-3">
                             <button id="dc-colorize" class="menu_button dc-llm-only" data-help="Colorize uncolored messages. Shift-click for only the latest message.">Colorize Missing</button>
+                            <button id="dc-verify-attr" class="menu_button dc-dom-only" style="display:none;" data-help="Verify DOM quote attribution with the selected LLM profile. Shift-click scans visible unverified messages.">Verify Colors (LLM)</button>
                             <button id="dc-stats" class="menu_button" data-help="Open dialogue statistics for tracked characters.">Show Stats</button>
                         </div>
                         <div class="dc-field-row">
@@ -5194,6 +5650,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                             <label class="checkbox_label"><input type="checkbox" id="dc-legend" data-help="Show a floating legend of active character colors."><span>Show floating legend</span></label>
                             <label class="checkbox_label"><input type="checkbox" id="dc-css-effects" data-help="Allow transform-based CSS effects for dramatic dialogue."><span>Enable CSS effects</span></label>
                             <label class="checkbox_label"><input type="checkbox" id="dc-auto-recolor" data-help="Automatically recolor chat after color changes."><span>Auto-recolor after changes</span></label>
+                            <label class="checkbox_label dc-dom-only"><input type="checkbox" id="dc-llm-attr-check" data-help="After generation ends in DOM mode, ask the selected LLM profile to verify quote attribution and save metadata corrections."><span>LLM attribution check</span></label>
                         </div>
                         <div class="dc-field-row dc-llm-only">
                             <label class="dc-inline-label" for="dc-prompt-depth">Depth</label>
@@ -5388,6 +5845,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         $('dc-auto-lock').onchange = e => { settings.autoLockDetected = e.target.checked; saveData(); };
         $('dc-auto-recolor').onchange = e => { settings.autoRecolor = e.target.checked; saveData(); };
         $('dc-auto-colorize').onchange = e => { settings.autoColorize = e.target.checked; saveData(); };
+        $('dc-llm-attr-check').onchange = e => { settings.llmAttributionCheck = e.target.checked; saveData(); };
         $('dc-right-click').onchange = e => { settings.enableRightClick = e.target.checked; saveData(); };
         $('dc-legend').onchange = e => { settings.showLegend = e.target.checked; saveData(); updateLegend(); };
         $('dc-disable-narration').onchange = e => { settings.disableNarration = e.target.checked; saveData(); injectPrompt(); scheduleDecorateAll(0); };
@@ -5400,7 +5858,10 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             saveData();
             injectPrompt();
             updateEngineVisibility();
-            if (isDomEngine()) decorateAllMessages();
+            if (isDomEngine()) {
+                setupChatObserver();
+                decorateAllMessages();
+            }
             else if (wasDomEngine) undecorateAllMessages();
         };
         $('dc-llm-profile').onchange = e => { settings.llmConnectionProfile = e.target.value || null; saveData(); };
@@ -5456,6 +5917,10 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         $('dc-colorize').onclick = (e) => {
             if (e.shiftKey) colorizeMessages('last');
             else if (confirm('Colorize all uncolored messages with known character colors?')) colorizeMessages('all');
+        };
+        $('dc-verify-attr').onclick = (e) => {
+            if (e.shiftKey) runAttributionVerification(() => verifyVisibleAttributionsWithLLM({ manual: true }), { manual: true });
+            else runAttributionVerification(() => verifyLatestAttributionsWithLLM({ manual: true }), { manual: true });
         };
         $('dc-fix-conflicts').onclick = autoResolveConflicts;
         $('dc-regen').onclick = regenerateAllColors;
@@ -5632,11 +6097,14 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         updateCharList();
         injectPrompt();
         stripColorBlocksFromDisplay();
+        setupChatObserver();
         scheduleDecorateAll(150);
+        setTimeout(() => setupChatObserver(), 250);
         if (settings.autoScanOnLoad !== false && !Object.keys(characterColors).length) {
             setTimeout(() => {
                 if (document.querySelectorAll('.mes').length) scanAllMessages();
                 stripColorBlocksFromDisplay();
+                setupChatObserver();
                 scheduleDecorateAll(0);
             }, 1000);
         }
@@ -5649,6 +6117,13 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             characterMessageRendered: () => { onNewMessage(); scheduleDecorateAll(120); },
             messageRendered: () => scheduleDecorateAll(120),
             messageUpdated: () => scheduleDecorateAll(80),
+            streamToken: () => scheduleDecorateLast(80),
+            generationEnded: () => {
+                scheduleDecorateAll(0);
+                if (settings.llmAttributionCheck) {
+                    setTimeout(() => runAttributionVerification(() => verifyLatestAttributionsWithLLM({ manual: false }), { manual: false }), 250);
+                }
+            },
             chatChanged: handleChatChanged,
             settingsUpdated: () => {
                 const record = getAutoSyncRecord(false);
@@ -5663,6 +6138,9 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         if (event_types.USER_MESSAGE_RENDERED) eventSource.on(event_types.USER_MESSAGE_RENDERED, runtimeState.eventHandlers.messageRendered);
         if (event_types.MESSAGE_UPDATED) eventSource.on(event_types.MESSAGE_UPDATED, runtimeState.eventHandlers.messageUpdated);
         if (event_types.MESSAGE_SWIPED) eventSource.on(event_types.MESSAGE_SWIPED, runtimeState.eventHandlers.messageUpdated);
+        if (event_types.STREAM_TOKEN_RECEIVED) eventSource.on(event_types.STREAM_TOKEN_RECEIVED, runtimeState.eventHandlers.streamToken);
+        if (event_types.SMOOTH_STREAM_TOKEN_RECEIVED) eventSource.on(event_types.SMOOTH_STREAM_TOKEN_RECEIVED, runtimeState.eventHandlers.streamToken);
+        if (event_types.GENERATION_ENDED) eventSource.on(event_types.GENERATION_ENDED, runtimeState.eventHandlers.generationEnded);
         eventSource.on(event_types.CHAT_CHANGED, runtimeState.eventHandlers.chatChanged);
         eventSource.on(event_types.SETTINGS_UPDATED, runtimeState.eventHandlers.settingsUpdated);
         eventSource.on(event_types.CHAT_CHANGED, () => populateProfileDropdown());
@@ -5740,6 +6218,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 clearDomCache();
                 injectPrompt();
                 populateProfileDropdown();
+                setupChatObserver();
                 scheduleDecorateAll(150);
             } else if (waitAttempts > 60) {
                 clearInterval(waitUI);

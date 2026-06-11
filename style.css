@@ -63,6 +63,15 @@
     opacity: 0.92;
 }
 
+[data-dc-colored] {
+    transition: color 0.15s ease, background-color 0.15s ease;
+}
+
+#dc-verify-attr:disabled {
+    opacity: 0.7;
+    cursor: wait;
+}
+
 #dc-ext label.checkbox_label {
     display: flex;
     align-items: center;

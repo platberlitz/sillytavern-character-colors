@@ -6,7 +6,7 @@
   "js": "index.js",
   "css": "style.css",
   "author": "platberlitz",
-  "version": "4.3.0",
+  "version": "4.4.0",
   "homePage": "https://github.com/platberlitz/sillytavern-character-colors",
   "description": "LLM or local DOM-only dialogue and thought coloring with auto-regex-install",
   "generate_interceptor": "DialogueColorsInterceptor"
