@@ -1,109 +1,97 @@
 # Dialogue Colors
 
-A SillyTavern extension that makes the LLM color-code each character's dialogue automatically. It keeps the fast visual readability of the original extension, but the UI is now organized around a simpler daily workflow so the common actions are easier to find and harder to misuse.
+A SillyTavern extension that tells the LLM to color-code each character's dialogue with `<font color>` tags. It scans your chat, tracks who said what, and keeps things readable when multiple characters are on screen.
 
----
+## Quick Start
 
-## Highlights
+1. Enable the extension in the **Basic** section.
+2. Start chatting so the model can emit a `[COLORS:...]` block.
+3. Use **Scan Chat** if you want to pull colors from existing messages right away.
+4. Mark your main characters with **Keep** in the **Characters** list.
+5. Use **Clear Non-Kept** when you want to clean out temporary NPCs without losing pinned characters.
 
-- **Auto-coloring** - Instructs the LLM to wrap dialogue in `<font color>` tags
-- **LLM color blocks** - Reads `[COLORS:Name=#RRGGBB,...]` blocks and removes them from display
-- **Keep / pin protection** - Mark important characters with **Keep** so they survive `Clear Non-Kept`, batch delete tools, duplicate cleanup, and other destructive bulk actions
-- **Safer destructive tools** - Heavy cleanup actions now live in a dedicated **Danger Zone** and respect kept characters
-- **Cleaner everyday workflow** - Common actions are grouped into **Basic**, **Characters**, **Advanced**, and **Danger Zone**
-- **Per-chat or global colors** - Store colors per chat or share them across all chats
-- **Auto-lock detected characters** - Newly detected characters can still lock automatically by default
-- **Right-click/long-press reassignment** - Optional manual reassignment on dialogue text
-- **Undo/Redo** - Undo destructive or accidental changes quickly
-- **Custom palettes and presets** - Save reusable color setups without losing advanced flexibility
+## Features
 
-## Everyday Workflow
+### Auto-coloring
+
+The extension instructs the LLM to wrap dialogue in `<font color>` tags. The LLM also outputs a `[COLORS:Name=#RRGGBB,...]` block at the end of messages, which the extension reads to track character colors and then hides from view.
+
+### Colorize fallback
+
+If the LLM rewrites that would change the actual dialogue text are detected, they get rejected. The extension falls back to deterministic matching instead. Parenthesized nicknames in the color block (like `"Name (Nickname)"`) become aliases automatically.
+
+### Keep and lock
+
+- **Keep** marks a character as important. Kept characters survive `Clear Non-Kept`, batch delete tools, duplicate cleanup, and other destructive actions.
+- **Lock** freezes a character's color so regen and reset tools leave it alone.
+- Kept characters sort to the top of the list so your main cast stays visible.
+
+Keep is manual. It is not assigned to the current card automatically.
+
+### Per-chat or global colors
+
+Colors can be stored per-chat or shared across every chat. Settings can also sync across devices through SillyTavern's managed extension settings store.
+
+### Manual recoloring
+
+Sometimes the LLM misses a piece of dialogue. When that happens, you can select text in a message, right-click it, and assign it to a character with a chosen color. The selection gets wrapped in a font tag and saved. This uses the same right-click/long-press toggle as the existing reassignment feature.
+
+### Custom palettes and presets
+
+- Generate a custom palette from a name and optional notes.
+- Save your current colors as a reusable palette.
+- Save, load, and delete color presets.
+- Export and import full color data or settings as JSON.
+
+### Undo and redo
+
+Ctrl+Z / Ctrl+Y works inside the extension panel for undo and redo.
+
+## UI Layout
 
 ### Basic
 
-This section is meant to be the only place most users need most of the time.
+The everyday controls:
 
 - **Scan Chat** - Scan the current chat for characters and colors
-- **Clear Non-Kept** - Clear tracked characters except anything marked with **Keep**
-- **Recolor Chat** - Rewrite message colors to match the current assignments
-- **Colorize Missing** - Colorize uncolored messages
+- **Clear Non-Kept** - Clear tracked characters except anything marked with Keep
+- **Recolor Chat** - Rewrite message colors to match current assignments
+- **Colorize Missing** - Colorize uncolored messages (shift-click for only the latest)
 - **Show Stats** - Open dialogue statistics
 - **Theme / Palette / Brightness** - Control the look of newly generated colors
-- **Enable Dialogue Colors / Highlight dialogue / Show floating legend / Auto-recolor after changes** - Core visual toggles
+- **Depth / Role / Mode** - How the prompt injection is sent (defaults to User role at depth 1)
+- **Toggles** - Enable Dialogue Colors, highlight dialogue, floating legend, CSS effects, auto-recolor
 
 ### Characters
 
-This section is where manual character management happens.
+Where manual character management happens:
 
 - **Keep** - Protect a character from clear and bulk-delete tools
 - **Lock** - Prevent regen/reset tools from changing that character's color
 - **Delete** - Remove a character directly unless it is kept
 - **More** - Reveal less common per-character tools like swap, alias, style, and group
-- **Search / Sort / Add Character** - Find, organize, and add entries quickly
-- **Batch bar** - Bulk select characters for lock, unlock, style, or delete actions
+- **Search / Sort / Add** - Find, organize, and add entries
+- **Batch bar** - Bulk select characters for lock, unlock, style, or delete
 
-Kept characters are also sorted to the top so the most important cast members stay visible.
+### Advanced
 
-## Advanced Tools
+Less common tools are tucked away here.
 
-Advanced options are still there, but they are intentionally tucked away so they do not crowd the default experience.
+**Automation** - Auto-scan on chat load, auto-scan new messages, auto-lock new characters, auto-colorize fallback, right-click reassignment, narration toggle, global color sharing, CSS effects, LLM profile selection, reduced toast popups.
 
-### Automation
+**Prompt & narration** - Narrator color, thought symbols, macro copy helper. Prompt depth, role, and mode moved to Basic.
 
-- Auto-scan on chat load
-- Auto-scan new messages
-- Auto-lock new characters
-- Auto-colorize fallback
-- Right-click reassignment
-- Narration toggle
-- Global color sharing
-- CSS effects
-- LLM palette enhancement
-- Reduced toast popups
-- LLM profile selection
+**Palette tools** - Generate, save, and delete custom palettes. Overwrite existing palette toggle.
 
-### Prompt & narration
+**Presets & import/export** - Save/load/delete color presets. Export and import full color data or settings. Export legend as PNG.
 
-- Narrator color
-- Thought symbols
-- Prompt depth
-- Prompt role
-- Prompt mode
-- Macro copy helper
+**Card & sync** - Add current card, use avatar color, save/load to card, auto-sync controls.
 
-### Palette tools
-
-- Generate a custom palette from a name and notes
-- Save current colors as a custom palette
-- Delete the selected custom palette
-- Overwrite existing custom palette toggle
-
-### Presets & import/export
-
-- Save / load / delete color presets
-- Export and import full color data
-- Export legend PNG
-- Export and import settings only
-
-### Card & sync
-
-- **Add Current Card**
-- **Use Avatar Color**
-- **Save To Card**
-- **Load From Card**
-- Auto-sync controls
-
-### Maintenance
-
-- Undo / Redo
-- Fix Similar Colors
-- Regenerate Unlocked
-- Flip For Theme
-- Storage Manager
+**Maintenance** - Undo/Redo, Fix Similar Colors, Regenerate Unlocked, Flip For Theme, Storage Manager.
 
 ## Danger Zone
 
-This section contains the heavier cleanup tools.
+Heavier cleanup tools that all respect **Keep**:
 
 - **Reset Unlocked Colors**
 - **Delete Locked**
@@ -111,79 +99,20 @@ This section contains the heavier cleanup tools.
 - **Delete Below Threshold**
 - **Delete Duplicate Colors**
 
-All of these respect **Keep**. If a character is pinned, the extension will preserve it and tell you why it was not removed.
-
-## Keep Behavior
-
-`Keep` is manual. It is not automatically assigned to the current card.
-
-When a character is marked with **Keep**:
-
-- `Clear Non-Kept` leaves it alone
-- Per-row delete is blocked until Keep is turned off
-- Batch delete leaves it alone
-- Delete Locked / Delete Unlocked leave it alone
-- Delete Below Threshold leaves it alone
-- Delete Duplicate Colors preserves it
-- Clearing the current chat through **Storage Manager** preserves it
-
-This makes it useful for main cast members or card characters you never want to lose during cleanup.
-
-## Features
-
-### Core
-
-- **Auto-coloring** - Instructs the LLM to wrap dialogue in `<font color>` tags
-- **LLM color blocks** - LLM outputs `[COLORS:Name=#RRGGBB,...]` at end of messages for reliable character detection
-- **Text-safe colorize fallback** - Rejects LLM rewrites that alter dialogue text, then falls back to deterministic matching
-- **Auto-detect nicknames/usernames** - Parenthesized nicknames in the color block become aliases automatically
-- **Per-chat or global colors** - Store colors per character or share across all chats
-- **Auto-sync settings** - Settings can sync across devices through SillyTavern's managed extension settings store
-
-### Color Management
-
-- **Keep** - Protect important characters from destructive cleanup tools
-- **Color lock** - Lock a character's color to prevent changes
-- **Quick swap** - Swap colors between two characters
-- **Avatar color extraction** - Suggest a color from the current avatar
-- **Brightness adjustment** - Bias new colors lighter or darker
-- **Theme flip** - Flip colors for dark/light transitions
-- **Undo/Redo** - History with Ctrl+Z / Ctrl+Y support inside the extension panel
-- **Export/Import** - Save and load color schemes as JSON
-- **Color presets** - Save, load, and delete preset assignments
-- **Recolor messages** - Rewrite existing message colors after changing assignments
-- **Auto-recolor** - Optionally recolor chat automatically when colors change
-- **Smart color suggestions** - Name-based color suggestions for some characters
-- **Color harmony** - Double-click a color picker for harmony suggestions
-- **Custom palettes** - Generate palettes from words or save your current colors
-
-### Advanced Character Tools
-
-- **Aliases** - Map multiple names to the same color
-- **Per-character styles** - Bold, italic, or both
-- **Groups** - Assign and sort characters by group
-- **Batch operations** - Multi-select for bulk lock, unlock, delete, and style changes
-- **Dialogue count badges** - ⭐ for 50+, 💎 for 100+
-
-## Quick Start
-
-1. Enable the extension in the **Basic** section.
-2. Start chatting so the model can emit a `[COLORS:...]` block.
-3. Use **Scan Chat** if you want to pull colors from existing messages immediately.
-4. Mark your main characters with **Keep** in the **Characters** list.
-5. Use **Clear Non-Kept** when you want to clean out temporary NPCs without losing pinned characters.
+If a character is pinned with Keep, the extension preserves it and tells you why.
 
 ## Installation
 
-1. Open SillyTavern → Extensions → Install Extension
+1. Open SillyTavern, go to Extensions, then Install Extension.
 2. Paste: `https://github.com/platberlitz/sillytavern-character-colors`
-3. Click Install
+3. Click Install.
 
 ## Notes
 
-- Storage and import/export still preserve advanced data like aliases, styles, groups, locks, and keep state.
-- Card save/load also preserves keep state because the full normalized color table is stored.
-- The floating legend, stats popup, right-click reassignment, and palette generation workflows are still available; they are just no longer competing for space in the default UI.
+- Storage and import/export preserve aliases, styles, groups, locks, and keep state.
+- Card save/load also preserves keep state since the full normalized color table is stored.
+- The floating legend, stats popup, right-click reassignment, and palette generation are all still available.
+- Dialogue count badges show ⭐ at 50+ and 💎 at 100+.
 
 ## Credits
 

@@ -136,7 +136,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     let swapMode = null;
     let searchTerm = '';
     let expandedCharacterRows = new Set();
-    let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, thoughtSymbols: '*', disableNarration: true, shareColorsGlobally: false, cssEffects: false, autoScanNewMessages: true, autoLockDetected: true, enableRightClick: false, promptDepth: 4, autoRecolor: true, autoColorize: false, disableToasts: false, llmConnectionProfile: null, colorSchemaVersion: COLOR_SCHEMA_VERSION, promptMode: 'inject', promptRole: 'system', sortMode: 'name' };
+    let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, thoughtSymbols: '*', disableNarration: true, shareColorsGlobally: false, cssEffects: false, autoScanNewMessages: true, autoLockDetected: true, enableRightClick: false, promptDepth: 1, autoRecolor: true, autoColorize: false, disableToasts: false, llmConnectionProfile: null, colorSchemaVersion: COLOR_SCHEMA_VERSION, promptMode: 'inject', promptRole: 'user', sortMode: 'name' };
     const TOGGLE_SETTING_DEFAULTS = Object.freeze({
         enabled: true,
         highlightMode: false,
@@ -2412,10 +2412,148 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             setTimeout(() => { document.addEventListener('click', closeMenu); document.addEventListener('touchstart', closeMenu); }, 10);
         };
 
+        const showSelectionMenu = (e, selection, range, selectedText, mesEl) => {
+            e.preventDefault();
+            const existingMenu = document.getElementById('dc-context-menu');
+            if (existingMenu) existingMenu.remove();
+
+            const msgIndex = Number(mesEl.getAttribute('mesid'));
+            if (msgIndex === -1) return;
+
+            const ctx = getContext();
+            const chat = ctx?.chat || [];
+            const msg = chat[msgIndex];
+            if (!msg || msg.is_user) return;
+
+            const charList = getSortedEntries()
+                .map(([k, v]) => ({ key: k, name: v.name }));
+            const datalistOptions = charList.map(c => `<option value="${escapeAttr(c.name)}">`).join('');
+
+            const preview = selectedText.substring(0, 30) + (selectedText.length > 30 ? '...' : '');
+
+            const menu = document.createElement('div');
+            menu.id = 'dc-context-menu';
+            const x = e.clientX ?? e.touches?.[0]?.clientX ?? 100;
+            const y = e.clientY ?? e.touches?.[0]?.clientY ?? 100;
+            menu.style.cssText = `position:fixed;left:${x}px;top:${y}px;background:var(--SmartThemeBlurTintColor);border:1px solid var(--SmartThemeBorderColor);border-radius:6px;padding:8px;z-index:10001;min-width:180px;color:var(--SmartThemeTextColor);box-shadow:0 4px 12px rgba(0,0,0,0.5);`;
+            menu.innerHTML = `
+                <div style="font-size:0.8em;opacity:0.7;margin-bottom:6px;"><em style="font-size:0.9em;">(selected text)</em><br>"${escapeHtml(preview)}"</div>
+                <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
+                    <span id="dc-ctx-color-dot" style="width:12px;height:12px;border-radius:50%;background:#888888;"></span>
+                    <input type="color" id="dc-ctx-color" value="#888888" style="width:24px;height:20px;border:none;">
+                    <input type="text" id="dc-ctx-name" list="dc-ctx-chars" placeholder="Character name (type to search)" class="text_pole" style="flex:1;padding:3px;font-size:0.85em;" autocomplete="off">
+                    <datalist id="dc-ctx-chars">${datalistOptions}</datalist>
+                </div>
+                <button id="dc-ctx-assign" class="menu_button" style="width:100%;margin-bottom:4px;">Assign to Character</button>
+                <button id="dc-ctx-close" class="menu_button" style="width:100%;">Cancel</button>
+            `;
+            document.body.appendChild(menu);
+            const menuRect = menu.getBoundingClientRect();
+            if (menuRect.right > window.innerWidth) menu.style.left = (window.innerWidth - menuRect.width - 8) + 'px';
+            if (menuRect.bottom > window.innerHeight) menu.style.top = (window.innerHeight - menuRect.height - 8) + 'px';
+            menu.querySelector('#dc-ctx-close').onclick = () => menu.remove();
+
+            const nameInput = menu.querySelector('#dc-ctx-name');
+            const colorInput = menu.querySelector('#dc-ctx-color');
+            const colorDot = menu.querySelector('#dc-ctx-color-dot');
+
+            colorInput.addEventListener('input', () => { colorDot.style.background = colorInput.value; });
+
+            nameInput.addEventListener('input', () => {
+                const name = nameInput.value.trim();
+                const key = name.toLowerCase();
+                if (characterColors[key]) {
+                    const existingColor = getEntryEffectiveColor(characterColors[key]);
+                    colorInput.value = existingColor;
+                    colorDot.style.background = existingColor;
+                }
+            });
+
+            menu.querySelector('#dc-ctx-assign').onclick = () => {
+                const name = nameInput.value.trim();
+                const pickerColor = normalizeHexColor(colorInput.value, '#888888');
+                if (!name) { menu.remove(); return; }
+
+                const key = name.toLowerCase();
+                let finalColor = pickerColor;
+
+                const existingSnapshot = characterColors[key]
+                    ? captureEffectiveColorSnapshot(Object.keys(characterColors))
+                    : null;
+
+                let existingColorChanged = false;
+                if (characterColors[key]) {
+                    const existingColor = getEntryEffectiveColor(characterColors[key]);
+                    if (normalizeHexColor(pickerColor) !== normalizeHexColor(existingColor)) {
+                        setEntryFromEffectiveColor(characterColors[key], pickerColor);
+                        existingColorChanged = true;
+                    }
+                    finalColor = getEntryEffectiveColor(characterColors[key]);
+                } else {
+                    const built = buildCharacterEntry(name, {
+                        color: pickerColor,
+                        colorMode: 'effective',
+                        locked: false,
+                        dialogueCount: 1
+                    });
+                    if (!built.entry) { menu.remove(); return; }
+                    characterColors[key] = built.entry;
+                }
+
+                if (existingColorChanged) {
+                    applyLiveColorChangesFromSnapshot(existingSnapshot, [key], { saveImmediately: true });
+                }
+
+                try {
+                    const fontNode = document.createElement('font');
+                    fontNode.setAttribute('color', finalColor);
+                    range.surroundContents(fontNode);
+                } catch (wrapErr) {
+                    const fontNode = document.createElement('font');
+                    fontNode.setAttribute('color', finalColor);
+                    try {
+                        const fragment = range.extractContents();
+                        fontNode.appendChild(fragment);
+                        range.insertNode(fontNode);
+                    } catch (fallbackErr) {
+                        toast.error('Could not wrap selection');
+                        menu.remove();
+                        return;
+                    }
+                }
+
+                selection.removeAllRanges();
+
+                const escapedSelected = escapeRegex(selectedText);
+                const replaceRegex = new RegExp(escapedSelected);
+                if (replaceRegex.test(msg.mes)) {
+                    msg.mes = msg.mes.replace(replaceRegex, `<font color="${finalColor}">${selectedText}</font>`);
+                    queueChatSave();
+                    flushChatSave();
+                }
+
+                saveHistory(); saveData(); updateCharList(); injectPrompt();
+                toast.success(`Assigned to ${name}`);
+                menu.remove();
+            };
+
+            const closeMenu = e2 => { if (!menu.contains(e2.target)) { menu.remove(); document.removeEventListener('click', closeMenu); document.removeEventListener('touchstart', closeMenu); } };
+            setTimeout(() => { document.addEventListener('click', closeMenu); document.addEventListener('touchstart', closeMenu); }, 10);
+        };
+
         document.addEventListener('contextmenu', e => {
             if (!settings.enableRightClick) return;
             const mesText = e.target.closest('.mes_text');
             if (!mesText) return;
+            const sel = window.getSelection();
+            if (sel && !sel.isCollapsed && mesText.contains(sel.anchorNode)) {
+                const range = sel.getRangeAt(0);
+                const selectedText = sel.toString().trim();
+                if (selectedText && mesText.closest('.mes')) {
+                    showSelectionMenu(e, sel, range, selectedText, mesText.closest('.mes'));
+                    return;
+                }
+            }
             const fontTag = e.target.closest('font[color]');
             if (fontTag) { showMenu(e, fontTag, null); return; }
             const qEl = e.target.closest('q');
@@ -2766,8 +2904,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         settings.brightness = 0;
         settings.thoughtSymbols = '*';
         settings.narratorColor = '';
-        settings.promptDepth = 4;
-        settings.promptRole = 'system';
+        settings.promptDepth = 1;
+        settings.promptRole = 'user';
         settings.promptMode = 'inject';
         settings.sortMode = 'name';
         settings.llmConnectionProfile = null;
@@ -4657,8 +4795,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         if ($('dc-bright-val')) $('dc-bright-val').textContent = settings.brightness || 0;
         if ($('dc-narrator')) $('dc-narrator').value = settings.narratorColor || '#888888';
         if ($('dc-thought-symbols')) $('dc-thought-symbols').value = settings.thoughtSymbols || '';
-        if ($('dc-prompt-depth')) $('dc-prompt-depth').value = settings.promptDepth ?? 4;
-        if ($('dc-prompt-role')) $('dc-prompt-role').value = settings.promptRole || 'system';
+        if ($('dc-prompt-depth')) $('dc-prompt-depth').value = settings.promptDepth ?? 1;
+        if ($('dc-prompt-role')) $('dc-prompt-role').value = settings.promptRole || 'user';
         if ($('dc-prompt-mode')) $('dc-prompt-mode').value = settings.promptMode || 'inject';
         if ($('dc-sort')) $('dc-sort').value = settings.sortMode || 'name';
         refreshPresetDropdown();
@@ -4706,6 +4844,18 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                             <label class="checkbox_label"><input type="checkbox" id="dc-legend" data-help="Show a floating legend of active character colors."><span>Show floating legend</span></label>
                             <label class="checkbox_label"><input type="checkbox" id="dc-css-effects" data-help="Allow transform-based CSS effects for dramatic dialogue."><span>Enable CSS effects</span></label>
                             <label class="checkbox_label"><input type="checkbox" id="dc-auto-recolor" data-help="Automatically recolor chat after color changes."><span>Auto-recolor after changes</span></label>
+                        </div>
+                        <div class="dc-field-row">
+                            <label class="dc-inline-label" for="dc-prompt-depth">Depth</label>
+                            <input type="number" id="dc-prompt-depth" min="0" max="99" value="1" class="text_pole" data-help="How far from the chat end the prompt is injected.">
+                        </div>
+                        <div class="dc-field-row">
+                            <label class="dc-inline-label" for="dc-prompt-role">Role</label>
+                            <select id="dc-prompt-role" class="text_pole" data-help="Inject the prompt as a system or user message."><option value="system">System</option><option value="user">User</option></select>
+                        </div>
+                        <div class="dc-field-row">
+                            <label class="dc-inline-label" for="dc-prompt-mode">Mode</label>
+                            <select id="dc-prompt-mode" class="text_pole" data-help="Inject automatically or use the macro manually."><option value="inject">Inject</option><option value="macro">Macro</option></select>
                         </div>
                     </div>
                 </details>
@@ -4761,18 +4911,6 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                                     <input type="text" id="dc-thought-symbols" placeholder="*" class="text_pole" data-help="Symbols used to detect inner-thought dialogue.">
                                     <button id="dc-thought-add" class="menu_button" data-help="Append another thought symbol.">Add Symbol</button>
                                     <button id="dc-thought-clear" class="menu_button" data-help="Remove all thought symbols.">Clear Symbols</button>
-                                </div>
-                                <div class="dc-field-row">
-                                    <label class="dc-inline-label" for="dc-prompt-depth">Depth</label>
-                                    <input type="number" id="dc-prompt-depth" min="0" max="99" value="4" class="text_pole" data-help="How far from the chat end the prompt is injected.">
-                                </div>
-                                <div class="dc-field-row">
-                                    <label class="dc-inline-label" for="dc-prompt-role">Role</label>
-                                    <select id="dc-prompt-role" class="text_pole" data-help="Inject the prompt as a system or user message."><option value="system">System</option><option value="user">User</option></select>
-                                </div>
-                                <div class="dc-field-row">
-                                    <label class="dc-inline-label" for="dc-prompt-mode">Mode</label>
-                                    <select id="dc-prompt-mode" class="text_pole" data-help="Inject automatically or use the macro manually."><option value="inject">Inject</option><option value="macro">Macro</option></select>
                                 </div>
                                 <div id="dc-system-prompt-container" style="display:none;">
                                     <label style="font-weight:bold;margin-bottom:4px;display:block;">Add to your system prompt:</label>
