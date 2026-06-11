@@ -8,6 +8,6 @@
   "author": "platberlitz",
   "version": "4.3.0",
   "homePage": "https://github.com/platberlitz/sillytavern-character-colors",
-  "description": "LLM-powered dialogue and thought coloring with auto-regex-install",
+  "description": "LLM or local DOM-only dialogue and thought coloring with auto-regex-install",
   "generate_interceptor": "DialogueColorsInterceptor"
 }

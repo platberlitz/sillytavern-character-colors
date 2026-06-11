@@ -1,6 +1,6 @@
 # Dialogue Colors
 
-A SillyTavern extension that tells the LLM to color-code each character's dialogue with `<font color>` tags. It scans your chat, tracks who said what, and keeps things readable when multiple characters are on screen.
+A SillyTavern extension that color-codes each character's dialogue automatically. Use the LLM engine to write persistent `<font color>` tags, or the local DOM-only engine to color rendered quotes without editing chat text.
 
 ## Quick Start
 
@@ -11,6 +11,19 @@ A SillyTavern extension that tells the LLM to color-code each character's dialog
 5. Use **Clear Non-Kept** when you want to clean out temporary NPCs without losing pinned characters.
 
 ## Features
+- **Two coloring engines** - Choose persistent LLM coloring or local DOM-only coloring from the **Basic** section
+- **Auto-coloring** - Instructs the LLM to wrap dialogue in `<font color>` tags
+- **DOM-only coloring** - Colors rendered dialogue locally without modifying `msg.mes` or saving chat text
+- **LLM color blocks** - Reads `[COLORS:Name=#RRGGBB,...]` blocks and removes them from display
+- **Keep / pin protection** - Mark important characters with **Keep** so they survive `Clear Non-Kept`, batch delete tools, duplicate cleanup, and other destructive bulk actions
+- **Safer destructive tools** - Heavy cleanup actions now live in a dedicated **Danger Zone** and respect kept characters
+- **Cleaner everyday workflow** - Common actions are grouped into **Basic**, **Characters**, **Advanced**, and **Danger Zone**
+- **Per-chat or global colors** - Store colors per chat or share them across all chats
+- **Auto-lock detected characters** - Newly detected characters can still lock automatically by default
+- **Right-click/long-press reassignment** - Optional manual reassignment on dialogue text
+- **Per-chat quote overrides** - DOM-mode manual quote assignments are stored in chat metadata and reapplied on render
+- **Undo/Redo** - Undo destructive or accidental changes quickly
+- **Custom palettes and presets** - Save reusable color setups without losing advanced flexibility
 
 ### Auto-coloring
 
@@ -54,9 +67,10 @@ Ctrl+Z / Ctrl+Y works inside the extension panel for undo and redo.
 The everyday controls:
 
 - **Scan Chat** - Scan the current chat for characters and colors
-- **Clear Non-Kept** - Clear tracked characters except anything marked with Keep
-- **Recolor Chat** - Rewrite message colors to match current assignments
-- **Colorize Missing** - Colorize uncolored messages (shift-click for only the latest)
+- **Coloring engine** - Pick `LLM` for persistent font tags or `Local (DOM-only)` for reversible local decoration
+- **Clear Non-Kept** - Clear tracked characters except anything marked with **Keep**
+- **Recolor Chat / Refresh DOM Colors** - Rewrite persistent font tags in LLM mode, or refresh local decorations in DOM mode
+- **Colorize Missing** - Colorize uncolored messages in LLM mode
 - **Show Stats** - Open dialogue statistics
 - **Theme / Palette / Brightness** - Control the look of newly generated colors
 - **Depth / Role / Mode** - How the prompt injection is sent (defaults to User role at depth 1)
@@ -81,9 +95,11 @@ Less common tools are tucked away here.
 
 **Prompt & narration** - Narrator color, thought symbols, macro copy helper. Prompt depth, role, and mode moved to Basic.
 
-**Palette tools** - Generate, save, and delete custom palettes. Overwrite existing palette toggle.
+**Automation** - Auto-scan on chat load, auto-scan new messages, auto-lock new characters, auto-colorize fallback (LLM mode only), right-click reassignment, narration toggle, global color sharing, CSS effects, LLM palette enhancement, reduced toast popups, LLM profile selection.
 
 **Presets & import/export** - Save/load/delete color presets. Export and import full color data or settings. Export legend as PNG.
+
+**Palette tools** - Generate, save, and delete custom palettes. Overwrite existing palette toggle.
 
 **Card & sync** - Add current card, use avatar color, save/load to card, auto-sync controls.
 
@@ -99,7 +115,23 @@ Heavier cleanup tools that all respect **Keep**:
 - **Delete Below Threshold**
 - **Delete Duplicate Colors**
 
-If a character is pinned with Keep, the extension preserves it and tells you why.
+If a character is pinned with **Keep**, the extension preserves it and tells you why.
+
+## Keep Behavior
+
+`Keep` is manual. It is not automatically assigned to the current card.
+
+When a character is marked with **Keep**:
+
+- `Clear Non-Kept` leaves it alone
+- Per-row delete is blocked until Keep is turned off
+- Batch delete leaves it alone
+- Delete Locked / Delete Unlocked leave it alone
+- Delete Below Threshold leaves it alone
+- Delete Duplicate Colors preserves it
+- Clearing the current chat through **Storage Manager** preserves it
+
+This makes it useful for main cast members or card characters you never want to lose during cleanup.
 
 ## Installation
 
@@ -111,6 +143,7 @@ If a character is pinned with Keep, the extension preserves it and tells you why
 
 - Storage and import/export preserve aliases, styles, groups, locks, and keep state.
 - Card save/load also preserves keep state since the full normalized color table is stored.
+- DOM-only quote overrides are stored in the current chat's metadata, not in the message text. If the message text changes, the override is ignored instead of being applied to the wrong quote.
 - The floating legend, stats popup, right-click reassignment, and palette generation are all still available.
 - Dialogue count badges show ⭐ at 50+ and 💎 at 100+.
 
