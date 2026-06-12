@@ -193,6 +193,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     let lastStreamingAttributionVerifyKey = '';
     let attributionChatGeneration = 0;
     const streamingAttributionOverrides = new Map();
+    const streamingHeuristicCache = new Map();
     const LIVE_CHAT_SAVE_DELAY_MS = 350;
     const COLOR_STATE_SAVE_DELAY_MS = 180;
     let liveChatSaveTimer = null;
@@ -4257,36 +4258,53 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         };
         let previousParagraph = null;
 
+        // Determine if we are attributing the active streaming message to check/save cached assignments
+        let isStreamingMsg = false;
+        if (isStreamingGenerationActive && options.mesIndex !== undefined) {
+            const chat = getContext()?.chat || [];
+            if (options.mesIndex === chat.length - 1) {
+                isStreamingMsg = true;
+            }
+        }
+
         for (const segment of collectedSegments) {
             const sameParagraphAsPrevious = isSameDialogueParagraph(segment.paragraph, previousParagraph);
             let assignment = null;
 
-            // Tier 1: explicit per-segment override.
-            const overrideName = overrides ? overrides[segment.index] : undefined;
-            if (overrideName) {
-                assignment = resolveSingleSpeakerAssignment(String(overrideName), lookup);
-            }
+            if (isStreamingMsg && streamingHeuristicCache.has(segment.start)) {
+                assignment = streamingHeuristicCache.get(segment.start);
+            } else {
+                // Tier 1: explicit per-segment override.
+                const overrideName = overrides ? overrides[segment.index] : undefined;
+                if (overrideName) {
+                    assignment = resolveSingleSpeakerAssignment(String(overrideName), lookup);
+                }
 
-            // Tier 2: masked, paragraph-scoped proximity near the quote.
-            if (!assignment) {
-                const windowStart = Math.max(segment.paragraph.start, segment.start - 240);
-                const windowEnd = Math.min(segment.paragraph.end, segment.end + 120);
-                assignment = findClosestMentionedSpeakerInContext(maskedText, windowStart, windowEnd, segment.start, segment.end, lookup, sortedLookupKeys);
-            }
+                // Tier 2: masked, paragraph-scoped proximity near the quote.
+                if (!assignment) {
+                    const windowStart = Math.max(segment.paragraph.start, segment.start - 240);
+                    const windowEnd = Math.min(segment.paragraph.end, segment.end + 120);
+                    assignment = findClosestMentionedSpeakerInContext(maskedText, windowStart, windowEnd, segment.start, segment.end, lookup, sortedLookupKeys);
+                }
 
-            // Tier 3: carry only within the same paragraph/line.
-            if (!assignment && sameParagraphAsPrevious && lastResolvedSpeakerKey) {
-                assignment = lookup.get(lastResolvedSpeakerKey) || null;
-            }
+                // Tier 3: carry only within the same paragraph/line.
+                if (!assignment && sameParagraphAsPrevious && lastResolvedSpeakerKey) {
+                    assignment = lookup.get(lastResolvedSpeakerKey) || null;
+                }
 
-            // Tier 4: alternate speakers across unattributed new paragraphs.
-            if (!assignment && !sameParagraphAsPrevious) {
-                assignment = getAlternatingAssignment();
-            }
+                // Tier 4: alternate speakers across unattributed new paragraphs.
+                if (!assignment && !sameParagraphAsPrevious) {
+                    assignment = getAlternatingAssignment();
+                }
 
-            // Tier 5: default message speaker.
-            if (!assignment) {
-                assignment = defaultSpeaker || ensureDefaultSpeaker();
+                // Tier 5: default message speaker.
+                if (!assignment) {
+                    assignment = defaultSpeaker || ensureDefaultSpeaker();
+                }
+
+                if (isStreamingMsg && assignment) {
+                    streamingHeuristicCache.set(segment.start, assignment);
+                }
             }
 
             if (assignment) {
@@ -4495,6 +4513,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             const attribution = attributeDialogueSegments(msg.mes, msg.name, {
                 autoAddMessageSpeaker: true,
                 overrides: getMessageQuoteOverrides(i, msg),
+                mesIndex: i,
             });
             if (attribution.createdCharacters) createdCharacters = true;
             for (const seg of attribution.segments) {
@@ -4580,6 +4599,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const attribution = attributeDialogueSegments(msg.mes, msg.name, {
             autoAddMessageSpeaker: true,
             overrides: getMessageQuoteOverridesForDecoration(mesIndex, msg),
+            mesIndex: mesIndex,
         });
 
         let decorated = false;
@@ -4986,6 +5006,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const attribution = attributeDialogueSegments(msg.mes, msg.name, {
             autoAddMessageSpeaker: true,
             overrides: existingEntry?.segments || null,
+            mesIndex: mesIndex,
         });
         const persistCreatedCharacters = () => {
             if (!attribution.createdCharacters) return;
@@ -6514,6 +6535,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         attributionChatGeneration++;
         isStreamingGenerationActive = false;
         cancelStreamingAttributionVerification({ clearOverrides: true });
+        streamingHeuristicCache.clear();
         pendingAttributionVerifications = [];
         clearAutoAttributionVerificationQueue({ clearCooldown: true });
         clearAutoColorizeIndicators();
@@ -6554,6 +6576,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             streamToken: () => { isStreamingGenerationActive = true; scheduleDecorateLast(hasMessageQuoteOverridesForLatestMessage() ? 0 : 80); scheduleStreamingAttributionVerification(); },
             generationEnded: () => {
                 isStreamingGenerationActive = false;
+                streamingHeuristicCache.clear();
                 cancelStreamingAttributionVerification();
                 scheduleDecorateAll(0);
                 queueAutoAttributionVerificationForMessage((getContext()?.chat || []).length - 1, { force: true, delay: 800 });
