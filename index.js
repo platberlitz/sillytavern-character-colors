@@ -5098,6 +5098,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             saveData();
             updateCharList();
         }
+        refreshMessageDom(mesIndex, msg);
         const mesElement = document.querySelector(`#chat .mes[mesid="${mesIndex}"]`) || document.querySelectorAll('#chat .mes[mesid]')[mesIndex];
         if (mesElement) decorateObservedMessages([mesElement]);
 
