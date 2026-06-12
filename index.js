@@ -3988,10 +3988,52 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         for (const ch of getThoughtDelimiterSymbols()) {
             delimiters.add(ch);
         }
+        
+        const ASYMMETRIC_MAP = {
+            '『': '』',
+            '「': '」',
+            '（': '）',
+            '《': '》',
+            '〈': '〉',
+            '【': '】',
+            '〔': '〕',
+            '〖': '〗',
+            '〘': '〙',
+            '〚': '〛',
+            '(': ')',
+            '{': '}',
+            '[': ']',
+            '<': '>',
+        };
+        const REVERSE_ASYMMETRIC_MAP = {};
+        for (const [open, close] of Object.entries(ASYMMETRIC_MAP)) {
+            REVERSE_ASYMMETRIC_MAP[close] = open;
+        }
+
         const patterns = [];
+        const processedAsymmetricPairs = new Set();
+
         for (const delimiter of delimiters) {
-            const escaped = escapeRegex(delimiter);
-            patterns.push(`${escaped}([^${escaped}]+)${escaped}`);
+            const isOpening = ASYMMETRIC_MAP[delimiter] !== undefined;
+            const isClosing = REVERSE_ASYMMETRIC_MAP[delimiter] !== undefined;
+
+            if (isOpening || isClosing) {
+                const openChar = isOpening ? delimiter : REVERSE_ASYMMETRIC_MAP[delimiter];
+                const closeChar = isOpening ? ASYMMETRIC_MAP[delimiter] : delimiter;
+                const pairKey = `${openChar}:${closeChar}`;
+
+                if (processedAsymmetricPairs.has(pairKey)) {
+                    continue;
+                }
+                processedAsymmetricPairs.add(pairKey);
+
+                const escapedOpen = escapeRegex(openChar);
+                const escapedClose = escapeRegex(closeChar);
+                patterns.push(`${escapedOpen}([^${escapedClose}]+)${escapedClose}`);
+            } else {
+                const escaped = escapeRegex(delimiter);
+                patterns.push(`${escaped}([^${escaped}]+)${escaped}`);
+            }
         }
         return patterns.length ? new RegExp(`(${patterns.join('|')})`, 'g') : null;
     }
@@ -4551,7 +4593,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             decorated = true;
         };
 
-        const quoteSegments = attribution.segments.filter(seg => seg.delimiter === '"');
+        const quoteSegments = attribution.segments.filter(seg => seg.delimiter !== '*' && seg.delimiter !== '_');
         const emphasisSegments = attribution.segments.filter(seg => seg.delimiter === '*' || seg.delimiter === '_');
         const qElements = Array.from(mesText.querySelectorAll('q'));
         const emElements = Array.from(mesText.querySelectorAll('em'));
