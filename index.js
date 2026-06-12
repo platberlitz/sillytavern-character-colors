@@ -185,6 +185,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     let streamingAttributionGeneration = 0;
     let lastStreamingAttributionVerifyKey = '';
     let attributionChatGeneration = 0;
+    const streamingAttributionOverrides = new Map();
     const LIVE_CHAT_SAVE_DELAY_MS = 350;
     const COLOR_STATE_SAVE_DELAY_MS = 180;
     let liveChatSaveTimer = null;
@@ -4325,6 +4326,62 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         return entry?.segments || null;
     }
 
+    function getStreamingAttributionMessageId(msg, mesIndex) {
+        return String(msg?.id ?? msg?.send_date ?? mesIndex ?? '');
+    }
+
+    function getStreamingAttributionOverrideEntry(mesIndex, msg, create = false) {
+        const key = String(mesIndex);
+        const messageId = getStreamingAttributionMessageId(msg, mesIndex);
+        let entry = streamingAttributionOverrides.get(key);
+        if (!isPlainObject(entry) || entry.messageId !== messageId) {
+            if (!create) return null;
+            entry = { messageId, segments: {}, sources: {} };
+            streamingAttributionOverrides.set(key, entry);
+        }
+        if (!isPlainObject(entry.segments)) entry.segments = {};
+        if (!isPlainObject(entry.sources)) entry.sources = {};
+        return entry;
+    }
+
+    function getStreamingAttributionOverrides(mesIndex, msg) {
+        const entry = getStreamingAttributionOverrideEntry(mesIndex, msg, false);
+        return entry?.segments || null;
+    }
+
+    function getMessageQuoteOverridesForDecoration(mesIndex, msg) {
+        const persisted = getMessageQuoteOverrides(mesIndex, msg);
+        const streaming = getStreamingAttributionOverrides(mesIndex, msg);
+        if (!persisted) return streaming;
+        if (!streaming) return persisted;
+        return { ...streaming, ...persisted };
+    }
+
+    function setStreamingAttributionOverride(mesIndex, msg, segmentIndex, speakerName, options = {}) {
+        const entry = getStreamingAttributionOverrideEntry(mesIndex, msg, true);
+        if (!entry) return false;
+        entry.segments[String(segmentIndex)] = String(speakerName);
+        entry.sources[String(segmentIndex)] = options.source || 'llm';
+        return true;
+    }
+
+    function clearStreamingAttributionOverrides(mesIndex = null) {
+        if (mesIndex === null || mesIndex === undefined) streamingAttributionOverrides.clear();
+        else streamingAttributionOverrides.delete(String(mesIndex));
+    }
+
+    function hasStreamingAttributionOverridesForMessage(mesIndex, msg) {
+        const overrides = getStreamingAttributionOverrides(mesIndex, msg);
+        return !!overrides && Object.keys(overrides).length > 0;
+    }
+
+    function hasStreamingAttributionOverridesForLatestMessage() {
+        const chat = getContext()?.chat || [];
+        const mesIndex = chat.length - 1;
+        if (mesIndex < 0) return false;
+        return hasStreamingAttributionOverridesForMessage(mesIndex, chat[mesIndex]);
+    }
+
     function getMessageQuoteOverrideEntry(mesIndex, msg, create = false) {
         const map = getQuoteOverridesMap(create);
         if (!map) return null;
@@ -4470,7 +4527,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
         const attribution = attributeDialogueSegments(msg.mes, msg.name, {
             autoAddMessageSpeaker: true,
-            overrides: getMessageQuoteOverrides(mesIndex, msg),
+            overrides: getMessageQuoteOverridesForDecoration(mesIndex, msg),
         });
 
         let decorated = false;
@@ -4707,6 +4764,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const msg = ctx?.chat?.[mesIndex];
         if (!isMessageEligibleForAttributionVerification(msg)) return { checked: false, corrections: 0, createdCharacters: false };
         const skipMarkVerified = options.skipMarkVerified === true;
+        const useTransientOverrides = options.transientOverrides === true;
         const quiet = options.quiet === true;
         if (isMessageAttributionVerified(mesIndex, msg)) return { checked: false, corrections: 0, createdCharacters: false };
 
@@ -4724,7 +4782,10 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         };
         const segments = attribution.segments.filter(seg => seg.assignment);
         if (!segments.length) {
-            if (!skipMarkVerified) markMessageAttributionVerified(mesIndex, msg);
+            if (!skipMarkVerified) {
+                markMessageAttributionVerified(mesIndex, msg);
+                clearStreamingAttributionOverrides(mesIndex);
+            }
             persistCreatedCharacters();
             return { checked: true, corrections: 0, createdCharacters: attribution.createdCharacters };
         }
@@ -4782,18 +4843,24 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             const { assignment, created } = resolveVerifierSpeakerName(correction?.speaker, lookup);
             if (!assignment || assignment.key === seg.assignment?.key) continue;
 
-            const latestEntry = getMessageQuoteOverrideEntry(mesIndex, msg, true);
+            const latestEntry = getMessageQuoteOverrideEntry(mesIndex, msg, !useTransientOverrides);
             const existingOverride = latestEntry?.segments?.[String(index)];
             const existingSource = latestEntry?.sources?.[String(index)];
             if (existingOverride && existingSource !== 'llm') continue;
 
-            if (setMessageQuoteOverride(mesIndex, msg, index, assignment.name, { source: 'llm' })) {
+            const didSetOverride = useTransientOverrides
+                ? setStreamingAttributionOverride(mesIndex, msg, index, assignment.name, { source: 'llm' })
+                : setMessageQuoteOverride(mesIndex, msg, index, assignment.name, { source: 'llm' });
+            if (didSetOverride) {
                 appliedCorrections++;
                 if (created) createdCharacters = true;
             }
         }
 
-        if (!skipMarkVerified) markMessageAttributionVerified(mesIndex, msg);
+        if (!skipMarkVerified) {
+            markMessageAttributionVerified(mesIndex, msg);
+            clearStreamingAttributionOverrides(mesIndex);
+        }
         if (createdCharacters) {
             saveData();
             updateCharList();
@@ -4877,11 +4944,12 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         }
     }
 
-    function cancelStreamingAttributionVerification() {
+    function cancelStreamingAttributionVerification(options = {}) {
         clearTimeout(streamingAttributionVerifyTimer);
         streamingAttributionVerifyTimer = null;
         streamingAttributionGeneration++;
         lastStreamingAttributionVerifyKey = '';
+        if (options.clearOverrides) clearStreamingAttributionOverrides();
     }
 
     function scheduleStreamingAttributionVerification() {
@@ -4913,7 +4981,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         lastStreamingAttributionVerifyKey = verifyKey;
 
         return runAttributionVerification(
-            () => verifyAttributionsWithLLM(mesIndex, { manual: false, skipMarkVerified: true, quiet: true }),
+            () => verifyAttributionsWithLLM(mesIndex, { manual: false, skipMarkVerified: true, transientOverrides: true, quiet: true }),
             { manual: false, queue: false }
         );
     }
@@ -5974,7 +6042,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         $('dc-auto-recolor').onchange = e => { settings.autoRecolor = e.target.checked; saveData(); };
         $('dc-auto-colorize').onchange = e => { settings.autoColorize = e.target.checked; saveData(); };
         $('dc-llm-attr-check').onchange = e => { settings.llmAttributionCheck = e.target.checked; saveData(); };
-        $('dc-llm-attr-parallel').onchange = e => { settings.llmAttributionParallel = e.target.checked; if (!settings.llmAttributionParallel) cancelStreamingAttributionVerification(); saveData(); };
+        $('dc-llm-attr-parallel').onchange = e => { settings.llmAttributionParallel = e.target.checked; if (!settings.llmAttributionParallel) { cancelStreamingAttributionVerification({ clearOverrides: true }); scheduleDecorateAll(0); } saveData(); };
         $('dc-stealth-colors').onchange = e => { settings.domStealthColors = e.target.checked; saveData(); injectPrompt(); };
         $('dc-right-click').onchange = e => { settings.enableRightClick = e.target.checked; saveData(); };
         $('dc-legend').onchange = e => { settings.showLegend = e.target.checked; saveData(); updateLegend(); };
@@ -6214,7 +6282,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
     function handleChatChanged() {
         attributionChatGeneration++;
-        cancelStreamingAttributionVerification();
+        cancelStreamingAttributionVerification({ clearOverrides: true });
         pendingAttributionVerifications = [];
         clearAutoColorizeIndicators();
         clearDomCache();
@@ -6251,7 +6319,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             characterMessageRendered: () => { onNewMessage(); scheduleDecorateAll(120); },
             messageRendered: () => scheduleDecorateAll(120),
             messageUpdated: () => scheduleDecorateAll(80),
-            streamToken: () => { scheduleDecorateLast(80); scheduleStreamingAttributionVerification(); },
+            streamToken: () => { scheduleDecorateLast(hasStreamingAttributionOverridesForLatestMessage() ? 0 : 80); scheduleStreamingAttributionVerification(); },
             generationEnded: () => {
                 cancelStreamingAttributionVerification();
                 scheduleDecorateAll(0);
