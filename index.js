@@ -3339,6 +3339,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     function buildDomStealthColorsInstruction() {
         if (!settings.enabled) return '';
         const { mode, minLightness, maxLightness } = getThemeLightnessBounds();
+        const thoughtSymbols = getThoughtDelimiterSymbols();
+        const thoughtSymbolList = thoughtSymbols.map(formatPromptLiteralSymbol).join(', ');
         const colorEntries = Object.entries(characterColors)
             .filter(([, v]) => v && getEntryEffectiveColor(v));
         const colorList = colorEntries
@@ -3363,6 +3365,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         }
         if (colorList) parts.push(`Established: ${colorList}.`);
         if (reservedColors) parts.push(`${reservedColors} are taken. New speakers need distinct colors not closely matching these.`);
+        if (thoughtSymbolList) parts.push(`Inner-thought dialogue delimiters to track for speakers: ${thoughtSymbolList}.`);
         return parts.join(' ');
     }
 
@@ -4880,6 +4883,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     }
 
     function buildAttributionVerifierPrompt(msg, mesIndex, segments, lookup) {
+        const thoughtSymbols = getThoughtDelimiterSymbols();
+        const thoughtSymbolList = thoughtSymbols.map(formatPromptLiteralSymbol).join(', ');
         const knownNames = [];
         const seenNames = new Set();
         const addKnownName = name => {
@@ -4897,11 +4902,14 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         addKnownName(msg?.name);
 
         const quoteList = segments
-            .map(seg => `${seg.index}. current=${seg.assignment?.name || 'Unknown'} quote=${JSON.stringify(seg.text)}`)
+            .map(seg => `${seg.index}. current=${seg.assignment?.name || 'Uncolored/Unknown'} delimiter=${JSON.stringify(seg.delimiter)} text=${JSON.stringify(seg.text)}`)
             .join('\n');
         const knownList = knownNames.length ? knownNames.join(', ') : '(none)';
+        const thoughtLine = thoughtSymbolList
+            ? `\nConfigured inner-thought delimiters: ${thoughtSymbolList}. Treat those as dialogue segments that also need speaker attribution.`
+            : '';
 
-        return `You verify dialogue speaker attribution for a local DOM-only colorizer.\nReturn JSON only: {"corrections":[{"index":0,"speaker":"Name"}]}\nOnly include quotes whose current speaker is clearly wrong. If unsure, omit the quote. Use one speaker name only, preferably from Known speakers. Do not invent speaker names unless the message makes the name explicit.\n\nMessage index: ${mesIndex}\nMessage speaker/fallback: ${msg?.name || 'Unknown'}\nKnown speakers and aliases: ${knownList}\n\nFull message text:\n${msg?.mes || ''}\n\nNumbered dialogue segments:\n${quoteList}`;
+        return `You verify dialogue speaker attribution for a local DOM-only colorizer.\nReturn JSON only: {"corrections":[{"index":0,"speaker":"Name"}]}\nInclude a correction when the current speaker is clearly wrong, or when a segment is Uncolored/Unknown and the speaker is clear enough to color it. If unsure, omit the segment. Use one speaker name only, preferably from Known speakers. Do not invent speaker names unless the message makes the name explicit.\n\nMessage index: ${mesIndex}\nMessage speaker/fallback: ${msg?.name || 'Unknown'}\nKnown speakers and aliases: ${knownList}${thoughtLine}\n\nFull message text:\n${msg?.mes || ''}\n\nNumbered dialogue/thought segments:\n${quoteList}`;
     }
 
     function resolveVerifierSpeakerName(rawName, lookup) {
@@ -4942,7 +4950,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             saveData();
             updateCharList();
         };
-        const segments = attribution.segments.filter(seg => seg.assignment);
+        const segments = attribution.segments;
         if (!segments.length) {
             if (!skipMarkVerified) {
                 markMessageAttributionVerified(mesIndex, msg);
