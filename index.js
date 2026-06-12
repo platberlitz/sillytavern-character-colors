@@ -180,7 +180,14 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     let isAutoColorizing = false;
     let isVerifyingAttribution = false;
     let pendingAttributionVerifications = [];
+    const AUTO_ATTRIBUTION_VERIFY_DELAY_MS = 1000;
+    const AUTO_ATTRIBUTION_VERIFY_RETRY_DELAY_MS = 30000;
     const STREAMING_ATTRIBUTION_VERIFY_DELAY_MS = 2000;
+    let autoAttributionVerifyTimer = null;
+    let autoAttributionVerifyTimerDue = 0;
+    const pendingAutoAttributionVerifyIndices = new Map();
+    const recentAutoAttributionVerifyAttempts = new Map();
+    let isStreamingGenerationActive = false;
     let streamingAttributionVerifyTimer = null;
     let streamingAttributionGeneration = 0;
     let lastStreamingAttributionVerifyKey = '';
@@ -4585,6 +4592,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 updateCharList();
             }
             updateLegend();
+            queueAutoAttributionVerificationForRenderedMessages();
         } finally {
             isDecoratingDom = previousDecoratingState;
         }
@@ -4617,6 +4625,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             updateCharList();
         }
         updateLegend();
+        queueAutoAttributionVerificationForElements(elements);
     }
 
     function decorateLastMessageDom() {
@@ -4716,6 +4725,143 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
     function isMessageEligibleForAttributionVerification(msg) {
         return !!msg && !msg.is_system && !!msg.mes && !collectFontColorsFromText(msg.mes).size;
+    }
+
+    function isAutoAttributionVerificationEnabled() {
+        return settings.enabled && isDomEngine() && (settings.llmAttributionCheck || settings.llmAttributionParallel);
+    }
+
+    function getAutoAttributionVerifyKey(mesIndex, msg) {
+        return `${mesIndex}:${hashMessageText(msg?.mes)}`;
+    }
+
+    function getAutoAttributionMessageId(msg) {
+        const id = msg?.id ?? msg?.send_date ?? '';
+        return id === null || id === undefined ? '' : String(id);
+    }
+
+    function pruneRecentAutoAttributionVerifyAttempts(now = Date.now()) {
+        const maxAge = AUTO_ATTRIBUTION_VERIFY_RETRY_DELAY_MS * 2;
+        for (const [key, timestamp] of recentAutoAttributionVerifyAttempts.entries()) {
+            if (now - timestamp > maxAge) recentAutoAttributionVerifyAttempts.delete(key);
+        }
+    }
+
+    function clearAutoAttributionVerificationQueue(options = {}) {
+        clearTimeout(autoAttributionVerifyTimer);
+        autoAttributionVerifyTimer = null;
+        autoAttributionVerifyTimerDue = 0;
+        pendingAutoAttributionVerifyIndices.clear();
+        if (options.clearCooldown) recentAutoAttributionVerifyAttempts.clear();
+    }
+
+    function shouldQueueAutoAttributionVerification(mesIndex, msg, options = {}) {
+        if (!isAutoAttributionVerificationEnabled()) return false;
+        if (isStreamingGenerationActive && !options.allowDuringStreaming) return false;
+        if (!Number.isFinite(mesIndex) || mesIndex < 0) return false;
+        if (!isMessageEligibleForAttributionVerification(msg) || isMessageAttributionVerified(mesIndex, msg)) return false;
+
+        if (!options.force) {
+            const key = getAutoAttributionVerifyKey(mesIndex, msg);
+            const lastAttempt = recentAutoAttributionVerifyAttempts.get(key) || 0;
+            if (Date.now() - lastAttempt < AUTO_ATTRIBUTION_VERIFY_RETRY_DELAY_MS) return false;
+        }
+        return true;
+    }
+
+    function scheduleAutoAttributionVerificationDrain(delay = AUTO_ATTRIBUTION_VERIFY_DELAY_MS) {
+        if (!isAutoAttributionVerificationEnabled() || !pendingAutoAttributionVerifyIndices.size) return;
+        const nextDue = Date.now() + Math.max(0, delay);
+        if (autoAttributionVerifyTimer && autoAttributionVerifyTimerDue <= nextDue) return;
+        clearTimeout(autoAttributionVerifyTimer);
+        autoAttributionVerifyTimerDue = nextDue;
+        autoAttributionVerifyTimer = setTimeout(() => {
+            autoAttributionVerifyTimer = null;
+            autoAttributionVerifyTimerDue = 0;
+            drainAutoAttributionVerificationQueue()
+                .catch(e => console.warn('[Dialogue Colors] Automatic attribution verification queue failed:', e));
+        }, Math.max(0, nextDue - Date.now()));
+    }
+
+    function queueAutoAttributionVerificationForMessage(mesIndex, options = {}) {
+        const index = Number(mesIndex);
+        const msg = getContext()?.chat?.[index];
+        if (!shouldQueueAutoAttributionVerification(index, msg, options)) return false;
+
+        const key = getAutoAttributionVerifyKey(index, msg);
+        const existing = pendingAutoAttributionVerifyIndices.get(key);
+        pendingAutoAttributionVerifyIndices.set(key, {
+            key,
+            mesIndex: index,
+            messageId: getAutoAttributionMessageId(msg),
+            chatGeneration: attributionChatGeneration,
+            force: options.force === true || existing?.force === true,
+        });
+        scheduleAutoAttributionVerificationDrain(options.delay ?? AUTO_ATTRIBUTION_VERIFY_DELAY_MS);
+        return true;
+    }
+
+    function queueAutoAttributionVerificationForElements(elements, options = {}) {
+        if (!elements?.length) return false;
+        let queued = false;
+        for (const mesElement of elements) {
+            const mesIndex = Number(mesElement?.getAttribute?.('mesid'));
+            if (queueAutoAttributionVerificationForMessage(mesIndex, options)) queued = true;
+        }
+        return queued;
+    }
+
+    function queueAutoAttributionVerificationForRenderedMessages(options = {}) {
+        const messages = Array.from(document.querySelectorAll('#chat .mes[mesid]')).reverse();
+        return queueAutoAttributionVerificationForElements(messages, options);
+    }
+
+    async function drainAutoAttributionVerificationQueue() {
+        if (!pendingAutoAttributionVerifyIndices.size) return;
+        if (!isAutoAttributionVerificationEnabled()) {
+            pendingAutoAttributionVerifyIndices.clear();
+            return;
+        }
+        if (isStreamingGenerationActive) {
+            scheduleAutoAttributionVerificationDrain(AUTO_ATTRIBUTION_VERIFY_DELAY_MS);
+            return;
+        }
+
+        const queued = Array.from(pendingAutoAttributionVerifyIndices.values());
+        pendingAutoAttributionVerifyIndices.clear();
+        pruneRecentAutoAttributionVerifyAttempts();
+
+        for (const item of queued) {
+            if (!isAutoAttributionVerificationEnabled()) break;
+            if (isStreamingGenerationActive) {
+                pendingAutoAttributionVerifyIndices.set(item.key, item);
+                scheduleAutoAttributionVerificationDrain(AUTO_ATTRIBUTION_VERIFY_DELAY_MS);
+                break;
+            }
+            if (item.chatGeneration !== attributionChatGeneration) continue;
+
+            const msg = getContext()?.chat?.[item.mesIndex];
+            if (!isMessageEligibleForAttributionVerification(msg) || isMessageAttributionVerified(item.mesIndex, msg)) continue;
+            const currentKey = getAutoAttributionVerifyKey(item.mesIndex, msg);
+            if (currentKey !== item.key) continue;
+            const currentMessageId = getAutoAttributionMessageId(msg);
+            if (item.messageId && currentMessageId && item.messageId !== currentMessageId) continue;
+
+            const now = Date.now();
+            const lastAttempt = recentAutoAttributionVerifyAttempts.get(currentKey) || 0;
+            if (!item.force && now - lastAttempt < AUTO_ATTRIBUTION_VERIFY_RETRY_DELAY_MS) continue;
+            recentAutoAttributionVerifyAttempts.set(currentKey, now);
+            pruneRecentAutoAttributionVerifyAttempts(now);
+
+            try {
+                await runAttributionVerification(
+                    () => verifyAttributionsWithLLM(item.mesIndex, { manual: false, quiet: true }),
+                    { manual: false, queueKey: `auto:${currentKey}` }
+                );
+            } catch (e) {
+                console.warn('[Dialogue Colors] Automatic attribution verification failed:', e);
+            }
+        }
     }
 
     function parseAttributionVerifierResponse(responseText) {
@@ -5857,7 +6003,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                             <label class="checkbox_label"><input type="checkbox" id="dc-css-effects" data-help="Allow transform-based CSS effects for dramatic dialogue."><span>Enable CSS effects</span></label>
                             <label class="checkbox_label"><input type="checkbox" id="dc-auto-recolor" data-help="Automatically recolor chat after color changes."><span>Auto-recolor after changes</span></label>
                             <label class="checkbox_label dc-dom-only"><input type="checkbox" id="dc-stealth-colors" data-help="In DOM mode, inject a slim instruction for the model to include [COLORS:Name=#RRGGBB] for new speakers."><span>Stealth colors block</span></label>
-                            <label class="checkbox_label dc-dom-only"><input type="checkbox" id="dc-llm-attr-check" data-help="After generation ends in DOM mode, ask the selected LLM profile to verify quote attribution and save metadata corrections."><span>LLM attribution check</span></label>
+                            <label class="checkbox_label dc-dom-only"><input type="checkbox" id="dc-llm-attr-check" data-help="In DOM mode, automatically ask the selected LLM profile to verify rendered unverified messages and save metadata corrections."><span>LLM attribution check</span></label>
                             <label class="checkbox_label dc-dom-only"><input type="checkbox" id="dc-llm-attr-parallel" data-help="During streaming in DOM mode, verify quote attribution after 2-second pauses so corrections can appear before generation fully ends."><span>LLM streaming attribution</span></label>
                         </div>
                         <div class="dc-field-row dc-dom-only">
@@ -6050,15 +6196,29 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
         syncUIWithSettings();
 
-        $('dc-enabled').onchange = e => { settings.enabled = e.target.checked; saveData(); injectPrompt(); scheduleDecorateAll(0); };
+        $('dc-enabled').onchange = e => { settings.enabled = e.target.checked; if (!settings.enabled) clearAutoAttributionVerificationQueue({ clearCooldown: true }); saveData(); injectPrompt(); scheduleDecorateAll(0); };
         $('dc-highlight').onchange = e => { settings.highlightMode = e.target.checked; saveData(); injectPrompt(); scheduleDecorateAll(0); };
         $('dc-autoscan').onchange = e => { settings.autoScanOnLoad = e.target.checked; saveData(); };
         $('dc-autoscan-new').onchange = e => { settings.autoScanNewMessages = e.target.checked; saveData(); };
         $('dc-auto-lock').onchange = e => { settings.autoLockDetected = e.target.checked; saveData(); };
         $('dc-auto-recolor').onchange = e => { settings.autoRecolor = e.target.checked; saveData(); };
         $('dc-auto-colorize').onchange = e => { settings.autoColorize = e.target.checked; saveData(); };
-        $('dc-llm-attr-check').onchange = e => { settings.llmAttributionCheck = e.target.checked; saveData(); };
-        $('dc-llm-attr-parallel').onchange = e => { settings.llmAttributionParallel = e.target.checked; if (!settings.llmAttributionParallel) { cancelStreamingAttributionVerification({ clearOverrides: true }); scheduleDecorateAll(0); } saveData(); };
+        $('dc-llm-attr-check').onchange = e => {
+            settings.llmAttributionCheck = e.target.checked;
+            if (settings.llmAttributionCheck) queueAutoAttributionVerificationForRenderedMessages({ force: true, delay: 0 });
+            else if (!settings.llmAttributionParallel) clearAutoAttributionVerificationQueue({ clearCooldown: true });
+            saveData();
+        };
+        $('dc-llm-attr-parallel').onchange = e => {
+            settings.llmAttributionParallel = e.target.checked;
+            if (settings.llmAttributionParallel) queueAutoAttributionVerificationForRenderedMessages({ force: true, delay: 0 });
+            else {
+                cancelStreamingAttributionVerification({ clearOverrides: true });
+                if (!settings.llmAttributionCheck) clearAutoAttributionVerificationQueue({ clearCooldown: true });
+                scheduleDecorateAll(0);
+            }
+            saveData();
+        };
         $('dc-stealth-colors').onchange = e => { settings.domStealthColors = e.target.checked; saveData(); injectPrompt(); };
         $('dc-right-click').onchange = e => { settings.enableRightClick = e.target.checked; saveData(); };
         $('dc-legend').onchange = e => { settings.showLegend = e.target.checked; saveData(); updateLegend(); };
@@ -6076,7 +6236,11 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 setupChatObserver();
                 decorateAllMessages();
             }
-            else if (wasDomEngine) undecorateAllMessages();
+            else if (wasDomEngine) {
+                clearAutoAttributionVerificationQueue({ clearCooldown: true });
+                cancelStreamingAttributionVerification({ clearOverrides: true });
+                undecorateAllMessages();
+            }
         };
         $('dc-llm-profile').onchange = e => { settings.llmConnectionProfile = e.target.value || null; saveData(); };
         $('dc-attr-profile').onchange = e => { settings.attributionConnectionProfile = e.target.value || null; saveData(); };
@@ -6298,8 +6462,10 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
     function handleChatChanged() {
         attributionChatGeneration++;
+        isStreamingGenerationActive = false;
         cancelStreamingAttributionVerification({ clearOverrides: true });
         pendingAttributionVerifications = [];
+        clearAutoAttributionVerificationQueue({ clearCooldown: true });
         clearAutoColorizeIndicators();
         clearDomCache();
         const currentCharKey = getCharKey();
@@ -6335,29 +6501,12 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             characterMessageRendered: () => { onNewMessage(); scheduleDecorateAll(120); },
             messageRendered: () => scheduleDecorateAll(120),
             messageUpdated: () => scheduleDecorateAll(80),
-            streamToken: () => { scheduleDecorateLast(hasMessageQuoteOverridesForLatestMessage() ? 0 : 80); scheduleStreamingAttributionVerification(); },
+            streamToken: () => { isStreamingGenerationActive = true; scheduleDecorateLast(hasMessageQuoteOverridesForLatestMessage() ? 0 : 80); scheduleStreamingAttributionVerification(); },
             generationEnded: () => {
+                isStreamingGenerationActive = false;
                 cancelStreamingAttributionVerification();
                 scheduleDecorateAll(0);
-                if (settings.llmAttributionCheck || settings.llmAttributionParallel) {
-                    const chat = getContext()?.chat || [];
-                    const mesIndex = chat.length - 1;
-                    const msg = chat[mesIndex];
-                    const messageId = msg?.id ?? msg?.send_date ?? '';
-                    const chatGeneration = attributionChatGeneration;
-                    if (mesIndex >= 0) {
-                        setTimeout(() => {
-                            if (chatGeneration !== attributionChatGeneration) return;
-                            const currentMsg = getContext()?.chat?.[mesIndex];
-                            const currentMessageId = currentMsg?.id ?? currentMsg?.send_date ?? '';
-                            if (messageId && messageId !== currentMessageId) return;
-                            runAttributionVerification(
-                                () => verifyAttributionsWithLLM(mesIndex, { manual: false }),
-                                { manual: false, queueKey: `auto:${mesIndex}:${messageId || 'latest'}` }
-                            ).catch(e => console.warn('[Dialogue Colors] Automatic attribution verification failed:', e));
-                        }, 800);
-                    }
-                }
+                queueAutoAttributionVerificationForMessage((getContext()?.chat || []).length - 1, { force: true, delay: 800 });
             },
             chatChanged: handleChatChanged,
             settingsUpdated: () => {
