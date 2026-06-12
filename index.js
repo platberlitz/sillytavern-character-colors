@@ -1551,12 +1551,12 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     }
 
     function applyLiveColorChangesFromSnapshot(snapshot, keys = Object.keys(snapshot || {}), options = {}) {
-        if (!settings.autoRecolor && !options.force) return 0;
         if (isDomEngine()) {
             if (options.saveImmediately) decorateAllMessages();
             else scheduleDecorateAll();
             return 0;
         }
+        if (!settings.autoRecolor && !options.force) return 0;
         const list = Array.isArray(keys) ? keys : [keys];
         return applyLiveColorReplacements(buildColorReplacementsFromSnapshot(snapshot, list), {
             nameToNewColor: buildNameToCurrentColorForKeys(list),
@@ -3356,7 +3356,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const brightnessClause = brightnessOffset !== 0
             ? ` New speakers: ${brightnessOffset > 0 ? '+' : ''}${brightnessOffset}% lightness bias.`
             : '';
-        parts.push(`For speaker tracking: end your response with [COLORS:Name=#RRGGBB] listing each speaker in your reply that is not already established below. Use Name(Nick)=#RRGGBB for nicknames. Omit the block if there are no new speakers. Output it as plain text on the final line.`);
+        parts.push(`For speaker tracking: end your response with [COLORS:Name=#RRGGBB] listing each speaker in your reply. Use Name(Nick)=#RRGGBB for nicknames. Omit the block if there are no speakers in your reply. Output it as plain text on the final line.`);
         parts.push(`Use ${modeGuidance}.${brightnessClause}`);
         const customPalettePrompt = buildCustomPalettePrompt();
         if (customPalettePrompt) parts.push(customPalettePrompt);
@@ -4998,7 +4998,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const skipMarkVerified = options.skipMarkVerified === true;
         const useTransientOverrides = options.transientOverrides === true;
         const quiet = options.quiet === true;
-        if (isMessageAttributionVerified(mesIndex, msg)) return { checked: false, corrections: 0, createdCharacters: false };
+        if (!options.manual && isMessageAttributionVerified(mesIndex, msg)) return { checked: false, corrections: 0, createdCharacters: false };
 
         const localAssignments = parseNamedColorAssignmentsFromText(msg.mes);
         const lookup = buildNameColorLookup(localAssignments);
@@ -5112,7 +5112,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         }
         const lastIdx = chat.length - 1;
         const msg = chat[lastIdx];
-        if (!isMessageEligibleForAttributionVerification(msg) || isMessageAttributionVerified(lastIdx, msg)) {
+        if (!isMessageEligibleForAttributionVerification(msg) || (!options.manual && isMessageAttributionVerified(lastIdx, msg))) {
             if (options.manual) toast.info('Latest message already verified or not eligible.');
             return { checked: false, corrections: 0, createdCharacters: false };
         }
@@ -5134,7 +5134,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         toast.info('Verifying visible messages with LLM...');
         for (const index of indices) {
             const msg = chat[index];
-            if (!isMessageEligibleForAttributionVerification(msg) || isMessageAttributionVerified(index, msg)) continue;
+            if (!isMessageEligibleForAttributionVerification(msg) || (!options.manual && isMessageAttributionVerified(index, msg))) continue;
             const result = await verifyAttributionsWithLLM(index, options);
             if (result.checked) checked++;
             corrections += result.corrections || 0;
