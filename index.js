@@ -4357,6 +4357,11 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         return { ...streaming, ...persisted };
     }
 
+    function hasMessageQuoteOverridesForDecoration(mesIndex, msg) {
+        const overrides = getMessageQuoteOverridesForDecoration(mesIndex, msg);
+        return !!overrides && Object.keys(overrides).length > 0;
+    }
+
     function setStreamingAttributionOverride(mesIndex, msg, segmentIndex, speakerName, options = {}) {
         const entry = getStreamingAttributionOverrideEntry(mesIndex, msg, true);
         if (!entry) return false;
@@ -4370,16 +4375,11 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         else streamingAttributionOverrides.delete(String(mesIndex));
     }
 
-    function hasStreamingAttributionOverridesForMessage(mesIndex, msg) {
-        const overrides = getStreamingAttributionOverrides(mesIndex, msg);
-        return !!overrides && Object.keys(overrides).length > 0;
-    }
-
-    function hasStreamingAttributionOverridesForLatestMessage() {
+    function hasMessageQuoteOverridesForLatestMessage() {
         const chat = getContext()?.chat || [];
         const mesIndex = chat.length - 1;
         if (mesIndex < 0) return false;
-        return hasStreamingAttributionOverridesForMessage(mesIndex, chat[mesIndex]);
+        return hasMessageQuoteOverridesForDecoration(mesIndex, chat[mesIndex]);
     }
 
     function getMessageQuoteOverrideEntry(mesIndex, msg, create = false) {
@@ -4666,6 +4666,14 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         }, 80);
     }
 
+    function shouldDecorateObservedMessageImmediately(mesElement) {
+        if (!mesElement || !settings.enabled || !isDomEngine()) return false;
+        const mesIndex = Number(mesElement.getAttribute('mesid'));
+        if (!Number.isFinite(mesIndex) || mesIndex < 0) return false;
+        const msg = getContext()?.chat?.[mesIndex];
+        return hasMessageQuoteOverridesForDecoration(mesIndex, msg);
+    }
+
     function collectMutatedMessageElements(mutation) {
         const elements = [];
         const pushMessage = node => {
@@ -4689,11 +4697,19 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         runtimeState.chatObserverTarget = chatEl;
         runtimeState.chatObserver = new MutationObserver(mutations => {
             if (isDecoratingDom || !settings.enabled || !isDomEngine()) return;
+            const immediate = new Set();
+            const delayed = new Set();
             for (const mutation of mutations) {
                 for (const mesElement of collectMutatedMessageElements(mutation)) {
-                    queueObservedMessageDecoration(mesElement);
+                    if (shouldDecorateObservedMessageImmediately(mesElement)) immediate.add(mesElement);
+                    else delayed.add(mesElement);
                 }
             }
+            if (immediate.size) {
+                for (const mesElement of immediate) runtimeState.pendingObservedMessages.delete(mesElement);
+                decorateObservedMessages(Array.from(immediate));
+            }
+            for (const mesElement of delayed) queueObservedMessageDecoration(mesElement);
         });
         runtimeState.chatObserver.observe(chatEl, { childList: true, subtree: true, characterData: true });
     }
@@ -6319,7 +6335,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             characterMessageRendered: () => { onNewMessage(); scheduleDecorateAll(120); },
             messageRendered: () => scheduleDecorateAll(120),
             messageUpdated: () => scheduleDecorateAll(80),
-            streamToken: () => { scheduleDecorateLast(hasStreamingAttributionOverridesForLatestMessage() ? 0 : 80); scheduleStreamingAttributionVerification(); },
+            streamToken: () => { scheduleDecorateLast(hasMessageQuoteOverridesForLatestMessage() ? 0 : 80); scheduleStreamingAttributionVerification(); },
             generationEnded: () => {
                 cancelStreamingAttributionVerification();
                 scheduleDecorateAll(0);
