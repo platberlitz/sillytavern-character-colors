@@ -145,7 +145,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     let swapMode = null;
     let searchTerm = '';
     let expandedCharacterRows = new Set();
-    let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, thoughtSymbols: '*', disableNarration: true, shareColorsGlobally: false, cssEffects: false, autoScanNewMessages: true, autoLockDetected: true, enableRightClick: false, promptDepth: 1, autoRecolor: true, autoColorize: false, llmAttributionCheck: false, domStealthColors: true, disableToasts: false, llmConnectionProfile: null, attributionConnectionProfile: null, colorSchemaVersion: COLOR_SCHEMA_VERSION, promptMode: 'inject', promptRole: 'user', sortMode: 'name', coloringEngine: 'llm' };
+    let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, thoughtSymbols: '*', disableNarration: true, shareColorsGlobally: false, cssEffects: false, autoScanNewMessages: true, autoLockDetected: true, enableRightClick: false, promptDepth: 1, autoRecolor: true, autoColorize: false, llmAttributionCheck: false, llmAttributionParallel: false, domStealthColors: true, disableToasts: false, llmConnectionProfile: null, attributionConnectionProfile: null, colorSchemaVersion: COLOR_SCHEMA_VERSION, promptMode: 'inject', promptRole: 'user', sortMode: 'name', coloringEngine: 'llm' };
     const TOGGLE_SETTING_DEFAULTS = Object.freeze({
         enabled: true,
         highlightMode: false,
@@ -160,6 +160,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         autoRecolor: true,
         autoColorize: false,
         llmAttributionCheck: false,
+        llmAttributionParallel: false,
         domStealthColors: true,
         disableToasts: false,
     });
@@ -178,6 +179,12 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     let isColorizing = false;
     let isAutoColorizing = false;
     let isVerifyingAttribution = false;
+    let pendingAttributionVerifications = [];
+    const STREAMING_ATTRIBUTION_VERIFY_DELAY_MS = 2000;
+    let streamingAttributionVerifyTimer = null;
+    let streamingAttributionGeneration = 0;
+    let lastStreamingAttributionVerifyKey = '';
+    let attributionChatGeneration = 0;
     const LIVE_CHAT_SAVE_DELAY_MS = 350;
     const COLOR_STATE_SAVE_DELAY_MS = 180;
     let liveChatSaveTimer = null;
@@ -4699,6 +4706,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const ctx = getContext();
         const msg = ctx?.chat?.[mesIndex];
         if (!isMessageEligibleForAttributionVerification(msg)) return { checked: false, corrections: 0, createdCharacters: false };
+        const skipMarkVerified = options.skipMarkVerified === true;
+        const quiet = options.quiet === true;
         if (isMessageAttributionVerified(mesIndex, msg)) return { checked: false, corrections: 0, createdCharacters: false };
 
         const localAssignments = parseNamedColorAssignmentsFromText(msg.mes);
@@ -4715,7 +4724,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         };
         const segments = attribution.segments.filter(seg => seg.assignment);
         if (!segments.length) {
-            markMessageAttributionVerified(mesIndex, msg);
+            if (!skipMarkVerified) markMessageAttributionVerified(mesIndex, msg);
             persistCreatedCharacters();
             return { checked: true, corrections: 0, createdCharacters: attribution.createdCharacters };
         }
@@ -4751,14 +4760,14 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             corrections = parseAttributionVerifierResponse(response);
         } catch (e) {
             console.warn('[Dialogue Colors] LLM attribution verification failed:', e);
-            toast.warning('Color verification failed (see console).');
+            if (!quiet) toast.warning('Color verification failed (see console).');
             persistCreatedCharacters();
             return { checked: false, corrections: 0, createdCharacters: false };
         }
 
         if (!Array.isArray(corrections)) {
             console.warn('[Dialogue Colors] LLM attribution verification returned invalid JSON.');
-            toast.warning('Color verification failed (see console).');
+            if (!quiet) toast.warning('Color verification failed (see console).');
             persistCreatedCharacters();
             return { checked: false, corrections: 0, createdCharacters: false };
         }
@@ -4784,7 +4793,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             }
         }
 
-        markMessageAttributionVerified(mesIndex, msg);
+        if (!skipMarkVerified) markMessageAttributionVerified(mesIndex, msg);
         if (createdCharacters) {
             saveData();
             updateCharList();
@@ -4839,7 +4848,16 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     async function runAttributionVerification(action, options = {}) {
         if (isVerifyingAttribution) {
             if (options.manual) toast.info('Attribution verification is already running.');
-            return { checked: false, corrections: 0, createdCharacters: false };
+            else if (options.queue !== false) {
+                const queued = { action, options };
+                const queueKey = options.queueKey ? String(options.queueKey) : '';
+                const existingIndex = queueKey
+                    ? pendingAttributionVerifications.findIndex(item => item.options?.queueKey === queueKey)
+                    : -1;
+                if (existingIndex >= 0) pendingAttributionVerifications[existingIndex] = queued;
+                else pendingAttributionVerifications.push(queued);
+            }
+            return { checked: false, corrections: 0, createdCharacters: false, queued: !options.manual && options.queue !== false };
         }
         isVerifyingAttribution = true;
         setVerifyAttributionButtonBusy(true);
@@ -4847,8 +4865,57 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             return await action();
         } finally {
             isVerifyingAttribution = false;
-            setVerifyAttributionButtonBusy(false);
+            const next = pendingAttributionVerifications.shift();
+            if (next) {
+                setTimeout(() => {
+                    runAttributionVerification(next.action, next.options)
+                        .catch(e => console.warn('[Dialogue Colors] Queued attribution verification failed:', e));
+                }, 0);
+            } else {
+                setVerifyAttributionButtonBusy(false);
+            }
         }
+    }
+
+    function cancelStreamingAttributionVerification() {
+        clearTimeout(streamingAttributionVerifyTimer);
+        streamingAttributionVerifyTimer = null;
+        streamingAttributionGeneration++;
+        lastStreamingAttributionVerifyKey = '';
+    }
+
+    function scheduleStreamingAttributionVerification() {
+        if (!settings.enabled || !isDomEngine() || !settings.llmAttributionParallel) return;
+        const chat = getContext()?.chat || [];
+        const mesIndex = chat.length - 1;
+        const msg = chat[mesIndex];
+        if (!isMessageEligibleForAttributionVerification(msg)) return;
+
+        clearTimeout(streamingAttributionVerifyTimer);
+        const generation = streamingAttributionGeneration;
+        streamingAttributionVerifyTimer = setTimeout(() => {
+            streamingAttributionVerifyTimer = null;
+            runStreamingAttributionVerification(mesIndex, generation)
+                .catch(e => console.warn('[Dialogue Colors] Streaming attribution verification failed:', e));
+        }, STREAMING_ATTRIBUTION_VERIFY_DELAY_MS);
+    }
+
+    async function runStreamingAttributionVerification(mesIndex, generation) {
+        if (generation !== streamingAttributionGeneration) return { checked: false, corrections: 0, createdCharacters: false };
+        if (!settings.enabled || !isDomEngine() || !settings.llmAttributionParallel) return { checked: false, corrections: 0, createdCharacters: false };
+        if (isVerifyingAttribution) return { checked: false, corrections: 0, createdCharacters: false };
+
+        const msg = getContext()?.chat?.[mesIndex];
+        if (!isMessageEligibleForAttributionVerification(msg)) return { checked: false, corrections: 0, createdCharacters: false };
+
+        const verifyKey = `${mesIndex}:${hashMessageText(msg.mes)}`;
+        if (verifyKey === lastStreamingAttributionVerifyKey) return { checked: false, corrections: 0, createdCharacters: false };
+        lastStreamingAttributionVerifyKey = verifyKey;
+
+        return runAttributionVerification(
+            () => verifyAttributionsWithLLM(mesIndex, { manual: false, skipMarkVerified: true, quiet: true }),
+            { manual: false, queue: false }
+        );
     }
 
     async function recolorAllMessages() {
@@ -5632,6 +5699,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         if ($('dc-auto-recolor')) $('dc-auto-recolor').checked = settings.autoRecolor !== false;
         if ($('dc-auto-colorize')) $('dc-auto-colorize').checked = settings.autoColorize || false;
         if ($('dc-llm-attr-check')) $('dc-llm-attr-check').checked = settings.llmAttributionCheck || false;
+        if ($('dc-llm-attr-parallel')) $('dc-llm-attr-parallel').checked = settings.llmAttributionParallel || false;
         if ($('dc-stealth-colors')) $('dc-stealth-colors').checked = settings.domStealthColors !== false;
         if ($('dc-right-click')) $('dc-right-click').checked = settings.enableRightClick;
         if ($('dc-legend')) $('dc-legend').checked = settings.showLegend;
@@ -5706,6 +5774,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                             <label class="checkbox_label"><input type="checkbox" id="dc-auto-recolor" data-help="Automatically recolor chat after color changes."><span>Auto-recolor after changes</span></label>
                             <label class="checkbox_label dc-dom-only"><input type="checkbox" id="dc-stealth-colors" data-help="In DOM mode, inject a slim instruction for the model to include [COLORS:Name=#RRGGBB] for new speakers."><span>Stealth colors block</span></label>
                             <label class="checkbox_label dc-dom-only"><input type="checkbox" id="dc-llm-attr-check" data-help="After generation ends in DOM mode, ask the selected LLM profile to verify quote attribution and save metadata corrections."><span>LLM attribution check</span></label>
+                            <label class="checkbox_label dc-dom-only"><input type="checkbox" id="dc-llm-attr-parallel" data-help="During streaming in DOM mode, verify quote attribution after 2-second pauses so corrections can appear before generation fully ends."><span>LLM streaming attribution</span></label>
                         </div>
                         <div class="dc-field-row dc-dom-only">
                             <label class="dc-inline-label" for="dc-attr-profile">Verify profile</label>
@@ -5905,6 +5974,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         $('dc-auto-recolor').onchange = e => { settings.autoRecolor = e.target.checked; saveData(); };
         $('dc-auto-colorize').onchange = e => { settings.autoColorize = e.target.checked; saveData(); };
         $('dc-llm-attr-check').onchange = e => { settings.llmAttributionCheck = e.target.checked; saveData(); };
+        $('dc-llm-attr-parallel').onchange = e => { settings.llmAttributionParallel = e.target.checked; if (!settings.llmAttributionParallel) cancelStreamingAttributionVerification(); saveData(); };
         $('dc-stealth-colors').onchange = e => { settings.domStealthColors = e.target.checked; saveData(); injectPrompt(); };
         $('dc-right-click').onchange = e => { settings.enableRightClick = e.target.checked; saveData(); };
         $('dc-legend').onchange = e => { settings.showLegend = e.target.checked; saveData(); updateLegend(); };
@@ -6143,6 +6213,9 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     }
 
     function handleChatChanged() {
+        attributionChatGeneration++;
+        cancelStreamingAttributionVerification();
+        pendingAttributionVerifications = [];
         clearAutoColorizeIndicators();
         clearDomCache();
         const currentCharKey = getCharKey();
@@ -6178,11 +6251,28 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             characterMessageRendered: () => { onNewMessage(); scheduleDecorateAll(120); },
             messageRendered: () => scheduleDecorateAll(120),
             messageUpdated: () => scheduleDecorateAll(80),
-            streamToken: () => scheduleDecorateLast(80),
+            streamToken: () => { scheduleDecorateLast(80); scheduleStreamingAttributionVerification(); },
             generationEnded: () => {
+                cancelStreamingAttributionVerification();
                 scheduleDecorateAll(0);
-                if (settings.llmAttributionCheck) {
-                    setTimeout(() => runAttributionVerification(() => verifyLatestAttributionsWithLLM({ manual: false }), { manual: false }), 250);
+                if (settings.llmAttributionCheck || settings.llmAttributionParallel) {
+                    const chat = getContext()?.chat || [];
+                    const mesIndex = chat.length - 1;
+                    const msg = chat[mesIndex];
+                    const messageId = msg?.id ?? msg?.send_date ?? '';
+                    const chatGeneration = attributionChatGeneration;
+                    if (mesIndex >= 0) {
+                        setTimeout(() => {
+                            if (chatGeneration !== attributionChatGeneration) return;
+                            const currentMsg = getContext()?.chat?.[mesIndex];
+                            const currentMessageId = currentMsg?.id ?? currentMsg?.send_date ?? '';
+                            if (messageId && messageId !== currentMessageId) return;
+                            runAttributionVerification(
+                                () => verifyAttributionsWithLLM(mesIndex, { manual: false }),
+                                { manual: false, queueKey: `auto:${mesIndex}:${messageId || 'latest'}` }
+                            ).catch(e => console.warn('[Dialogue Colors] Automatic attribution verification failed:', e));
+                        }, 800);
+                    }
                 }
             },
             chatChanged: handleChatChanged,
