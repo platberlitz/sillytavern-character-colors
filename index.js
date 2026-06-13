@@ -20,8 +20,12 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         eventHandlers: null,
         chatObserver: null,
         chatObserverTarget: null,
+        chatRootObserver: null,
+        chatRootObserverTimer: null,
         chatObserverTimer: null,
         chatChangedRafId: null,
+        domSettleTimers: new Set(),
+        isDomSettlePass: false,
         pendingObservedMessages: new Set(),
     };
     globalThis[RUNTIME_GUARD_KEY] = runtimeState;
@@ -1553,8 +1557,12 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
     function applyLiveColorChangesFromSnapshot(snapshot, keys = Object.keys(snapshot || {}), options = {}) {
         if (isDomEngine()) {
-            if (options.saveImmediately) decorateAllMessages();
-            else scheduleDecorateAll();
+            if (options.saveImmediately) {
+                decorateAllMessages();
+                scheduleDomSettleRefresh(DOM_RETRY_REFRESH_DELAYS);
+            } else {
+                scheduleDomRefreshSeries();
+            }
             return 0;
         }
         if (!settings.autoRecolor && !options.force) return 0;
@@ -2449,6 +2457,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                             return;
                         }
                         decorateAllMessages();
+                        scheduleDomSettleRefresh(DOM_RETRY_REFRESH_DELAYS);
                     } else if (isBareQuote) {
                         textUpdated = wrapQElementWithFontTag(qElement, finalColor);
                     } else {
@@ -3869,7 +3878,10 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
         saveHistory(); saveData(); updateCharList(); injectPrompt();
         stripColorBlocksFromDisplay();
-        if (isDomEngine()) decorateAllMessages();
+        if (isDomEngine()) {
+            decorateAllMessages();
+            scheduleDomSettleRefresh(DOM_RETRY_REFRESH_DELAYS);
+        }
         const conflicts = checkColorConflicts();
         if (conflicts.length) toast.warning(`Similar: ${conflicts.slice(0, 3).map(c => c.join(' & ')).join(', ')}`);
         toast.info(`Found ${Object.keys(characterColors).length} characters`);
@@ -4363,7 +4375,13 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     let decorateLastTimer = null;
     let isDecoratingDom = false;
     let decorateAllFirstCallTime = 0;
+    let decorateLastFirstCallTime = 0;
+    let observedDecorationFirstCallTime = 0;
     const DECORATE_ALL_MAX_WAIT = 500;
+    const DECORATE_LAST_MAX_WAIT = 250;
+    const OBSERVED_DECORATION_MAX_WAIT = 250;
+    const DOM_SETTLE_REFRESH_DELAYS = [0, 120, 350, 900, 1800, 3000];
+    const DOM_RETRY_REFRESH_DELAYS = [120, 350, 900, 1800, 3000];
     let pendingDeferredMutations = false;
 
     function hashMessageText(text) {
@@ -4590,7 +4608,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
     function decorateMessageDom(mesElement, msg, mesIndex) {
         const mesText = mesElement?.querySelector?.('.mes_text');
-        if (!mesText) return { decorated: false, createdCharacters: false };
+        if (!mesText) return { decorated: false, createdCharacters: false, needsRetry: !!msg && !msg.is_system };
         undecorateMessageDom(mesElement);
         if (!settings.enabled || !isDomEngine() || !msg || msg.is_system) {
             return { decorated: false, createdCharacters: false };
@@ -4621,20 +4639,57 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const emphasisSegments = attribution.segments.filter(seg => seg.delimiter === '*' || seg.delimiter === '_');
         const qElements = Array.from(mesText.querySelectorAll('q'));
         const emElements = Array.from(mesText.querySelectorAll('em'));
+        const expectedDecorations = quoteSegments.filter(seg => seg.assignment).length + emphasisSegments.filter(seg => seg.assignment).length;
+        let matchedDecorations = 0;
 
         matchSegmentsToElements(quoteSegments, qElements, seg => normalizeSegmentText(seg.text), applyDecoration);
         matchSegmentsToElements(emphasisSegments, emElements, seg => normalizeSegmentText(seg.text.slice(1, -1)), applyDecoration);
+        matchedDecorations = mesText.querySelectorAll('[data-dc-colored]').length;
 
         if (!settings.disableNarration && settings.narratorColor) {
             mesText.style.color = settings.narratorColor;
             mesText.setAttribute('data-dc-narrator', '1');
         }
 
-        return { decorated, createdCharacters: attribution.createdCharacters, segments: attribution.segments };
+        return {
+            decorated,
+            createdCharacters: attribution.createdCharacters,
+            segments: attribution.segments,
+            needsRetry: expectedDecorations > matchedDecorations && (qElements.length < quoteSegments.length || emElements.length < emphasisSegments.length),
+        };
     }
 
     function undecorateAllMessages() {
         document.querySelectorAll('#chat .mes[mesid]').forEach(undecorateMessageDom);
+    }
+
+    function clearDomSettleRefreshes() {
+        for (const timer of runtimeState.domSettleTimers || []) clearTimeout(timer);
+        runtimeState.domSettleTimers?.clear?.();
+    }
+
+    function scheduleDomSettleRefresh(delays = DOM_SETTLE_REFRESH_DELAYS) {
+        if (!isDomEngine()) return;
+        clearDomSettleRefreshes();
+        for (const delay of delays) {
+            const timer = setTimeout(() => {
+                runtimeState.domSettleTimers.delete(timer);
+                if (!settings.enabled || !isDomEngine()) return;
+                setupChatObserver();
+                runtimeState.isDomSettlePass = true;
+                try {
+                    decorateAllMessages();
+                } finally {
+                    runtimeState.isDomSettlePass = false;
+                }
+            }, Math.max(0, delay));
+            runtimeState.domSettleTimers.add(timer);
+        }
+    }
+
+    function scheduleDomRefreshSeries(delay = 0) {
+        scheduleDecorateAll(delay);
+        scheduleDomSettleRefresh(DOM_SETTLE_REFRESH_DELAYS.slice(1).map(settleDelay => settleDelay + delay));
     }
 
     function decorateAllMessages() {
@@ -4649,12 +4704,14 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             const chat = ctx?.chat || [];
             const countResult = refreshDomDialogueCounts(chat);
             let changedColorData = countResult.changed;
+            let needsRetry = false;
             document.querySelectorAll('#chat .mes[mesid]').forEach(mesElement => {
                 const mesIndex = Number(mesElement.getAttribute('mesid'));
                 const msg = chat[mesIndex];
                 if (!msg) return;
                 const result = decorateMessageDom(mesElement, msg, mesIndex);
                 if (result.createdCharacters) changedColorData = true;
+                if (result.needsRetry) needsRetry = true;
             });
             if (changedColorData) {
                 saveData();
@@ -4662,6 +4719,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             }
             updateLegend();
             queueAutoAttributionVerificationForRenderedMessages();
+            if (needsRetry && !runtimeState.isDomSettlePass) scheduleDomSettleRefresh(DOM_RETRY_REFRESH_DELAYS);
         } finally {
             isDecoratingDom = previousDecoratingState;
             if (pendingDeferredMutations) {
@@ -4683,12 +4741,14 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const previousDecoratingState = isDecoratingDom;
         isDecoratingDom = true;
         let createdCharacters = false;
+        let needsRetry = false;
         try {
             for (const mesElement of elements) {
                 if (!mesElement?.isConnected) continue;
                 const mesIndex = Number(mesElement.getAttribute('mesid'));
                 const result = decorateMessageElementByIndex(mesElement, mesIndex);
                 if (result.createdCharacters) createdCharacters = true;
+                if (result.needsRetry) needsRetry = true;
             }
         } finally {
             isDecoratingDom = previousDecoratingState;
@@ -4703,6 +4763,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         }
         updateLegend();
         queueAutoAttributionVerificationForElements(elements);
+        if (needsRetry && !runtimeState.isDomSettlePass) scheduleDomSettleRefresh(DOM_RETRY_REFRESH_DELAYS);
     }
 
     function decorateLastMessageDom() {
@@ -4728,11 +4789,15 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
     function scheduleDecorateLast(delay = 80) {
         if (!settings.enabled || !isDomEngine()) return;
+        const now = Date.now();
+        if (!decorateLastFirstCallTime) decorateLastFirstCallTime = now;
         clearTimeout(decorateLastTimer);
+        const effectiveDelay = Math.min(delay, Math.max(0, DECORATE_LAST_MAX_WAIT - (now - decorateLastFirstCallTime)));
         decorateLastTimer = setTimeout(() => {
             decorateLastTimer = null;
+            decorateLastFirstCallTime = 0;
             decorateLastMessageDom();
-        }, delay);
+        }, effectiveDelay);
     }
 
     function disconnectChatObserver() {
@@ -4741,19 +4806,24 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         runtimeState.chatObserverTarget = null;
         if (runtimeState.chatObserverTimer) clearTimeout(runtimeState.chatObserverTimer);
         runtimeState.chatObserverTimer = null;
+        observedDecorationFirstCallTime = 0;
         runtimeState.pendingObservedMessages?.clear?.();
     }
 
     function queueObservedMessageDecoration(mesElement) {
         if (!mesElement || !settings.enabled || !isDomEngine()) return;
+        const now = Date.now();
+        if (!observedDecorationFirstCallTime) observedDecorationFirstCallTime = now;
         runtimeState.pendingObservedMessages.add(mesElement);
         if (runtimeState.chatObserverTimer) clearTimeout(runtimeState.chatObserverTimer);
+        const effectiveDelay = Math.min(80, Math.max(0, OBSERVED_DECORATION_MAX_WAIT - (now - observedDecorationFirstCallTime)));
         runtimeState.chatObserverTimer = setTimeout(() => {
             runtimeState.chatObserverTimer = null;
+            observedDecorationFirstCallTime = 0;
             const pending = Array.from(runtimeState.pendingObservedMessages || []);
             runtimeState.pendingObservedMessages.clear();
             decorateObservedMessages(pending);
-        }, 80);
+        }, effectiveDelay);
     }
 
     function shouldDecorateObservedMessageImmediately(mesElement) {
@@ -4802,7 +4872,35 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             }
             for (const mesElement of delayed) queueObservedMessageDecoration(mesElement);
         });
-        runtimeState.chatObserver.observe(chatEl, { childList: true, subtree: true, characterData: true });
+        runtimeState.chatObserver.observe(chatEl, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['class', 'mesid'] });
+    }
+
+    function setupChatRootObserver() {
+        if (runtimeState.chatRootObserver || !document.body) return;
+        const mutationTouchesChatRoot = mutations => {
+            if (runtimeState.chatObserverTarget && !runtimeState.chatObserverTarget.isConnected) return true;
+            const hasChatNode = node => {
+                const element = node?.nodeType === Node.ELEMENT_NODE ? node : null;
+                return !!element && (element.id === 'chat' || !!element.querySelector?.('#chat'));
+            };
+            return mutations.some(mutation => {
+                if (mutation.target === runtimeState.chatObserverTarget) return false;
+                return Array.from(mutation.addedNodes || []).some(hasChatNode)
+                    || Array.from(mutation.removedNodes || []).some(hasChatNode);
+            });
+        };
+        runtimeState.chatRootObserver = new MutationObserver(mutations => {
+            if (!mutationTouchesChatRoot(mutations)) return;
+            if (runtimeState.chatRootObserverTimer) clearTimeout(runtimeState.chatRootObserverTimer);
+            runtimeState.chatRootObserverTimer = setTimeout(() => {
+                runtimeState.chatRootObserverTimer = null;
+                const chatEl = document.getElementById('chat');
+                if (!chatEl || runtimeState.chatObserverTarget === chatEl) return;
+                setupChatObserver();
+                scheduleDomSettleRefresh(DOM_RETRY_REFRESH_DELAYS);
+            }, 50);
+        });
+        runtimeState.chatRootObserver.observe(document.body, { childList: true, subtree: true });
     }
 
     function isMessageEligibleForAttributionVerification(msg) {
@@ -5243,6 +5341,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         if (isDomEngine()) {
             syncAllEffectiveColors();
             decorateAllMessages();
+            scheduleDomSettleRefresh(DOM_RETRY_REFRESH_DELAYS);
             toast.info('Refreshed DOM colors without editing chat text.');
             return;
         }
@@ -5403,6 +5502,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         if (!chat.length) { toast.info('No messages to colorize.'); return; }
         if (isDomEngine()) {
             decorateAllMessages();
+            scheduleDomSettleRefresh(DOM_RETRY_REFRESH_DELAYS);
             toast.info('Refreshed DOM colors without editing chat text.');
             return;
         }
@@ -5534,7 +5634,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             const signature = `${chat.length}|${sigId}|${text}`;
             if (signature === lastProcessedMessageSignature) {
                 stripColorBlockFromElement(document.querySelector('.mes:last-child .mes_text'));
-                scheduleDecorateAll();
+                scheduleDomRefreshSeries();
                 return;
             }
             lastProcessedMessageSignature = signature;
@@ -5589,12 +5689,12 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
             // Keep chat colors in sync when receive-time color conflict remapping happens.
             if (hadRemapping && settings.autoRecolor) {
-                if (isDomEngine()) scheduleDecorateAll(0);
+                if (isDomEngine()) scheduleDomRefreshSeries(0);
                 else await recolorAllMessages();
             }
 
             if (isDomEngine()) {
-                scheduleDecorateAll(0);
+                scheduleDomRefreshSeries(0);
                 return;
             }
             if (latestRemapChanged && typeof ctx?.saveChat === 'function') {
@@ -6284,8 +6384,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
         syncUIWithSettings();
 
-        $('dc-enabled').onchange = e => { settings.enabled = e.target.checked; if (!settings.enabled) clearAutoAttributionVerificationQueue({ clearCooldown: true }); saveData(); injectPrompt(); scheduleDecorateAll(0); };
-        $('dc-highlight').onchange = e => { settings.highlightMode = e.target.checked; saveData(); injectPrompt(); scheduleDecorateAll(0); };
+        $('dc-enabled').onchange = e => { settings.enabled = e.target.checked; if (!settings.enabled) clearAutoAttributionVerificationQueue({ clearCooldown: true }); saveData(); injectPrompt(); scheduleDomRefreshSeries(0); };
+        $('dc-highlight').onchange = e => { settings.highlightMode = e.target.checked; saveData(); injectPrompt(); scheduleDomRefreshSeries(0); };
         $('dc-autoscan').onchange = e => { settings.autoScanOnLoad = e.target.checked; saveData(); };
         $('dc-autoscan-new').onchange = e => { settings.autoScanNewMessages = e.target.checked; saveData(); };
         $('dc-auto-lock').onchange = e => { settings.autoLockDetected = e.target.checked; saveData(); };
@@ -6303,14 +6403,14 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             else {
                 cancelStreamingAttributionVerification({ clearOverrides: true });
                 if (!settings.llmAttributionCheck) clearAutoAttributionVerificationQueue({ clearCooldown: true });
-                scheduleDecorateAll(0);
+                scheduleDomRefreshSeries(0);
             }
             saveData();
         };
         $('dc-stealth-colors').onchange = e => { settings.domStealthColors = e.target.checked; saveData(); injectPrompt(); };
         $('dc-right-click').onchange = e => { settings.enableRightClick = e.target.checked; saveData(); };
         $('dc-legend').onchange = e => { settings.showLegend = e.target.checked; saveData(); updateLegend(); };
-        $('dc-disable-narration').onchange = e => { settings.disableNarration = e.target.checked; saveData(); injectPrompt(); scheduleDecorateAll(0); };
+        $('dc-disable-narration').onchange = e => { settings.disableNarration = e.target.checked; saveData(); injectPrompt(); scheduleDomRefreshSeries(0); };
         $('dc-share-global').onchange = e => { settings.shareColorsGlobally = e.target.checked; saveData(); loadData(); updateCharList(); injectPrompt(); };
         $('dc-css-effects').onchange = e => { settings.cssEffects = e.target.checked; saveData(); injectPrompt(); };
         $('dc-disable-toasts').onchange = e => { settings.disableToasts = e.target.checked; saveData(); };
@@ -6321,8 +6421,10 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             injectPrompt();
             updateEngineVisibility();
             if (isDomEngine()) {
+                setupChatRootObserver();
                 setupChatObserver();
                 decorateAllMessages();
+                scheduleDomSettleRefresh(DOM_RETRY_REFRESH_DELAYS);
             }
             else if (wasDomEngine) {
                 clearAutoAttributionVerificationQueue({ clearCooldown: true });
@@ -6344,11 +6446,11 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             queueColorStateSave({ history: false });
         };
         $('dc-brightness').onchange = () => { flushColorStateSave(); flushChatSave(); };
-        $('dc-narrator').oninput = e => { settings.narratorColor = e.target.value; saveData(); injectPrompt(); scheduleDecorateAll(); };
-        $('dc-narrator-clear').onclick = () => { settings.narratorColor = ''; $('dc-narrator').value = '#888888'; saveData(); injectPrompt(); scheduleDecorateAll(0); };
-        $('dc-thought-symbols').oninput = e => { settings.thoughtSymbols = e.target.value; saveData(); injectPrompt(); scheduleDecorateAll(); };
-        $('dc-thought-add').onclick = () => { const s = prompt('Add thought symbol (e.g., *, 「, 『):'); if (s?.trim()) { settings.thoughtSymbols = (settings.thoughtSymbols || '') + s.trim(); $('dc-thought-symbols').value = settings.thoughtSymbols; saveData(); injectPrompt(); scheduleDecorateAll(0); } };
-        $('dc-thought-clear').onclick = () => { settings.thoughtSymbols = ''; $('dc-thought-symbols').value = ''; saveData(); injectPrompt(); scheduleDecorateAll(0); };
+        $('dc-narrator').oninput = e => { settings.narratorColor = e.target.value; saveData(); injectPrompt(); scheduleDomRefreshSeries(); };
+        $('dc-narrator-clear').onclick = () => { settings.narratorColor = ''; $('dc-narrator').value = '#888888'; saveData(); injectPrompt(); scheduleDomRefreshSeries(0); };
+        $('dc-thought-symbols').oninput = e => { settings.thoughtSymbols = e.target.value; saveData(); injectPrompt(); scheduleDomRefreshSeries(); };
+        $('dc-thought-add').onclick = () => { const s = prompt('Add thought symbol (e.g., *, 「, 『):'); if (s?.trim()) { settings.thoughtSymbols = (settings.thoughtSymbols || '') + s.trim(); $('dc-thought-symbols').value = settings.thoughtSymbols; saveData(); injectPrompt(); scheduleDomRefreshSeries(0); } };
+        $('dc-thought-clear').onclick = () => { settings.thoughtSymbols = ''; $('dc-thought-symbols').value = ''; saveData(); injectPrompt(); scheduleDomRefreshSeries(0); };
         $('dc-prompt-depth').oninput = e => { settings.promptDepth = parseInt(e.target.value, 10) || 0; saveData(); injectPrompt(); };
         $('dc-prompt-role').onchange = e => { settings.promptRole = e.target.value; saveData(); injectPrompt(); };
         $('dc-prompt-mode').onchange = e => { settings.promptMode = e.target.value; saveData(); injectPrompt(); };
@@ -6570,21 +6672,23 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         updateCharList();
         injectPrompt();
         stripColorBlocksFromDisplay();
+        setupChatRootObserver();
         setupChatObserver();
-        scheduleDecorateAll(150);
+        scheduleDomRefreshSeries(150);
         if (runtimeState.chatChangedRafId) cancelAnimationFrame(runtimeState.chatChangedRafId);
         runtimeState.chatChangedRafId = requestAnimationFrame(() => {
             runtimeState.chatChangedRafId = null;
             setupChatObserver();
             decorateAllMessages();
+            scheduleDomSettleRefresh(DOM_RETRY_REFRESH_DELAYS);
         });
-        setTimeout(() => setupChatObserver(), 250);
+        setTimeout(() => { setupChatObserver(); scheduleDomSettleRefresh(DOM_RETRY_REFRESH_DELAYS); }, 250);
         if (settings.autoScanOnLoad !== false && !Object.keys(characterColors).length) {
             setTimeout(() => {
                 if (document.querySelectorAll('.mes').length) scanAllMessages();
                 stripColorBlocksFromDisplay();
                 setupChatObserver();
-                scheduleDecorateAll(0);
+                scheduleDomRefreshSeries(0);
             }, 1000);
         }
     }
@@ -6593,15 +6697,15 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         if (runtimeState.eventsRegistered) return;
         runtimeState.eventHandlers = {
             generationAfterCommands: () => injectPrompt(),
-            characterMessageRendered: () => { onNewMessage(); scheduleDecorateAll(120); },
-            messageRendered: () => scheduleDecorateAll(120),
-            messageUpdated: () => scheduleDecorateAll(200),
+            characterMessageRendered: () => { onNewMessage(); scheduleDomRefreshSeries(120); },
+            messageRendered: () => scheduleDomRefreshSeries(120),
+            messageUpdated: () => scheduleDomRefreshSeries(200),
             streamToken: () => { isStreamingGenerationActive = true; scheduleDecorateLast(hasMessageQuoteOverridesForLatestMessage() ? 0 : 80); scheduleStreamingAttributionVerification(); },
             generationEnded: () => {
                 isStreamingGenerationActive = false;
                 streamingHeuristicCache.clear();
                 cancelStreamingAttributionVerification();
-                scheduleDecorateAll(0);
+                scheduleDomRefreshSeries(0);
                 queueAutoAttributionVerificationForMessage((getContext()?.chat || []).length - 1, { force: true, delay: 800 });
             },
             chatChanged: handleChatChanged,
@@ -6698,8 +6802,9 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 clearDomCache();
                 injectPrompt();
                 populateProfileDropdown();
+                setupChatRootObserver();
                 setupChatObserver();
-                scheduleDecorateAll(150);
+                scheduleDomRefreshSeries(150);
             } else if (waitAttempts > 60) {
                 clearInterval(waitUI);
             }
