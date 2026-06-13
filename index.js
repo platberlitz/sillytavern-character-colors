@@ -21,6 +21,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         chatObserver: null,
         chatObserverTarget: null,
         chatObserverTimer: null,
+        chatChangedRafId: null,
         pendingObservedMessages: new Set(),
     };
     globalThis[RUNTIME_GUARD_KEY] = runtimeState;
@@ -4361,6 +4362,9 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     let decorateAllTimer = null;
     let decorateLastTimer = null;
     let isDecoratingDom = false;
+    let decorateAllFirstCallTime = 0;
+    const DECORATE_ALL_MAX_WAIT = 500;
+    let pendingDeferredMutations = false;
 
     function hashMessageText(text) {
         const str = String(text ?? '');
@@ -4660,6 +4664,10 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             queueAutoAttributionVerificationForRenderedMessages();
         } finally {
             isDecoratingDom = previousDecoratingState;
+            if (pendingDeferredMutations) {
+                pendingDeferredMutations = false;
+                scheduleDecorateAll(0);
+            }
         }
     }
 
@@ -4684,6 +4692,10 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             }
         } finally {
             isDecoratingDom = previousDecoratingState;
+            if (pendingDeferredMutations) {
+                pendingDeferredMutations = false;
+                scheduleDecorateAll(0);
+            }
         }
         if (createdCharacters) {
             saveData();
@@ -4703,11 +4715,15 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
     function scheduleDecorateAll(delay = 100) {
         if (!isDomEngine()) return;
+        const now = Date.now();
+        if (!decorateAllFirstCallTime) decorateAllFirstCallTime = now;
         clearTimeout(decorateAllTimer);
+        const effectiveDelay = Math.min(delay, Math.max(0, DECORATE_ALL_MAX_WAIT - (now - decorateAllFirstCallTime)));
         decorateAllTimer = setTimeout(() => {
             decorateAllTimer = null;
+            decorateAllFirstCallTime = 0;
             decorateAllMessages();
-        }, delay);
+        }, effectiveDelay);
     }
 
     function scheduleDecorateLast(delay = 80) {
@@ -4770,7 +4786,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         runtimeState.pendingObservedMessages = new Set();
         runtimeState.chatObserverTarget = chatEl;
         runtimeState.chatObserver = new MutationObserver(mutations => {
-            if (isDecoratingDom || !settings.enabled || !isDomEngine()) return;
+            if (!settings.enabled || !isDomEngine()) return;
+            if (isDecoratingDom) { pendingDeferredMutations = true; return; }
             const immediate = new Set();
             const delayed = new Set();
             for (const mutation of mutations) {
@@ -5094,7 +5111,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             markMessageAttributionVerified(mesIndex, msg);
             clearStreamingAttributionOverrides(mesIndex);
         }
-        if (createdCharacters) {
+        if (appliedCorrections) {
             saveData();
             updateCharList();
         }
@@ -6555,6 +6572,12 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         stripColorBlocksFromDisplay();
         setupChatObserver();
         scheduleDecorateAll(150);
+        if (runtimeState.chatChangedRafId) cancelAnimationFrame(runtimeState.chatChangedRafId);
+        runtimeState.chatChangedRafId = requestAnimationFrame(() => {
+            runtimeState.chatChangedRafId = null;
+            setupChatObserver();
+            decorateAllMessages();
+        });
         setTimeout(() => setupChatObserver(), 250);
         if (settings.autoScanOnLoad !== false && !Object.keys(characterColors).length) {
             setTimeout(() => {
@@ -6572,7 +6595,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             generationAfterCommands: () => injectPrompt(),
             characterMessageRendered: () => { onNewMessage(); scheduleDecorateAll(120); },
             messageRendered: () => scheduleDecorateAll(120),
-            messageUpdated: () => scheduleDecorateAll(80),
+            messageUpdated: () => scheduleDecorateAll(200),
             streamToken: () => { isStreamingGenerationActive = true; scheduleDecorateLast(hasMessageQuoteOverridesForLatestMessage() ? 0 : 80); scheduleStreamingAttributionVerification(); },
             generationEnded: () => {
                 isStreamingGenerationActive = false;
