@@ -6,7 +6,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     'use strict';
 
     const { extension_settings, getContext } = await import('../../../extensions.js');
-    const { eventSource, event_types, setExtensionPrompt, saveSettingsDebounced, saveCharacterDebounced, getCharacters, extension_prompt_types, extension_prompt_roles, generateQuietPrompt, registerMacro, getRequestHeaders } = await import('../../../../script.js');
+    const { eventSource, event_types, setExtensionPrompt, saveSettings, saveSettingsDebounced, saveCharacterDebounced, getCharacters, extension_prompt_types, extension_prompt_roles, generateQuietPrompt, registerMacro, getRequestHeaders } = await import('../../../../script.js');
     const RUNTIME_GUARD_KEY = '__dialogueColorsRuntime_v1';
     if (globalThis[RUNTIME_GUARD_KEY]?.initialized) {
         console.warn('[Dialogue Colors] Runtime already initialized; skipping duplicate script execution.');
@@ -101,7 +101,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         };
     }
 
-    function normalizeCharacterColors(rawColors) {
+    function normalizeCharacterColors(rawColors, options = {}) {
         if (!rawColors || typeof rawColors !== 'object') return {};
         const normalized = {};
         for (const [rawKey, entry] of Object.entries(rawColors)) {
@@ -122,7 +122,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             if (existing.baseColor === '#888888' && normalizedEntry.baseColor !== '#888888') existing.baseColor = normalizedEntry.baseColor;
             if (existing.color === '#888888' && normalizedEntry.color !== '#888888') existing.color = normalizedEntry.color;
         }
-        return pruneReducibleCompositeEntries(normalized);
+        return options.pruneCompositeEntries === true ? pruneReducibleCompositeEntries(normalized) : normalized;
     }
 
     const COLOR_CONFLICT_HUE_THRESHOLD = 12;
@@ -215,6 +215,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     let autoSyncPendingRecord = null;
     let autoSyncSaveTimeout = null;
     let autoSyncStatusError = '';
+    let immediateSettingsSaveInFlight = false;
+    let immediateSettingsSaveQueued = false;
 
     function isPlainObject(value) {
         return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -343,10 +345,36 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         });
     }
 
-    function persistModuleStore(record, { debounce = true } = {}) {
+    function queueImmediateSettingsSave() {
+        if (typeof saveSettings !== 'function') {
+            saveSettingsDebounced?.();
+            return;
+        }
+        immediateSettingsSaveQueued = true;
+        if (immediateSettingsSaveInFlight) return;
+
+        const run = () => {
+            if (!immediateSettingsSaveQueued) return;
+            immediateSettingsSaveQueued = false;
+            immediateSettingsSaveInFlight = true;
+            saveSettings()
+                .catch(err => {
+                    console.warn('[Dialogue Colors] Immediate settings save failed; falling back to debounced save:', err);
+                    saveSettingsDebounced?.();
+                })
+                .finally(() => {
+                    immediateSettingsSaveInFlight = false;
+                    if (immediateSettingsSaveQueued) run();
+                });
+        };
+        run();
+    }
+
+    function persistModuleStore(record, { debounce = true, immediate = false } = {}) {
         const normalized = buildAutoSyncRecord(record || getAutoSyncRecord(true));
         extension_settings[MODULE_NAME] = normalized;
-        if (debounce) saveSettingsDebounced?.();
+        if (immediate) queueImmediateSettingsSave();
+        else if (debounce) saveSettingsDebounced?.();
         return normalized;
     }
 
@@ -524,11 +552,11 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         return buildAutoSyncRecord(record);
     }
 
-    function saveGlobalSettingsSnapshot() {
+    function saveGlobalSettingsSnapshot(options = {}) {
         const record = getAutoSyncRecord(true);
         record.globalSettings = buildFullSettingsSnapshot();
         record.settings = buildSettingsSubset(GLOBAL_SETTINGS_V2_KEYS);
-        persistModuleStore(record);
+        persistModuleStore(record, options);
     }
 
     const DYNAMIC_CONTROL_HELP_TEXT = Object.freeze({
@@ -2207,7 +2235,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         return normalizeColorDataEntry(getUserColorDataStore()[key]);
     }
 
-    function setStoredColorData(key, colors, storedSettings = settings) {
+    function setStoredColorData(key, colors, storedSettings = settings, options = {}) {
         const record = getAutoSyncRecord(true);
         if (!isPlainObject(record.colorData)) record.colorData = {};
         record.colorData[key] = {
@@ -2215,7 +2243,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             settings: normalizeStoredSettings(storedSettings),
             updatedAt: new Date().toISOString(),
         };
-        persistModuleStore(record);
+        persistModuleStore(record, options);
     }
 
     function removeStoredColorData(key) {
@@ -2829,11 +2857,11 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         settings.colorSchemaVersion = COLOR_SCHEMA_VERSION;
         syncAllEffectiveColors();
         try {
-            setStoredColorData(getStorageKey(), characterColors, settings);
-            saveGlobalSettingsSnapshot();
+            setStoredColorData(getStorageKey(), characterColors, settings, { debounce: false });
+            saveGlobalSettingsSnapshot(options.immediate === false ? {} : { immediate: true });
             // Trigger auto-sync if enabled
             if (autoSyncEnabled && !options.skipAutoSync) {
-                saveSettingsToStore();
+                saveSettingsToStore({ force: true });
             }
         } catch (e) {
             console.warn('[Dialogue Colors] Failed to save user settings:', e);
@@ -7051,6 +7079,7 @@ JSON response:`;
         clearAutoAttributionVerificationQueue({ clearCooldown: true });
         clearAutoColorizeIndicators();
         clearDomCache();
+        const currentCharKey = getCharKey();
         clearDecoratedWatchers();
         if (currentCharKey !== lastCharKey) {
             expandedCharacterRows.clear();

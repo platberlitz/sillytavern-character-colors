@@ -10,8 +10,8 @@
     --dc-danger-soft: rgba(194, 85, 85, 0.14);
     --dc-keep: #d9ba5a;
     --dc-keep-soft: rgba(217, 186, 90, 0.16);
-    max-height: 80vh;
-    overflow-y: auto;
+    max-height: none;
+    overflow: visible;
 }
 
 #dc-ext .inline-drawer-content {
@@ -144,7 +144,13 @@
     border-bottom-color: #fff !important;
 }
 
-#dc-ext .dc-section,
+#dc-ext .dc-section {
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    overflow: visible;
+}
+
 #dc-ext .dc-subsection {
     border: 1px solid var(--dc-border);
     border-radius: 14px;
@@ -153,7 +159,9 @@
 }
 
 #dc-ext .dc-section + .dc-section {
-    margin-top: 10px;
+    margin-top: 14px;
+    padding-top: 10px;
+    border-top: 1px solid var(--dc-border);
 }
 
 #dc-ext .dc-subsection + .dc-subsection {
@@ -176,6 +184,10 @@
     gap: 8px;
     cursor: pointer;
     font-weight: 700;
+    padding: 10px 0;
+}
+
+#dc-ext .dc-subsection > summary {
     padding: 10px 12px;
 }
 
@@ -192,7 +204,10 @@
     transform: rotate(90deg);
 }
 
-#dc-ext .dc-section > summary + *,
+#dc-ext .dc-section > summary + * {
+    padding: 0 0 10px;
+}
+
 #dc-ext .dc-subsection > summary + * {
     padding: 0 10px 10px;
 }
