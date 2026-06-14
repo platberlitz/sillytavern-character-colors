@@ -24,21 +24,15 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         chatRootObserverTimer: null,
         chatObserverTimer: null,
         chatChangedRafId: null,
-        domSettleTimers: new Set(),
-        isDomSettlePass: false,
+        // Per-message self-terminating observers that replace the old polling settle timers.
+        // Keyed by the .mes element; value is { observer, fallbackTimer }.
+        messageSettleObservers: new Map(),
         pendingObservedMessages: new Set(),
     };
     globalThis[RUNTIME_GUARD_KEY] = runtimeState;
 
-    // Cache frequently used DOM queries
-    const domCache = new Map();
-    function getCachedElement(selector) {
-        if (!domCache.has(selector)) {
-            domCache.set(selector, document.querySelector(selector));
-        }
-        return domCache.get(selector);
-    }
-    function clearDomCache() { domCache.clear(); }
+    // Invalidates derived caches (speaker mention regexes). Called on chat change and UI init.
+    function clearDomCache() { clearSpeakerRegexCache(); }
 
     function escapeAttr(s) {
         return escapeHtml(s);
@@ -608,7 +602,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             historyIndex--;
             characterColors = JSON.parse(colorHistory[historyIndex]);
             applyLiveColorChangesFromSnapshot(snapshot, Object.keys(characterColors).filter(key => snapshot[key]), { saveImmediately: true });
-            saveData(); updateCharList(); injectPrompt();
+            commit({ history: false });
         }
     }
 
@@ -618,7 +612,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             historyIndex++;
             characterColors = JSON.parse(colorHistory[historyIndex]);
             applyLiveColorChangesFromSnapshot(snapshot, Object.keys(characterColors).filter(key => snapshot[key]), { saveImmediately: true });
-            saveData(); updateCharList(); injectPrompt();
+            commit({ history: false });
         }
     }
 
@@ -632,7 +626,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             expandedCharacterRows = new Set(expandedSnapshot);
             swapMode = swapSnapshot;
             applyLiveColorChangesFromSnapshot(snapshot, Object.keys(characterColors).filter(key => snapshot[key]), { saveImmediately: true });
-            saveHistory(); saveData(); updateCharList(); injectPrompt();
+            commit();
         };
     }
 
@@ -718,11 +712,9 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             expandedCharacterRows.delete(key);
             if (swapMode === key) swapMode = null;
         });
+        clearSpeakerRegexCache();
         pruneExpandedCharacterRows();
-        saveHistory();
-        saveData();
-        injectPrompt();
-        updateCharList();
+        commit();
         if (typeof onComplete === 'function') onComplete({ removedKeys, keptKeys });
         showUndoToast(buildKeepAwareRemovalMessage(actionLabel || 'Removed', removedKeys.length, keptKeys.length, itemLabel), restore);
         return { removed: removedKeys.length, kept: keptKeys.length, skipped: keptKeys, removedKeys };
@@ -826,7 +818,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             }
         }
         applyLiveColorChangesFromSnapshot(snapshot, changedKeys);
-        saveHistory(); saveData(); updateCharList(); injectPrompt();
+        commit();
         toast.success('Colors regenerated');
     }
 
@@ -850,7 +842,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             }
         });
         applyLiveColorChangesFromSnapshot(snapshot, changedKeys);
-        saveHistory(); saveData(); updateCharList(); injectPrompt();
+        commit();
         toast.success(`Fixed: ${fixedPairs.join('; ')}`);
     }
 
@@ -865,7 +857,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             setEntryFromEffectiveColor(char, hslToHex(h, s, clampedL));
         }
         applyLiveColorChangesFromSnapshot(snapshot, entries.map(([key]) => key));
-        saveHistory(); saveData(); updateCharList(); injectPrompt();
+        commit();
         toast.success('Colors flipped for theme switch');
     }
 
@@ -916,8 +908,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             changed = true;
         }
         if (changed) applyLiveColorChangesFromSnapshot(snapshot, changedKeys);
-        if (changed) saveHistory();
-        saveData(); updateCharList(); injectPrompt();
+        commit({ history: changed });
         toast.success(`Preset "${name}" loaded`);
     }
 
@@ -1536,10 +1527,12 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
     function applyFastColorUiUpdates(keys = Object.keys(characterColors)) {
         const list = Array.isArray(keys) ? keys : [keys];
+        const charList = document.getElementById('dc-char-list');
         for (const key of list) {
             const entry = characterColors[key];
             if (!entry) continue;
-            const row = Array.from(document.querySelectorAll('#dc-char-list .dc-char')).find(el => el.dataset.key === key);
+            const safeKey = CSS.escape(key);
+            const row = charList?.querySelector(`.dc-char[data-key="${safeKey}"]`);
             if (!row) continue;
             const effectiveColor = getEntryEffectiveColor(entry);
             const pickerColor = getBaseColor(entry, effectiveColor);
@@ -1601,6 +1594,17 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         if (shouldInjectPrompt) injectPrompt();
         if (shouldUpdateList) updateCharList();
         updateLegend();
+    }
+
+    // Synchronous commit of a character/color mutation. Replaces the repeated
+    // `commit();` quartet.
+    // Pass `false` for any step to opt out (e.g. commit({ history: false })).
+    function commit(options = {}) {
+        if (options.history !== false) saveHistory();
+        if (options.data !== false) saveData();
+        if (options.inject !== false) injectPrompt();
+        if (options.updateList !== false) updateCharList();
+        if (options.legend !== false) updateLegend();
     }
 
     function normalizeColorizedTextForComparison(text) {
@@ -1947,7 +1951,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
                 setEntryFromBaseColor(char, swatch.dataset.color);
                 applyLiveColorChangesFromSnapshot(snapshot, [key]);
-                saveHistory(); saveData(); updateCharList(); injectPrompt();
+                commit();
                 popup.remove();
             };
         });
@@ -2465,7 +2469,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                         textUpdated = updateMessageTextForFontTag(fontTag, originalFontColor, finalColor);
                     }
 
-                    saveHistory(); saveData(); updateCharList(); injectPrompt();
+                    commit();
 
                     if (isDomSegment) {
                         updateLegend();
@@ -2487,7 +2491,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             const existingMenu = document.getElementById('dc-context-menu');
             if (existingMenu) existingMenu.remove();
 
-            const msgIndex = Number(mesEl.getAttribute('mesid'));
+            const msgIndex = getMessageIndexFromElement(mesEl);
             if (msgIndex === -1) return;
 
             const ctx = getContext();
@@ -2574,6 +2578,11 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                     applyLiveColorChangesFromSnapshot(existingSnapshot, [key], { saveImmediately: true });
                 }
 
+                // Capture rendered offsets BEFORE mutating the DOM with surroundContents.
+                const mesTextEl = mesEl.querySelector('.mes_text');
+                const renderedCharOffset = getRenderedCharOffset(mesTextEl, range);
+                const renderedLen = mesTextEl ? mesTextEl.textContent.length : 0;
+
                 try {
                     const fontNode = document.createElement('font');
                     fontNode.setAttribute('color', finalColor);
@@ -2594,15 +2603,13 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
                 selection.removeAllRanges();
 
-                const escapedSelected = escapeRegex(selectedText);
-                const replaceRegex = new RegExp(escapedSelected);
-                if (replaceRegex.test(msg.mes)) {
-                    msg.mes = msg.mes.replace(replaceRegex, `<font color="${finalColor}">${selectedText}</font>`);
+                const textUpdated = replaceMessageSelectionWithFontTag(msg, selectedText, finalColor, renderedCharOffset, renderedLen);
+                if (textUpdated) {
                     queueChatSave();
                     flushChatSave();
                 }
 
-                saveHistory(); saveData(); updateCharList(); injectPrompt();
+                commit();
                 toast.success(`Assigned to ${name}`);
                 menu.remove();
             };
@@ -2666,11 +2673,63 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         document.addEventListener('touchmove', () => { clearTimeout(longPressTimer); longPressTimer = null; });
     }
 
-    function wrapQElementWithFontTag(qElement, color) {
-        const mesEl = qElement.closest('.mes');
-        if (!mesEl) return false;
+    /**
+     * Computes the character offset of a range's start boundary within rootEl's
+     * rendered textContent. Must be called BEFORE any DOM mutation of the range.
+     */
+    function getRenderedCharOffset(rootEl, range) {
+        if (!rootEl || !range) return 0;
+        let charOffset = 0;
+        const tw = document.createTreeWalker(rootEl, NodeFilter.SHOW_TEXT, null, false);
+        let textNode;
+        while ((textNode = tw.nextNode()) !== null) {
+            if (textNode === range.startContainer) {
+                return charOffset + range.startOffset;
+            }
+            charOffset += textNode.textContent.length;
+        }
+        return charOffset;
+    }
 
-        const msgIndex = Number(mesEl.getAttribute('mesid'));
+    /**
+     * Replaces a text selection in msg.mes with a <font color> tag.
+     *
+     * The rendered text differs from msg.mes (markdown syntax chars are consumed),
+     * so we cannot reliably use a first-match replace. Instead we map the rendered
+     * selection offset proportionally onto msg.mes, then choose the occurrence of
+     * selectedText closest to that approximate source offset.
+     *
+     * renderedCharOffset / renderedLen must be captured BEFORE the DOM is mutated.
+     * Returns true when msg.mes was modified.
+     */
+    function replaceMessageSelectionWithFontTag(msg, selectedText, hexColor, renderedCharOffset, renderedLen) {
+        if (!selectedText || !msg?.mes) return false;
+
+        const rawLen = msg.mes.length;
+        const approxRawOffset = renderedLen > 0 ? Math.floor((renderedCharOffset / renderedLen) * rawLen) : 0;
+
+        // Collect all occurrences of selectedText in msg.mes.
+        const occurrences = [];
+        let searchStart = 0;
+        while (true) {
+            const idx = msg.mes.indexOf(selectedText, searchStart);
+            if (idx === -1) break;
+            occurrences.push(idx);
+            searchStart = idx + 1;
+        }
+        if (!occurrences.length) return false;
+
+        // Pick the occurrence whose start is closest to approxRawOffset.
+        const bestIdx = occurrences.reduce((best, idx) =>
+            Math.abs(idx - approxRawOffset) < Math.abs(best - approxRawOffset) ? idx : best,
+        occurrences[0]);
+
+        msg.mes = `${msg.mes.slice(0, bestIdx)}<font color="${hexColor}">${selectedText}</font>${msg.mes.slice(bestIdx + selectedText.length)}`;
+        return true;
+    }
+
+    function wrapQElementWithFontTag(qElement, color) {
+        const msgIndex = getMessageIndexFromElement(qElement);
         if (msgIndex === -1) return false;
 
         const ctx = getContext();
@@ -2679,40 +2738,36 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         if (!msg || msg.is_user) return false;
 
         const newHex = normalizeHexColor(color);
+        if (!newHex) return false;
 
-        // <q> elements are generated at render time from raw quoted strings in msg.mes.
-        // e.g. "Hello world" in msg.mes → <q>"Hello world"</q> in the DOM.
-        // So we need to find the raw text (including its surrounding quote chars) in msg.mes.
-        const rawQuoteText = String(qElement.innerHTML);
-        if (!rawQuoteText) return false;
+        const mesEl = qElement.closest('.mes');
+        if (!mesEl) return false;
+        const mesText = mesEl.querySelector('.mes_text');
+        if (!mesText) return false;
 
-        let escapedText = converter.makeMarkdown(rawQuoteText);
-        escapedText = escapedText.replace('…', '...'); // normalize fancy ellipsis...
-        escapedText = escapeRegex(escapedText);
-        const rawQuoteRegex = new RegExp(escapedText);
-        if (!rawQuoteRegex.test(msg.mes)) return false;
+        // Re-run attribution to get precise source offsets for each quote/emphasis segment.
+        // This avoids the fragile converter.makeMarkdown round-trip used previously.
+        const attribution = attributeDialogueSegments(msg.mes, msg.name);
+        const quoteSegments = attribution.segments.filter(seg => seg.delimiter !== '*' && seg.delimiter !== '_');
+        const qElements = Array.from(mesText.querySelectorAll('q'));
 
-        const updated = msg.mes.replace(rawQuoteRegex, `<font color="${newHex}">${rawQuoteText}</font>`);
-        if (updated === msg.mes) return false;
+        let targetSegment = null;
+        matchSegmentsToElements(quoteSegments, qElements, seg => normalizeSegmentText(seg.text), (seg, el) => {
+            if (el === qElement) targetSegment = seg;
+        });
 
-        msg.mes = updated;
+        if (!targetSegment) return false;
 
-        // Wrap in DOM: replace qElement with a font node containing it so the
-        // DOM reflects the persisted state immediately without a full re-render.
-        const fontNode = document.createElement('font');
-        fontNode.setAttribute('color', newHex);
-        qElement.replaceWith(fontNode);
-        fontNode.appendChild(qElement);
+        // Splice using exact source offsets — no regex, no HTML serialization.
+        msg.mes = `${msg.mes.slice(0, targetSegment.start)}<font color="${newHex}">${msg.mes.slice(targetSegment.start, targetSegment.end)}</font>${msg.mes.slice(targetSegment.end)}`;
+
+        // Re-render the full message block canonically.
+        refreshMessageDom(msgIndex, msg);
         return true;
     }
 
     function updateMessageTextForFontTag(fontTag, oldColor, newColor) {
-        const mesEl = fontTag.closest('.mes');
-        if (!mesEl) return false;
-
-        const mesId = Number(mesEl.getAttribute('mesid'));
-        const messageEls = Array.from(document.querySelectorAll('.mes'));
-        const msgIndex = Number.isFinite(mesId) && mesId >= 0 ? mesId : messageEls.indexOf(mesEl);
+        const msgIndex = getMessageIndexFromElement(fontTag);
         if (msgIndex === -1) return false;
 
         const ctx = getContext();
@@ -2835,6 +2890,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     // Legacy localStorage fallback is intentionally read-only and only seeds user settings.
     function loadData() {
         characterColors = {};
+        clearSpeakerRegexCache();
         const record = getAutoSyncRecord(true);
         applyStoredSettingsSnapshot(record.globalSettings, { includeColorSchemaVersion: false });
         const primaryKey = getStorageKey();
@@ -2886,7 +2942,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 migrateColorSchemaIfNeeded();
                 syncAllEffectiveColors();
                 applyLiveColorChangesFromSnapshot(snapshot, Object.keys(characterColors).filter(key => snapshot[key]), { saveImmediately: true });
-                saveHistory(); saveData(); updateCharList(); injectPrompt();
+                commit();
                 toast.success('Imported!');
             } catch {
                 toast.error('Invalid file');
@@ -3645,7 +3701,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                     migrateColorSchemaIfNeeded();
                     syncAllEffectiveColors();
                     applyLiveColorChangesFromSnapshot(snapshot, Object.keys(characterColors).filter(key => snapshot[key]), { saveImmediately: true });
-                    saveHistory(); saveData(); updateCharList(); injectPrompt();
+                    commit();
                     toast.success('Loaded from card');
                 } else {
                     toast.info('No saved colors in card');
@@ -3876,7 +3932,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             }
         }
 
-        saveHistory(); saveData(); updateCharList(); injectPrompt();
+        commit();
         stripColorBlocksFromDisplay();
         if (isDomEngine()) {
             decorateAllMessages();
@@ -4145,6 +4201,11 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         return candidate.distance < best.distance;
     }
 
+    // Cache compiled per-speaker name-match regexes.  Invalidated when the
+    // character list changes (loadData/addCharacter/deleteCharacter/renameCharacter).
+    const speakerRegexCache = new Map();
+    function clearSpeakerRegexCache() { speakerRegexCache.clear(); }
+
     function findClosestMentionedSpeakerInContext(maskedText, windowStart, windowEnd, segmentStart, segmentEnd, lookup, sortedLookupKeys) {
         const text = String(maskedText ?? '');
         const boundedStart = Math.max(0, Math.min(text.length, windowStart));
@@ -4157,7 +4218,12 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         for (const speakerKey of sortedLookupKeys) {
             const assignment = lookup.get(speakerKey);
             if (!assignment) continue;
-            const regex = new RegExp(`\\b${escapeRegex(speakerKey)}(?:'s?)?\\b`, 'gi');
+            let regex = speakerRegexCache.get(speakerKey);
+            if (!regex) {
+                regex = new RegExp(`\\b${escapeRegex(speakerKey)}(?:'s?)?\\b`, 'gi');
+                speakerRegexCache.set(speakerKey, regex);
+            }
+            regex.lastIndex = 0;
             let match;
             while ((match = regex.exec(cleanWindow)) !== null) {
                 const matchStart = boundedStart + match.index;
@@ -4664,32 +4730,91 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     }
 
     function clearDomSettleRefreshes() {
-        for (const timer of runtimeState.domSettleTimers || []) clearTimeout(timer);
-        runtimeState.domSettleTimers?.clear?.();
+        for (const { observer, fallbackTimer } of runtimeState.messageSettleObservers.values()) {
+            try { observer.disconnect(); } catch (_) { /* ignored */ }
+            clearTimeout(fallbackTimer);
+        }
+        runtimeState.messageSettleObservers.clear();
     }
 
-    function scheduleDomSettleRefresh(delays = DOM_SETTLE_REFRESH_DELAYS) {
+    // Maximum time to wait for a message's DOM to settle before giving up.
+    const MESSAGE_SETTLE_MAX_WAIT_MS = 3000;
+
+    /**
+     * Attach a self-terminating MutationObserver to a single .mes element.
+     * Re-tries decoration whenever child nodes are added or removed inside its
+     * .mes_text container. Disconnects as soon as decoration succeeds (no
+     * needsRetry) or after MESSAGE_SETTLE_MAX_WAIT_MS, whichever comes first.
+     */
+    function attachMessageSettleObserver(mesElement, mesIndex) {
+        if (!mesElement?.isConnected) return;
+        // Remove any existing watcher for this element.
+        const existing = runtimeState.messageSettleObservers.get(mesElement);
+        if (existing) {
+            try { existing.observer.disconnect(); } catch (_) { /* ignored */ }
+            clearTimeout(existing.fallbackTimer);
+            runtimeState.messageSettleObservers.delete(mesElement);
+        }
+
+        const attempt = () => {
+            if (!mesElement.isConnected || !settings.enabled || !isDomEngine()) {
+                cleanup();
+                return;
+            }
+            const msg = getContext()?.chat?.[mesIndex];
+            if (!msg) { cleanup(); return; }
+            const result = decorateMessageDom(mesElement, msg, mesIndex);
+            if (result.createdCharacters) {
+                queueColorStateSave({ history: false, injectPrompt: false });
+            }
+            updateLegend();
+            if (!result.needsRetry) cleanup();
+        };
+
+        const cleanup = () => {
+            const entry = runtimeState.messageSettleObservers.get(mesElement);
+            if (!entry) return;
+            try { entry.observer.disconnect(); } catch (_) { /* ignored */ }
+            clearTimeout(entry.fallbackTimer);
+            runtimeState.messageSettleObservers.delete(mesElement);
+        };
+
+        const observer = new MutationObserver(() => attempt());
+        const mesText = mesElement.querySelector('.mes_text');
+        if (!mesText) return;
+        observer.observe(mesText, { childList: true, subtree: true });
+
+        const fallbackTimer = setTimeout(() => {
+            cleanup();
+        }, MESSAGE_SETTLE_MAX_WAIT_MS);
+
+        runtimeState.messageSettleObservers.set(mesElement, { observer, fallbackTimer });
+    }
+
+    /**
+     * Previously fired up to six whole-chat decoration passes on fixed delays.
+     * Now a thin fallback: one extra decoration pass after a short delay, serving
+     * as a safety net for cases where per-message observers miss something (e.g.
+     * the element was not connected when the observer was attached).
+     * The `delays` parameter is accepted and ignored for call-site compatibility.
+     */
+    function scheduleDomSettleRefresh(_delays) {
         if (!isDomEngine()) return;
         clearDomSettleRefreshes();
-        for (const delay of delays) {
-            const timer = setTimeout(() => {
-                runtimeState.domSettleTimers.delete(timer);
-                if (!settings.enabled || !isDomEngine()) return;
-                setupChatObserver();
-                runtimeState.isDomSettlePass = true;
-                try {
-                    decorateAllMessages();
-                } finally {
-                    runtimeState.isDomSettlePass = false;
-                }
-            }, Math.max(0, delay));
-            runtimeState.domSettleTimers.add(timer);
-        }
+        const timer = setTimeout(() => {
+            if (!settings.enabled || !isDomEngine()) return;
+            setupChatObserver();
+            decorateAllMessages();
+        }, 400);
+        // Track this single timer in our Map under a sentinel key.
+        runtimeState.messageSettleObservers.set('__settle_fallback__', {
+            observer: { disconnect: () => {} },
+            fallbackTimer: timer,
+        });
     }
 
     function scheduleDomRefreshSeries(delay = 0) {
         scheduleDecorateAll(delay);
-        scheduleDomSettleRefresh(DOM_SETTLE_REFRESH_DELAYS.slice(1).map(settleDelay => settleDelay + delay));
     }
 
     function decorateAllMessages() {
@@ -4704,22 +4829,24 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             const chat = ctx?.chat || [];
             const countResult = refreshDomDialogueCounts(chat);
             let changedColorData = countResult.changed;
-            let needsRetry = false;
             document.querySelectorAll('#chat .mes[mesid]').forEach(mesElement => {
                 const mesIndex = Number(mesElement.getAttribute('mesid'));
                 const msg = chat[mesIndex];
                 if (!msg) return;
                 const result = decorateMessageDom(mesElement, msg, mesIndex);
                 if (result.createdCharacters) changedColorData = true;
-                if (result.needsRetry) needsRetry = true;
+                // If the message's quotes/emphasis have not rendered yet, attach a
+                // self-terminating observer that finishes decoration once they appear.
+                if (result.needsRetry) attachMessageSettleObserver(mesElement, mesIndex);
             });
             if (changedColorData) {
-                saveData();
-                updateCharList();
+                // Decoration discovered new characters/counts. Persist via the
+                // debounced color-state saver instead of a synchronous heavy
+                // saveData()+updateCharList() on every render pass.
+                queueColorStateSave({ history: false, injectPrompt: false });
             }
             updateLegend();
             queueAutoAttributionVerificationForRenderedMessages();
-            if (needsRetry && !runtimeState.isDomSettlePass) scheduleDomSettleRefresh(DOM_RETRY_REFRESH_DELAYS);
         } finally {
             isDecoratingDom = previousDecoratingState;
             if (pendingDeferredMutations) {
@@ -4741,14 +4868,13 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const previousDecoratingState = isDecoratingDom;
         isDecoratingDom = true;
         let createdCharacters = false;
-        let needsRetry = false;
         try {
             for (const mesElement of elements) {
                 if (!mesElement?.isConnected) continue;
                 const mesIndex = Number(mesElement.getAttribute('mesid'));
                 const result = decorateMessageElementByIndex(mesElement, mesIndex);
                 if (result.createdCharacters) createdCharacters = true;
-                if (result.needsRetry) needsRetry = true;
+                if (result.needsRetry) attachMessageSettleObserver(mesElement, mesIndex);
             }
         } finally {
             isDecoratingDom = previousDecoratingState;
@@ -4758,12 +4884,10 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             }
         }
         if (createdCharacters) {
-            saveData();
-            updateCharList();
+            queueColorStateSave({ history: false, injectPrompt: false });
         }
         updateLegend();
         queueAutoAttributionVerificationForElements(elements);
-        if (needsRetry && !runtimeState.isDomSettlePass) scheduleDomSettleRefresh(DOM_RETRY_REFRESH_DELAYS);
     }
 
     function decorateLastMessageDom() {
@@ -4872,7 +4996,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             }
             for (const mesElement of delayed) queueObservedMessageDecoration(mesElement);
         });
-        runtimeState.chatObserver.observe(chatEl, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['class', 'mesid'] });
+        runtimeState.chatObserver.observe(chatEl, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'mesid'] });
     }
 
     function setupChatRootObserver() {
@@ -5602,8 +5726,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             }
 
             if (createdCharacters) {
-                saveHistory();
-                saveData(); updateCharList(); injectPrompt();
+                commit();
             }
 
             // Persist and refresh only the affected message DOM nodes.
@@ -5730,8 +5853,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                         if (!result || !result.changed) {
                             result = colorizeMessageText(text, lastMsg.name, { autoAddMessageSpeaker: true });
                             if (result.createdCharacters) {
-                                saveHistory();
-                                saveData(); updateCharList(); injectPrompt();
+                                commit();
                             }
                         }
                         if (result.changed) {
@@ -5772,8 +5894,9 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             });
             if (!built.entry) return;
             characterColors[key] = built.entry;
+            clearSpeakerRegexCache();
         }
-        saveHistory(); saveData(); updateCharList(); injectPrompt();
+        commit();
     }
 
     function swapColors(key1, key2) {
@@ -5783,7 +5906,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         setEntryFromEffectiveColor(characterColors[key1], color2);
         setEntryFromEffectiveColor(characterColors[key2], color1);
         applyLiveColorChangesFromSnapshot(snapshot, [key1, key2]);
-        saveHistory(); saveData(); updateCharList(); injectPrompt();
+        commit();
     }
 
     function toggleCharacterRowExpansion(key) {
@@ -5829,39 +5952,23 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         applyFastColorUiUpdates(keys);
     }
 
-    // Phase 5B: Alias chips, Phase 6B: Group headers, Phase 5D: Harmony on dblclick
-    function updateCharList() {
-        const list = document.getElementById('dc-char-list'); if (!list) return;
-        const entries = getSortedEntries();
-        const countEl = document.getElementById('dc-count');
-        if (countEl) countEl.textContent = Object.keys(characterColors).length;
-
-        let lastGroup = null;
-        list.innerHTML = entries.length ? entries.map(([k, v]) => {
-            const safeKey = escapeAttr(k);
-            const safeColor = getEntryEffectiveColor(v);
-            const pickerColor = getBaseColor(v, safeColor);
-            const rowExpanded = expandedCharacterRows.has(k);
-            const styleLabel = v.style || 'Normal';
-            const statusBadges = [
-                v.keep ? '<span class="dc-status-chip dc-status-chip-keep">Kept</span>' : '',
-                v.locked ? '<span class="dc-status-chip dc-status-chip-lock">Locked</span>' : '',
-                v.group ? `<span class="dc-status-chip">${escapeHtml(v.group)}</span>` : '',
-                v.style ? `<span class="dc-status-chip">${escapeHtml(styleLabel)}</span>` : '',
-                getBadge(v.dialogueCount || 0) ? `<span class="dc-status-chip">${getBadge(v.dialogueCount || 0)}</span>` : ''
-            ].filter(Boolean).join('');
-            let groupHeader = '';
-            if (settings.sortMode === 'group') {
-                const g = v.group || '(ungrouped)';
-                if (g !== lastGroup) {
-                    lastGroup = g;
-                    groupHeader = `<div class="dc-group-header">${escapeHtml(g)}</div>`;
-                }
-            }
-            const aliasChips = (v.aliases || []).map(a =>
-                `<span class="dc-alias-chip">${escapeHtml(a)}<span class="dc-alias-remove" data-key="${safeKey}" data-alias="${escapeAttr(a)}" title="Remove alias">&times;</span></span>`
-            ).join('');
-            return groupHeader + `
+    function buildCharRowHtml(k, v) {
+        const safeKey = escapeAttr(k);
+        const safeColor = getEntryEffectiveColor(v);
+        const pickerColor = getBaseColor(v, safeColor);
+        const rowExpanded = expandedCharacterRows.has(k);
+        const styleLabel = v.style || 'Normal';
+        const statusBadges = [
+            v.keep ? '<span class="dc-status-chip dc-status-chip-keep">Kept</span>' : '',
+            v.locked ? '<span class="dc-status-chip dc-status-chip-lock">Locked</span>' : '',
+            v.group ? `<span class="dc-status-chip">${escapeHtml(v.group)}</span>` : '',
+            v.style ? `<span class="dc-status-chip">${escapeHtml(styleLabel)}</span>` : '',
+            getBadge(v.dialogueCount || 0) ? `<span class="dc-status-chip">${getBadge(v.dialogueCount || 0)}</span>` : ''
+        ].filter(Boolean).join('');
+        const aliasChips = (v.aliases || []).map(a =>
+            `<span class="dc-alias-chip">${escapeHtml(a)}<span class="dc-alias-remove" data-key="${safeKey}" data-alias="${escapeAttr(a)}" title="Remove alias">&times;</span></span>`
+        ).join('');
+        return `
             <div class="dc-char ${swapMode === k ? 'dc-swap-selected' : ''} ${v.keep ? 'dc-char-kept' : ''}" data-key="${safeKey}">
                 <div class="dc-char-main">
                     <span class="dc-color-swatch">
@@ -5892,103 +5999,165 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                     </div>
                 </div>` : ''}
             </div>`;
-        }).join('') : `<small style="opacity:0.6;">${searchTerm ? 'No matches' : 'No characters'}</small>`;
+    }
 
-        applyControlHelpText(list);
+    function buildCharRowSignature(k, v) {
+        const safeColor = getEntryEffectiveColor(v);
+        return [
+            safeColor,
+            getBaseColor(v, safeColor),
+            expandedCharacterRows.has(k) ? 1 : 0,
+            v.keep ? 1 : 0,
+            v.locked ? 1 : 0,
+            v.group || '',
+            v.style || '',
+            v.dialogueCount || 0,
+            swapMode === k ? 1 : 0,
+            (v.aliases || []).join('\u0001'),
+            v.name || ''
+        ].join('\u0002');
+    }
 
-        // Color input + double-click for harmony popup
-        list.querySelectorAll('.dc-color-input').forEach(i => {
-            i.oninput = () => {
-                const c = characterColors[i.dataset.key];
+    function htmlToNode(html) {
+        const tpl = document.createElement('template');
+        tpl.innerHTML = String(html).trim();
+        return tpl.content.firstElementChild;
+    }
+
+    function applyHexInputForElement(i) {
+        const c = characterColors[i.dataset.key];
+        if (!c) return false;
+        const nextColor = normalizeManualColorInput(i.value, null);
+        if (!nextColor) {
+            i.value = getBaseColor(c);
+            toast.warning('Enter a hex color like #ff66cc.');
+            return false;
+        }
+        if (applyCharacterBaseColor(i.dataset.key, nextColor)) queueColorStateSave();
+        return true;
+    }
+
+    // Event delegation: handlers are installed once on the list container, so
+    // re-rendering rows never needs to rebind per-row listeners.
+    function installCharListDelegation(list) {
+        if (list.__dcDelegated) return;
+        list.__dcDelegated = true;
+
+        list.addEventListener('input', (e) => {
+            const t = e.target;
+            if (t.classList && t.classList.contains('dc-color-input')) {
+                const c = characterColors[t.dataset.key];
                 if (!c) return;
-                if (applyCharacterBaseColor(i.dataset.key, normalizeHexColor(i.value, getBaseColor(c)))) {
+                if (applyCharacterBaseColor(t.dataset.key, normalizeHexColor(t.value, getBaseColor(c)))) {
                     queueColorStateSave();
                 }
-            };
-            i.onchange = maybeAutoRecolorAfterColorChange;
-            i.ondblclick = (e) => { e.preventDefault(); showHarmonyPopup(i.dataset.key, i); };
+            }
         });
-        list.querySelectorAll('.dc-color-hex').forEach(i => {
-            const applyHexInput = () => {
-                const c = characterColors[i.dataset.key];
-                if (!c) return false;
-                const nextColor = normalizeManualColorInput(i.value, null);
-                if (!nextColor) {
-                    i.value = getBaseColor(c);
-                    toast.warning('Enter a hex color like #ff66cc.');
-                    return false;
-                }
-                if (applyCharacterBaseColor(i.dataset.key, nextColor)) queueColorStateSave();
-                return true;
-            };
-            i.onkeydown = (e) => {
-                if (e.key === 'Enter') {
-                    e.preventDefault();
-                    if (applyHexInput()) maybeAutoRecolorAfterColorChange();
-                    i.blur();
-                }
-            };
-            i.onchange = () => {
-                if (applyHexInput()) maybeAutoRecolorAfterColorChange();
-            };
+
+        list.addEventListener('change', (e) => {
+            const t = e.target;
+            if (!t.classList) return;
+            if (t.classList.contains('dc-color-input')) {
+                maybeAutoRecolorAfterColorChange();
+            } else if (t.classList.contains('dc-color-hex')) {
+                if (applyHexInputForElement(t)) maybeAutoRecolorAfterColorChange();
+            }
         });
-        list.querySelectorAll('.dc-color-dot').forEach(dot => {
-            dot.onclick = () => { const input = dot.nextElementSibling; if (input?.classList.contains('dc-color-input')) input.click(); };
+
+        list.addEventListener('keydown', (e) => {
+            const t = e.target;
+            if (t.classList && t.classList.contains('dc-color-hex') && e.key === 'Enter') {
+                e.preventDefault();
+                if (applyHexInputForElement(t)) maybeAutoRecolorAfterColorChange();
+                t.blur();
+            }
         });
-        list.querySelectorAll('.dc-more').forEach(b => {
-            b.onclick = () => {
-                toggleCharacterRowExpansion(b.dataset.key);
+
+        list.addEventListener('dblclick', (e) => {
+            const t = e.target;
+            if (t.classList && t.classList.contains('dc-color-input')) {
+                e.preventDefault();
+                showHarmonyPopup(t.dataset.key, t);
+            }
+        });
+
+        list.addEventListener('click', (e) => {
+            const t = e.target;
+            if (!t || !t.closest) return;
+
+            const dotEl = t.closest('.dc-color-dot');
+            if (dotEl) {
+                const input = dotEl.nextElementSibling;
+                if (input?.classList.contains('dc-color-input')) input.click();
+                return;
+            }
+            const moreBtn = t.closest('.dc-more');
+            if (moreBtn) {
+                toggleCharacterRowExpansion(moreBtn.dataset.key);
                 updateCharList();
-            };
-        });
-        list.querySelectorAll('.dc-del').forEach(b => {
-            b.onclick = () => {
-                removeCharacterKeys([b.dataset.key], {
+                return;
+            }
+            const delBtn = t.closest('.dc-del');
+            if (delBtn) {
+                removeCharacterKeys([delBtn.dataset.key], {
                     actionLabel: 'Deleted',
                     emptyMessage: 'Character already removed.',
                     blockedMessage: 'Turn off Keep before deleting this character.'
                 });
-            };
-        });
-        list.querySelectorAll('.dc-keep').forEach(b => {
-            b.onclick = () => {
-                const key = b.dataset.key;
+                return;
+            }
+            const keepBtn = t.closest('.dc-keep');
+            if (keepBtn) {
+                const key = keepBtn.dataset.key;
                 if (!characterColors[key]) return;
                 characterColors[key].keep = !characterColors[key].keep;
                 saveHistory();
                 saveData();
                 updateCharList();
                 toast.info(characterColors[key].keep ? `${characterColors[key].name} will now survive Clear and bulk delete.` : `${characterColors[key].name} can now be cleared or deleted normally.`);
-            };
-        });
-        list.querySelectorAll('.dc-lock').forEach(b => {
-            b.onclick = () => {
-                const key = b.dataset.key;
+                return;
+            }
+            const lockBtn = t.closest('.dc-lock');
+            if (lockBtn) {
+                const key = lockBtn.dataset.key;
                 if (!characterColors[key]) return;
                 characterColors[key].locked = !characterColors[key].locked;
                 saveHistory();
                 saveData(); updateCharList();
-            };
-        });
-        list.querySelectorAll('.dc-swap').forEach(b => {
-            b.onclick = () => {
-                if (!swapMode) { swapMode = b.dataset.key; updateCharList(); toast.info('Click another character to swap'); }
-                else if (swapMode === b.dataset.key) { swapMode = null; updateCharList(); }
-                else { swapColors(swapMode, b.dataset.key); swapMode = null; }
-            };
-        });
-        list.querySelectorAll('.dc-style').forEach(b => {
-            b.onclick = () => {
+                return;
+            }
+            const swapBtn = t.closest('.dc-swap');
+            if (swapBtn) {
+                if (!swapMode) { swapMode = swapBtn.dataset.key; updateCharList(); toast.info('Click another character to swap'); }
+                else if (swapMode === swapBtn.dataset.key) { swapMode = null; updateCharList(); }
+                else { swapColors(swapMode, swapBtn.dataset.key); swapMode = null; }
+                return;
+            }
+            const styleBtn = t.closest('.dc-style');
+            if (styleBtn) {
                 const styles = ['', 'bold', 'italic', 'bold italic'];
-                const curr = characterColors[b.dataset.key].style || '';
-                characterColors[b.dataset.key].style = styles[(styles.indexOf(curr) + 1) % styles.length];
-                saveHistory();
-                saveData(); injectPrompt(); updateCharList();
-            };
-        });
-        list.querySelectorAll('.dc-alias').forEach(b => {
-            b.onclick = () => {
-                const row = b.closest('.dc-char');
+                const curr = characterColors[styleBtn.dataset.key].style || '';
+                characterColors[styleBtn.dataset.key].style = styles[(styles.indexOf(curr) + 1) % styles.length];
+                commit();
+                return;
+            }
+            const aliasRemoveBtn = t.closest('.dc-alias-remove');
+            if (aliasRemoveBtn) {
+                e.stopPropagation();
+                const key = aliasRemoveBtn.dataset.key;
+                const alias = aliasRemoveBtn.dataset.alias;
+                if (characterColors[key]?.aliases) {
+                    const nextAliases = characterColors[key].aliases.filter(a => a !== alias);
+                    if (nextAliases.length !== characterColors[key].aliases.length) {
+                        characterColors[key].aliases = nextAliases;
+                        commit();
+                    }
+                }
+                return;
+            }
+            const aliasBtn = t.closest('.dc-alias');
+            if (aliasBtn) {
+                const row = aliasBtn.closest('.dc-char');
                 const existing = row.querySelector('.dc-inline-input');
                 if (existing) { existing.remove(); return; }
                 const inputRow = document.createElement('div');
@@ -6001,11 +6170,10 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 const submit = () => {
                     const alias = inp.value.trim();
                     if (alias) {
-                        const aliases = characterColors[b.dataset.key].aliases = characterColors[b.dataset.key].aliases || [];
+                        const aliases = characterColors[aliasBtn.dataset.key].aliases = characterColors[aliasBtn.dataset.key].aliases || [];
                         if (!aliases.includes(alias)) {
                             aliases.push(alias);
-                            saveHistory();
-                            saveData(); injectPrompt(); updateCharList();
+                            commit();
                         } else {
                             inputRow.remove();
                         }
@@ -6013,32 +6181,15 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                     else inputRow.remove();
                 };
                 inputRow.querySelector('button').onclick = submit;
-                inp.onkeydown = e => { if (e.key === 'Enter') submit(); if (e.key === 'Escape') inputRow.remove(); };
-            };
-        });
-        // Phase 5B: Alias chip removal
-        list.querySelectorAll('.dc-alias-remove').forEach(b => {
-            b.onclick = (e) => {
-                e.stopPropagation();
-                const key = b.dataset.key;
-                const alias = b.dataset.alias;
-                if (characterColors[key]?.aliases) {
-                    const nextAliases = characterColors[key].aliases.filter(a => a !== alias);
-                    if (nextAliases.length !== characterColors[key].aliases.length) {
-                        characterColors[key].aliases = nextAliases;
-                        saveHistory();
-                        saveData(); injectPrompt(); updateCharList();
-                    }
-                }
-            };
-        });
-        // Phase 6B: Group assignment
-        list.querySelectorAll('.dc-group').forEach(b => {
-            b.onclick = () => {
-                const row = b.closest('.dc-char');
+                inp.onkeydown = ev => { if (ev.key === 'Enter') submit(); if (ev.key === 'Escape') inputRow.remove(); };
+                return;
+            }
+            const groupBtn = t.closest('.dc-group');
+            if (groupBtn) {
+                const row = groupBtn.closest('.dc-char');
                 const existing = row.querySelector('.dc-inline-input');
                 if (existing) { existing.remove(); return; }
-                const key = b.dataset.key;
+                const key = groupBtn.dataset.key;
                 const current = characterColors[key]?.group || '';
                 const inputRow = document.createElement('div');
                 inputRow.className = 'dc-inline-input';
@@ -6059,9 +6210,69 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                     }
                 };
                 inputRow.querySelector('button').onclick = submit;
-                inp.onkeydown = e => { if (e.key === 'Enter') submit(); if (e.key === 'Escape') inputRow.remove(); };
-            };
+                inp.onkeydown = ev => { if (ev.key === 'Enter') submit(); if (ev.key === 'Escape') inputRow.remove(); };
+                return;
+            }
         });
+    }
+
+    // Phase 5B: Alias chips, Phase 6B: Group headers, Phase 5D: Harmony on dblclick
+    function updateCharList() {
+        const list = document.getElementById('dc-char-list'); if (!list) return;
+        installCharListDelegation(list);
+        const entries = getSortedEntries();
+        const countEl = document.getElementById('dc-count');
+        if (countEl) countEl.textContent = Object.keys(characterColors).length;
+
+        if (!entries.length) {
+            list.innerHTML = `<small style="opacity:0.6;">${searchTerm ? 'No matches' : 'No characters'}</small>`;
+            applyControlHelpText(list);
+            updateLegend();
+            return;
+        }
+
+        // Build the desired ordered sequence of keyed blocks (optional group
+        // headers interleaved with character rows).
+        const desired = [];
+        let lastGroup = null;
+        for (const [k, v] of entries) {
+            if (settings.sortMode === 'group') {
+                const g = v.group || '(ungrouped)';
+                if (g !== lastGroup) {
+                    lastGroup = g;
+                    desired.push({ blockKey: '__group__:' + g, sig: 'h:' + g, html: `<div class="dc-group-header">${escapeHtml(g)}</div>` });
+                }
+            }
+            desired.push({ blockKey: 'row:' + k, sig: buildCharRowSignature(k, v), html: buildCharRowHtml(k, v) });
+        }
+
+        // Index currently-managed nodes by their block key; drop anything stray
+        // (e.g. a leftover empty-state message).
+        const existing = new Map();
+        for (const node of Array.from(list.children)) {
+            const bk = node.getAttribute('data-dc-block');
+            if (bk !== null) existing.set(bk, node);
+            else node.remove();
+        }
+
+        // Reconcile in order: reuse unchanged nodes (preserving open inline
+        // inputs and avoiding handler churn), rebuild changed ones, append new.
+        const used = new Set();
+        for (const item of desired) {
+            let node = existing.get(item.blockKey);
+            if (!(node && node.getAttribute('data-dc-sig') === item.sig)) {
+                node = htmlToNode(item.html);
+                node.setAttribute('data-dc-block', item.blockKey);
+                node.setAttribute('data-dc-sig', item.sig);
+            }
+            list.appendChild(node);
+            used.add(node);
+        }
+        for (const node of Array.from(list.children)) {
+            if (!used.has(node)) node.remove();
+        }
+
+        applyControlHelpText(list);
         updateLegend();
     }
 
@@ -6473,10 +6684,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             }
             const restore = createRestoreSnapshot();
             keepCharacterKeysOnly(keptKeys);
-            saveHistory();
-            saveData();
-            injectPrompt();
-            updateCharList();
+            commit();
             showUndoToast(buildKeepAwareRemovalMessage('Cleared', allKeys.length - keptKeys.length, keptKeys.length), restore);
         };
         $('dc-stats').onclick = showStatsPopup;
@@ -6522,7 +6730,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                     if (!built.entry) return;
                     characterColors[key] = built.entry;
                 }
-                saveHistory(); saveData(); updateCharList(); injectPrompt();
+                commit();
                 toast.success(`Set ${char.name} to ${color}`);
             } catch {
                 toast.error('Failed to extract avatar color');
@@ -6625,7 +6833,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             });
             if (!changed) { toast.info('No unlocked colors to reset'); return; }
             applyLiveColorChangesFromSnapshot(snapshot, changedKeys);
-            saveHistory(); saveData(); updateCharList(); injectPrompt();
+            commit();
             showUndoToast(`Reset ${changed} unlocked color${changed !== 1 ? 's' : ''}.`, restore);
         };
         $('dc-search').oninput = e => { searchTerm = e.target.value; updateCharList(); };

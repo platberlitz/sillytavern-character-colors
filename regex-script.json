@@ -1,14 +1,15 @@
 {
-  "scriptName": "Dialogue Colors - Strip Tags from AI Context",
-  "findRegex": "<\\/?font[^>]*>",
+  "id": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+  "scriptName": "Trim Font Colors",
+  "findRegex": "/<\\/?font[^>]*>/gi",
   "replaceString": "",
   "trimStrings": [],
-  "placement": [2, 3, 4],
+  "placement": [2],
   "disabled": false,
   "markdownOnly": false,
   "promptOnly": true,
   "runOnEdit": true,
-  "substituteRegex": false,
+  "substituteRegex": 0,
   "minDepth": null,
   "maxDepth": null
 }
