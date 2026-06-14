@@ -5384,6 +5384,7 @@ ${quoteList}
 </segments>
 
 JSON response:`;
+    }
 
     function resolveVerifierSpeakerName(rawName, lookup) {
         const speakerName = String(rawName ?? '').trim();
