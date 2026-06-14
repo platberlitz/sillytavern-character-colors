@@ -2440,7 +2440,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 }
             });
 
-            menu.querySelector('#dc-ctx-assign').onclick = () => {
+            menu.querySelector('#dc-ctx-assign').onclick = async () => {
                 const nameInput = menu.querySelector('#dc-ctx-name');
                 const colorInput = menu.querySelector('#dc-ctx-color');
                 const name = nameInput.value.trim();
@@ -2494,8 +2494,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                             menu.remove();
                             return;
                         }
-                        decorateAllMessages();
-                        scheduleDomSettleRefresh(DOM_RETRY_REFRESH_DELAYS);
+                        await refreshAndDecorateMessageDom(mesIndex, msg);
                     } else if (isBareQuote) {
                         textUpdated = wrapQElementWithFontTag(qElement, finalColor);
                     } else {
@@ -2822,12 +2821,16 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         return false;
     }
 
-    function refreshMessageDom(messageIndex, message) {
+    async function refreshMessageDom(messageIndex, message) {
         if (!Number.isFinite(messageIndex) || messageIndex < 0) return false;
         const ctx = getContext();
         if (typeof ctx?.updateMessageBlock === 'function') {
-            ctx.updateMessageBlock(messageIndex, message ?? ctx?.chat?.[messageIndex]);
-            return true;
+            try {
+                await ctx.updateMessageBlock(messageIndex, message ?? ctx?.chat?.[messageIndex]);
+                return true;
+            } catch (e) {
+                console.warn('[Dialogue Colors] updateMessageBlock failed, using fallback render:', e);
+            }
         }
         const mesEl = document.querySelector(`.mes[mesid="${messageIndex}"]`) || document.querySelectorAll('.mes')[messageIndex];
         const mesText = mesEl?.querySelector?.('.mes_text');
@@ -2846,10 +2849,31 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             return true;
         }
         if (typeof eventSource?.emit === 'function' && event_types?.MESSAGE_UPDATED) {
-            eventSource.emit(event_types.MESSAGE_UPDATED, messageIndex);
-            return true;
+            try {
+                await eventSource.emit(event_types.MESSAGE_UPDATED, messageIndex);
+                return true;
+            } catch (e) {
+                console.warn('[Dialogue Colors] MESSAGE_UPDATED fallback emit failed:', e);
+            }
         }
         return false;
+    }
+
+    function waitForDomFrame() {
+        return new Promise(resolve => {
+            if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => resolve());
+            else setTimeout(resolve, 0);
+        });
+    }
+
+    async function refreshAndDecorateMessageDom(messageIndex, message) {
+        await refreshMessageDom(messageIndex, message);
+        await waitForDomFrame();
+        const mesElement = document.querySelector(`#chat .mes[mesid="${messageIndex}"]`) || document.querySelectorAll('#chat .mes[mesid]')[messageIndex];
+        if (!mesElement) return false;
+        decorateObservedMessages([mesElement]);
+        scheduleDomSettleRefresh(DOM_RETRY_REFRESH_DELAYS);
+        return true;
     }
 
     function saveData(options = {}) {
@@ -5603,10 +5627,11 @@ ${quoteList}`;
             saveData();
             updateCharList();
         }
-        const mesElement = document.querySelector(`#chat .mes[mesid="${mesIndex}"]`) || document.querySelectorAll('#chat .mes[mesid]')[mesIndex];
-        if (mesElement) {
-            decorateObservedMessages([mesElement]);
-            scheduleDomSettleRefresh(DOM_RETRY_REFRESH_DELAYS);
+        if (appliedCorrections) {
+            await refreshAndDecorateMessageDom(mesIndex, msg);
+        } else {
+            const mesElement = document.querySelector(`#chat .mes[mesid="${mesIndex}"]`) || document.querySelectorAll('#chat .mes[mesid]')[mesIndex];
+            if (mesElement) decorateObservedMessages([mesElement]);
         }
 
         return { checked: true, corrections: appliedCorrections, createdCharacters };
@@ -6001,7 +6026,7 @@ ${quoteList}`;
             // Persist and refresh only the affected message DOM nodes.
             if (colorizedCount > 0) {
                 if (typeof ctx?.saveChat === 'function') await ctx.saveChat();
-                for (const index of updatedMessageIndices) refreshMessageDom(index, chat[index]);
+                for (const index of updatedMessageIndices) await refreshMessageDom(index, chat[index]);
                 toast.info(`Colorized ${colorizedCount} message${colorizedCount !== 1 ? 's' : ''}${skippedNoColor > 0 ? ` (${skippedNoColor} skipped — no speaker/color match)` : ''}.`);
             } else if (skippedNoColor > 0) {
                 toast.info(`No uncolored dialogue found; ${skippedNoColor} message${skippedNoColor !== 1 ? 's' : ''} skipped (no known speaker/color could be resolved).`);
@@ -6134,7 +6159,7 @@ ${quoteList}`;
                                 await ctx2.saveChat();
                             }
 
-                            refreshMessageDom(chat.length - 1, lastMsg);
+                            await refreshMessageDom(chat.length - 1, lastMsg);
                             toast.info('Auto-colorized latest message.');
                         }
                     } finally {
