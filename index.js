@@ -23,7 +23,6 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         chatRootObserver: null,
         chatRootObserverTimer: null,
         chatObserverTimer: null,
-        domHealthCheckTimer: null,
         chatChangedRafId: null,
         // Per-message self-terminating observers that replace the old polling settle timers.
         // Keyed by the .mes element; value is { observer, fallbackTimer }.
@@ -102,7 +101,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         };
     }
 
-    function normalizeCharacterColors(rawColors, options = {}) {
+    function normalizeCharacterColors(rawColors) {
         if (!rawColors || typeof rawColors !== 'object') return {};
         const normalized = {};
         for (const [rawKey, entry] of Object.entries(rawColors)) {
@@ -123,7 +122,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             if (existing.baseColor === '#888888' && normalizedEntry.baseColor !== '#888888') existing.baseColor = normalizedEntry.baseColor;
             if (existing.color === '#888888' && normalizedEntry.color !== '#888888') existing.color = normalizedEntry.color;
         }
-        return options.pruneCompositeEntries === true ? pruneReducibleCompositeEntries(normalized) : normalized;
+        return pruneReducibleCompositeEntries(normalized);
     }
 
     const COLOR_CONFLICT_HUE_THRESHOLD = 12;
@@ -4451,8 +4450,6 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     const DECORATE_ALL_MAX_WAIT = 500;
     const DECORATE_LAST_MAX_WAIT = 250;
     const OBSERVED_DECORATION_MAX_WAIT = 250;
-    const DOM_HEALTH_CHECK_INTERVAL_MS = 1200;
-    const DOM_HEALTH_CHECK_VISIBLE_LIMIT = 40;
     const DOM_SETTLE_REFRESH_DELAYS = [0, 120, 350, 900, 1800, 3000];
     const DOM_RETRY_REFRESH_DELAYS = [120, 350, 900, 1800, 3000];
     let pendingDeferredMutations = false;
@@ -4882,74 +4879,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         });
 
         observer.observe(mesText, { childList: true, subtree: true });
-        runtimeState.decoratedWatchers.set(mesElement, { observer, mesText });
-    }
-
-    function collectDomHealthCheckMessages() {
-        const messages = Array.from(document.querySelectorAll('#chat .mes[mesid]'));
-        if (messages.length <= DOM_HEALTH_CHECK_VISIBLE_LIMIT) return messages;
-        const selected = new Set(messages.slice(-Math.ceil(DOM_HEALTH_CHECK_VISIBLE_LIMIT / 2)));
-        const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
-        const upperBound = -viewportHeight;
-        const lowerBound = viewportHeight * 2;
-        for (const mesElement of messages) {
-            if (selected.size >= DOM_HEALTH_CHECK_VISIBLE_LIMIT) break;
-            const rect = mesElement.getBoundingClientRect?.();
-            if (rect && rect.bottom >= upperBound && rect.top <= lowerBound) selected.add(mesElement);
-        }
-        return messages.filter(mesElement => selected.has(mesElement));
-    }
-
-    function messageNeedsDomHealthRepair(mesElement, msg) {
-        const mesText = mesElement?.querySelector?.('.mes_text');
-        if (!mesText || !msg || msg.is_system || collectFontColorsFromText(msg.mes).size || mesText.querySelector('font[color]')) return false;
-        if (mesText.querySelector('[data-dc-colored], [data-dc-narrator]')) return false;
-        return !!mesText.querySelector('q, em') || (!settings.disableNarration && !!settings.narratorColor);
-    }
-
-    function runDomHealthCheck() {
-        if (!settings.enabled || !isDomEngine()) {
-            stopDomHealthCheck();
-            return;
-        }
-        if (isDecoratingDom) return;
-        setupChatObserver();
-
-        const repairTargets = new Set();
-        for (const [mesElement, watcher] of Array.from(runtimeState.decoratedWatchers.entries())) {
-            const currentMesText = mesElement?.querySelector?.('.mes_text');
-            if (!mesElement?.isConnected || !watcher?.mesText?.isConnected || watcher.mesText !== currentMesText) {
-                clearDecoratedWatcher(mesElement);
-                if (mesElement?.isConnected) repairTargets.add(mesElement);
-            }
-        }
-
-        const chat = getContext()?.chat || [];
-        for (const mesElement of collectDomHealthCheckMessages()) {
-            const mesIndex = Number(mesElement.getAttribute('mesid'));
-            if (!Number.isFinite(mesIndex) || mesIndex < 0) continue;
-            const msg = chat[mesIndex];
-            const mesText = mesElement.querySelector?.('.mes_text');
-            if (!mesText) continue;
-            if (mesText.querySelector('[data-dc-colored], [data-dc-narrator]')) {
-                if (!runtimeState.decoratedWatchers.has(mesElement)) watchDecoratedMessage(mesElement, mesIndex);
-                continue;
-            }
-            if (messageNeedsDomHealthRepair(mesElement, msg)) repairTargets.add(mesElement);
-        }
-
-        if (repairTargets.size) decorateObservedMessages(Array.from(repairTargets));
-    }
-
-    function startDomHealthCheck() {
-        if (runtimeState.domHealthCheckTimer || !settings.enabled || !isDomEngine()) return;
-        runtimeState.domHealthCheckTimer = setInterval(runDomHealthCheck, DOM_HEALTH_CHECK_INTERVAL_MS);
-    }
-
-    function stopDomHealthCheck() {
-        if (!runtimeState.domHealthCheckTimer) return;
-        clearInterval(runtimeState.domHealthCheckTimer);
-        runtimeState.domHealthCheckTimer = null;
+        runtimeState.decoratedWatchers.set(mesElement, { observer });
     }
 
     /**
@@ -4961,7 +4891,6 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
      */
     function scheduleDomSettleRefresh(_delays) {
         if (!isDomEngine()) return;
-        startDomHealthCheck();
         clearDomSettleRefreshes();
         const timer = setTimeout(() => {
             if (!settings.enabled || !isDomEngine()) return;
@@ -4976,7 +4905,6 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     }
 
     function scheduleDomRefreshSeries(delay = 0) {
-        startDomHealthCheck();
         scheduleDecorateAll(delay);
     }
 
@@ -4985,7 +4913,6 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         isDecoratingDom = true;
         try {
             if (!settings.enabled || !isDomEngine()) {
-                stopDomHealthCheck();
                 undecorateAllMessages();
                 return;
             }
@@ -5073,7 +5000,6 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
     function scheduleDecorateAll(delay = 100) {
         if (!isDomEngine()) return;
-        startDomHealthCheck();
         const now = Date.now();
         if (!decorateAllFirstCallTime) decorateAllFirstCallTime = now;
         clearTimeout(decorateAllTimer);
@@ -5087,7 +5013,6 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
     function scheduleDecorateLast(delay = 80) {
         if (!settings.enabled || !isDomEngine()) return;
-        startDomHealthCheck();
         const now = Date.now();
         if (!decorateLastFirstCallTime) decorateLastFirstCallTime = now;
         clearTimeout(decorateLastTimer);
@@ -6809,12 +6734,10 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             if (isDomEngine()) {
                 setupChatRootObserver();
                 setupChatObserver();
-                startDomHealthCheck();
                 decorateAllMessages();
                 scheduleDomSettleRefresh(DOM_RETRY_REFRESH_DELAYS);
             }
             else if (wasDomEngine) {
-                stopDomHealthCheck();
                 clearAutoAttributionVerificationQueue({ clearCooldown: true });
                 cancelStreamingAttributionVerification({ clearOverrides: true });
                 undecorateAllMessages();
@@ -7044,7 +6967,6 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         clearAutoAttributionVerificationQueue({ clearCooldown: true });
         clearAutoColorizeIndicators();
         clearDomCache();
-        stopDomHealthCheck();
         clearDecoratedWatchers();
         if (currentCharKey !== lastCharKey) {
             expandedCharacterRows.clear();
@@ -7060,7 +6982,6 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         stripColorBlocksFromDisplay();
         setupChatRootObserver();
         setupChatObserver();
-        startDomHealthCheck();
         scheduleDomRefreshSeries(150);
         if (runtimeState.chatChangedRafId) cancelAnimationFrame(runtimeState.chatChangedRafId);
         runtimeState.chatChangedRafId = requestAnimationFrame(() => {
@@ -7191,7 +7112,6 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 populateProfileDropdown();
                 setupChatRootObserver();
                 setupChatObserver();
-                startDomHealthCheck();
                 scheduleDomRefreshSeries(150);
             } else if (waitAttempts > 60) {
                 clearInterval(waitUI);
