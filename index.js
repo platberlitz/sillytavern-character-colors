@@ -23,6 +23,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         chatRootObserver: null,
         chatRootObserverTimer: null,
         chatObserverTimer: null,
+        domHealthCheckTimer: null,
         chatChangedRafId: null,
         // Per-message self-terminating observers that replace the old polling settle timers.
         // Keyed by the .mes element; value is { observer, fallbackTimer }.
@@ -2821,6 +2822,34 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         return false;
     }
 
+    function getMessageElementByIndex(messageIndex) {
+        const index = Number(messageIndex);
+        if (!Number.isFinite(index) || index < 0) return null;
+        return document.querySelector(`#chat .mes[mesid="${index}"]`)
+            || document.querySelector(`.mes[mesid="${index}"]`)
+            || document.querySelectorAll('#chat .mes[mesid]')[index]
+            || document.querySelectorAll('.mes[mesid]')[index]
+            || null;
+    }
+
+    function renderMessageDomFallback(messageIndex, message, ctx = getContext()) {
+        const mesEl = getMessageElementByIndex(messageIndex);
+        const mesText = mesEl?.querySelector?.('.mes_text');
+        if (!mesText || !message) return false;
+        const rawText = stripColorBlocks(message.mes || '');
+        let formatted = '';
+        try {
+            if (typeof ctx?.messageFormatting === 'function') {
+                formatted = ctx.messageFormatting(rawText, message.name || '', message.is_system || false, message.is_user || false, messageIndex);
+            }
+        } catch (e) {
+            console.warn('[Dialogue Colors] Message formatting fallback failed:', e);
+        }
+        if (!formatted && typeof converter?.makeHtml === 'function') formatted = converter.makeHtml(rawText);
+        mesText.innerHTML = formatted || escapeHtml(rawText).replace(/\n/g, '<br>');
+        return true;
+    }
+
     async function refreshMessageDom(messageIndex, message) {
         if (!Number.isFinite(messageIndex) || messageIndex < 0) return false;
         const ctx = getContext();
@@ -2832,20 +2861,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 console.warn('[Dialogue Colors] updateMessageBlock failed, using fallback render:', e);
             }
         }
-        const mesEl = document.querySelector(`.mes[mesid="${messageIndex}"]`) || document.querySelectorAll('.mes')[messageIndex];
-        const mesText = mesEl?.querySelector?.('.mes_text');
-        if (mesText && message) {
-            const rawText = stripColorBlocks(message.mes || '');
-            let formatted = '';
-            try {
-                if (typeof ctx?.messageFormatting === 'function') {
-                    formatted = ctx.messageFormatting(rawText, message.name || '', message.is_system || false, message.is_user || false, messageIndex);
-                }
-            } catch (e) {
-                console.warn('[Dialogue Colors] Message formatting fallback failed:', e);
-            }
-            if (!formatted && typeof converter?.makeHtml === 'function') formatted = converter.makeHtml(rawText);
-            mesText.innerHTML = formatted || escapeHtml(rawText).replace(/\n/g, '<br>');
+        if (renderMessageDomFallback(messageIndex, message, ctx)) {
             return true;
         }
         if (typeof eventSource?.emit === 'function' && event_types?.MESSAGE_UPDATED) {
@@ -2866,10 +2882,99 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         });
     }
 
-    async function refreshAndDecorateMessageDom(messageIndex, message) {
-        await refreshMessageDom(messageIndex, message);
+    async function waitForMobileRenderSettleWindow() {
         await waitForDomFrame();
-        const mesElement = document.querySelector(`#chat .mes[mesid="${messageIndex}"]`) || document.querySelectorAll('#chat .mes[mesid]')[messageIndex];
+        await new Promise(resolve => setTimeout(resolve, 80));
+        await waitForDomFrame();
+    }
+
+    function getMessageDomReadiness(mesElement, msg, mesIndex) {
+        const mesText = mesElement?.querySelector?.('.mes_text');
+        if (!mesText || !msg || msg.is_system) return { ready: false, totalSegments: 0, matchedSegments: 0, expectedDecorations: 0, coloredDecorations: 0 };
+        if (mesText.querySelector('font[color]') || collectFontColorsFromText(msg.mes).size) {
+            return { ready: true, totalSegments: 0, matchedSegments: 0, expectedDecorations: 0, coloredDecorations: 0 };
+        }
+        const attribution = attributeDialogueSegments(msg.mes, msg.name, {
+            autoAddMessageSpeaker: false,
+            overrides: getMessageQuoteOverridesForDecoration(mesIndex, msg),
+            mesIndex,
+        });
+        const quoteSegments = attribution.segments.filter(seg => seg.delimiter !== '*' && seg.delimiter !== '_');
+        const emphasisSegments = attribution.segments.filter(seg => seg.delimiter === '*' || seg.delimiter === '_');
+        const qElements = Array.from(mesText.querySelectorAll('q'));
+        const emElements = Array.from(mesText.querySelectorAll('em'));
+        const totalSegments = quoteSegments.length + emphasisSegments.length;
+        const expectedDecorations = quoteSegments.filter(seg => seg.assignment).length + emphasisSegments.filter(seg => seg.assignment).length;
+        let matchedSegments = 0;
+        matchSegmentsToElements(quoteSegments, qElements, seg => normalizeSegmentText(seg.text), () => { matchedSegments++; });
+        matchSegmentsToElements(emphasisSegments, emElements, seg => normalizeSegmentText(seg.text.slice(1, -1)), () => { matchedSegments++; });
+        return {
+            ready: totalSegments === 0 || matchedSegments >= totalSegments,
+            totalSegments,
+            matchedSegments,
+            expectedDecorations,
+            coloredDecorations: mesText.querySelectorAll('[data-dc-colored]').length,
+        };
+    }
+
+    function waitForMessageDomReadyForDecoration(messageIndex, msg, timeoutMs = 1600) {
+        if (!msg) return Promise.resolve({ ready: false, mesElement: getMessageElementByIndex(messageIndex), readiness: null });
+        return new Promise(resolve => {
+            const started = Date.now();
+            let observer = null;
+            let interval = null;
+            let settled = false;
+
+            const cleanup = () => {
+                if (observer) {
+                    try { observer.disconnect(); } catch (_) { /* ignored */ }
+                    observer = null;
+                }
+                if (interval) {
+                    clearInterval(interval);
+                    interval = null;
+                }
+            };
+
+            const finish = result => {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                resolve(result);
+            };
+
+            const check = () => {
+                const mesElement = getMessageElementByIndex(messageIndex);
+                const readiness = getMessageDomReadiness(mesElement, msg, messageIndex);
+                if (readiness.ready) {
+                    finish({ ready: true, mesElement, readiness });
+                    return;
+                }
+                if (Date.now() - started >= timeoutMs) {
+                    finish({ ready: false, mesElement, readiness });
+                }
+            };
+
+            const mesElement = getMessageElementByIndex(messageIndex);
+            if (mesElement && typeof MutationObserver === 'function') {
+                observer = new MutationObserver(check);
+                observer.observe(mesElement, { childList: true, subtree: true, characterData: true });
+            }
+            interval = setInterval(check, 50);
+            check();
+        });
+    }
+
+    async function refreshAndDecorateMessageDom(messageIndex, message) {
+        const msg = message ?? getContext()?.chat?.[messageIndex];
+        await refreshMessageDom(messageIndex, msg);
+        await waitForMobileRenderSettleWindow();
+        let { ready, mesElement } = await waitForMessageDomReadyForDecoration(messageIndex, msg);
+        if (!ready && renderMessageDomFallback(messageIndex, msg)) {
+            await waitForDomFrame();
+            ({ mesElement } = await waitForMessageDomReadyForDecoration(messageIndex, msg, 300));
+        }
+        mesElement = mesElement || getMessageElementByIndex(messageIndex);
         if (!mesElement) return false;
         decorateObservedMessages([mesElement]);
         scheduleDomSettleRefresh(DOM_RETRY_REFRESH_DELAYS);
@@ -4506,6 +4611,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     const OBSERVED_DECORATION_MAX_WAIT = 250;
     const DOM_SETTLE_REFRESH_DELAYS = [0, 120, 350, 900, 1800, 3000];
     const DOM_RETRY_REFRESH_DELAYS = [120, 350, 900, 1800, 3000];
+    const DOM_HEALTH_CHECK_INTERVAL_MS = 1500;
+    const DOM_HEALTH_CHECK_VISIBLE_LIMIT = 40;
     let pendingDeferredMutations = false;
 
     function hashMessageText(text) {
@@ -4991,6 +5098,85 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         runtimeState.decoratedWatchers.set(mesElement, { observer, mesText: initialMesText });
     }
 
+    function collectDomHealthCheckMessages() {
+        const messages = Array.from(document.querySelectorAll('#chat .mes[mesid]'));
+        if (messages.length <= DOM_HEALTH_CHECK_VISIBLE_LIMIT) return messages;
+
+        const selected = new Set(messages.slice(-Math.ceil(DOM_HEALTH_CHECK_VISIBLE_LIMIT / 2)));
+        const viewportHeight = window.innerHeight || document.documentElement?.clientHeight || 800;
+        const minTop = -viewportHeight;
+        const maxBottom = viewportHeight * 2;
+        for (const mesElement of messages) {
+            const rect = mesElement.getBoundingClientRect?.();
+            if (!rect) continue;
+            if (rect.bottom >= minTop && rect.top <= maxBottom) selected.add(mesElement);
+            if (selected.size >= DOM_HEALTH_CHECK_VISIBLE_LIMIT) break;
+        }
+        return Array.from(selected).slice(0, DOM_HEALTH_CHECK_VISIBLE_LIMIT);
+    }
+
+    function messageNeedsDomHealthRepair(mesElement, msg, mesIndex) {
+        const mesText = mesElement?.querySelector?.('.mes_text');
+        if (!mesText || !msg || msg.is_system) return false;
+        if (mesText.querySelector('font[color]') || collectFontColorsFromText(msg.mes).size) return false;
+        const readiness = getMessageDomReadiness(mesElement, msg, mesIndex);
+        if (readiness.totalSegments === 0) {
+            return !settings.disableNarration && !!settings.narratorColor && !mesText.hasAttribute('data-dc-narrator');
+        }
+        if (!readiness.ready) return true;
+        return readiness.expectedDecorations > readiness.coloredDecorations;
+    }
+
+    function runDomHealthCheck() {
+        if (!settings.enabled || !isDomEngine()) {
+            stopDomHealthCheck();
+            return;
+        }
+        if (isDecoratingDom) return;
+        setupChatObserver();
+
+        const chat = getContext()?.chat || [];
+        const repairTargets = new Set();
+        for (const [mesElement, watcher] of runtimeState.decoratedWatchers.entries()) {
+            const currentMesText = mesElement?.querySelector?.('.mes_text');
+            if (!mesElement?.isConnected || !currentMesText?.isConnected) {
+                clearDecoratedWatcher(mesElement);
+                continue;
+            }
+            if (watcher?.mesText !== currentMesText) {
+                clearDecoratedWatcher(mesElement);
+                repairTargets.add(mesElement);
+            }
+        }
+
+        for (const mesElement of collectDomHealthCheckMessages()) {
+            const mesIndex = Number(mesElement.getAttribute('mesid'));
+            if (!Number.isFinite(mesIndex) || mesIndex < 0) continue;
+            const msg = chat[mesIndex];
+            if (messageNeedsDomHealthRepair(mesElement, msg, mesIndex)) {
+                repairTargets.add(mesElement);
+                continue;
+            }
+            const mesText = mesElement.querySelector('.mes_text');
+            if (mesText?.querySelector?.('[data-dc-colored], [data-dc-narrator]') && !runtimeState.decoratedWatchers.has(mesElement)) {
+                watchDecoratedMessage(mesElement, mesIndex);
+            }
+        }
+
+        if (repairTargets.size) decorateObservedMessages(Array.from(repairTargets));
+    }
+
+    function startDomHealthCheck() {
+        if (!settings.enabled || !isDomEngine() || runtimeState.domHealthCheckTimer) return;
+        runtimeState.domHealthCheckTimer = setInterval(runDomHealthCheck, DOM_HEALTH_CHECK_INTERVAL_MS);
+    }
+
+    function stopDomHealthCheck() {
+        if (!runtimeState.domHealthCheckTimer) return;
+        clearInterval(runtimeState.domHealthCheckTimer);
+        runtimeState.domHealthCheckTimer = null;
+    }
+
     /**
      * Bounded fallback pass series for races where ST/external agents update
      * msg.mes before the rendered .mes_text has caught up. Per-message observers
@@ -4999,6 +5185,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
      */
     function scheduleDomSettleRefresh(delays = DOM_RETRY_REFRESH_DELAYS) {
         if (!isDomEngine()) return;
+        startDomHealthCheck();
         clearDomSettleRefreshes();
         const refreshDelays = Array.isArray(delays) && delays.length ? delays : [400];
         refreshDelays.forEach((delay, index) => {
@@ -5017,6 +5204,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     }
 
     function scheduleDomRefreshSeries(delay = 0) {
+        startDomHealthCheck();
         scheduleDecorateAll(delay);
     }
 
@@ -5025,6 +5213,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         isDecoratingDom = true;
         try {
             if (!settings.enabled || !isDomEngine()) {
+                stopDomHealthCheck();
                 undecorateAllMessages();
                 return;
             }
@@ -5112,6 +5301,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
     function scheduleDecorateAll(delay = 100) {
         if (!isDomEngine()) return;
+        startDomHealthCheck();
         const now = Date.now();
         if (!decorateAllFirstCallTime) decorateAllFirstCallTime = now;
         clearTimeout(decorateAllTimer);
@@ -5125,6 +5315,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
     function scheduleDecorateLast(delay = 80) {
         if (!settings.enabled || !isDomEngine()) return;
+        startDomHealthCheck();
         const now = Date.now();
         if (!decorateLastFirstCallTime) decorateLastFirstCallTime = now;
         clearTimeout(decorateLastTimer);
@@ -6896,7 +7087,16 @@ ${quoteList}`;
 
         syncUIWithSettings();
 
-        $('dc-enabled').onchange = e => { settings.enabled = e.target.checked; if (!settings.enabled) clearAutoAttributionVerificationQueue({ clearCooldown: true }); saveData(); injectPrompt(); scheduleDomRefreshSeries(0); };
+        $('dc-enabled').onchange = e => {
+            settings.enabled = e.target.checked;
+            if (!settings.enabled) {
+                stopDomHealthCheck();
+                clearAutoAttributionVerificationQueue({ clearCooldown: true });
+            }
+            saveData();
+            injectPrompt();
+            scheduleDomRefreshSeries(0);
+        };
         $('dc-highlight').onchange = e => { settings.highlightMode = e.target.checked; saveData(); injectPrompt(); scheduleDomRefreshSeries(0); };
         $('dc-autoscan').onchange = e => { settings.autoScanOnLoad = e.target.checked; saveData(); };
         $('dc-autoscan-new').onchange = e => { settings.autoScanNewMessages = e.target.checked; saveData(); };
@@ -6937,10 +7137,12 @@ ${quoteList}`;
             if (isDomEngine()) {
                 setupChatRootObserver();
                 setupChatObserver();
+                startDomHealthCheck();
                 decorateAllMessages();
                 scheduleDomSettleRefresh(DOM_RETRY_REFRESH_DELAYS);
             }
             else if (wasDomEngine) {
+                stopDomHealthCheck();
                 clearAutoAttributionVerificationQueue({ clearCooldown: true });
                 cancelStreamingAttributionVerification({ clearOverrides: true });
                 undecorateAllMessages();
@@ -7170,6 +7372,7 @@ ${quoteList}`;
         clearAutoAttributionVerificationQueue({ clearCooldown: true });
         clearAutoColorizeIndicators();
         clearDomCache();
+        stopDomHealthCheck();
         const currentCharKey = getCharKey();
         clearDecoratedWatchers();
         if (currentCharKey !== lastCharKey) {
@@ -7186,20 +7389,23 @@ ${quoteList}`;
         stripColorBlocksFromDisplay();
         setupChatRootObserver();
         setupChatObserver();
+        startDomHealthCheck();
         scheduleDomRefreshSeries(150);
         if (runtimeState.chatChangedRafId) cancelAnimationFrame(runtimeState.chatChangedRafId);
         runtimeState.chatChangedRafId = requestAnimationFrame(() => {
             runtimeState.chatChangedRafId = null;
             setupChatObserver();
+            startDomHealthCheck();
             decorateAllMessages();
             scheduleDomSettleRefresh(DOM_RETRY_REFRESH_DELAYS);
         });
-        setTimeout(() => { setupChatObserver(); scheduleDomSettleRefresh(DOM_RETRY_REFRESH_DELAYS); }, 250);
+        setTimeout(() => { setupChatObserver(); startDomHealthCheck(); scheduleDomSettleRefresh(DOM_RETRY_REFRESH_DELAYS); }, 250);
         if (settings.autoScanOnLoad !== false && !Object.keys(characterColors).length) {
             setTimeout(() => {
                 if (document.querySelectorAll('.mes').length) scanAllMessages();
                 stripColorBlocksFromDisplay();
                 setupChatObserver();
+                startDomHealthCheck();
                 scheduleDomRefreshSeries(0);
             }, 1000);
         }
@@ -7316,6 +7522,7 @@ ${quoteList}`;
                 populateProfileDropdown();
                 setupChatRootObserver();
                 setupChatObserver();
+                startDomHealthCheck();
                 scheduleDomRefreshSeries(150);
             } else if (waitAttempts > 60) {
                 clearInterval(waitUI);
