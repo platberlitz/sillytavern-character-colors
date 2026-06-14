@@ -27,6 +27,10 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         // Per-message self-terminating observers that replace the old polling settle timers.
         // Keyed by the .mes element; value is { observer, fallbackTimer }.
         messageSettleObservers: new Map(),
+        // Long-lived observers on decorated messages that re-decorate when an
+        // external agent (e.g. Prose Polisher) rebuilds .mes_text innerHTML.
+        // Keyed by the .mes element; value is { observer }.
+        decoratedWatchers: new Map(),
         pendingObservedMessages: new Set(),
     };
     globalThis[RUNTIME_GUARD_KEY] = runtimeState;
@@ -4670,6 +4674,9 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             if (!mesText.getAttribute('style')) mesText.removeAttribute('style');
             mesText.removeAttribute('data-dc-narrator');
         }
+        // Tear down the external-rebuild watcher so it doesn't re-decorate
+        // a message we've intentionally undecorated.
+        clearDecoratedWatcher(mesElement);
     }
 
     function decorateMessageDom(mesElement, msg, mesIndex) {
@@ -4737,6 +4744,40 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         runtimeState.messageSettleObservers.clear();
     }
 
+    // Disconnect every long-lived "decorated message" watcher. Called on chat
+    // change and when DOM decoration is disabled wholesale.
+    function clearDecoratedWatchers() {
+        for (const { observer } of runtimeState.decoratedWatchers.values()) {
+            try { observer.disconnect(); } catch (_) { /* ignored */ }
+        }
+        runtimeState.decoratedWatchers.clear();
+    }
+
+    // Disconnect the long-lived decorated watcher for a single .mes element.
+    function clearDecoratedWatcher(mesElement) {
+        const watcher = runtimeState.decoratedWatchers.get(mesElement);
+        if (watcher) {
+            try { watcher.observer.disconnect(); } catch (_) { /* ignored */ }
+            runtimeState.decoratedWatchers.delete(mesElement);
+        }
+    }
+
+    // Tear down per-element observers (both the settle observer and the
+    // long-lived decorated watcher) for a single .mes element.
+    function clearMessageObservers(mesElement) {
+        const settle = runtimeState.messageSettleObservers.get(mesElement);
+        if (settle) {
+            try { settle.observer.disconnect(); } catch (_) { /* ignored */ }
+            clearTimeout(settle.fallbackTimer);
+            runtimeState.messageSettleObservers.delete(mesElement);
+        }
+        const watcher = runtimeState.decoratedWatchers.get(mesElement);
+        if (watcher) {
+            try { watcher.observer.disconnect(); } catch (_) { /* ignored */ }
+            runtimeState.decoratedWatchers.delete(mesElement);
+        }
+    }
+
     // Maximum time to wait for a message's DOM to settle before giving up.
     const MESSAGE_SETTLE_MAX_WAIT_MS = 3000;
 
@@ -4768,7 +4809,12 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 queueColorStateSave({ history: false, injectPrompt: false });
             }
             updateLegend();
-            if (!result.needsRetry) cleanup();
+            if (!result.needsRetry) {
+                cleanup();
+                // Decoration succeeded: arm the long-lived watcher so a later
+                // external re-render (e.g. Prose Polisher) re-decorates.
+                if (result.decorated) watchDecoratedMessage(mesElement, mesIndex);
+            }
         };
 
         const cleanup = () => {
@@ -4789,6 +4835,51 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         }, MESSAGE_SETTLE_MAX_WAIT_MS);
 
         runtimeState.messageSettleObservers.set(mesElement, { observer, fallbackTimer });
+    }
+
+    /**
+     * Attach a long-lived MutationObserver that watches for external re-renders
+     * of an already-decorated message (e.g. a post-gen agent editing msg.mes and
+     * calling updateMessageBlock(), which rebuilds .mes_text innerHTML, wiping DC
+     * inline styles). When .mes_text childList changes and all data-dc-colored
+     * elements have disappeared, we trigger attachMessageSettleObserver so
+     * decoration is re-applied once <q>/<em> elements re-appear.
+     *
+     * Unlike attachMessageSettleObserver (which is self-terminating), this watcher
+     * lives for the lifetime of the decorated message and is only torn down when
+     * the message is undecorated or the chat changes.
+     *
+     * DC's own decoration only writes style/attributes (not childList mutations),
+     * so this observer will not self-trigger on our own changes.
+     */
+    function watchDecoratedMessage(mesElement, mesIndex) {
+        if (!mesElement?.isConnected) return;
+        // Tear down any existing watcher for this element first.
+        clearDecoratedWatcher(mesElement);
+
+        const mesText = mesElement.querySelector('.mes_text');
+        if (!mesText) return;
+
+        const observer = new MutationObserver(() => {
+            if (!mesElement.isConnected || !settings.enabled || !isDomEngine()) {
+                clearDecoratedWatcher(mesElement);
+                return;
+            }
+            // Ignore mutations we caused ourselves (decoration only writes
+            // style/attributes, but a concurrent decorate pass may reshuffle nodes).
+            if (isDecoratingDom) return;
+            // If our decorations are still present, the rebuild didn't wipe them.
+            if (mesText.querySelector('[data-dc-colored]') || mesText.querySelector('[data-dc-narrator]')) return;
+            const msg = getContext()?.chat?.[mesIndex];
+            if (!msg || msg.is_system) return;
+            // An external agent rebuilt .mes_text and wiped our inline decorations.
+            // Re-decorate now; decorateObservedMessages re-arms this watcher (or
+            // falls back to a settle observer if <q>/<em> haven't rendered yet).
+            decorateObservedMessages([mesElement]);
+        });
+
+        observer.observe(mesText, { childList: true, subtree: true });
+        runtimeState.decoratedWatchers.set(mesElement, { observer });
     }
 
     /**
@@ -4837,7 +4928,12 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 if (result.createdCharacters) changedColorData = true;
                 // If the message's quotes/emphasis have not rendered yet, attach a
                 // self-terminating observer that finishes decoration once they appear.
-                if (result.needsRetry) attachMessageSettleObserver(mesElement, mesIndex);
+                if (result.needsRetry) {
+                    attachMessageSettleObserver(mesElement, mesIndex);
+                } else if (result.decorated) {
+                    // Fully decorated: watch for external re-renders (e.g. Prose Polisher).
+                    watchDecoratedMessage(mesElement, mesIndex);
+                }
             });
             if (changedColorData) {
                 // Decoration discovered new characters/counts. Persist via the
@@ -4874,7 +4970,11 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 const mesIndex = Number(mesElement.getAttribute('mesid'));
                 const result = decorateMessageElementByIndex(mesElement, mesIndex);
                 if (result.createdCharacters) createdCharacters = true;
-                if (result.needsRetry) attachMessageSettleObserver(mesElement, mesIndex);
+                if (result.needsRetry) {
+                    attachMessageSettleObserver(mesElement, mesIndex);
+                } else if (result.decorated) {
+                    watchDecoratedMessage(mesElement, mesIndex);
+                }
             }
         } finally {
             isDecoratingDom = previousDecoratingState;
@@ -6867,7 +6967,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         clearAutoAttributionVerificationQueue({ clearCooldown: true });
         clearAutoColorizeIndicators();
         clearDomCache();
-        const currentCharKey = getCharKey();
+        clearDecoratedWatchers();
         if (currentCharKey !== lastCharKey) {
             expandedCharacterRows.clear();
             swapMode = null;
