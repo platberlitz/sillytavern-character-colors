@@ -2483,7 +2483,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                         const mesIndex = getMessageIndexFromElement(targetEl);
                         const ctx = getContext();
                         const msg = ctx?.chat?.[mesIndex];
-                        const segmentIndex = Number(targetEl.getAttribute('data-dc-seg'));
+                        const segmentIndex = resolveDomSegmentIndexForElement(targetEl, mesIndex, msg);
                         if (!msg || !Number.isFinite(segmentIndex)) {
                             toast.error('Could not map this dialogue segment.');
                             menu.remove();
@@ -2657,7 +2657,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             const mesText = e.target.closest('.mes_text');
             if (!mesText) return;
             if (isDomEngine()) {
-                const segmentEl = e.target.closest('[data-dc-seg]');
+                const segmentEl = e.target.closest('[data-dc-seg], q, em');
                 if (segmentEl && mesText.contains(segmentEl) && !segmentEl.closest('font[color]')) {
                     showMenu(e, null, segmentEl);
                 }
@@ -2683,7 +2683,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             const mesText = e.target.closest('.mes_text');
             if (!mesText) return;
             if (isDomEngine()) {
-                const segmentEl = e.target.closest('[data-dc-seg]');
+                const segmentEl = e.target.closest('[data-dc-seg], q, em');
                 if (segmentEl && mesText.contains(segmentEl) && !segmentEl.closest('font[color]')) {
                     longPressTarget = segmentEl;
                     longPressTimer = setTimeout(() => showMenu(e, null, segmentEl), 500);
@@ -4691,6 +4691,45 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         }
     }
 
+    function resolveDomSegmentIndexForElement(segmentEl, mesIndex, msg) {
+        if (!segmentEl || !msg) return NaN;
+        if (segmentEl.hasAttribute?.('data-dc-seg')) {
+            const directIndex = Number(segmentEl.getAttribute('data-dc-seg'));
+            if (Number.isFinite(directIndex)) return directIndex;
+        }
+
+        const mesText = segmentEl.closest?.('.mes_text');
+        if (!mesText) return NaN;
+
+        const attribution = attributeDialogueSegments(msg.mes, msg.name, {
+            autoAddMessageSpeaker: true,
+            overrides: getMessageQuoteOverridesForDecoration(mesIndex, msg),
+            mesIndex,
+        });
+
+        const isThoughtElement = segmentEl.matches?.('em');
+        const segments = attribution.segments.filter(seg => isThoughtElement
+            ? (seg.delimiter === '*' || seg.delimiter === '_')
+            : (seg.delimiter !== '*' && seg.delimiter !== '_'));
+        const elements = Array.from(mesText.querySelectorAll(isThoughtElement ? 'em' : 'q'));
+        let resolvedIndex = NaN;
+
+        matchSegmentsToElements(
+            segments,
+            elements,
+            seg => isThoughtElement ? normalizeSegmentText(seg.text.slice(1, -1)) : normalizeSegmentText(seg.text),
+            (seg, el) => {
+                if (el === segmentEl) resolvedIndex = seg.index;
+            }
+        );
+        if (Number.isFinite(resolvedIndex)) return resolvedIndex;
+
+        // If SillyTavern's rendered text differs slightly from msg.mes, fall back
+        // to ordinal mapping so manual DOM overrides can still recover coloring.
+        const ordinal = elements.indexOf(segmentEl);
+        return ordinal >= 0 && segments[ordinal] ? segments[ordinal].index : NaN;
+    }
+
     function clearSegmentDecoration(el) {
         el.style.color = '';
         el.style.backgroundColor = '';
@@ -4700,29 +4739,31 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         el.removeAttribute('data-dc-seg');
     }
 
-    function undecorateMessageDom(mesElement) {
+    function undecorateMessageDom(mesElement, options = {}) {
         const mesText = mesElement?.querySelector?.('.mes_text');
-        if (!mesText) return;
-        mesText.querySelectorAll('[data-dc-colored], [data-dc-seg]').forEach(clearSegmentDecoration);
-        if (mesText.hasAttribute('data-dc-narrator')) {
-            mesText.style.color = '';
-            if (!mesText.getAttribute('style')) mesText.removeAttribute('style');
-            mesText.removeAttribute('data-dc-narrator');
+        if (mesText) {
+            mesText.querySelectorAll('[data-dc-colored], [data-dc-seg]').forEach(clearSegmentDecoration);
+            if (mesText.hasAttribute('data-dc-narrator')) {
+                mesText.style.color = '';
+                if (!mesText.getAttribute('style')) mesText.removeAttribute('style');
+                mesText.removeAttribute('data-dc-narrator');
+            }
         }
         // Tear down the external-rebuild watcher so it doesn't re-decorate
         // a message we've intentionally undecorated.
-        clearDecoratedWatcher(mesElement);
+        if (options.clearWatcher !== false) clearDecoratedWatcher(mesElement);
     }
 
     function decorateMessageDom(mesElement, msg, mesIndex) {
         const mesText = mesElement?.querySelector?.('.mes_text');
         if (!mesText) return { decorated: false, createdCharacters: false, needsRetry: !!msg && !msg.is_system };
-        undecorateMessageDom(mesElement);
+        undecorateMessageDom(mesElement, { clearWatcher: false });
         if (!settings.enabled || !isDomEngine() || !msg || msg.is_system) {
             return { decorated: false, createdCharacters: false };
         }
         // Leave messages with persisted font colors (LLM engine output) untouched.
         if (mesText.querySelector('font[color]') || collectFontColorsFromText(msg.mes).size) {
+            clearDecoratedWatcher(mesElement);
             return { decorated: false, createdCharacters: false };
         }
 
@@ -4772,11 +4813,12 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     }
 
     function clearDomSettleRefreshes() {
-        for (const { observer, fallbackTimer } of runtimeState.messageSettleObservers.values()) {
+        for (const [key, { observer, fallbackTimer }] of runtimeState.messageSettleObservers.entries()) {
+            if (typeof key !== 'string' || !key.startsWith('__settle_fallback_')) continue;
             try { observer.disconnect(); } catch (_) { /* ignored */ }
             clearTimeout(fallbackTimer);
+            runtimeState.messageSettleObservers.delete(key);
         }
-        runtimeState.messageSettleObservers.clear();
     }
 
     // Disconnect every long-lived "decorated message" watcher. Called on chat
@@ -4804,6 +4846,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         if (settle) {
             try { settle.observer.disconnect(); } catch (_) { /* ignored */ }
             clearTimeout(settle.fallbackTimer);
+            settle.retryTimers?.forEach?.(clearTimeout);
             runtimeState.messageSettleObservers.delete(mesElement);
         }
         const watcher = runtimeState.decoratedWatchers.get(mesElement);
@@ -4829,8 +4872,11 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         if (existing) {
             try { existing.observer.disconnect(); } catch (_) { /* ignored */ }
             clearTimeout(existing.fallbackTimer);
+            existing.retryTimers?.forEach?.(clearTimeout);
             runtimeState.messageSettleObservers.delete(mesElement);
         }
+
+        let retryTimers = [];
 
         const attempt = () => {
             if (!mesElement.isConnected || !settings.enabled || !isDomEngine()) {
@@ -4857,17 +4903,22 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             if (!entry) return;
             try { entry.observer.disconnect(); } catch (_) { /* ignored */ }
             clearTimeout(entry.fallbackTimer);
+            entry.retryTimers?.forEach?.(clearTimeout);
             runtimeState.messageSettleObservers.delete(mesElement);
         };
 
         const observer = new MutationObserver(() => attempt());
         observer.observe(mesElement, { childList: true, subtree: true });
 
+        retryTimers = DOM_RETRY_REFRESH_DELAYS
+            .filter(delay => Number(delay) > 0 && Number(delay) < MESSAGE_SETTLE_MAX_WAIT_MS)
+            .map(delay => setTimeout(() => attempt(), Number(delay)));
+
         const fallbackTimer = setTimeout(() => {
             cleanup();
         }, MESSAGE_SETTLE_MAX_WAIT_MS);
 
-        runtimeState.messageSettleObservers.set(mesElement, { observer, fallbackTimer });
+        runtimeState.messageSettleObservers.set(mesElement, { observer, fallbackTimer, retryTimers });
     }
 
     /**
@@ -4927,12 +4978,14 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         clearDomSettleRefreshes();
         const refreshDelays = Array.isArray(delays) && delays.length ? delays : [400];
         refreshDelays.forEach((delay, index) => {
+            const key = `__settle_fallback_${index}__`;
             const timer = setTimeout(() => {
+                runtimeState.messageSettleObservers.delete(key);
                 if (!settings.enabled || !isDomEngine()) return;
                 setupChatObserver();
                 decorateAllMessages();
             }, Math.max(0, Number(delay) || 0));
-            runtimeState.messageSettleObservers.set(`__settle_fallback_${index}__`, {
+            runtimeState.messageSettleObservers.set(key, {
                 observer: { disconnect: () => {} },
                 fallbackTimer: timer,
             });
