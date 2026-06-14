@@ -4857,29 +4857,30 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         // Tear down any existing watcher for this element first.
         clearDecoratedWatcher(mesElement);
 
-        const mesText = mesElement.querySelector('.mes_text');
-        if (!mesText) return;
+        const initialMesText = mesElement.querySelector('.mes_text');
+        if (!initialMesText) return;
 
         const observer = new MutationObserver(() => {
             if (!mesElement.isConnected || !settings.enabled || !isDomEngine()) {
                 clearDecoratedWatcher(mesElement);
                 return;
             }
-            // Ignore mutations we caused ourselves (decoration only writes
-            // style/attributes, but a concurrent decorate pass may reshuffle nodes).
             if (isDecoratingDom) return;
+            // Re-query .mes_text: external agents may replace the node entirely.
+            const currentMesText = mesElement.querySelector('.mes_text');
+            if (!currentMesText || !currentMesText.isConnected) return;
+            // Skip messages with LLM-emitted font[color] tags.
+            if (currentMesText.querySelector('font[color]')) return;
             // If our decorations are still present, the rebuild didn't wipe them.
-            if (mesText.querySelector('[data-dc-colored]') || mesText.querySelector('[data-dc-narrator]')) return;
+            if (currentMesText.querySelector('[data-dc-colored]') || currentMesText.querySelector('[data-dc-narrator]')) return;
             const msg = getContext()?.chat?.[mesIndex];
             if (!msg || msg.is_system) return;
-            // An external agent rebuilt .mes_text and wiped our inline decorations.
-            // Re-decorate now; decorateObservedMessages re-arms this watcher (or
-            // falls back to a settle observer if <q>/<em> haven't rendered yet).
             decorateObservedMessages([mesElement]);
         });
 
-        observer.observe(mesText, { childList: true, subtree: true });
-        runtimeState.decoratedWatchers.set(mesElement, { observer });
+        // Observe mesElement subtree so we catch .mes_text replacement itself.
+        observer.observe(mesElement, { childList: true, subtree: true });
+        runtimeState.decoratedWatchers.set(mesElement, { observer, mesText: initialMesText });
     }
 
     /**
