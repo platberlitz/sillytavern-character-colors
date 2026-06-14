@@ -184,6 +184,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     let isAutoColorizing = false;
     let isVerifyingAttribution = false;
     let pendingAttributionVerifications = [];
+    const ATTRIBUTION_VERIFIER_VERSION = 2;
     const AUTO_ATTRIBUTION_VERIFY_DELAY_MS = 1000;
     const AUTO_ATTRIBUTION_VERIFY_RETRY_DELAY_MS = 30000;
     const STREAMING_ATTRIBUTION_VERIFY_DELAY_MS = 2000;
@@ -4600,6 +4601,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         // A manual override means the LLM-verified state is no longer authoritative.
         delete entry.verifiedHash;
         delete entry.verifiedAt;
+        delete entry.verifiedVersion;
         saveChatMetadata();
         return true;
     }
@@ -4609,6 +4611,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         if (!entry) return false;
         entry.verifiedHash = hashMessageText(msg?.mes);
         entry.verifiedAt = Date.now();
+        entry.verifiedVersion = ATTRIBUTION_VERIFIER_VERSION;
         saveChatMetadata();
         return true;
     }
@@ -4616,7 +4619,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     function isMessageAttributionVerified(mesIndex, msg) {
         const entry = getMessageQuoteOverrideEntry(mesIndex, msg, false);
         const hash = hashMessageText(msg?.mes);
-        return !!entry && entry.hash === hash && entry.verifiedHash === hash;
+        return !!entry && entry.hash === hash && entry.verifiedHash === hash && entry.verifiedVersion === ATTRIBUTION_VERIFIER_VERSION;
     }
 
     function getMessageIndexFromElement(el) {
@@ -4760,7 +4763,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             decorated,
             createdCharacters: attribution.createdCharacters,
             segments: attribution.segments,
-            needsRetry: expectedDecorations > matchedDecorations && (qElements.length < quoteSegments.length || emElements.length < emphasisSegments.length),
+            needsRetry: expectedDecorations > matchedDecorations,
         };
     }
 
@@ -4815,8 +4818,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
     /**
      * Attach a self-terminating MutationObserver to a single .mes element.
-     * Re-tries decoration whenever child nodes are added or removed inside its
-     * .mes_text container. Disconnects as soon as decoration succeeds (no
+     * Re-tries decoration whenever child nodes are added or removed inside the
+     * message element. Disconnects as soon as decoration succeeds (no
      * needsRetry) or after MESSAGE_SETTLE_MAX_WAIT_MS, whichever comes first.
      */
     function attachMessageSettleObserver(mesElement, mesIndex) {
@@ -4858,9 +4861,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         };
 
         const observer = new MutationObserver(() => attempt());
-        const mesText = mesElement.querySelector('.mes_text');
-        if (!mesText) return;
-        observer.observe(mesText, { childList: true, subtree: true });
+        observer.observe(mesElement, { childList: true, subtree: true });
 
         const fallbackTimer = setTimeout(() => {
             cleanup();
@@ -4916,24 +4917,25 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     }
 
     /**
-     * Previously fired up to six whole-chat decoration passes on fixed delays.
-     * Now a thin fallback: one extra decoration pass after a short delay, serving
-     * as a safety net for cases where per-message observers miss something (e.g.
-     * the element was not connected when the observer was attached).
-     * The `delays` parameter is accepted and ignored for call-site compatibility.
+     * Bounded fallback pass series for races where ST/external agents update
+     * msg.mes before the rendered .mes_text has caught up. Per-message observers
+     * handle the common path; these delayed passes keep verification/overrides
+     * from requiring a full chat reload when the live DOM is briefly stale.
      */
-    function scheduleDomSettleRefresh(_delays) {
+    function scheduleDomSettleRefresh(delays = DOM_RETRY_REFRESH_DELAYS) {
         if (!isDomEngine()) return;
         clearDomSettleRefreshes();
-        const timer = setTimeout(() => {
-            if (!settings.enabled || !isDomEngine()) return;
-            setupChatObserver();
-            decorateAllMessages();
-        }, 400);
-        // Track this single timer in our Map under a sentinel key.
-        runtimeState.messageSettleObservers.set('__settle_fallback__', {
-            observer: { disconnect: () => {} },
-            fallbackTimer: timer,
+        const refreshDelays = Array.isArray(delays) && delays.length ? delays : [400];
+        refreshDelays.forEach((delay, index) => {
+            const timer = setTimeout(() => {
+                if (!settings.enabled || !isDomEngine()) return;
+                setupChatObserver();
+                decorateAllMessages();
+            }, Math.max(0, Number(delay) || 0));
+            runtimeState.messageSettleObservers.set(`__settle_fallback_${index}__`, {
+                observer: { disconnect: () => {} },
+                fallbackTimer: timer,
+            });
         });
     }
 
@@ -5301,6 +5303,43 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         }
     }
 
+    function collectJsonObjectCandidates(text) {
+        const candidates = [];
+        let start = -1;
+        let depth = 0;
+        let inString = false;
+        let escaped = false;
+        const source = String(text ?? '');
+
+        for (let i = 0; i < source.length; i++) {
+            const ch = source[i];
+            if (inString) {
+                if (escaped) escaped = false;
+                else if (ch === '\\') escaped = true;
+                else if (ch === '"') inString = false;
+                continue;
+            }
+            if (ch === '"') {
+                inString = true;
+                continue;
+            }
+            if (ch === '{') {
+                if (depth === 0) start = i;
+                depth++;
+                continue;
+            }
+            if (ch === '}' && depth > 0) {
+                depth--;
+                if (depth === 0 && start >= 0) {
+                    candidates.push(source.slice(start, i + 1));
+                    start = -1;
+                }
+            }
+        }
+
+        return candidates;
+    }
+
     function parseAttributionVerifierResponse(responseText) {
         if (!responseText || typeof responseText !== 'string') return null;
         // Strip common reasoning/thinking wrappers so we can find the final JSON.
@@ -5309,18 +5348,28 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             .replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, '')
             .replace(/### Reasoning:[\s\S]*?(?=###|(?=\{)|$)/gi, '')
             .replace(/\[thinking\][\s\S]*?\[\/thinking\]/gi, '');
+        const fencedBlocks = [];
+        cleaned.replace(/```(?:json|javascript|js|text|txt)?\s*([\s\S]*?)\s*```/gi, (_, body) => {
+            fencedBlocks.push(String(body ?? '').trim());
+            return '';
+        });
         cleaned = unwrapCodeFence(cleaned).trim();
-        const candidates = [cleaned];
-        const objectMatch = cleaned.match(/\{[\s\S]*\}/);
-        if (objectMatch && objectMatch[0] !== cleaned) candidates.push(objectMatch[0]);
-        // Some reasoning models emit the JSON object first and then prose; try the last object too.
-        const lastObjectMatch = cleaned.match(/\{[\s\S]*\}(?!.*\{[\s\S]*\})/);
-        if (lastObjectMatch && lastObjectMatch[0] !== cleaned && (!objectMatch || lastObjectMatch[0] !== objectMatch[0])) {
-            candidates.push(lastObjectMatch[0]);
+
+        const candidates = [];
+        for (const source of [...fencedBlocks, cleaned]) {
+            if (!source) continue;
+            candidates.push(source);
+            const objects = collectJsonObjectCandidates(source);
+            for (let i = objects.length - 1; i >= 0; i--) candidates.push(objects[i]);
         }
+
+        const seen = new Set();
         for (const candidate of candidates) {
+            const trimmed = String(candidate ?? '').trim();
+            if (!trimmed || seen.has(trimmed)) continue;
+            seen.add(trimmed);
             try {
-                const parsed = JSON.parse(candidate);
+                const parsed = JSON.parse(trimmed);
                 const corrections = Array.isArray(parsed) ? parsed : parsed?.corrections;
                 return Array.isArray(corrections) ? corrections : [];
             } catch { /* try next candidate */ }
@@ -5347,71 +5396,32 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         for (const assignment of lookup.values()) addKnownName(assignment.name);
         addKnownName(msg?.name);
 
-        const knownList = knownNames.length ? knownNames.join(', ') : '(none)';
         const quoteList = segments
-            .map(seg => `  <segment index="${seg.index}" current="${seg.assignment?.name || 'Uncolored/Unknown'}" delimiter=${JSON.stringify(seg.delimiter)} text=${JSON.stringify(seg.text)}/>`)
+            .map(seg => `${seg.index}. current=${seg.assignment?.name || 'Uncolored/Unknown'} delimiter=${JSON.stringify(seg.delimiter)} text=${JSON.stringify(seg.text)}`)
             .join('\n');
+        const knownList = knownNames.length ? knownNames.join(', ') : '(none)';
         const conservativeLine = settings.attributionConservativeOnly
-            ? 'Correct ONLY segments marked "Uncolored/Unknown". Do NOT change segments that already have a speaker.'
-            : 'Correct segments where the current speaker is wrong, and Uncolored/Unknown segments when the speaker is clear.';
+            ? 'Include a correction only when the current speaker is Uncolored/Unknown and the speaker is clear enough to color it.'
+            : 'Include a correction when the current speaker is clearly wrong, or when a segment is Uncolored/Unknown and the speaker is clear enough to color it.';
         const thoughtLine = thoughtSymbolList
-            ? `Configured inner-thought delimiters: ${thoughtSymbolList}. Treat those as dialogue segments that also need speaker attribution.`
+            ? `\nConfigured inner-thought delimiters: ${thoughtSymbolList}. Treat those as dialogue segments that also need speaker attribution.`
             : '';
 
-        return `You are a dialogue speaker verifier for a local colorizer.
+        return `You verify dialogue speaker attribution for a local DOM-only colorizer.
+Return only this JSON shape, with no reasoning: {"corrections":[{"index":0,"speaker":"Name"}]}
+${conservativeLine}
+If the current speaker is already correct, omit that segment. If unsure, omit that segment.
+Use one speaker name only, preferably from Known speakers. Do not invent speaker names unless the message makes the name explicit.
 
-Your task:
-1. Read the full message below.
-2. Look at each numbered <segment>.
-3. Decide who is speaking in that segment.
-4. Pick the speaker ONLY from <speakers>.
-5. Output a JSON object with corrections.
+Message index: ${mesIndex}
+Message speaker/fallback: ${msg?.name || 'Unknown'}
+Known speakers and aliases: ${knownList}${thoughtLine}
 
-Rules:
-- ${conservativeLine}
-- If the current speaker is already correct, do NOT include that segment.
-- If you are unsure, do NOT include that segment.
-- Do NOT invent speaker names.
-- Return valid JSON only, with no explanation outside the JSON.
-
-Output format:
-{"corrections":[{"index":<segment number>,"speaker":"<exact speaker name>"}]}
-
-Example 1 — one correction:
-<speakers>Alice, Bob</speakers>
-<segments>
-  <segment index="0" current="Alice" delimiter="&quot;" text="Hello there."/>
-  <segment index="1" current="Bob" delimiter="&quot;" text="Hi!"/>
-</segments>
-Segment 0 is actually spoken by Bob.
-{"corrections":[{"index":0,"speaker":"Bob"}]}
-
-Example 2 — nothing to change:
-<speakers>Alice, Bob</speakers>
-<segments>
-  <segment index="0" current="Alice" delimiter="&quot;" text="Hello there."/>
-</segments>
-{"corrections":[]}
-
-Example 3 — unsure who speaks:
-<speakers>Alice, Bob</speakers>
-<segments>
-  <segment index="0" current="Uncolored/Unknown" delimiter="*" text="maybe thinking"/>
-</segments>
-{"corrections":[]}
-
-Now process this message:
-<message speaker="${msg?.name || 'Unknown'}">
+Full message text:
 ${msg?.mes || ''}
-</message>
-<speakers>
-  ${knownList}
-</speakers>
-${thoughtLine ? `<note>\n  ${thoughtLine}\n</note>\n` : ''}<segments>
-${quoteList}
-</segments>
 
-JSON response:`;
+Numbered dialogue/thought segments:
+${quoteList}`;
     }
 
     function resolveVerifierSpeakerName(rawName, lookup) {
@@ -5541,7 +5551,10 @@ JSON response:`;
             updateCharList();
         }
         const mesElement = document.querySelector(`#chat .mes[mesid="${mesIndex}"]`) || document.querySelectorAll('#chat .mes[mesid]')[mesIndex];
-        if (mesElement) decorateObservedMessages([mesElement]);
+        if (mesElement) {
+            decorateObservedMessages([mesElement]);
+            scheduleDomSettleRefresh(DOM_RETRY_REFRESH_DELAYS);
+        }
 
         return { checked: true, corrections: appliedCorrections, createdCharacters };
     }
