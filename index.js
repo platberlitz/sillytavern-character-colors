@@ -148,7 +148,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     let swapMode = null;
     let searchTerm = '';
     let expandedCharacterRows = new Set();
-    let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, thoughtSymbols: '*', disableNarration: true, shareColorsGlobally: false, cssEffects: false, autoScanNewMessages: true, autoLockDetected: true, enableRightClick: false, promptDepth: 1, autoRecolor: true, autoColorize: false, llmAttributionCheck: false, llmAttributionParallel: false, domStealthColors: true, disableToasts: false, llmConnectionProfile: null, attributionConnectionProfile: null, colorSchemaVersion: COLOR_SCHEMA_VERSION, promptMode: 'inject', promptRole: 'user', sortMode: 'name', coloringEngine: 'llm' };
+    let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, thoughtSymbols: '*', disableNarration: true, shareColorsGlobally: false, cssEffects: false, autoScanNewMessages: true, autoLockDetected: true, enableRightClick: false, promptDepth: 1, autoRecolor: true, autoColorize: false, llmAttributionCheck: false, llmAttributionParallel: false, attributionConservativeOnly: false, attributionMaxTokens: 4096, domStealthColors: true, disableToasts: false, llmConnectionProfile: null, attributionConnectionProfile: null, colorSchemaVersion: COLOR_SCHEMA_VERSION, promptMode: 'inject', promptRole: 'user', sortMode: 'name', coloringEngine: 'llm' };
     const TOGGLE_SETTING_DEFAULTS = Object.freeze({
         enabled: true,
         highlightMode: false,
@@ -164,13 +164,14 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         autoColorize: false,
         llmAttributionCheck: false,
         llmAttributionParallel: false,
+        attributionConservativeOnly: false,
         domStealthColors: true,
         disableToasts: false,
     });
     const GLOBAL_TOGGLE_KEYS = Object.freeze(Object.keys(TOGGLE_SETTING_DEFAULTS));
     const GLOBAL_VISUAL_KEYS = Object.freeze(['thoughtSymbols', 'themeMode', 'colorTheme', 'brightness', 'promptDepth', 'promptRole', 'promptMode', 'coloringEngine']);
     const GLOBAL_SETTINGS_V2_KEYS = Object.freeze([...new Set([...GLOBAL_VISUAL_KEYS, ...GLOBAL_TOGGLE_KEYS])]);
-    const ACTIVE_SETTING_KEYS = Object.freeze([...new Set([...GLOBAL_SETTINGS_V2_KEYS, 'narratorColor', 'llmConnectionProfile', 'attributionConnectionProfile', 'colorSchemaVersion', 'sortMode'])]);
+    const ACTIVE_SETTING_KEYS = Object.freeze([...new Set([...GLOBAL_SETTINGS_V2_KEYS, 'narratorColor', 'llmConnectionProfile', 'attributionConnectionProfile', 'attributionConservativeOnly', 'attributionMaxTokens', 'colorSchemaVersion', 'sortMode'])]);
     const LEGACY_AUTO_SYNC_ENABLED_KEY = 'dc_autosync_enabled';
     const AUTO_SYNC_SAVE_TIMEOUT_MS = 15000;
     let lastCharKey = null;
@@ -4568,6 +4569,9 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         entry.segments[String(segmentIndex)] = String(speakerName);
         if (!isPlainObject(entry.sources)) entry.sources = {};
         entry.sources[String(segmentIndex)] = options.source || 'manual';
+        // A manual override means the LLM-verified state is no longer authoritative.
+        delete entry.verifiedHash;
+        delete entry.verifiedAt;
         saveChatMetadata();
         return true;
     }
@@ -5270,10 +5274,22 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     }
 
     function parseAttributionVerifierResponse(responseText) {
-        const cleaned = unwrapCodeFence(responseText);
+        if (!responseText || typeof responseText !== 'string') return null;
+        // Strip common reasoning/thinking wrappers so we can find the final JSON.
+        let cleaned = responseText
+            .replace(/<think>[\s\S]*?<\/think>/gi, '')
+            .replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, '')
+            .replace(/### Reasoning:[\s\S]*?(?=###|(?=\{)|$)/gi, '')
+            .replace(/\[thinking\][\s\S]*?\[\/thinking\]/gi, '');
+        cleaned = unwrapCodeFence(cleaned).trim();
         const candidates = [cleaned];
         const objectMatch = cleaned.match(/\{[\s\S]*\}/);
         if (objectMatch && objectMatch[0] !== cleaned) candidates.push(objectMatch[0]);
+        // Some reasoning models emit the JSON object first and then prose; try the last object too.
+        const lastObjectMatch = cleaned.match(/\{[\s\S]*\}(?!.*\{[\s\S]*\})/);
+        if (lastObjectMatch && lastObjectMatch[0] !== cleaned && (!objectMatch || lastObjectMatch[0] !== objectMatch[0])) {
+            candidates.push(lastObjectMatch[0]);
+        }
         for (const candidate of candidates) {
             try {
                 const parsed = JSON.parse(candidate);
@@ -5303,16 +5319,71 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         for (const assignment of lookup.values()) addKnownName(assignment.name);
         addKnownName(msg?.name);
 
-        const quoteList = segments
-            .map(seg => `${seg.index}. current=${seg.assignment?.name || 'Uncolored/Unknown'} delimiter=${JSON.stringify(seg.delimiter)} text=${JSON.stringify(seg.text)}`)
-            .join('\n');
         const knownList = knownNames.length ? knownNames.join(', ') : '(none)';
+        const quoteList = segments
+            .map(seg => `  <segment index="${seg.index}" current="${seg.assignment?.name || 'Uncolored/Unknown'}" delimiter=${JSON.stringify(seg.delimiter)} text=${JSON.stringify(seg.text)}/>`)
+            .join('\n');
+        const conservativeLine = settings.attributionConservativeOnly
+            ? 'Correct ONLY segments marked "Uncolored/Unknown". Do NOT change segments that already have a speaker.'
+            : 'Correct segments where the current speaker is wrong, and Uncolored/Unknown segments when the speaker is clear.';
         const thoughtLine = thoughtSymbolList
-            ? `\nConfigured inner-thought delimiters: ${thoughtSymbolList}. Treat those as dialogue segments that also need speaker attribution.`
+            ? `Configured inner-thought delimiters: ${thoughtSymbolList}. Treat those as dialogue segments that also need speaker attribution.`
             : '';
 
-        return `You verify dialogue speaker attribution for a local DOM-only colorizer.\nReturn JSON only: {"corrections":[{"index":0,"speaker":"Name"}]}\nInclude a correction when the current speaker is clearly wrong, or when a segment is Uncolored/Unknown and the speaker is clear enough to color it. If unsure, omit the segment. Use one speaker name only, preferably from Known speakers. Do not invent speaker names unless the message makes the name explicit.\n\nMessage index: ${mesIndex}\nMessage speaker/fallback: ${msg?.name || 'Unknown'}\nKnown speakers and aliases: ${knownList}${thoughtLine}\n\nFull message text:\n${msg?.mes || ''}\n\nNumbered dialogue/thought segments:\n${quoteList}`;
-    }
+        return `You are a dialogue speaker verifier for a local colorizer.
+
+Your task:
+1. Read the full message below.
+2. Look at each numbered <segment>.
+3. Decide who is speaking in that segment.
+4. Pick the speaker ONLY from <speakers>.
+5. Output a JSON object with corrections.
+
+Rules:
+- ${conservativeLine}
+- If the current speaker is already correct, do NOT include that segment.
+- If you are unsure, do NOT include that segment.
+- Do NOT invent speaker names.
+- Return valid JSON only, with no explanation outside the JSON.
+
+Output format:
+{"corrections":[{"index":<segment number>,"speaker":"<exact speaker name>"}]}
+
+Example 1 — one correction:
+<speakers>Alice, Bob</speakers>
+<segments>
+  <segment index="0" current="Alice" delimiter="&quot;" text="Hello there."/>
+  <segment index="1" current="Bob" delimiter="&quot;" text="Hi!"/>
+</segments>
+Segment 0 is actually spoken by Bob.
+{"corrections":[{"index":0,"speaker":"Bob"}]}
+
+Example 2 — nothing to change:
+<speakers>Alice, Bob</speakers>
+<segments>
+  <segment index="0" current="Alice" delimiter="&quot;" text="Hello there."/>
+</segments>
+{"corrections":[]}
+
+Example 3 — unsure who speaks:
+<speakers>Alice, Bob</speakers>
+<segments>
+  <segment index="0" current="Uncolored/Unknown" delimiter="*" text="maybe thinking"/>
+</segments>
+{"corrections":[]}
+
+Now process this message:
+<message speaker="${msg?.name || 'Unknown'}">
+${msg?.mes || ''}
+</message>
+<speakers>
+  ${knownList}
+</speakers>
+${thoughtLine ? `<note>\n  ${thoughtLine}\n</note>\n` : ''}<segments>
+${quoteList}
+</segments>
+
+JSON response:`;
 
     function resolveVerifierSpeakerName(rawName, lookup) {
         const speakerName = String(rawName ?? '').trim();
@@ -5389,7 +5460,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 profileId: settings.attributionConnectionProfile,
                 quietName: `DC_Attr_${mesIndex}_${Date.now()}`,
                 jsonSchema,
-                maxTokens: 500,
+                maxTokens: Number.isFinite(settings.attributionMaxTokens) && settings.attributionMaxTokens > 0 ? settings.attributionMaxTokens : 4096,
             });
             corrections = parseAttributionVerifierResponse(response);
         } catch (e) {
@@ -5413,6 +5484,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             const index = Number(correction?.index);
             if (!Number.isInteger(index) || !segmentByIndex.has(index)) continue;
             const seg = segmentByIndex.get(index);
+            // In conservative mode we only fill segments that are currently uncolored/unknown.
+            if (settings.attributionConservativeOnly && seg.assignment?.key) continue;
             const { assignment, created } = resolveVerifierSpeakerName(correction?.speaker, lookup);
             if (!assignment || assignment.key === seg.assignment?.key) continue;
 
@@ -6430,6 +6503,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         if ($('dc-auto-colorize')) $('dc-auto-colorize').checked = settings.autoColorize || false;
         if ($('dc-llm-attr-check')) $('dc-llm-attr-check').checked = settings.llmAttributionCheck || false;
         if ($('dc-llm-attr-parallel')) $('dc-llm-attr-parallel').checked = settings.llmAttributionParallel || false;
+        if ($('dc-attr-conservative')) $('dc-attr-conservative').checked = settings.attributionConservativeOnly || false;
+        if ($('dc-attr-max-tokens')) $('dc-attr-max-tokens').value = Number.isFinite(settings.attributionMaxTokens) && settings.attributionMaxTokens > 0 ? settings.attributionMaxTokens : 4096;
         if ($('dc-stealth-colors')) $('dc-stealth-colors').checked = settings.domStealthColors !== false;
         if ($('dc-right-click')) $('dc-right-click').checked = settings.enableRightClick;
         if ($('dc-legend')) $('dc-legend').checked = settings.showLegend;
@@ -6505,10 +6580,15 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                             <label class="checkbox_label dc-dom-only"><input type="checkbox" id="dc-stealth-colors" data-help="In DOM mode, inject a slim instruction for the model to include [COLORS:Name=#RRGGBB] for new speakers."><span>Stealth colors block</span></label>
                             <label class="checkbox_label dc-dom-only"><input type="checkbox" id="dc-llm-attr-check" data-help="In DOM mode, automatically ask the selected LLM profile to verify rendered unverified messages and save metadata corrections."><span>LLM attribution check</span></label>
                             <label class="checkbox_label dc-dom-only"><input type="checkbox" id="dc-llm-attr-parallel" data-help="During streaming in DOM mode, verify quote attribution after 2-second pauses so corrections can appear before generation fully ends."><span>LLM streaming attribution</span></label>
+                            <label class="checkbox_label dc-dom-only"><input type="checkbox" id="dc-attr-conservative" data-help="In DOM mode, the LLM verifier will only fill Uncolored/Unknown segments and will not overwrite existing colors."><span>Conservative verify</span></label>
                         </div>
                         <div class="dc-field-row dc-dom-only">
                             <label class="dc-inline-label" for="dc-attr-profile">Verify profile</label>
                             <select id="dc-attr-profile" class="text_pole" data-help="Connection profile to use for LLM attribution verification."><option value="">-- Use main chat AI --</option></select>
+                        </div>
+                        <div class="dc-field-row dc-dom-only">
+                            <label class="dc-inline-label" for="dc-attr-max-tokens">Verify tokens</label>
+                            <input type="number" id="dc-attr-max-tokens" min="256" max="32768" value="4096" class="text_pole" data-help="Maximum tokens for the LLM verifier. Increase for reasoning models that think before outputting JSON.">
                         </div>
                         <div class="dc-field-row dc-llm-only">
                             <label class="dc-inline-label" for="dc-prompt-depth">Depth</label>
@@ -6719,6 +6799,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             }
             saveData();
         };
+        $('dc-attr-conservative').onchange = e => { settings.attributionConservativeOnly = e.target.checked; saveData(); };
+        $('dc-attr-max-tokens').oninput = e => { settings.attributionMaxTokens = parseInt(e.target.value, 10) || 4096; saveData(); };
         $('dc-stealth-colors').onchange = e => { settings.domStealthColors = e.target.checked; saveData(); injectPrompt(); };
         $('dc-right-click').onchange = e => { settings.enableRightClick = e.target.checked; saveData(); };
         $('dc-legend').onchange = e => { settings.showLegend = e.target.checked; saveData(); updateLegend(); };
