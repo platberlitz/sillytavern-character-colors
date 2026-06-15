@@ -30,8 +30,11 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         messageSettleObservers: new Map(),
         // Long-lived observers on decorated messages that re-decorate when an
         // external agent (e.g. Prose Polisher) rebuilds .mes_text innerHTML.
-        // Keyed by the .mes element; value is { observer }.
+        // Keyed by the .mes element; value is { observer, mesText }.
         decoratedWatchers: new Map(),
+        // Coalesced post-mutation repairs keyed by message index. These force
+        // a repaint before decoration when agents rewrite msg.mes after gen.
+        messageDomRepairTimers: new Map(),
         pendingObservedMessages: new Set(),
     };
     globalThis[RUNTIME_GUARD_KEY] = runtimeState;
@@ -2981,6 +2984,49 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         return true;
     }
 
+    function clearMessageDomRepairTimers() {
+        for (const timer of runtimeState.messageDomRepairTimers.values()) clearTimeout(timer);
+        runtimeState.messageDomRepairTimers.clear();
+    }
+
+    function scheduleMessageDomRepair(mesIndex, options = {}) {
+        const index = Number(mesIndex);
+        if (!Number.isFinite(index) || index < 0) return false;
+
+        const existing = runtimeState.messageDomRepairTimers.get(index);
+        if (existing) clearTimeout(existing);
+
+        const chatGeneration = attributionChatGeneration;
+        const delay = Math.max(0, Number(options.delay ?? POST_MUTATION_DOM_REPAIR_DELAY_MS) || 0);
+        const timer = setTimeout(async () => {
+            runtimeState.messageDomRepairTimers.delete(index);
+            if (!settings.enabled || !isDomEngine()) return;
+            if (chatGeneration !== attributionChatGeneration) return;
+
+            const msg = getContext()?.chat?.[index];
+            if (!msg || msg.is_system) return;
+
+            try {
+                await refreshAndDecorateMessageDom(index, msg);
+            } catch (e) {
+                console.warn('[Dialogue Colors] Post-update DOM repair failed:', e);
+                const mesElement = getMessageElementByIndex(index);
+                if (mesElement) decorateObservedMessages([mesElement]);
+            }
+
+            if (chatGeneration !== attributionChatGeneration) return;
+
+            if (options.verify !== false) {
+                queueAutoAttributionVerificationForMessage(index, {
+                    force: options.forceVerify === true,
+                    delay: options.verifyDelay ?? AUTO_ATTRIBUTION_VERIFY_DELAY_MS,
+                });
+            }
+        }, delay);
+        runtimeState.messageDomRepairTimers.set(index, timer);
+        return true;
+    }
+
     function saveData(options = {}) {
         normalizeToggleSettings();
         characterColors = normalizeCharacterColors(characterColors);
@@ -4613,6 +4659,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     const DOM_RETRY_REFRESH_DELAYS = [120, 350, 900, 1800, 3000];
     const DOM_HEALTH_CHECK_INTERVAL_MS = 1500;
     const DOM_HEALTH_CHECK_VISIBLE_LIMIT = 40;
+    const POST_MUTATION_DOM_REPAIR_DELAY_MS = 700;
     let pendingDeferredMutations = false;
 
     function hashMessageText(text) {
@@ -5115,16 +5162,16 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         return Array.from(selected).slice(0, DOM_HEALTH_CHECK_VISIBLE_LIMIT);
     }
 
-    function messageNeedsDomHealthRepair(mesElement, msg, mesIndex) {
+    function getMessageDomHealthRepairType(mesElement, msg, mesIndex) {
         const mesText = mesElement?.querySelector?.('.mes_text');
-        if (!mesText || !msg || msg.is_system) return false;
-        if (mesText.querySelector('font[color]') || collectFontColorsFromText(msg.mes).size) return false;
+        if (!mesText || !msg || msg.is_system) return '';
+        if (mesText.querySelector('font[color]') || collectFontColorsFromText(msg.mes).size) return '';
         const readiness = getMessageDomReadiness(mesElement, msg, mesIndex);
         if (readiness.totalSegments === 0) {
-            return !settings.disableNarration && !!settings.narratorColor && !mesText.hasAttribute('data-dc-narrator');
+            return !settings.disableNarration && !!settings.narratorColor && !mesText.hasAttribute('data-dc-narrator') ? 'decorate' : '';
         }
-        if (!readiness.ready) return true;
-        return readiness.expectedDecorations > readiness.coloredDecorations;
+        if (!readiness.ready) return 'refresh';
+        return readiness.expectedDecorations > readiness.coloredDecorations ? 'decorate' : '';
     }
 
     function runDomHealthCheck() {
@@ -5136,7 +5183,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         setupChatObserver();
 
         const chat = getContext()?.chat || [];
-        const repairTargets = new Set();
+        const decorateTargets = new Set();
         for (const [mesElement, watcher] of runtimeState.decoratedWatchers.entries()) {
             const currentMesText = mesElement?.querySelector?.('.mes_text');
             if (!mesElement?.isConnected || !currentMesText?.isConnected) {
@@ -5145,7 +5192,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             }
             if (watcher?.mesText !== currentMesText) {
                 clearDecoratedWatcher(mesElement);
-                repairTargets.add(mesElement);
+                scheduleMessageDomRepair(Number(mesElement.getAttribute('mesid')), { delay: 0, verify: false });
             }
         }
 
@@ -5153,8 +5200,13 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             const mesIndex = Number(mesElement.getAttribute('mesid'));
             if (!Number.isFinite(mesIndex) || mesIndex < 0) continue;
             const msg = chat[mesIndex];
-            if (messageNeedsDomHealthRepair(mesElement, msg, mesIndex)) {
-                repairTargets.add(mesElement);
+            const repairType = getMessageDomHealthRepairType(mesElement, msg, mesIndex);
+            if (repairType === 'refresh') {
+                scheduleMessageDomRepair(mesIndex, { delay: 0, verify: false });
+                continue;
+            }
+            if (repairType === 'decorate') {
+                decorateTargets.add(mesElement);
                 continue;
             }
             const mesText = mesElement.querySelector('.mes_text');
@@ -5163,7 +5215,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             }
         }
 
-        if (repairTargets.size) decorateObservedMessages(Array.from(repairTargets));
+        if (decorateTargets.size) decorateObservedMessages(Array.from(decorateTargets));
     }
 
     function startDomHealthCheck() {
@@ -5172,9 +5224,11 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     }
 
     function stopDomHealthCheck() {
-        if (!runtimeState.domHealthCheckTimer) return;
-        clearInterval(runtimeState.domHealthCheckTimer);
-        runtimeState.domHealthCheckTimer = null;
+        if (runtimeState.domHealthCheckTimer) {
+            clearInterval(runtimeState.domHealthCheckTimer);
+            runtimeState.domHealthCheckTimer = null;
+        }
+        clearMessageDomRepairTimers();
     }
 
     /**
@@ -7411,13 +7465,30 @@ ${quoteList}`;
         }
     }
 
+    function handleMessageUpdated(mesIndex) {
+        scheduleDomRefreshSeries(200);
+        const index = Number(mesIndex);
+        if (Number.isFinite(index) && index >= 0) {
+            scheduleMessageDomRepair(index, { forceVerify: true, verifyDelay: 250 });
+            return;
+        }
+
+        const chatGeneration = attributionChatGeneration;
+        setTimeout(() => {
+            if (!settings.enabled || !isDomEngine()) return;
+            if (chatGeneration !== attributionChatGeneration) return;
+            decorateAllMessages();
+            queueAutoAttributionVerificationForRenderedMessages({ delay: 250 });
+        }, POST_MUTATION_DOM_REPAIR_DELAY_MS);
+    }
+
     function registerEventHandlers() {
         if (runtimeState.eventsRegistered) return;
         runtimeState.eventHandlers = {
             generationAfterCommands: () => injectPrompt(),
             characterMessageRendered: () => { onNewMessage(); scheduleDomRefreshSeries(120); },
             messageRendered: () => scheduleDomRefreshSeries(120),
-            messageUpdated: () => scheduleDomRefreshSeries(200),
+            messageUpdated: handleMessageUpdated,
             streamToken: () => { isStreamingGenerationActive = true; scheduleDecorateLast(hasMessageQuoteOverridesForLatestMessage() ? 0 : 80); scheduleStreamingAttributionVerification(); },
             generationEnded: () => {
                 isStreamingGenerationActive = false;
