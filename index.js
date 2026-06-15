@@ -2505,7 +2505,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                         }
                         markMessageAttributionVerified(mesIndex, msg);
                         clearStreamingAttributionOverrides(mesIndex);
-                        const repainted = await refreshAndDecorateMessageDom(mesIndex, msg, { queueVerification: false });
+                        const repainted = await decorateMessageDomFromCurrentRender(mesIndex, msg, { queueVerification: false });
                         scheduleMessageDomFollowupRepair(mesIndex, repainted);
                     } else if (isBareQuote) {
                         textUpdated = wrapQElementWithFontTag(qElement, finalColor);
@@ -3000,21 +3000,38 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         return true;
     }
 
+    async function decorateMessageDomFromCurrentRender(messageIndex, message, options = {}) {
+        const msg = message ?? getContext()?.chat?.[messageIndex];
+        let { ready, mesElement } = await waitForMessageDomReadyForDecoration(messageIndex, msg, options.timeoutMs ?? 400);
+        if (!ready && options.renderFallback !== false && renderMessageDomFallback(messageIndex, msg)) {
+            await waitForDomFrame();
+            ({ mesElement } = await waitForMessageDomReadyForDecoration(messageIndex, msg, 300));
+        }
+        mesElement = mesElement || getMessageElementByIndex(messageIndex);
+        if (!mesElement) return false;
+        decorateObservedMessages([mesElement], { queueVerification: options.queueVerification !== false });
+        return true;
+    }
+
     function scheduleMessageDomFollowupRepair(messageIndex, repainted) {
         const index = Number(messageIndex);
         if (!Number.isFinite(index) || index < 0) return;
         const chatGeneration = attributionChatGeneration;
         const delays = repainted ? [120, 900, 3200] : [0, 900, 3200];
         for (const delay of delays) {
-            setTimeout(() => {
-                if (!settings.enabled || !isDomEngine()) return;
-                if (chatGeneration !== attributionChatGeneration) return;
-                const msg = getContext()?.chat?.[index];
-                const mesElement = getMessageElementByIndex(index);
-                if (!msg || !mesElement) return;
-                const repairType = getMessageDomHealthRepairType(mesElement, msg, index);
-                if (repairType === 'refresh') scheduleMessageDomRepair(index, { delay: 0, verify: false, queueVerification: false });
-                else if (repairType === 'decorate') decorateObservedMessages([mesElement], { queueVerification: false });
+            setTimeout(async () => {
+                try {
+                    if (!settings.enabled || !isDomEngine()) return;
+                    if (chatGeneration !== attributionChatGeneration) return;
+                    const msg = getContext()?.chat?.[index];
+                    const mesElement = getMessageElementByIndex(index);
+                    if (!msg || !mesElement) return;
+                    const repairType = getMessageDomHealthRepairType(mesElement, msg, index);
+                    if (repairType === 'refresh') await decorateMessageDomFromCurrentRender(index, msg, { queueVerification: false });
+                    else if (repairType === 'decorate') decorateObservedMessages([mesElement], { queueVerification: false });
+                } catch (e) {
+                    console.warn('[Dialogue Colors] Follow-up DOM repair failed:', e);
+                }
             }, Math.max(0, Number(delay) || 0));
         }
     }
@@ -3054,7 +3071,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             } catch (e) {
                 console.warn('[Dialogue Colors] Post-update DOM repair failed:', e);
                 const mesElement = getMessageElementByIndex(index);
-                if (mesElement) decorateObservedMessages([mesElement]);
+                if (mesElement) decorateObservedMessages([mesElement], { queueVerification: options.queueVerification !== false });
             } finally {
                 if (runtimeState.messageDomRepairTimers.get(index) === timer) {
                     runtimeState.messageDomRepairTimers.delete(index);
@@ -5915,7 +5932,7 @@ ${quoteList}`;
             updateCharList();
         }
         if (appliedCorrections) {
-            const repainted = await refreshAndDecorateMessageDom(mesIndex, msg, { queueVerification: false });
+            const repainted = await decorateMessageDomFromCurrentRender(mesIndex, msg, { queueVerification: false });
             scheduleMessageDomFollowupRepair(mesIndex, repainted);
         } else {
             const mesElement = document.querySelector(`#chat .mes[mesid="${mesIndex}"]`) || document.querySelectorAll('#chat .mes[mesid]')[mesIndex];
