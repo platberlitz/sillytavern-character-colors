@@ -753,6 +753,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         clearSpeakerRegexCache();
         pruneExpandedCharacterRows();
         commit();
+        repaintDomAfterCharacterDataChange(0);
         if (typeof onComplete === 'function') onComplete({ removedKeys, keptKeys });
         showUndoToast(buildKeepAwareRemovalMessage(actionLabel || 'Removed', removedKeys.length, keptKeys.length, itemLabel), restore);
         return { removed: removedKeys.length, kept: keptKeys.length, skipped: keptKeys, removedKeys };
@@ -1602,6 +1603,10 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             nameToNewColor: buildNameToCurrentColorForKeys(list),
             saveImmediately: options.saveImmediately,
         });
+    }
+
+    function repaintDomAfterCharacterDataChange(delay = 0) {
+        if (isDomEngine()) scheduleDomRefreshSeries(delay);
     }
 
     function queueColorStateSave(options = {}) {
@@ -2498,7 +2503,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                             menu.remove();
                             return;
                         }
-                        await refreshAndDecorateMessageDom(mesIndex, msg);
+                        const repainted = await refreshAndDecorateMessageDom(mesIndex, msg);
+                        scheduleMessageDomFollowupRepair(mesIndex, repainted);
                     } else if (isBareQuote) {
                         textUpdated = wrapQElementWithFontTag(qElement, finalColor);
                     } else {
@@ -2984,6 +2990,10 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         decorateObservedMessages([mesElement]);
         scheduleDomSettleRefresh(DOM_RETRY_REFRESH_DELAYS);
         return true;
+    }
+
+    function scheduleMessageDomFollowupRepair(messageIndex, repainted) {
+        scheduleMessageDomRepair(messageIndex, { delay: repainted ? 120 : 0, verify: false });
     }
 
     function clearMessageDomRepairTimers() {
@@ -5881,7 +5891,8 @@ ${quoteList}`;
             updateCharList();
         }
         if (appliedCorrections) {
-            await refreshAndDecorateMessageDom(mesIndex, msg);
+            const repainted = await refreshAndDecorateMessageDom(mesIndex, msg);
+            scheduleMessageDomFollowupRepair(mesIndex, repainted);
         } else {
             const mesElement = document.querySelector(`#chat .mes[mesid="${mesIndex}"]`) || document.querySelectorAll('#chat .mes[mesid]')[mesIndex];
             if (mesElement) decorateObservedMessages([mesElement]);
@@ -6429,6 +6440,7 @@ ${quoteList}`;
         if (!name.trim()) return;
         const key = name.trim().toLowerCase();
         const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
+        let needsDomRepaint = false;
         if (characterColors[key]) {
             setEntryFromBaseColor(characterColors[key], normalizeHexColor(color, suggestColorForName(name) || getNextColor()));
             applyLiveColorChangesFromSnapshot(snapshot, [key]);
@@ -6442,8 +6454,10 @@ ${quoteList}`;
             if (!built.entry) return;
             characterColors[key] = built.entry;
             clearSpeakerRegexCache();
+            needsDomRepaint = true;
         }
         commit();
+        if (needsDomRepaint) repaintDomAfterCharacterDataChange(0);
     }
 
     function swapColors(key1, key2) {
@@ -6462,7 +6476,7 @@ ${quoteList}`;
         else expandedCharacterRows.add(key);
     }
 
-    function applyCharacterBaseColor(key, color) {
+    function applyCharacterBaseColor(key, color, options = {}) {
         const entry = characterColors[key];
         const nextColor = normalizeHexColor(color, null);
         if (!entry || !nextColor) return false;
@@ -6474,7 +6488,7 @@ ${quoteList}`;
         const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
         setEntryFromBaseColor(entry, nextColor);
         keys.slice(1).forEach(aliasKey => setEntryFromBaseColor(characterColors[aliasKey], nextColor));
-        applyLiveColorChangesFromSnapshot(snapshot, keys);
+        applyLiveColorChangesFromSnapshot(snapshot, keys, { saveImmediately: options.saveImmediately === true });
         applyFastColorUiUpdates(keys);
         return true;
     }
@@ -6571,7 +6585,17 @@ ${quoteList}`;
         return tpl.content.firstElementChild;
     }
 
-    function applyHexInputForElement(i) {
+    function applyColorInputForElement(i, options = {}) {
+        const c = characterColors[i.dataset.key];
+        if (!c) return false;
+        if (applyCharacterBaseColor(i.dataset.key, normalizeHexColor(i.value, getBaseColor(c)), options)) {
+            queueColorStateSave();
+            return true;
+        }
+        return false;
+    }
+
+    function applyHexInputForElement(i, options = {}) {
         const c = characterColors[i.dataset.key];
         if (!c) return false;
         const nextColor = normalizeManualColorInput(i.value, null);
@@ -6580,7 +6604,7 @@ ${quoteList}`;
             toast.warning('Enter a hex color like #ff66cc.');
             return false;
         }
-        if (applyCharacterBaseColor(i.dataset.key, nextColor)) queueColorStateSave();
+        if (applyCharacterBaseColor(i.dataset.key, nextColor, options)) queueColorStateSave();
         return true;
     }
 
@@ -6593,11 +6617,7 @@ ${quoteList}`;
         list.addEventListener('input', (e) => {
             const t = e.target;
             if (t.classList && t.classList.contains('dc-color-input')) {
-                const c = characterColors[t.dataset.key];
-                if (!c) return;
-                if (applyCharacterBaseColor(t.dataset.key, normalizeHexColor(t.value, getBaseColor(c)))) {
-                    queueColorStateSave();
-                }
+                applyColorInputForElement(t);
             }
         });
 
@@ -6605,9 +6625,10 @@ ${quoteList}`;
             const t = e.target;
             if (!t.classList) return;
             if (t.classList.contains('dc-color-input')) {
+                applyColorInputForElement(t, { saveImmediately: true });
                 maybeAutoRecolorAfterColorChange();
             } else if (t.classList.contains('dc-color-hex')) {
-                if (applyHexInputForElement(t)) maybeAutoRecolorAfterColorChange();
+                if (applyHexInputForElement(t, { saveImmediately: true })) maybeAutoRecolorAfterColorChange();
             }
         });
 
@@ -6615,7 +6636,7 @@ ${quoteList}`;
             const t = e.target;
             if (t.classList && t.classList.contains('dc-color-hex') && e.key === 'Enter') {
                 e.preventDefault();
-                if (applyHexInputForElement(t)) maybeAutoRecolorAfterColorChange();
+                if (applyHexInputForElement(t, { saveImmediately: true })) maybeAutoRecolorAfterColorChange();
                 t.blur();
             }
         });
@@ -6682,10 +6703,13 @@ ${quoteList}`;
             }
             const styleBtn = t.closest('.dc-style');
             if (styleBtn) {
+                const key = styleBtn.dataset.key;
+                if (!characterColors[key]) return;
                 const styles = ['', 'bold', 'italic', 'bold italic'];
-                const curr = characterColors[styleBtn.dataset.key].style || '';
-                characterColors[styleBtn.dataset.key].style = styles[(styles.indexOf(curr) + 1) % styles.length];
+                const curr = characterColors[key].style || '';
+                characterColors[key].style = styles[(styles.indexOf(curr) + 1) % styles.length];
                 commit();
+                repaintDomAfterCharacterDataChange(0);
                 return;
             }
             const aliasRemoveBtn = t.closest('.dc-alias-remove');
@@ -6698,6 +6722,7 @@ ${quoteList}`;
                     if (nextAliases.length !== characterColors[key].aliases.length) {
                         characterColors[key].aliases = nextAliases;
                         commit();
+                        repaintDomAfterCharacterDataChange(0);
                     }
                 }
                 return;
@@ -6721,6 +6746,7 @@ ${quoteList}`;
                         if (!aliases.includes(alias)) {
                             aliases.push(alias);
                             commit();
+                            repaintDomAfterCharacterDataChange(0);
                         } else {
                             inputRow.remove();
                         }
@@ -7252,6 +7278,7 @@ ${quoteList}`;
             const restore = createRestoreSnapshot();
             keepCharacterKeysOnly(keptKeys);
             commit();
+            repaintDomAfterCharacterDataChange(0);
             showUndoToast(buildKeepAwareRemovalMessage('Cleared', allKeys.length - keptKeys.length, keptKeys.length), restore);
         };
         $('dc-stats').onclick = showStatsPopup;
@@ -7289,6 +7316,7 @@ ${quoteList}`;
                 if (!color) { toast.error('Could not extract color'); return; }
                 const key = char.name.toLowerCase();
                 const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
+                let needsDomRepaint = false;
                 if (characterColors[key]) {
                     setEntryFromBaseColor(characterColors[key], color);
                     applyLiveColorChangesFromSnapshot(snapshot, [key]);
@@ -7296,8 +7324,10 @@ ${quoteList}`;
                     const built = buildCharacterEntry(char.name, { color, colorMode: 'base', locked: false, dialogueCount: 0 });
                     if (!built.entry) return;
                     characterColors[key] = built.entry;
+                    needsDomRepaint = true;
                 }
                 commit();
+                if (needsDomRepaint) repaintDomAfterCharacterDataChange(0);
                 toast.success(`Set ${char.name} to ${color}`);
             } catch {
                 toast.error('Failed to extract avatar color');
