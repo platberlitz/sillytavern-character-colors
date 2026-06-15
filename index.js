@@ -2503,6 +2503,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                             menu.remove();
                             return;
                         }
+                        clearMessageDomRepairTimer(mesIndex);
                         markMessageAttributionVerified(mesIndex, msg);
                         clearStreamingAttributionOverrides(mesIndex);
                         const repainted = await decorateMessageDomFromCurrentRender(mesIndex, msg, { queueVerification: false });
@@ -2895,10 +2896,18 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         return false;
     }
 
-    function waitForDomFrame() {
+    function waitForDomFrame(maxWaitMs = 80) {
         return new Promise(resolve => {
-            if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => resolve());
-            else setTimeout(resolve, 0);
+            let settled = false;
+            const finish = () => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timeoutId);
+                resolve();
+            };
+            const timeoutId = setTimeout(finish, Math.max(0, Number(maxWaitMs) || 0));
+            if (typeof requestAnimationFrame === 'function') requestAnimationFrame(finish);
+            else setTimeout(finish, 0);
         });
     }
 
@@ -3036,6 +3045,14 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         }
     }
 
+    function clearMessageDomRepairTimer(mesIndex) {
+        const index = Number(mesIndex);
+        if (!Number.isFinite(index) || index < 0) return;
+        const timer = runtimeState.messageDomRepairTimers.get(index);
+        if (timer) clearTimeout(timer);
+        runtimeState.messageDomRepairTimers.delete(index);
+    }
+
     function clearMessageDomRepairTimers() {
         for (const timer of runtimeState.messageDomRepairTimers.values()) clearTimeout(timer);
         runtimeState.messageDomRepairTimers.clear();
@@ -3045,8 +3062,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const index = Number(mesIndex);
         if (!Number.isFinite(index) || index < 0) return false;
 
-        const existing = runtimeState.messageDomRepairTimers.get(index);
-        if (existing) clearTimeout(existing);
+        clearMessageDomRepairTimer(index);
 
         const chatGeneration = attributionChatGeneration;
         const delay = Math.max(0, Number(options.delay ?? POST_MUTATION_DOM_REPAIR_DELAY_MS) || 0);
@@ -3058,7 +3074,10 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 const msg = getContext()?.chat?.[index];
                 if (!msg || msg.is_system) return;
 
-                await refreshAndDecorateMessageDom(index, msg, { queueVerification: options.queueVerification !== false });
+                await decorateMessageDomFromCurrentRender(index, msg, {
+                    queueVerification: options.queueVerification !== false,
+                    timeoutMs: options.timeoutMs ?? 700,
+                });
 
                 if (chatGeneration !== attributionChatGeneration) return;
 
@@ -5932,6 +5951,7 @@ ${quoteList}`;
             updateCharList();
         }
         if (appliedCorrections) {
+            clearMessageDomRepairTimer(mesIndex);
             const repainted = await decorateMessageDomFromCurrentRender(mesIndex, msg, { queueVerification: false });
             scheduleMessageDomFollowupRepair(mesIndex, repainted);
         } else {
