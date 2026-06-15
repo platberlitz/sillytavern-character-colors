@@ -2857,11 +2857,20 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         if (!Number.isFinite(messageIndex) || messageIndex < 0) return false;
         const ctx = getContext();
         if (typeof ctx?.updateMessageBlock === 'function') {
+            let timeoutId = null;
             try {
-                await ctx.updateMessageBlock(messageIndex, message ?? ctx?.chat?.[messageIndex]);
-                return true;
+                const status = await Promise.race([
+                    Promise.resolve(ctx.updateMessageBlock(messageIndex, message ?? ctx?.chat?.[messageIndex])).then(() => 'updated'),
+                    new Promise(resolve => {
+                        timeoutId = setTimeout(() => resolve('timeout'), UPDATE_MESSAGE_BLOCK_TIMEOUT_MS);
+                    }),
+                ]);
+                if (status === 'updated') return true;
+                console.warn('[Dialogue Colors] updateMessageBlock timed out, using fallback render.');
             } catch (e) {
                 console.warn('[Dialogue Colors] updateMessageBlock failed, using fallback render:', e);
+            } finally {
+                if (timeoutId) clearTimeout(timeoutId);
             }
         }
         if (renderMessageDomFallback(messageIndex, message, ctx)) {
@@ -2883,12 +2892,6 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => resolve());
             else setTimeout(resolve, 0);
         });
-    }
-
-    async function waitForMobileRenderSettleWindow() {
-        await waitForDomFrame();
-        await new Promise(resolve => setTimeout(resolve, 80));
-        await waitForDomFrame();
     }
 
     function getMessageDomReadiness(mesElement, msg, mesIndex) {
@@ -2971,7 +2974,6 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     async function refreshAndDecorateMessageDom(messageIndex, message) {
         const msg = message ?? getContext()?.chat?.[messageIndex];
         await refreshMessageDom(messageIndex, msg);
-        await waitForMobileRenderSettleWindow();
         let { ready, mesElement } = await waitForMessageDomReadyForDecoration(messageIndex, msg);
         if (!ready && renderMessageDomFallback(messageIndex, msg)) {
             await waitForDomFrame();
@@ -2999,28 +3001,31 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const chatGeneration = attributionChatGeneration;
         const delay = Math.max(0, Number(options.delay ?? POST_MUTATION_DOM_REPAIR_DELAY_MS) || 0);
         const timer = setTimeout(async () => {
-            runtimeState.messageDomRepairTimers.delete(index);
-            if (!settings.enabled || !isDomEngine()) return;
-            if (chatGeneration !== attributionChatGeneration) return;
-
-            const msg = getContext()?.chat?.[index];
-            if (!msg || msg.is_system) return;
-
             try {
+                if (!settings.enabled || !isDomEngine()) return;
+                if (chatGeneration !== attributionChatGeneration) return;
+
+                const msg = getContext()?.chat?.[index];
+                if (!msg || msg.is_system) return;
+
                 await refreshAndDecorateMessageDom(index, msg);
+
+                if (chatGeneration !== attributionChatGeneration) return;
+
+                if (options.verify !== false) {
+                    queueAutoAttributionVerificationForMessage(index, {
+                        force: options.forceVerify === true,
+                        delay: options.verifyDelay ?? AUTO_ATTRIBUTION_VERIFY_DELAY_MS,
+                    });
+                }
             } catch (e) {
                 console.warn('[Dialogue Colors] Post-update DOM repair failed:', e);
                 const mesElement = getMessageElementByIndex(index);
                 if (mesElement) decorateObservedMessages([mesElement]);
-            }
-
-            if (chatGeneration !== attributionChatGeneration) return;
-
-            if (options.verify !== false) {
-                queueAutoAttributionVerificationForMessage(index, {
-                    force: options.forceVerify === true,
-                    delay: options.verifyDelay ?? AUTO_ATTRIBUTION_VERIFY_DELAY_MS,
-                });
+            } finally {
+                if (runtimeState.messageDomRepairTimers.get(index) === timer) {
+                    runtimeState.messageDomRepairTimers.delete(index);
+                }
             }
         }, delay);
         runtimeState.messageDomRepairTimers.set(index, timer);
@@ -4660,6 +4665,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     const DOM_HEALTH_CHECK_INTERVAL_MS = 1500;
     const DOM_HEALTH_CHECK_VISIBLE_LIMIT = 40;
     const POST_MUTATION_DOM_REPAIR_DELAY_MS = 700;
+    const UPDATE_MESSAGE_BLOCK_TIMEOUT_MS = 1500;
     let pendingDeferredMutations = false;
 
     function hashMessageText(text) {
@@ -5128,6 +5134,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 return;
             }
             if (isDecoratingDom) return;
+            const repairIndex = Number(mesIndex);
+            if (runtimeState.messageDomRepairTimers.has(repairIndex)) return;
             // Re-query .mes_text: external agents may replace the node entirely.
             const currentMesText = mesElement.querySelector('.mes_text');
             if (!currentMesText || !currentMesText.isConnected) return;
@@ -7466,12 +7474,13 @@ ${quoteList}`;
     }
 
     function handleMessageUpdated(mesIndex) {
-        scheduleDomRefreshSeries(200);
         const index = Number(mesIndex);
         if (Number.isFinite(index) && index >= 0) {
             scheduleMessageDomRepair(index, { forceVerify: true, verifyDelay: 250 });
             return;
         }
+
+        scheduleDomRefreshSeries(200);
 
         const chatGeneration = attributionChatGeneration;
         setTimeout(() => {
