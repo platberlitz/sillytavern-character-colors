@@ -2504,9 +2504,13 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                             return;
                         }
                         clearMessageDomRepairTimer(mesIndex);
+                        cancelMessageDomFollowupRepairs(mesIndex);
                         markMessageAttributionVerified(mesIndex, msg);
                         clearStreamingAttributionOverrides(mesIndex);
-                        const repainted = await decorateMessageDomFromCurrentRender(mesIndex, msg, { queueVerification: false });
+                        // Override-only change: the visible DOM is already rendered by
+                        // SillyTavern, so decorate in place without an innerHTML fallback
+                        // write (which would trigger an observer re-decoration cascade).
+                        const repainted = await decorateMessageDomFromCurrentRender(mesIndex, msg, { queueVerification: false, renderFallback: false });
                         scheduleMessageDomFollowupRepair(mesIndex, repainted);
                     } else if (isBareQuote) {
                         textUpdated = wrapQElementWithFontTag(qElement, finalColor);
@@ -3022,13 +3026,39 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         return true;
     }
 
+    // Per-message follow-up repair timers so override/verifier repaints can be
+    // cancelled when a newer override lands for the same message (prevents
+    // stale follow-ups from re-decorating with outdated state).
+    const messageDomFollowupTimers = new Map();
+
+    function cancelMessageDomFollowupRepairs(messageIndex) {
+        const index = Number(messageIndex);
+        if (!Number.isFinite(index) || index < 0) return;
+        const timers = messageDomFollowupTimers.get(index);
+        if (timers) {
+            timers.forEach(clearTimeout);
+            messageDomFollowupTimers.delete(index);
+        }
+    }
+
     function scheduleMessageDomFollowupRepair(messageIndex, repainted) {
         const index = Number(messageIndex);
         if (!Number.isFinite(index) || index < 0) return;
+        // Cancel any in-flight follow-ups for this message first so we never
+        // stack overlapping repair passes that fight each other.
+        cancelMessageDomFollowupRepairs(index);
         const chatGeneration = attributionChatGeneration;
         const delays = repainted ? [120, 900, 3200] : [0, 900, 3200];
+        const timers = [];
         for (const delay of delays) {
-            setTimeout(async () => {
+            const timer = setTimeout(async () => {
+                // Remove this timer from the tracked set as soon as it fires.
+                const tracked = messageDomFollowupTimers.get(index);
+                if (tracked) {
+                    const at = tracked.indexOf(timer);
+                    if (at >= 0) tracked.splice(at, 1);
+                    if (!tracked.length) messageDomFollowupTimers.delete(index);
+                }
                 try {
                     if (!settings.enabled || !isDomEngine()) return;
                     if (chatGeneration !== attributionChatGeneration) return;
@@ -3036,13 +3066,18 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                     const mesElement = getMessageElementByIndex(index);
                     if (!msg || !mesElement) return;
                     const repairType = getMessageDomHealthRepairType(mesElement, msg, index);
-                    if (repairType === 'refresh') await decorateMessageDomFromCurrentRender(index, msg, { queueVerification: false });
+                    // renderFallback:false — never write .mes_text innerHTML here.
+                    // A fallback write would trigger the chat observer and cause a
+                    // re-decoration cascade (the flicker users were seeing).
+                    if (repairType === 'refresh') await decorateMessageDomFromCurrentRender(index, msg, { queueVerification: false, renderFallback: false });
                     else if (repairType === 'decorate') decorateObservedMessages([mesElement], { queueVerification: false });
                 } catch (e) {
                     console.warn('[Dialogue Colors] Follow-up DOM repair failed:', e);
                 }
             }, Math.max(0, Number(delay) || 0));
+            timers.push(timer);
         }
+        messageDomFollowupTimers.set(index, timers);
     }
 
     function clearMessageDomRepairTimer(mesIndex) {
@@ -3056,6 +3091,9 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     function clearMessageDomRepairTimers() {
         for (const timer of runtimeState.messageDomRepairTimers.values()) clearTimeout(timer);
         runtimeState.messageDomRepairTimers.clear();
+        // Also clear all per-message follow-up repair timers.
+        for (const timers of messageDomFollowupTimers.values()) timers.forEach(clearTimeout);
+        messageDomFollowupTimers.clear();
     }
 
     function scheduleMessageDomRepair(mesIndex, options = {}) {
@@ -5952,7 +5990,10 @@ ${quoteList}`;
         }
         if (appliedCorrections) {
             clearMessageDomRepairTimer(mesIndex);
-            const repainted = await decorateMessageDomFromCurrentRender(mesIndex, msg, { queueVerification: false });
+            cancelMessageDomFollowupRepairs(mesIndex);
+            // Verifier corrections only change override metadata; decorate the
+            // already-rendered DOM without an innerHTML fallback write.
+            const repainted = await decorateMessageDomFromCurrentRender(mesIndex, msg, { queueVerification: false, renderFallback: false });
             scheduleMessageDomFollowupRepair(mesIndex, repainted);
         } else {
             const mesElement = document.querySelector(`#chat .mes[mesid="${mesIndex}"]`) || document.querySelectorAll('#chat .mes[mesid]')[mesIndex];
