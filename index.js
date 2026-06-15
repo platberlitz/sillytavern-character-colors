@@ -4671,40 +4671,43 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             const sameParagraphAsPrevious = isSameDialogueParagraph(segment.paragraph, previousParagraph);
             let assignment = null;
 
-            if (isStreamingMsg && streamingHeuristicCache.has(segment.start)) {
+            // Tier 1: explicit per-segment override. Manual/verifier overrides
+            // must always beat cached streaming heuristics, otherwise a stale
+            // cached speaker can make right-click and Verified DOM corrections
+            // appear to do nothing on the latest message.
+            const overrideName = overrides ? overrides[segment.index] : undefined;
+            if (overrideName) {
+                assignment = resolveSingleSpeakerAssignment(String(overrideName), lookup);
+            }
+
+            if (!assignment && isStreamingMsg && streamingHeuristicCache.has(segment.start)) {
                 assignment = streamingHeuristicCache.get(segment.start);
-            } else {
-                // Tier 1: explicit per-segment override.
-                const overrideName = overrides ? overrides[segment.index] : undefined;
-                if (overrideName) {
-                    assignment = resolveSingleSpeakerAssignment(String(overrideName), lookup);
-                }
+            }
 
-                // Tier 2: masked, paragraph-scoped proximity near the quote.
-                if (!assignment) {
-                    const windowStart = Math.max(segment.paragraph.start, segment.start - 240);
-                    const windowEnd = Math.min(segment.paragraph.end, segment.end + 120);
-                    assignment = findClosestMentionedSpeakerInContext(maskedText, windowStart, windowEnd, segment.start, segment.end, lookup, sortedLookupKeys);
-                }
+            // Tier 2: masked, paragraph-scoped proximity near the quote.
+            if (!assignment) {
+                const windowStart = Math.max(segment.paragraph.start, segment.start - 240);
+                const windowEnd = Math.min(segment.paragraph.end, segment.end + 120);
+                assignment = findClosestMentionedSpeakerInContext(maskedText, windowStart, windowEnd, segment.start, segment.end, lookup, sortedLookupKeys);
+            }
 
-                // Tier 3: carry only within the same paragraph/line.
-                if (!assignment && sameParagraphAsPrevious && lastResolvedSpeakerKey) {
-                    assignment = lookup.get(lastResolvedSpeakerKey) || null;
-                }
+            // Tier 3: carry only within the same paragraph/line.
+            if (!assignment && sameParagraphAsPrevious && lastResolvedSpeakerKey) {
+                assignment = lookup.get(lastResolvedSpeakerKey) || null;
+            }
 
-                // Tier 4: alternate speakers across unattributed new paragraphs.
-                if (!assignment && !sameParagraphAsPrevious) {
-                    assignment = getAlternatingAssignment();
-                }
+            // Tier 4: alternate speakers across unattributed new paragraphs.
+            if (!assignment && !sameParagraphAsPrevious) {
+                assignment = getAlternatingAssignment();
+            }
 
-                // Tier 5: default message speaker.
-                if (!assignment) {
-                    assignment = defaultSpeaker || ensureDefaultSpeaker();
-                }
+            // Tier 5: default message speaker.
+            if (!assignment) {
+                assignment = defaultSpeaker || ensureDefaultSpeaker();
+            }
 
-                if (isStreamingMsg && assignment) {
-                    streamingHeuristicCache.set(segment.start, assignment);
-                }
+            if (isStreamingMsg && assignment) {
+                streamingHeuristicCache.set(segment.start, assignment);
             }
 
             if (assignment) {
@@ -4850,6 +4853,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         if (!entry) return false;
         entry.segments[String(segmentIndex)] = String(speakerName);
         entry.sources[String(segmentIndex)] = options.source || 'llm';
+        streamingHeuristicCache.clear();
         return true;
     }
 
@@ -4889,6 +4893,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         entry.segments[String(segmentIndex)] = String(speakerName);
         if (!isPlainObject(entry.sources)) entry.sources = {};
         entry.sources[String(segmentIndex)] = options.source || 'manual';
+        streamingHeuristicCache.clear();
         // A manual override means the LLM-verified state is no longer authoritative.
         delete entry.verifiedHash;
         delete entry.verifiedAt;
