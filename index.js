@@ -2498,12 +2498,14 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                             menu.remove();
                             return;
                         }
-                        if (!setMessageQuoteOverride(mesIndex, msg, segmentIndex, name)) {
+                        if (!setMessageQuoteOverride(mesIndex, msg, segmentIndex, name, { source: 'manual' })) {
                             toast.error('Could not save quote override.');
                             menu.remove();
                             return;
                         }
-                        const repainted = await refreshAndDecorateMessageDom(mesIndex, msg);
+                        markMessageAttributionVerified(mesIndex, msg);
+                        clearStreamingAttributionOverrides(mesIndex);
+                        const repainted = await refreshAndDecorateMessageDom(mesIndex, msg, { queueVerification: false });
                         scheduleMessageDomFollowupRepair(mesIndex, repainted);
                     } else if (isBareQuote) {
                         textUpdated = wrapQElementWithFontTag(qElement, finalColor);
@@ -2902,9 +2904,9 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
     function getMessageDomReadiness(mesElement, msg, mesIndex) {
         const mesText = mesElement?.querySelector?.('.mes_text');
-        if (!mesText || !msg || msg.is_system) return { ready: false, totalSegments: 0, matchedSegments: 0, expectedDecorations: 0, coloredDecorations: 0 };
+        if (!mesText || !msg || msg.is_system) return { ready: false, totalSegments: 0, matchedSegments: 0, expectedDecorations: 0, coloredDecorations: 0, correctDecorations: 0 };
         if (mesText.querySelector('font[color]') || collectFontColorsFromText(msg.mes).size) {
-            return { ready: true, totalSegments: 0, matchedSegments: 0, expectedDecorations: 0, coloredDecorations: 0 };
+            return { ready: true, totalSegments: 0, matchedSegments: 0, expectedDecorations: 0, coloredDecorations: 0, correctDecorations: 0 };
         }
         const attribution = attributeDialogueSegments(msg.mes, msg.name, {
             autoAddMessageSpeaker: false,
@@ -2918,14 +2920,20 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const totalSegments = quoteSegments.length + emphasisSegments.length;
         const expectedDecorations = quoteSegments.filter(seg => seg.assignment).length + emphasisSegments.filter(seg => seg.assignment).length;
         let matchedSegments = 0;
-        matchSegmentsToElements(quoteSegments, qElements, seg => normalizeSegmentText(seg.text), () => { matchedSegments++; });
-        matchSegmentsToElements(emphasisSegments, emElements, seg => normalizeSegmentText(seg.text.slice(1, -1)), () => { matchedSegments++; });
+        let correctDecorations = 0;
+        const countMatch = (seg, el) => {
+            matchedSegments++;
+            if (seg.assignment && el.getAttribute('data-dc-speaker') === seg.assignment.key) correctDecorations++;
+        };
+        matchSegmentsToElements(quoteSegments, qElements, seg => normalizeSegmentText(seg.text), countMatch);
+        matchSegmentsToElements(emphasisSegments, emElements, seg => normalizeSegmentText(seg.text.slice(1, -1)), countMatch);
         return {
             ready: totalSegments === 0 || matchedSegments >= totalSegments,
             totalSegments,
             matchedSegments,
             expectedDecorations,
             coloredDecorations: mesText.querySelectorAll('[data-dc-colored]').length,
+            correctDecorations,
         };
     }
 
@@ -2977,7 +2985,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         });
     }
 
-    async function refreshAndDecorateMessageDom(messageIndex, message) {
+    async function refreshAndDecorateMessageDom(messageIndex, message, options = {}) {
         const msg = message ?? getContext()?.chat?.[messageIndex];
         await refreshMessageDom(messageIndex, msg);
         let { ready, mesElement } = await waitForMessageDomReadyForDecoration(messageIndex, msg);
@@ -2987,13 +2995,28 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         }
         mesElement = mesElement || getMessageElementByIndex(messageIndex);
         if (!mesElement) return false;
-        decorateObservedMessages([mesElement]);
+        decorateObservedMessages([mesElement], { queueVerification: options.queueVerification !== false });
         scheduleDomSettleRefresh(DOM_RETRY_REFRESH_DELAYS);
         return true;
     }
 
     function scheduleMessageDomFollowupRepair(messageIndex, repainted) {
-        scheduleMessageDomRepair(messageIndex, { delay: repainted ? 120 : 0, verify: false });
+        const index = Number(messageIndex);
+        if (!Number.isFinite(index) || index < 0) return;
+        const chatGeneration = attributionChatGeneration;
+        const delays = repainted ? [120, 900, 3200] : [0, 900, 3200];
+        for (const delay of delays) {
+            setTimeout(() => {
+                if (!settings.enabled || !isDomEngine()) return;
+                if (chatGeneration !== attributionChatGeneration) return;
+                const msg = getContext()?.chat?.[index];
+                const mesElement = getMessageElementByIndex(index);
+                if (!msg || !mesElement) return;
+                const repairType = getMessageDomHealthRepairType(mesElement, msg, index);
+                if (repairType === 'refresh') scheduleMessageDomRepair(index, { delay: 0, verify: false, queueVerification: false });
+                else if (repairType === 'decorate') decorateObservedMessages([mesElement], { queueVerification: false });
+            }, Math.max(0, Number(delay) || 0));
+        }
     }
 
     function clearMessageDomRepairTimers() {
@@ -3018,7 +3041,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 const msg = getContext()?.chat?.[index];
                 if (!msg || msg.is_system) return;
 
-                await refreshAndDecorateMessageDom(index, msg);
+                await refreshAndDecorateMessageDom(index, msg, { queueVerification: options.queueVerification !== false });
 
                 if (chatGeneration !== attributionChatGeneration) return;
 
@@ -5189,7 +5212,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             return !settings.disableNarration && !!settings.narratorColor && !mesText.hasAttribute('data-dc-narrator') ? 'decorate' : '';
         }
         if (!readiness.ready) return 'refresh';
-        return readiness.expectedDecorations > readiness.coloredDecorations ? 'decorate' : '';
+        return readiness.expectedDecorations > readiness.correctDecorations ? 'decorate' : '';
     }
 
     function runDomHealthCheck() {
@@ -5332,7 +5355,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         return decorateMessageDom(mesElement, msg, mesIndex);
     }
 
-    function decorateObservedMessages(elements) {
+    function decorateObservedMessages(elements, options = {}) {
         if (!settings.enabled || !isDomEngine() || !elements?.length) return;
         const previousDecoratingState = isDecoratingDom;
         isDecoratingDom = true;
@@ -5360,7 +5383,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             queueColorStateSave({ history: false, injectPrompt: false });
         }
         updateLegend();
-        queueAutoAttributionVerificationForElements(elements);
+        if (options.queueVerification !== false) queueAutoAttributionVerificationForElements(elements);
     }
 
     function decorateLastMessageDom() {
@@ -5871,11 +5894,12 @@ ${quoteList}`;
             const latestEntry = getMessageQuoteOverrideEntry(mesIndex, msg, !useTransientOverrides);
             const existingOverride = latestEntry?.segments?.[String(index)];
             const existingSource = latestEntry?.sources?.[String(index)];
-            if (existingOverride && existingSource !== 'llm') continue;
+            if (existingOverride && existingSource !== 'llm' && !options.manual) continue;
 
+            const overrideSource = options.manual ? 'manual' : 'llm';
             const didSetOverride = useTransientOverrides
-                ? setStreamingAttributionOverride(mesIndex, msg, index, assignment.name, { source: 'llm' })
-                : setMessageQuoteOverride(mesIndex, msg, index, assignment.name, { source: 'llm' });
+                ? setStreamingAttributionOverride(mesIndex, msg, index, assignment.name, { source: overrideSource })
+                : setMessageQuoteOverride(mesIndex, msg, index, assignment.name, { source: overrideSource });
             if (didSetOverride) {
                 appliedCorrections++;
                 if (created) createdCharacters = true;
@@ -5891,7 +5915,7 @@ ${quoteList}`;
             updateCharList();
         }
         if (appliedCorrections) {
-            const repainted = await refreshAndDecorateMessageDom(mesIndex, msg);
+            const repainted = await refreshAndDecorateMessageDom(mesIndex, msg, { queueVerification: false });
             scheduleMessageDomFollowupRepair(mesIndex, repainted);
         } else {
             const mesElement = document.querySelector(`#chat .mes[mesid="${mesIndex}"]`) || document.querySelectorAll('#chat .mes[mesid]')[mesIndex];
