@@ -2848,11 +2848,12 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             || null;
     }
 
-    function renderMessageDomFallback(messageIndex, message, ctx = getContext()) {
+    function renderMessageDomFallback(messageIndex, message, ctx = getContext(), detailsState = null) {
         const mesEl = getMessageElementByIndex(messageIndex);
         const mesText = mesEl?.querySelector?.('.mes_text');
         if (!mesText || !message) return false;
         if (suspendMessageDomWorkForEdit(mesEl, messageIndex)) return false;
+        const openDetailsState = detailsState ?? captureOpenDetailsState(mesText);
         const rawText = stripColorBlocks(message.mes || '');
         let formatted = '';
         try {
@@ -2863,7 +2864,11 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             console.warn('[Dialogue Colors] Message formatting fallback failed:', e);
         }
         if (!formatted && typeof converter?.makeHtml === 'function') formatted = converter.makeHtml(rawText);
-        mesText.innerHTML = formatted || escapeHtml(rawText).replace(/\n/g, '<br>');
+        try {
+            mesText.innerHTML = formatted || escapeHtml(rawText).replace(/\n/g, '<br>');
+        } finally {
+            restoreOpenDetailsState(mesText, openDetailsState);
+        }
         return true;
     }
 
@@ -2871,12 +2876,15 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         if (!Number.isFinite(messageIndex) || messageIndex < 0) return false;
         const mesElement = getMessageElementByIndex(messageIndex);
         if (suspendMessageDomWorkForEdit(mesElement, messageIndex)) return false;
+        const openDetailsState = captureMessageOpenDetailsState(mesElement, messageIndex);
         const ctx = getContext();
         if (typeof ctx?.updateMessageBlock === 'function') {
             let timeoutId = null;
             try {
+                const updatePromise = Promise.resolve(ctx.updateMessageBlock(messageIndex, message ?? ctx?.chat?.[messageIndex]))
+                    .finally(() => restoreMessageOpenDetailsState(mesElement, messageIndex, openDetailsState));
                 const status = await Promise.race([
-                    Promise.resolve(ctx.updateMessageBlock(messageIndex, message ?? ctx?.chat?.[messageIndex])).then(() => 'updated'),
+                    updatePromise.then(() => 'updated'),
                     new Promise(resolve => {
                         timeoutId = setTimeout(() => resolve('timeout'), UPDATE_MESSAGE_BLOCK_TIMEOUT_MS);
                     }),
@@ -2889,7 +2897,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 if (timeoutId) clearTimeout(timeoutId);
             }
         }
-        if (renderMessageDomFallback(messageIndex, message, ctx)) {
+        if (renderMessageDomFallback(messageIndex, message, ctx, openDetailsState)) {
             return true;
         }
         if (typeof eventSource?.emit === 'function' && event_types?.MESSAGE_UPDATED) {
@@ -4244,10 +4252,15 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     function stripColorBlockFromElement(element) {
         const mesText = element?.querySelector?.('.mes_text') || element;
         if (!mesText) return false;
+        const openDetailsState = captureOpenDetailsState(mesText);
         const before = mesText.innerHTML;
         const cleaned = before.replace(/\[COLORS?:[^\]]*\]/gi, '');
         if (cleaned === before) return false;
-        mesText.innerHTML = cleaned;
+        try {
+            mesText.innerHTML = cleaned;
+        } finally {
+            restoreOpenDetailsState(mesText, openDetailsState);
+        }
         return true;
     }
 
@@ -4820,6 +4833,72 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         runtimeState.pendingObservedMessages?.delete?.(editingMesElement);
         clearMessageObservers(editingMesElement);
         return true;
+    }
+
+    function getElementPath(root, element) {
+        if (!root || !element) return null;
+        const path = [];
+        let current = element;
+        while (current && current !== root) {
+            const parent = current.parentElement;
+            if (!parent) return null;
+            const index = Array.prototype.indexOf.call(parent.children, current);
+            if (index < 0) return null;
+            path.unshift(index);
+            current = parent;
+        }
+        return current === root ? path : null;
+    }
+
+    function getElementByPath(root, path) {
+        if (!root || !Array.isArray(path)) return null;
+        let current = root;
+        for (const index of path) {
+            current = current?.children?.[index];
+            if (!current) return null;
+        }
+        return current;
+    }
+
+    function captureOpenDetailsState(root) {
+        if (!root?.querySelectorAll) return null;
+        const allDetails = Array.from(root.querySelectorAll('details'));
+        const detailsState = allDetails.map((detailsElement, index) => ({
+            path: getElementPath(root, detailsElement),
+            index,
+            open: detailsElement.open,
+        }));
+        return detailsState.length ? detailsState : null;
+    }
+
+    function restoreOpenDetailsState(root, state) {
+        if (!root || !state?.length) return false;
+        const allDetails = Array.from(root.querySelectorAll('details'));
+        let restored = false;
+        for (const entry of state) {
+            let detailsElement = entry?.path ? getElementByPath(root, entry.path) : null;
+            if (!detailsElement || detailsElement.tagName !== 'DETAILS') {
+                detailsElement = Number.isFinite(entry?.index) ? allDetails[entry.index] : null;
+            }
+            if (detailsElement?.tagName === 'DETAILS') {
+                detailsElement.open = entry.open === true;
+                restored = true;
+            }
+        }
+        return restored;
+    }
+
+    function getMessageDetailsRoot(mesElement, mesIndex) {
+        const resolvedElement = mesElement?.isConnected ? mesElement : getMessageElementByIndex(mesIndex);
+        return resolvedElement?.querySelector?.('.mes_text') || null;
+    }
+
+    function captureMessageOpenDetailsState(mesElement, mesIndex) {
+        return captureOpenDetailsState(getMessageDetailsRoot(mesElement, mesIndex));
+    }
+
+    function restoreMessageOpenDetailsState(mesElement, mesIndex, state) {
+        return restoreOpenDetailsState(getMessageDetailsRoot(mesElement, mesIndex), state);
     }
 
     function hashMessageText(text) {
