@@ -2852,6 +2852,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const mesEl = getMessageElementByIndex(messageIndex);
         const mesText = mesEl?.querySelector?.('.mes_text');
         if (!mesText || !message) return false;
+        if (suspendMessageDomWorkForEdit(mesEl, messageIndex)) return false;
         const rawText = stripColorBlocks(message.mes || '');
         let formatted = '';
         try {
@@ -2868,6 +2869,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
     async function refreshMessageDom(messageIndex, message) {
         if (!Number.isFinite(messageIndex) || messageIndex < 0) return false;
+        const mesElement = getMessageElementByIndex(messageIndex);
+        if (suspendMessageDomWorkForEdit(mesElement, messageIndex)) return false;
         const ctx = getContext();
         if (typeof ctx?.updateMessageBlock === 'function') {
             let timeoutId = null;
@@ -2978,6 +2981,10 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
             const check = () => {
                 const mesElement = getMessageElementByIndex(messageIndex);
+                if (suspendMessageDomWorkForEdit(mesElement, messageIndex)) {
+                    finish({ ready: false, mesElement, readiness: null, edited: true });
+                    return;
+                }
                 const readiness = getMessageDomReadiness(mesElement, msg, messageIndex);
                 if (readiness.ready) {
                     finish({ ready: true, mesElement, readiness });
@@ -3000,29 +3007,37 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
     async function refreshAndDecorateMessageDom(messageIndex, message, options = {}) {
         const msg = message ?? getContext()?.chat?.[messageIndex];
+        const mesElement = getMessageElementByIndex(messageIndex);
+        if (suspendMessageDomWorkForEdit(mesElement, messageIndex)) return false;
         await refreshMessageDom(messageIndex, msg);
-        let { ready, mesElement } = await waitForMessageDomReadyForDecoration(messageIndex, msg);
+        let { ready, mesElement: readyMesElement, edited } = await waitForMessageDomReadyForDecoration(messageIndex, msg);
+        if (edited) return false;
         if (!ready && renderMessageDomFallback(messageIndex, msg)) {
             await waitForDomFrame();
-            ({ mesElement } = await waitForMessageDomReadyForDecoration(messageIndex, msg, 300));
+            ({ mesElement: readyMesElement, edited } = await waitForMessageDomReadyForDecoration(messageIndex, msg, 300));
+            if (edited) return false;
         }
-        mesElement = mesElement || getMessageElementByIndex(messageIndex);
-        if (!mesElement) return false;
-        decorateObservedMessages([mesElement], { queueVerification: options.queueVerification !== false });
+        const effectiveMesElement = readyMesElement || getMessageElementByIndex(messageIndex);
+        if (!effectiveMesElement) return false;
+        decorateObservedMessages([effectiveMesElement], { queueVerification: options.queueVerification !== false });
         scheduleDomSettleRefresh(DOM_RETRY_REFRESH_DELAYS);
         return true;
     }
 
     async function decorateMessageDomFromCurrentRender(messageIndex, message, options = {}) {
         const msg = message ?? getContext()?.chat?.[messageIndex];
-        let { ready, mesElement } = await waitForMessageDomReadyForDecoration(messageIndex, msg, options.timeoutMs ?? 400);
+        const mesElement = getMessageElementByIndex(messageIndex);
+        if (suspendMessageDomWorkForEdit(mesElement, messageIndex)) return false;
+        let { ready, mesElement: readyMesElement, edited } = await waitForMessageDomReadyForDecoration(messageIndex, msg, options.timeoutMs ?? 400);
+        if (edited) return false;
         if (!ready && options.renderFallback !== false && renderMessageDomFallback(messageIndex, msg)) {
             await waitForDomFrame();
-            ({ mesElement } = await waitForMessageDomReadyForDecoration(messageIndex, msg, 300));
+            ({ mesElement: readyMesElement, edited } = await waitForMessageDomReadyForDecoration(messageIndex, msg, 300));
+            if (edited) return false;
         }
-        mesElement = mesElement || getMessageElementByIndex(messageIndex);
-        if (!mesElement) return false;
-        decorateObservedMessages([mesElement], { queueVerification: options.queueVerification !== false });
+        const effectiveMesElement = readyMesElement || getMessageElementByIndex(messageIndex);
+        if (!effectiveMesElement) return false;
+        decorateObservedMessages([effectiveMesElement], { queueVerification: options.queueVerification !== false });
         return true;
     }
 
@@ -3044,6 +3059,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     function scheduleMessageDomFollowupRepair(messageIndex, repainted) {
         const index = Number(messageIndex);
         if (!Number.isFinite(index) || index < 0) return;
+        if (suspendMessageDomWorkForEdit(getMessageElementByIndex(index), index)) return;
         // Cancel any in-flight follow-ups for this message first so we never
         // stack overlapping repair passes that fight each other.
         cancelMessageDomFollowupRepairs(index);
@@ -3065,6 +3081,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                     const msg = getContext()?.chat?.[index];
                     const mesElement = getMessageElementByIndex(index);
                     if (!msg || !mesElement) return;
+                    if (suspendMessageDomWorkForEdit(mesElement, index)) return;
                     const repairType = getMessageDomHealthRepairType(mesElement, msg, index);
                     // renderFallback:false — never write .mes_text innerHTML here.
                     // A fallback write would trigger the chat observer and cause a
@@ -3100,6 +3117,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const index = Number(mesIndex);
         if (!Number.isFinite(index) || index < 0) return false;
 
+        if (suspendMessageDomWorkForEdit(getMessageElementByIndex(index), index)) return false;
+
         clearMessageDomRepairTimer(index);
 
         const chatGeneration = attributionChatGeneration;
@@ -3111,6 +3130,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
                 const msg = getContext()?.chat?.[index];
                 if (!msg || msg.is_system) return;
+                if (suspendMessageDomWorkForEdit(getMessageElementByIndex(index), index)) return;
 
                 await decorateMessageDomFromCurrentRender(index, msg, {
                     queueVerification: options.queueVerification !== false,
@@ -4777,6 +4797,30 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     const POST_MUTATION_DOM_REPAIR_DELAY_MS = 700;
     const UPDATE_MESSAGE_BLOCK_TIMEOUT_MS = 1500;
     let pendingDeferredMutations = false;
+    const MESSAGE_EDIT_TEXTAREA_SELECTOR = '#curEditTextarea, .edit_textarea, .reasoning_edit_textarea';
+
+    function getEditingMessageElement(mesElement, mesIndex) {
+        const resolvedElement = mesElement || (Number.isFinite(Number(mesIndex)) ? getMessageElementByIndex(mesIndex) : null);
+        if (!resolvedElement) return null;
+        const editTextarea = resolvedElement.matches?.(MESSAGE_EDIT_TEXTAREA_SELECTOR)
+            ? resolvedElement
+            : resolvedElement.querySelector?.(MESSAGE_EDIT_TEXTAREA_SELECTOR);
+        return editTextarea?.closest?.('.mes[mesid]') || null;
+    }
+
+    function suspendMessageDomWorkForEdit(mesElement, mesIndex) {
+        const editingMesElement = getEditingMessageElement(mesElement, mesIndex);
+        if (!editingMesElement) return false;
+        const requestedIndex = Number(mesIndex);
+        const index = Number.isFinite(requestedIndex) ? requestedIndex : Number(editingMesElement.getAttribute?.('mesid'));
+        if (Number.isFinite(index) && index >= 0) {
+            clearMessageDomRepairTimer(index);
+            cancelMessageDomFollowupRepairs(index);
+        }
+        runtimeState.pendingObservedMessages?.delete?.(editingMesElement);
+        clearMessageObservers(editingMesElement);
+        return true;
+    }
 
     function hashMessageText(text) {
         const str = String(text ?? '');
@@ -5053,6 +5097,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     function decorateMessageDom(mesElement, msg, mesIndex) {
         const mesText = mesElement?.querySelector?.('.mes_text');
         if (!mesText) return { decorated: false, createdCharacters: false, needsRetry: !!msg && !msg.is_system };
+        if (suspendMessageDomWorkForEdit(mesElement, mesIndex)) return { decorated: false, createdCharacters: false, needsRetry: false };
         undecorateMessageDom(mesElement, { clearWatcher: false });
         if (!settings.enabled || !isDomEngine() || !msg || msg.is_system) {
             return { decorated: false, createdCharacters: false };
@@ -5163,6 +5208,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
      */
     function attachMessageSettleObserver(mesElement, mesIndex) {
         if (!mesElement?.isConnected) return;
+        if (suspendMessageDomWorkForEdit(mesElement, mesIndex)) return;
         // Remove any existing watcher for this element.
         const existing = runtimeState.messageSettleObservers.get(mesElement);
         if (existing) {
@@ -5181,6 +5227,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             }
             const msg = getContext()?.chat?.[mesIndex];
             if (!msg) { cleanup(); return; }
+            if (suspendMessageDomWorkForEdit(mesElement, mesIndex)) { cleanup(); return; }
             const result = decorateMessageDom(mesElement, msg, mesIndex);
             if (result.createdCharacters) {
                 queueColorStateSave({ history: false, injectPrompt: false });
@@ -5234,6 +5281,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
      */
     function watchDecoratedMessage(mesElement, mesIndex) {
         if (!mesElement?.isConnected) return;
+        if (suspendMessageDomWorkForEdit(mesElement, mesIndex)) return;
         // Tear down any existing watcher for this element first.
         clearDecoratedWatcher(mesElement);
 
@@ -5248,6 +5296,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             if (isDecoratingDom) return;
             const repairIndex = Number(mesIndex);
             if (runtimeState.messageDomRepairTimers.has(repairIndex)) return;
+            if (suspendMessageDomWorkForEdit(mesElement, repairIndex)) return;
             // Re-query .mes_text: external agents may replace the node entirely.
             const currentMesText = mesElement.querySelector('.mes_text');
             if (!currentMesText || !currentMesText.isConnected) return;
@@ -5285,6 +5334,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     function getMessageDomHealthRepairType(mesElement, msg, mesIndex) {
         const mesText = mesElement?.querySelector?.('.mes_text');
         if (!mesText || !msg || msg.is_system) return '';
+        if (suspendMessageDomWorkForEdit(mesElement, mesIndex)) return '';
         if (mesText.querySelector('font[color]') || collectFontColorsFromText(msg.mes).size) return '';
         const readiness = getMessageDomReadiness(mesElement, msg, mesIndex);
         if (readiness.totalSegments === 0) {
@@ -5310,9 +5360,11 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 clearDecoratedWatcher(mesElement);
                 continue;
             }
+            const repairIndex = Number(mesElement.getAttribute('mesid'));
+            if (suspendMessageDomWorkForEdit(mesElement, repairIndex)) continue;
             if (watcher?.mesText !== currentMesText) {
                 clearDecoratedWatcher(mesElement);
-                scheduleMessageDomRepair(Number(mesElement.getAttribute('mesid')), { delay: 0, verify: false });
+                scheduleMessageDomRepair(repairIndex, { delay: 0, verify: false });
             }
         }
 
@@ -5320,6 +5372,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             const mesIndex = Number(mesElement.getAttribute('mesid'));
             if (!Number.isFinite(mesIndex) || mesIndex < 0) continue;
             const msg = chat[mesIndex];
+            if (suspendMessageDomWorkForEdit(mesElement, mesIndex)) continue;
             const repairType = getMessageDomHealthRepairType(mesElement, msg, mesIndex);
             if (repairType === 'refresh') {
                 scheduleMessageDomRepair(mesIndex, { delay: 0, verify: false });
@@ -5439,10 +5492,13 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const previousDecoratingState = isDecoratingDom;
         isDecoratingDom = true;
         let createdCharacters = false;
+        const verificationElements = [];
         try {
             for (const mesElement of elements) {
                 if (!mesElement?.isConnected) continue;
                 const mesIndex = Number(mesElement.getAttribute('mesid'));
+                if (suspendMessageDomWorkForEdit(mesElement, mesIndex)) continue;
+                verificationElements.push(mesElement);
                 const result = decorateMessageElementByIndex(mesElement, mesIndex);
                 if (result.createdCharacters) createdCharacters = true;
                 if (result.needsRetry) {
@@ -5462,7 +5518,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             queueColorStateSave({ history: false, injectPrompt: false });
         }
         updateLegend();
-        if (options.queueVerification !== false) queueAutoAttributionVerificationForElements(elements);
+        if (options.queueVerification !== false) queueAutoAttributionVerificationForElements(verificationElements);
     }
 
     function decorateLastMessageDom() {
@@ -5513,6 +5569,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
     function queueObservedMessageDecoration(mesElement) {
         if (!mesElement || !settings.enabled || !isDomEngine()) return;
+        const mesIndex = Number(mesElement.getAttribute('mesid'));
+        if (suspendMessageDomWorkForEdit(mesElement, mesIndex)) return;
         const now = Date.now();
         if (!observedDecorationFirstCallTime) observedDecorationFirstCallTime = now;
         runtimeState.pendingObservedMessages.add(mesElement);
@@ -5531,6 +5589,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         if (!mesElement || !settings.enabled || !isDomEngine()) return false;
         const mesIndex = Number(mesElement.getAttribute('mesid'));
         if (!Number.isFinite(mesIndex) || mesIndex < 0) return false;
+        if (suspendMessageDomWorkForEdit(mesElement, mesIndex)) return false;
         const msg = getContext()?.chat?.[mesIndex];
         return hasMessageQuoteOverridesForDecoration(mesIndex, msg);
     }
@@ -5563,6 +5622,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             const delayed = new Set();
             for (const mutation of mutations) {
                 for (const mesElement of collectMutatedMessageElements(mutation)) {
+                    const mesIndex = Number(mesElement?.getAttribute?.('mesid'));
+                    if (suspendMessageDomWorkForEdit(mesElement, mesIndex)) continue;
                     if (shouldDecorateObservedMessageImmediately(mesElement)) immediate.add(mesElement);
                     else delayed.add(mesElement);
                 }
@@ -5640,6 +5701,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         if (!isAutoAttributionVerificationEnabled()) return false;
         if (isStreamingGenerationActive && !options.allowDuringStreaming) return false;
         if (!Number.isFinite(mesIndex) || mesIndex < 0) return false;
+        if (suspendMessageDomWorkForEdit(getMessageElementByIndex(mesIndex), mesIndex)) return false;
         if (!isMessageEligibleForAttributionVerification(msg) || isMessageAttributionVerified(mesIndex, msg)) return false;
 
         if (!options.force) {
@@ -5711,6 +5773,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const queued = Array.from(pendingAutoAttributionVerifyIndices.values());
         pendingAutoAttributionVerifyIndices.clear();
         pruneRecentAutoAttributionVerifyAttempts();
+        const deferredItems = [];
 
         for (const item of queued) {
             if (!isAutoAttributionVerificationEnabled()) break;
@@ -5722,6 +5785,10 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             if (item.chatGeneration !== attributionChatGeneration) continue;
 
             const msg = getContext()?.chat?.[item.mesIndex];
+            if (suspendMessageDomWorkForEdit(getMessageElementByIndex(item.mesIndex), item.mesIndex)) {
+                deferredItems.push(item);
+                continue;
+            }
             if (!isMessageEligibleForAttributionVerification(msg) || isMessageAttributionVerified(item.mesIndex, msg)) continue;
             const currentKey = getAutoAttributionVerifyKey(item.mesIndex, msg);
             if (currentKey !== item.key) continue;
@@ -5742,6 +5809,10 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             } catch (e) {
                 console.warn('[Dialogue Colors] Automatic attribution verification failed:', e);
             }
+        }
+        if (deferredItems.length) {
+            for (const item of deferredItems) pendingAutoAttributionVerifyIndices.set(item.key, item);
+            scheduleAutoAttributionVerificationDrain(AUTO_ATTRIBUTION_VERIFY_DELAY_MS);
         }
     }
 
@@ -5886,6 +5957,7 @@ ${quoteList}`;
         if (!settings.enabled || !isDomEngine()) return { checked: false, corrections: 0, createdCharacters: false };
         const ctx = getContext();
         const msg = ctx?.chat?.[mesIndex];
+        if (suspendMessageDomWorkForEdit(getMessageElementByIndex(mesIndex), mesIndex)) return { checked: false, corrections: 0, createdCharacters: false };
         if (!isMessageEligibleForAttributionVerification(msg)) return { checked: false, corrections: 0, createdCharacters: false };
         const skipMarkVerified = options.skipMarkVerified === true;
         const useTransientOverrides = options.transientOverrides === true;
@@ -5999,7 +6071,7 @@ ${quoteList}`;
             // Verifier corrections only change override metadata; decorate the
             // already-rendered DOM without an innerHTML fallback write.
             const repainted = await decorateMessageDomFromCurrentRender(mesIndex, msg, { queueVerification: false, renderFallback: false });
-            scheduleMessageDomFollowupRepair(mesIndex, repainted);
+            if (repainted) scheduleMessageDomFollowupRepair(mesIndex, repainted);
         } else {
             const mesElement = document.querySelector(`#chat .mes[mesid="${mesIndex}"]`) || document.querySelectorAll('#chat .mes[mesid]')[mesIndex];
             if (mesElement) decorateObservedMessages([mesElement]);
