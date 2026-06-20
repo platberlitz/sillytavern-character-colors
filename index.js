@@ -6242,12 +6242,15 @@ ${quoteList}`;
 
     function scheduleStreamingAttributionVerification() {
         if (!settings.enabled || !isDomEngine() || !settings.llmAttributionParallel) return;
+        // Continuous loop: do NOT reset an already-scheduled timer on every token.
+        // The loop reschedules itself from runStreamingAttributionVerification's finally,
+        // so we only arm the timer when nothing is pending.
+        if (streamingAttributionVerifyTimer) return;
         const chat = getContext()?.chat || [];
         const mesIndex = chat.length - 1;
         const msg = chat[mesIndex];
         if (!isMessageEligibleForAttributionVerification(msg)) return;
 
-        clearTimeout(streamingAttributionVerifyTimer);
         const generation = streamingAttributionGeneration;
         streamingAttributionVerifyTimer = setTimeout(() => {
             streamingAttributionVerifyTimer = null;
@@ -6256,22 +6259,42 @@ ${quoteList}`;
         }, STREAMING_ATTRIBUTION_VERIFY_DELAY_MS);
     }
 
+    function rescheduleStreamingAttributionVerification(mesIndex, generation) {
+        if (generation !== streamingAttributionGeneration) return;
+        if (!isStreamingGenerationActive) return;
+        if (!settings.enabled || !isDomEngine() || !settings.llmAttributionParallel) return;
+        if (streamingAttributionVerifyTimer) return;
+        streamingAttributionVerifyTimer = setTimeout(() => {
+            streamingAttributionVerifyTimer = null;
+            runStreamingAttributionVerification(mesIndex, generation)
+                .catch(e => console.warn('[Dialogue Colors] Streaming attribution verification failed:', e));
+        }, STREAMING_ATTRIBUTION_VERIFY_DELAY_MS);
+    }
+
     async function runStreamingAttributionVerification(mesIndex, generation) {
-        if (generation !== streamingAttributionGeneration) return { checked: false, corrections: 0, createdCharacters: false };
-        if (!settings.enabled || !isDomEngine() || !settings.llmAttributionParallel) return { checked: false, corrections: 0, createdCharacters: false };
-        if (isVerifyingAttribution) return { checked: false, corrections: 0, createdCharacters: false };
+        try {
+            if (generation !== streamingAttributionGeneration) return { checked: false, corrections: 0, createdCharacters: false };
+            if (!settings.enabled || !isDomEngine() || !settings.llmAttributionParallel) return { checked: false, corrections: 0, createdCharacters: false };
+            if (isVerifyingAttribution) return { checked: false, corrections: 0, createdCharacters: false };
 
-        const msg = getContext()?.chat?.[mesIndex];
-        if (!isMessageEligibleForAttributionVerification(msg)) return { checked: false, corrections: 0, createdCharacters: false };
+            const msg = getContext()?.chat?.[mesIndex];
+            if (!isMessageEligibleForAttributionVerification(msg)) return { checked: false, corrections: 0, createdCharacters: false };
 
-        const verifyKey = `${mesIndex}:${hashMessageText(msg.mes)}`;
-        if (verifyKey === lastStreamingAttributionVerifyKey) return { checked: false, corrections: 0, createdCharacters: false };
-        lastStreamingAttributionVerifyKey = verifyKey;
-
-        return runAttributionVerification(
-            () => verifyAttributionsWithLLM(mesIndex, { manual: false, skipMarkVerified: true, transientOverrides: true, quiet: true }),
-            { manual: false, queue: false }
-        );
+            const verifyKey = `${mesIndex}:${hashMessageText(msg.mes)}`;
+            if (verifyKey !== lastStreamingAttributionVerifyKey) {
+                lastStreamingAttributionVerifyKey = verifyKey;
+                return await runAttributionVerification(
+                    () => verifyAttributionsWithLLM(mesIndex, { manual: false, skipMarkVerified: true, transientOverrides: true, quiet: true }),
+                    { manual: false, queue: false }
+                );
+            }
+            return { checked: false, corrections: 0, createdCharacters: false };
+        } finally {
+            // Self-perpetuating loop: keep re-checking while streaming is active.
+            // New tokens may have arrived since the last run; rescheduling lets us
+            // re-verify dialogue attributed in the interim.
+            rescheduleStreamingAttributionVerification(mesIndex, generation);
+        }
     }
 
     async function recolorAllMessages() {
