@@ -759,6 +759,22 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         return { removed: removedKeys.length, kept: keptKeys.length, skipped: keptKeys, removedKeys };
     }
 
+    function collectDuplicateColorKeys() {
+        const duplicateKeys = [];
+        const colorGroups = {};
+        Object.entries(characterColors).forEach(([k, v]) => {
+            const color = getEntryEffectiveColor(v).toLowerCase();
+            if (!colorGroups[color]) colorGroups[color] = [];
+            colorGroups[color].push({ key: k, count: v.dialogueCount || 0, keep: !!v.keep });
+        });
+        Object.values(colorGroups).forEach(group => {
+            if (group.length < 2) return;
+            group.sort((a, b) => Number(b.keep) - Number(a.keep) || b.count - a.count);
+            group.slice(1).forEach(({ key }) => duplicateKeys.push(key));
+        });
+        return duplicateKeys;
+    }
+
     function keepCharacterKeysOnly(keysToKeep) {
         const keepSet = new Set((Array.isArray(keysToKeep) ? keysToKeep : [keysToKeep]).map(key => String(key ?? '').trim().toLowerCase()).filter(Boolean));
         const nextColors = {};
@@ -3762,6 +3778,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const colorList = colorEntries
             .map(([, v]) => `${v.name}=${getEntryEffectiveColor(v)}`)
             .join(', ');
+        const aliases = Object.entries(characterColors).filter(([, v]) => v.aliases?.length)
+            .map(([, v]) => `${v.name}/${v.aliases.join('/')}`).join('; ');
         const reservedColors = [...new Set(colorEntries.map(([, v]) => getEntryEffectiveColor(v)))].join(', ');
         const brightnessOffset = getBrightnessOffset();
         const parts = [];
@@ -3780,6 +3798,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             if (paletteDesc) parts.push(paletteDesc);
         }
         if (colorList) parts.push(`Established: ${colorList}.`);
+        if (aliases) parts.push(`Aliases: ${aliases}.`);
         if (reservedColors) parts.push(`${reservedColors} are taken. New speakers need distinct colors not closely matching these.`);
         if (thoughtSymbolList) parts.push(`Inner-thought dialogue delimiters to track for speakers: ${thoughtSymbolList}.`);
         return parts.join(' ');
@@ -6970,9 +6989,20 @@ ${quoteList}`;
             if (lockBtn) {
                 const key = lockBtn.dataset.key;
                 if (!characterColors[key]) return;
+                const wasLocked = !!characterColors[key].locked;
                 characterColors[key].locked = !characterColors[key].locked;
                 saveHistory();
                 saveData(); updateCharList();
+                if (!wasLocked && characterColors[key]?.locked) {
+                    const duplicateKeys = collectDuplicateColorKeys();
+                    if (duplicateKeys.length) {
+                        removeCharacterKeys(duplicateKeys, {
+                            actionLabel: 'Auto-cleared',
+                            itemLabel: 'duplicate-color character',
+                            blockedMessage: 'Only pinned duplicate-color characters remain. Turn off Keep first.'
+                        });
+                    }
+                }
                 return;
             }
             const swapBtn = t.closest('.dc-swap');
@@ -7654,19 +7684,7 @@ ${quoteList}`;
             });
         };
         $('dc-del-dupes').onclick = () => {
-            const duplicateKeys = [];
-            const colorGroups = {};
-            Object.entries(characterColors).forEach(([k, v]) => {
-                const color = getEntryEffectiveColor(v).toLowerCase();
-                if (!colorGroups[color]) colorGroups[color] = [];
-                colorGroups[color].push({ key: k, count: v.dialogueCount || 0, keep: !!v.keep });
-            });
-            Object.values(colorGroups).forEach(group => {
-                if (group.length < 2) return;
-                group.sort((a, b) => Number(b.keep) - Number(a.keep) || b.count - a.count);
-                group.slice(1).forEach(({ key }) => duplicateKeys.push(key));
-            });
-            removeCharacterKeys(duplicateKeys, {
+            removeCharacterKeys(collectDuplicateColorKeys(), {
                 actionLabel: 'Deleted',
                 itemLabel: 'duplicate-color character',
                 emptyMessage: 'No duplicate colors found',
