@@ -1333,11 +1333,13 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
     function buildLLMColorizeRules(extraRule = '') {
         const rules = [
-            'Rules:',
-            '- Wrap quoted dialogue (and its quote marks) in <font color=COLOR>...</font>',
-            '- Preserve every original character exactly; only insert <font> tags',
-            '- Do not add or remove backslashes, quote marks, or any other punctuation',
-            '- Do not rewrite dialogue as an escaped string or surround it with extra outer quotes',
+            'Output rules:',
+            '1. Return the original message with color tags inserted.',
+            '2. Wrap each dialogue/thought span, including its opening and closing delimiters, in <font color=#RRGGBB>...</font>.',
+            '3. Preserve every original character, space, punctuation mark, and line break exactly; only add <font> tags and an optional final [COLORS:...] line.',
+            '4. Do not escape quote marks, add wrapper quotes, rewrite wording, translate, summarize, or add commentary.',
+            '5. If the speaker for a span is unclear, leave that span unchanged instead of guessing.',
+            '6. Do not wrap the answer in Markdown or code fences.',
         ];
         if (extraRule) rules.push(extraRule);
         return rules;
@@ -3671,12 +3673,13 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const aliases = Object.entries(characterColors).filter(([, v]) => v.aliases?.length).map(([, v]) => `${v.name}/${v.aliases.join('/')}`).join('; ');
         const brightnessOffset = getBrightnessOffset();
         const parts = [
-            `[Font Color Rule: Wrap ALL dialogue in <font color=#RRGGBB> tags, and include surrounding dialogue/thought delimiter symbols inside the same colored span.`,
-            mode === 'dark' ? 'Use readable colors for a dark background. HARD RULE: Never use dark colors in dark mode. Use medium-to-light colors only; avoid low-lightness shades.' : 'Use readable colors for a light background. HARD RULE: Never use bright colors in light mode. Use medium-to-dark colors only; avoid high-lightness shades.',
+            '[Dialogue Colors]',
+            'Follow this checklist for every assistant reply:',
+            `1. Wrap every spoken dialogue span in <font color=#RRGGBB>...</font>. Put the opening and closing dialogue/thought delimiters inside the same tag. Delimiters: ${delimiterSymbolList}.`,
+            '2. Preserve normal dialogue punctuation. Do not escape quotes, add extra outer quotes, or rewrite text just to color it.',
+            mode === 'dark' ? `3. Use readable colors for a dark background. Keep lightness between ${minLightness}% and ${maxLightness}%. Never use dark/low-lightness colors.` : `3. Use readable colors for a light background. Keep lightness between ${minLightness}% and ${maxLightness}%. Never use bright/high-lightness colors.`,
         ];
-        parts.push(`Delimiter rule: always color the actual delimiter characters too. Literal delimiters: ${delimiterSymbolList}.`);
-        parts.push('Use normal dialogue punctuation. Do not format dialogue as an escaped string or wrap it in extra outer quote marks.');
-        parts.push(`HARD RANGE: Keep color lightness between ${minLightness}% and ${maxLightness}% for ${mode} mode. This range is enforced.`);
+        parts.push('Correct format example: <font color=#aabbcc>"Hello."</font>');
         if (brightnessOffset > 0) parts.push(`For newly introduced characters only, bias the chosen color about +${brightnessOffset}% lightness before finalizing it, then clamp to the hard range.`);
         if (brightnessOffset < 0) parts.push(`For newly introduced characters only, bias the chosen color about -${Math.abs(brightnessOffset)}% lightness before finalizing it, then clamp to the hard range.`);
         const customPalettePrompt = buildCustomPalettePrompt();
@@ -3686,18 +3689,18 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             const paletteDesc = PALETTE_DESCRIPTIONS[settings.colorTheme];
             if (paletteDesc) parts.push(paletteDesc);
         }
-        if (colorList) parts.push(`Established characters: ${colorList}. Keep these exact colors unchanged.`);
-        if (reservedColors) parts.push(`Reserved colors already in use: ${reservedColors}. For any new speaker, choose a distinct color that does not reuse or closely match them.`);
+        if (colorList) parts.push(`Established characters and exact colors: ${colorList}. Use these exact colors unchanged.`);
+        if (reservedColors) parts.push(`Colors already in use: ${reservedColors}. For a new speaker, choose a distinct color that does not reuse or closely match them.`);
         if (aliases) parts.push(`Aliases: ${aliases}.`);
         if (!settings.disableNarration && settings.narratorColor) parts.push(`Narrator: ${applyThemeReadabilityAndBrightness(settings.narratorColor)}.`);
         if (thoughtSymbols.length) parts.push(`For inner thoughts, use these literal delimiters and color both the delimiters and enclosed text with the speaker's color: ${thoughtSymbols.map(formatPromptLiteralSymbol).join(', ')}.`);
         if (settings.highlightMode) parts.push('Add background highlight.');
         if (settings.cssEffects) parts.push(`For intense emotion, magic, distortion, or dramatic effect, use CSS transforms. Available effects: chaos=rotate(2deg) skew(5deg); magic=scale(1.2); unease=skew(-10deg); rage=uppercase; whispers=lowercase; glitch=skew(8deg) translate(2px, -1px); tremble=rotate(1deg) translate(1px, 1px); echo=opacity:0.7, text-shadow:2px 2px currentColor; fade=opacity:0.6; glow=text-shadow:0 0 8px currentColor; shadow=text-shadow:3px 3px 2px rgba(0,0,0,0.5); blur=filter:blur(1px); shimmer=filter:brightness(1.3); distort=skew(-5deg) scale(1.05); warp=rotate(-3deg) skew(4deg); bounce=translateY(-2px); sink=translateY(2px); stretch=scaleX(1.15); squash=scaleY(0.9); tilt=rotate(5deg); spin=rotate(15deg); shrink=scale(0.9); grow=scale(1.15); drift=translateX(3px); shudder=skew(-3deg) rotate(-1deg); pulse=scale(1.08); flicker=opacity:0.8; haze=filter:blur(0.5px) opacity:0.85; static=skew(2deg) translateY(1px); void=opacity:0.5 filter:blur(2px). Wrap in <span style='transform:X; display:inline-block; background:transparent;'>text</span> for transforms, or <span style='X'>text</span> for opacity/filter/text-shadow effects.`);
         parts.push('Give every newly introduced character a unique color.');
-        parts.push('End your response with: [COLORS:Name=#RRGGBB,Name2=#RRGGBB] for all speakers.');
+        parts.push('Final line must be plain text metadata, not Markdown/code: [COLORS:Name=#RRGGBB,Name2=#RRGGBB] for all speakers in the reply.');
         if (!settings.disableNarration) parts.push('Include Narrator=#RRGGBB if narration is used.');
         parts.push('Include nicknames as Name(Nick)=#RRGGBB.');
-        return parts.join(' ');
+        return parts.join('\n');
     }
 
     function buildCustomPalettePrompt() {
@@ -3739,7 +3742,12 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const brightnessClause = brightnessOffset !== 0
             ? ` New characters: ${brightnessOffset > 0 ? '+' : ''}${brightnessOffset}% lightness bias.`
             : '';
-        parts.push(`[Color dialogue with <font color=#RRGGBB> tags. Include delimiters (${delimiterList}) inside tags. ${mode} mode: ${minLightness}-${maxLightness}% lightness, ${modeGuidance}.${brightnessClause}`);
+        parts.push('[Dialogue Colors]');
+        parts.push('Follow these rules exactly:');
+        parts.push(`1. Wrap every spoken dialogue span in <font color=#RRGGBB>...</font>. Include its opening and closing delimiters inside the tag. Delimiters: ${delimiterList}.`);
+        parts.push('2. Correct format: <font color=#aabbcc>"Hello."</font>');
+        parts.push('3. Do not escape quote marks, add wrapper quotes, rewrite text, or add commentary for the coloring task.');
+        parts.push(`4. ${mode} mode: use ${modeGuidance}; keep lightness ${minLightness}-${maxLightness}%.${brightnessClause}`);
 
         const customPalettePrompt = buildCustomPalettePrompt();
         if (customPalettePrompt) {
@@ -3749,8 +3757,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             if (paletteDesc) parts.push(paletteDesc);
         }
 
-        if (colorList) parts.push(`Established: ${colorList}.`);
-        if (reservedColors) parts.push(`${reservedColors} are taken. New speakers need distinct colors.`);
+        if (colorList) parts.push(`Use these exact established colors: ${colorList}.`);
+        if (reservedColors) parts.push(`Already-used colors: ${reservedColors}. New speakers need distinct, non-matching colors.`);
         if (aliases) parts.push(`Aliases: ${aliases}.`);
         if (!settings.disableNarration && settings.narratorColor) {
             parts.push(`Narrator: ${applyThemeReadabilityAndBrightness(settings.narratorColor)}.`);
@@ -3763,9 +3771,10 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             parts.push(`CSS effects: chaos=rotate(2deg) skew(5deg), magic=scale(1.2), unease=skew(-10deg), rage=uppercase, whispers=lowercase, glitch=skew(8deg) translate(2px, -1px), tremble=rotate(1deg) translate(1px, 1px), echo=opacity:0.7 text-shadow:2px 2px, fade=opacity:0.6, glow=text-shadow:0 0 8px, shadow=text-shadow:3px 3px 2px, blur=filter:blur(1px), shimmer=filter:brightness(1.3), distort=skew(-5deg) scale(1.05), warp=rotate(-3deg) skew(4deg), bounce=translateY(-2px), sink=translateY(2px), stretch=scaleX(1.15), squash=scaleY(0.9), tilt=rotate(5deg), spin=rotate(15deg), shrink=scale(0.9), grow=scale(1.15), drift=translateX(3px), shudder=skew(-3deg) rotate(-1deg), pulse=scale(1.08), flicker=opacity:0.8, haze=filter:blur(0.5px) opacity:0.85, static=skew(2deg) translateY(1px), void=opacity:0.5 filter:blur(2px) in <span style='transform:X; display:inline-block; background:transparent;'>text</span> or <span style='X'>text</span>.`);
         }
 
-        parts.push(`End with: [COLORS:Name=#RRGGBB,Name2=#RRGGBB${!settings.disableNarration ? ',Narrator=#RRGGBB' : ''},Name(Nick)=#RRGGBB]`);
+        parts.push(`End the reply with this plain-text metadata line: [COLORS:Name=#RRGGBB,Name2=#RRGGBB${!settings.disableNarration ? ',Narrator=#RRGGBB' : ''},Name(Nick)=#RRGGBB]`);
+        parts.push('Do not put the final [COLORS] line in a code block.');
 
-        return parts.join(' ');
+        return parts.join('\n');
     }
 
     function buildDomStealthColorsInstruction() {
@@ -3789,7 +3798,11 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const brightnessClause = brightnessOffset !== 0
             ? ` New speakers: ${brightnessOffset > 0 ? '+' : ''}${brightnessOffset}% lightness bias.`
             : '';
-        parts.push(`For speaker tracking: end your response with [COLORS:Name=#RRGGBB] listing each speaker in your reply. Use Name(Nick)=#RRGGBB for nicknames. Omit the block if there are no speakers in your reply. Output it as plain text on the final line.`);
+        parts.push('[Dialogue Colors DOM-only mode]');
+        parts.push('Write the roleplay reply normally. Do NOT add <font> tags or CSS spans. The local DOM renderer handles visible colors.');
+        parts.push('For speaker tracking only, append one plain-text metadata line at the very end: [COLORS:Name=#RRGGBB,Name2=#RRGGBB]');
+        parts.push('List every speaker who has dialogue or inner thoughts in your reply. Use Name(Nick)=#RRGGBB for nicknames. Omit the metadata line only when the reply has no speakers.');
+        parts.push('Do not put the metadata line in Markdown or a code fence.');
         parts.push(`Use ${modeGuidance}.${brightnessClause}`);
         const customPalettePrompt = buildCustomPalettePrompt();
         if (customPalettePrompt) parts.push(customPalettePrompt);
@@ -3797,11 +3810,11 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             const paletteDesc = PALETTE_DESCRIPTIONS[settings.colorTheme];
             if (paletteDesc) parts.push(paletteDesc);
         }
-        if (colorList) parts.push(`Established: ${colorList}.`);
+        if (colorList) parts.push(`Use these exact established colors: ${colorList}.`);
         if (aliases) parts.push(`Aliases: ${aliases}.`);
-        if (reservedColors) parts.push(`${reservedColors} are taken. New speakers need distinct colors not closely matching these.`);
+        if (reservedColors) parts.push(`Already-used colors: ${reservedColors}. New speakers need distinct colors not closely matching these.`);
         if (thoughtSymbolList) parts.push(`Inner-thought dialogue delimiters to track for speakers: ${thoughtSymbolList}.`);
-        return parts.join(' ');
+        return parts.join('\n');
     }
 
     function buildColoredPromptPreview() {
@@ -6018,11 +6031,19 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             ? `\nConfigured inner-thought delimiters: ${thoughtSymbolList}. Treat those as dialogue segments that also need speaker attribution.`
             : '';
 
-        return `You verify dialogue speaker attribution for a local DOM-only colorizer.
-Return only this JSON shape, with no reasoning: {"corrections":[{"index":0,"speaker":"Name"}]}
-${conservativeLine}
-If the current speaker is already correct, omit that segment. If unsure, omit that segment.
-Use one speaker name only, preferably from Known speakers. Do not invent speaker names unless the message makes the name explicit.
+        return `Task: verify speaker attribution for a local DOM-only dialogue colorizer.
+Return ONLY valid JSON. No reasoning, no Markdown, no code fence, no extra text.
+Schema exactly: {"corrections":[{"index":0,"speaker":"Name"}]}
+If there are no corrections, return exactly: {"corrections":[]}
+
+Rules:
+1. ${conservativeLine}
+2. If the current speaker is already correct, omit that segment.
+3. If the speaker is unclear or only a guess, omit that segment.
+4. Use one speaker name only, preferably from Known speakers and aliases.
+5. Do not invent a speaker unless the full message text explicitly names them.
+6. Do not use Unknown, Unclear, None, N/A, Narrator, or a group/composite name as a speaker correction.
+7. Correction indexes must match the numbered segment list.
 
 Message index: ${mesIndex}
 Message speaker/fallback: ${msg?.name || 'Unknown'}
