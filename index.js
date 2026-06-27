@@ -7754,6 +7754,20 @@ ${quoteList}`;
         runtimeState.keyboardSetup = true;
     }
 
+    function resetDialogueCountsForNewChat() {
+        lastProcessedMessageSignature = '';
+
+        let changed = false;
+        for (const entry of Object.values(characterColors)) {
+            if (!entry || typeof entry !== 'object') continue;
+            if ((Number(entry.dialogueCount) || 0) === 0) continue;
+            entry.dialogueCount = 0;
+            changed = true;
+        }
+
+        if (changed) commit({ history: false });
+    }
+
     function handleChatChanged() {
         attributionChatGeneration++;
         isStreamingGenerationActive = false;
@@ -7835,6 +7849,7 @@ ${quoteList}`;
                 scheduleDomRefreshSeries(0);
                 queueAutoAttributionVerificationForMessage((getContext()?.chat || []).length - 1, { force: true, delay: 800 });
             },
+            chatCreated: resetDialogueCountsForNewChat,
             chatChanged: handleChatChanged,
             settingsUpdated: () => {
                 const record = getAutoSyncRecord(false);
@@ -7852,6 +7867,8 @@ ${quoteList}`;
         if (event_types.STREAM_TOKEN_RECEIVED) eventSource.on(event_types.STREAM_TOKEN_RECEIVED, runtimeState.eventHandlers.streamToken);
         if (event_types.SMOOTH_STREAM_TOKEN_RECEIVED) eventSource.on(event_types.SMOOTH_STREAM_TOKEN_RECEIVED, runtimeState.eventHandlers.streamToken);
         if (event_types.GENERATION_ENDED) eventSource.on(event_types.GENERATION_ENDED, runtimeState.eventHandlers.generationEnded);
+        if (event_types.CHAT_CREATED) eventSource.on(event_types.CHAT_CREATED, runtimeState.eventHandlers.chatCreated);
+        if (event_types.GROUP_CHAT_CREATED) eventSource.on(event_types.GROUP_CHAT_CREATED, runtimeState.eventHandlers.chatCreated);
         eventSource.on(event_types.CHAT_CHANGED, runtimeState.eventHandlers.chatChanged);
         eventSource.on(event_types.SETTINGS_UPDATED, runtimeState.eventHandlers.settingsUpdated);
         eventSource.on(event_types.CHAT_CHANGED, () => populateProfileDropdown());
