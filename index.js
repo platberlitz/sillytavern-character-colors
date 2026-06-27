@@ -188,8 +188,9 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     let isAutoColorizing = false;
     let isVerifyingAttribution = false;
     let pendingAttributionVerifications = [];
-    const ATTRIBUTION_VERIFIER_VERSION = 2;
+    const ATTRIBUTION_VERIFIER_VERSION = 3;
     const AUTO_ATTRIBUTION_VERIFY_DELAY_MS = 1000;
+    const AUTO_ATTRIBUTION_VERIFY_STABLE_RETRY_DELAY_MS = 1200;
     const AUTO_ATTRIBUTION_VERIFY_RETRY_DELAY_MS = 30000;
     const STREAMING_ATTRIBUTION_VERIFY_DELAY_MS = 2000;
     let autoAttributionVerifyTimer = null;
@@ -5870,6 +5871,16 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         return queueAutoAttributionVerificationForElements(messages, options);
     }
 
+    function queueAutoAttributionVerificationAfterCorrections(mesIndex, result, options = {}) {
+        if (!result?.checked || !(result.corrections > 0)) return false;
+        const index = Number(mesIndex);
+        if (!Number.isFinite(index) || index < 0) return false;
+        return queueAutoAttributionVerificationForMessage(index, {
+            force: true,
+            delay: options.delay ?? AUTO_ATTRIBUTION_VERIFY_STABLE_RETRY_DELAY_MS,
+        });
+    }
+
     async function drainAutoAttributionVerificationQueue() {
         if (!pendingAutoAttributionVerifyIndices.size) return;
         if (!isAutoAttributionVerificationEnabled()) {
@@ -5914,7 +5925,11 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
             try {
                 await runAttributionVerification(
-                    () => verifyAttributionsWithLLM(item.mesIndex, { manual: false, quiet: true }),
+                    async () => {
+                        const result = await verifyAttributionsWithLLM(item.mesIndex, { manual: false, quiet: true });
+                        queueAutoAttributionVerificationAfterCorrections(item.mesIndex, result);
+                        return result;
+                    },
                     { manual: false, queueKey: `auto:${currentKey}` }
                 );
             } catch (e) {
@@ -6086,9 +6101,12 @@ ${quoteList}`;
         const localAssignments = parseNamedColorAssignmentsFromText(msg.mes);
         const lookup = buildNameColorLookup(localAssignments);
         const existingEntry = getMessageQuoteOverrideEntry(mesIndex, msg, false);
+        const attributionOverrides = useTransientOverrides
+            ? getMessageQuoteOverridesForDecoration(mesIndex, msg)
+            : existingEntry?.segments || null;
         const attribution = attributeDialogueSegments(msg.mes, msg.name, {
             autoAddMessageSpeaker: true,
-            overrides: existingEntry?.segments || null,
+            overrides: attributionOverrides,
             mesIndex: mesIndex,
         });
         const persistCreatedCharacters = () => {
@@ -6177,7 +6195,7 @@ ${quoteList}`;
         }
 
         if (!skipMarkVerified) {
-            markMessageAttributionVerified(mesIndex, msg);
+            if (appliedCorrections === 0) markMessageAttributionVerified(mesIndex, msg);
             clearStreamingAttributionOverrides(mesIndex);
         }
         if (appliedCorrections) {
@@ -6322,11 +6340,12 @@ ${quoteList}`;
 
             const verifyKey = `${mesIndex}:${hashMessageText(msg.mes)}`;
             if (verifyKey !== lastStreamingAttributionVerifyKey) {
-                lastStreamingAttributionVerifyKey = verifyKey;
-                return await runAttributionVerification(
+                const result = await runAttributionVerification(
                     () => verifyAttributionsWithLLM(mesIndex, { manual: false, skipMarkVerified: true, transientOverrides: true, quiet: true }),
                     { manual: false, queue: false }
                 );
+                lastStreamingAttributionVerifyKey = result.checked && result.corrections === 0 ? verifyKey : '';
+                return result;
             }
             return { checked: false, corrections: 0, createdCharacters: false };
         } finally {
