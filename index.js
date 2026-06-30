@@ -3766,24 +3766,17 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const thoughtSymbols = getThoughtDelimiterSymbols();
         const delimiterSymbols = [...new Set(['"', ...thoughtSymbols])];
         const delimiterSymbolList = delimiterSymbols.map(formatPromptLiteralSymbol).join(', ');
-        const colorEntries = Object.entries(characterColors)
-            .filter(([, v]) => v && getEntryEffectiveColor(v));
-        const colorList = colorEntries
-            .map(([, v]) => `${v.name}=${getEntryEffectiveColor(v)}${v.style ? ` (${v.style})` : ''}`)
-            .join(', ');
-        const reservedColors = [...new Set(colorEntries.map(([, v]) => getEntryEffectiveColor(v)))].join(', ');
-        const aliases = Object.entries(characterColors).filter(([, v]) => v.aliases?.length).map(([, v]) => `${v.name}/${v.aliases.join('/')}`).join('; ');
         const brightnessOffset = getBrightnessOffset();
         const parts = [
             '[DIALOGUE COLORS - SYSTEM OVERRIDE RULESET]',
             'YOU MUST ADHERE TO THIS RULES MATRIX FOR EVERY SINGLE REPLY:',
-            `1. COLOR EVERY SPOKEN DIALOGUE SPAN: Wrap each spoken dialogue or dialogue segment inside a <font color=#RRGGBB>...</font> tag. You must place both the opening and closing delimiters (including quotes, thought markers, etc.) inside the same tag. DELIMITERS TO TRIGGER THIS: ${delimiterSymbolList}.`,
-            '2. PRESERVE ORIGINAL PUNCTUATION & TEXT: Do not escape quote marks, do not insert extra outer quote marks, and do not alter or rewrite any text just to apply colors. Keep the raw content exactly identical.',
-            mode === 'dark' ? `3. ENSURE READABILITY: You must select readable colors optimized for a dark background. Restrict lightness strictly between ${minLightness}% and ${maxLightness}%. Dark or low-contrast colors are strictly forbidden.` : `3. ENSURE READABILITY: You must select readable colors optimized for a light background. Restrict lightness strictly between ${minLightness}% and ${maxLightness}%. Bright or low-contrast colors are strictly forbidden.`,
+            `1. COLOR EVERY SPOKEN DIALOGUE SPAN: Wrap each spoken dialogue or dialogue segment inside a <font color=#RRGGBB>...</font> tag. Place both the delimiters (including quotes, thought markers, etc.) inside the same tag. DELIMITERS TO TRIGGER THIS: ${delimiterSymbolList}.`,
+            '2. PRESERVE ORIGINAL PUNCTUATION & TEXT: Do not escape quote marks, insert extra outer quote marks, or rewrite text just to apply colors.',
+            mode === 'dark' ? `3. ENSURE READABILITY: Select readable colors for dark background. Keep lightness between ${minLightness}% and ${maxLightness}%. Dark/low-contrast colors are strictly forbidden.` : `3. ENSURE READABILITY: Select readable colors for light background. Keep lightness between ${minLightness}% and ${maxLightness}%. Bright/low-contrast colors are strictly forbidden.`,
         ];
         parts.push('Correct format example: <font color=#aabbcc>"Hello."</font>');
-        if (brightnessOffset > 0) parts.push(`For newly introduced characters only, bias the chosen color about +${brightnessOffset}% lightness before finalizing it, then clamp to the hard range.`);
-        if (brightnessOffset < 0) parts.push(`For newly introduced characters only, bias the chosen color about -${Math.abs(brightnessOffset)}% lightness before finalizing it, then clamp to the hard range.`);
+        if (brightnessOffset > 0) parts.push(`For newly introduced characters, bias chosen colors +${brightnessOffset}% lightness before clamping to range.`);
+        if (brightnessOffset < 0) parts.push(`For newly introduced characters, bias chosen colors -${Math.abs(brightnessOffset)}% lightness before clamping to range.`);
         const customPalettePrompt = buildCustomPalettePrompt();
         if (customPalettePrompt) {
             parts.push(customPalettePrompt);
@@ -3791,14 +3784,11 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             const paletteDesc = PALETTE_DESCRIPTIONS[settings.colorTheme];
             if (paletteDesc) parts.push(paletteDesc);
         }
-        if (colorList) parts.push(`Established characters and exact colors: ${colorList}. Use these exact colors unchanged.`);
-        if (reservedColors) parts.push(`Colors already in use: ${reservedColors}. For a new speaker, choose a distinct color that does not reuse or closely match them.`);
-        if (aliases) parts.push(`Aliases: ${aliases}.`);
         if (!settings.disableNarration && settings.narratorColor) parts.push(`Narrator: ${applyThemeReadabilityAndBrightness(settings.narratorColor)}.`);
         if (thoughtSymbols.length) parts.push(buildThoughtSymbolColorPromptRule(thoughtSymbols.map(formatPromptLiteralSymbol).join(', ')));
         if (settings.highlightMode) parts.push('Add background highlight.');
-        if (settings.cssEffects) parts.push(`For intense emotion, magic, distortion, or dramatic effect, use CSS transforms. Available effects: chaos=rotate(2deg) skew(5deg); magic=scale(1.2); unease=skew(-10deg); rage=uppercase; whispers=lowercase; glitch=skew(8deg) translate(2px, -1px); tremble=rotate(1deg) translate(1px, 1px); echo=opacity:0.7, text-shadow:2px 2px currentColor; fade=opacity:0.6; glow=text-shadow:0 0 8px currentColor; shadow=text-shadow:3px 3px 2px rgba(0,0,0,0.5); blur=filter:blur(1px); shimmer=filter:brightness(1.3); distort=skew(-5deg) scale(1.05); warp=rotate(-3deg) skew(4deg); bounce=translateY(-2px); sink=translateY(2px); stretch=scaleX(1.15); squash=scaleY(0.9); tilt=rotate(5deg); spin=rotate(15deg); shrink=scale(0.9); grow=scale(1.15); drift=translateX(3px); shudder=skew(-3deg) rotate(-1deg); pulse=scale(1.08); flicker=opacity:0.8; haze=filter:blur(0.5px) opacity:0.85; static=skew(2deg) translateY(1px); void=opacity:0.5 filter:blur(2px). Wrap in <span style='transform:X; display:inline-block; background:transparent;'>text</span> for transforms, or <span style='X'>text</span> for opacity/filter/text-shadow effects.`);
-        parts.push('4. EXCLUSIVE UNIQUE COLOR ALLOCATION: Assign a highly distinct, unique color to any genuinely newly introduced character. Never assign a new color or entry to an existing alias of an established character.');
+        if (settings.cssEffects) parts.push(`CSS transforms: chaos=rotate(2deg) skew(5deg); magic=scale(1.2); unease=skew(-10deg); rage=uppercase; whispers=lowercase; glitch=skew(8deg) translate(2px, -1px); tremble=rotate(1deg) translate(1px, 1px); echo=opacity:0.7, text-shadow:2px 2px currentColor; fade=opacity:0.6; glow=text-shadow:0 0 8px currentColor; shadow=text-shadow:3px 3px 2px rgba(0,0,0,0.5); blur=filter:blur(1px); shimmer=filter:brightness(1.3); distort=skew(-5deg) scale(1.05); warp=rotate(-3deg) skew(4deg); bounce=translateY(-2px); sink=translateY(2px); stretch=scaleX(1.15); squash=scaleY(0.9); tilt=rotate(5deg); spin=rotate(15deg); shrink=scale(0.9); grow=scale(1.15); drift=translateX(3px); shudder=skew(-3deg) rotate(-1deg); pulse=scale(1.08); flicker=opacity:0.8; haze=filter:blur(0.5px) opacity:0.85; static=skew(2deg) translateY(1px); void=opacity:0.5 filter:blur(2px). Wrap in <span style='transform:X; display:inline-block;'>text</span> or <span style='X'>text</span>.`);
+        parts.push('4. EXCLUSIVE UNIQUE COLOR ALLOCATION: Assign distinct, unique colors for newly introduced characters. Never assign a new color or entry to an existing alias of an established character.');
         parts.push(...buildColorMetadataPromptLines());
         if (!settings.disableNarration) parts.push('5. NARRATOR COLOR RULE: If narration or story description is present, you must assign the exact Narrator color to it.');
         parts.push('6. CANONICAL NICKNAME BINDING: For any genuinely new nicknames or alternate names, you must append them directly to the canonical name as Name(Nick)=#RRGGBB. You are strictly forbidden from creating a separate Nick=#RRGGBB entry.');
@@ -3826,14 +3816,6 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const thoughtSymbols = getThoughtDelimiterSymbols();
         const delimiterSymbols = [...new Set(['"', ...thoughtSymbols])];
         const delimiterList = delimiterSymbols.map(formatPromptLiteralSymbol).join(', ');
-        const colorEntries = Object.entries(characterColors)
-            .filter(([, v]) => v && getEntryEffectiveColor(v));
-        const colorList = colorEntries
-            .map(([, v]) => `${v.name}=${getEntryEffectiveColor(v)}${v.style ? ` (${v.style})` : ''}`)
-            .join(', ');
-        const reservedColors = [...new Set(colorEntries.map(([, v]) => getEntryEffectiveColor(v)))].join(', ');
-        const aliases = Object.entries(characterColors).filter(([, v]) => v.aliases?.length)
-            .map(([, v]) => `${v.name}/${v.aliases.join('/')}`).join('; ');
         const brightnessOffset = getBrightnessOffset();
 
         const parts = [];
@@ -3859,9 +3841,6 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             if (paletteDesc) parts.push(paletteDesc);
         }
 
-        if (colorList) parts.push(`Use these exact established colors: ${colorList}.`);
-        if (reservedColors) parts.push(`Already-used colors: ${reservedColors}. New speakers need distinct, non-matching colors.`);
-        if (aliases) parts.push(`Aliases: ${aliases}.`);
         if (!settings.disableNarration && settings.narratorColor) {
             parts.push(`Narrator: ${applyThemeReadabilityAndBrightness(settings.narratorColor)}.`);
         }
@@ -3869,9 +3848,6 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             parts.push(buildThoughtSymbolColorPromptRule(thoughtSymbols.map(formatPromptLiteralSymbol).join(', ')));
         }
         if (settings.highlightMode) parts.push('Add background highlight.');
-        if (settings.cssEffects) {
-            parts.push(`CSS effects: chaos=rotate(2deg) skew(5deg), magic=scale(1.2), unease=skew(-10deg), rage=uppercase, whispers=lowercase, glitch=skew(8deg) translate(2px, -1px), tremble=rotate(1deg) translate(1px, 1px), echo=opacity:0.7 text-shadow:2px 2px, fade=opacity:0.6, glow=text-shadow:0 0 8px, shadow=text-shadow:3px 3px 2px, blur=filter:blur(1px), shimmer=filter:brightness(1.3), distort=skew(-5deg) scale(1.05), warp=rotate(-3deg) skew(4deg), bounce=translateY(-2px), sink=translateY(2px), stretch=scaleX(1.15), squash=scaleY(0.9), tilt=rotate(5deg), spin=rotate(15deg), shrink=scale(0.9), grow=scale(1.15), drift=translateX(3px), shudder=skew(-3deg) rotate(-1deg), pulse=scale(1.08), flicker=opacity:0.8, haze=filter:blur(0.5px) opacity:0.85, static=skew(2deg) translateY(1px), void=opacity:0.5 filter:blur(2px) in <span style='transform:X; display:inline-block; background:transparent;'>text</span> or <span style='X'>text</span>.`);
-        }
 
         parts.push(...buildColorMetadataPromptLines());
         if (!settings.disableNarration) parts.push('Include Narrator=#RRGGBB if narration is used.');
@@ -3886,14 +3862,6 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const { mode, minLightness, maxLightness } = getThemeLightnessBounds();
         const thoughtSymbols = getThoughtDelimiterSymbols();
         const thoughtSymbolList = thoughtSymbols.map(formatPromptLiteralSymbol).join(', ');
-        const colorEntries = Object.entries(characterColors)
-            .filter(([, v]) => v && getEntryEffectiveColor(v));
-        const colorList = colorEntries
-            .map(([, v]) => `${v.name}=${getEntryEffectiveColor(v)}`)
-            .join(', ');
-        const aliases = Object.entries(characterColors).filter(([, v]) => v.aliases?.length)
-            .map(([, v]) => `${v.name}/${v.aliases.join('/')}`).join('; ');
-        const reservedColors = [...new Set(colorEntries.map(([, v]) => getEntryEffectiveColor(v)))].join(', ');
         const brightnessOffset = getBrightnessOffset();
         const parts = [];
         const modeGuidance = mode === 'dark'
@@ -3915,9 +3883,6 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             const paletteDesc = PALETTE_DESCRIPTIONS[settings.colorTheme];
             if (paletteDesc) parts.push(paletteDesc);
         }
-        if (colorList) parts.push(`Use these exact established colors: ${colorList}.`);
-        if (aliases) parts.push(`Aliases: ${aliases}.`);
-        if (reservedColors) parts.push(`Already-used colors: ${reservedColors}. New speakers need distinct colors not closely matching these.`);
         if (thoughtSymbolList) parts.push(`Inner-thought dialogue delimiters to track for speakers: ${thoughtSymbolList}.`);
         return parts.join('\n');
     }
