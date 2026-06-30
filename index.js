@@ -87,6 +87,44 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         return [...new Set(aliases.map(a => String(a ?? '').trim()).filter(Boolean))];
     }
 
+    function normalizeGoogleFontName(fontName) {
+        const normalized = String(fontName ?? '').replace(/\s+/g, ' ').trim();
+        if (!normalized) return '';
+        return normalized
+            .replace(/[^A-Za-z0-9 .,'&+-]/g, '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 80);
+    }
+
+    function getGoogleFontFamily(fontName) {
+        const normalized = normalizeGoogleFontName(fontName);
+        if (!normalized) return '';
+        return `"${normalized.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}", sans-serif`;
+    }
+
+    function loadGoogleFont(fontName) {
+        const normalized = normalizeGoogleFontName(fontName);
+        if (!normalized || typeof document === 'undefined' || !document.head) return normalized;
+        const key = normalized.toLowerCase();
+        if (loadedGoogleFonts.has(key)) return normalized;
+        loadedGoogleFonts.add(key);
+        const family = encodeURIComponent(normalized).replace(/%20/g, '+');
+        const link = document.createElement('link');
+        link.rel = 'stylesheet';
+        link.href = `https://fonts.googleapis.com/css2?family=${family}:ital,wght@0,400;0,700;1,400;1,700&display=swap`;
+        link.dataset.dcGoogleFont = key;
+        link.onerror = () => {
+            const fallback = document.createElement('link');
+            fallback.rel = 'stylesheet';
+            fallback.href = `https://fonts.googleapis.com/css2?family=${family}&display=swap`;
+            fallback.dataset.dcGoogleFontFallback = key;
+            document.head.appendChild(fallback);
+        };
+        document.head.appendChild(link);
+        return normalized;
+    }
+
     function normalizeCharacterEntry(entry, fallbackName = '') {
         const name = String(entry?.name ?? fallbackName ?? '').trim();
         if (!name) return null;
@@ -101,7 +139,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             aliases: normalizeAliases(entry?.aliases),
             style: VALID_STYLES.has(entry?.style) ? entry.style : '',
             dialogueCount: Number.isFinite(entry?.dialogueCount) && entry.dialogueCount > 0 ? Math.floor(entry.dialogueCount) : 0,
-            group: String(entry?.group ?? '').trim()
+            group: String(entry?.group ?? '').trim(),
+            font: normalizeGoogleFontName(entry?.font)
         };
     }
 
@@ -123,6 +162,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             existing.dialogueCount = Math.max(existing.dialogueCount || 0, normalizedEntry.dialogueCount || 0);
             if (!existing.group && normalizedEntry.group) existing.group = normalizedEntry.group;
             if (!existing.style && normalizedEntry.style) existing.style = normalizedEntry.style;
+            if (!existing.font && normalizedEntry.font) existing.font = normalizedEntry.font;
             if (existing.baseColor === '#888888' && normalizedEntry.baseColor !== '#888888') existing.baseColor = normalizedEntry.baseColor;
             if (existing.color === '#888888' && normalizedEntry.color !== '#888888') existing.color = normalizedEntry.color;
         }
@@ -147,6 +187,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     const PRESETS_KEY = 'dc_presets';
     const LEGEND_POSITION_KEY = 'dc_legend_position';
     let characterColors = {};
+    const loadedGoogleFonts = new Set();
     let colorHistory = [];
     let historyIndex = -1;
     let swapMode = null;
@@ -928,6 +969,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             color: getEntryEffectiveColor(v),
             baseColor: getBaseColor(v),
             style: VALID_STYLES.has(v.style) ? v.style : '',
+            font: normalizeGoogleFontName(v.font),
             aliases: normalizeAliases(v.aliases),
             group: String(v.group ?? '').trim(),
             locked: !!v.locked,
@@ -1332,15 +1374,67 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         }
     }
 
+    function buildThoughtSymbolColorPromptRule(thoughtSymbolList) {
+        if (!thoughtSymbolList) return '';
+        return `CRITICAL RULE (MUST COMPLY): Every single inner thought block delimited by these literal symbols (${thoughtSymbolList}) MUST be colored. You must wrap the opening delimiter, the entire thought text, and the closing delimiter inside a single <font color=#RRGGBB>...</font> tag. You must apply this rule to every thought, regardless of whether there is quoted dialogue in the same reply. Always assign the active speaker's or default speaker's exact color to their thoughts.`;
+    }
+
+    function resolveCharacterKeyByNameOrAlias(rawName) {
+        const lookupName = String(rawName ?? '').trim().toLowerCase();
+        if (!lookupName) return '';
+        if (characterColors[lookupName]) return lookupName;
+        for (const [key, entry] of Object.entries(characterColors)) {
+            if (!entry) continue;
+            if (String(entry.name ?? '').trim().toLowerCase() === lookupName) return key;
+            if (normalizeAliases(entry.aliases).some(alias => alias.toLowerCase() === lookupName)) return key;
+        }
+        return '';
+    }
+
+    function formatColorBlockName(entry) {
+        const name = String(entry?.name ?? '').trim();
+        if (!name) return '';
+        const nameKey = name.toLowerCase();
+        const aliases = normalizeAliases(entry.aliases)
+            .filter(alias => alias.toLowerCase() !== nameKey);
+        return `${name}${aliases.map(alias => `(${alias})`).join('')}`;
+    }
+
+    function formatColorBlockPair(name, color) {
+        const normalizedColor = normalizeHexColor(color, null);
+        if (!normalizedColor) return '';
+        const key = resolveCharacterKeyByNameOrAlias(name);
+        const blockName = key ? formatColorBlockName(characterColors[key]) : String(name ?? '').trim();
+        return blockName ? `${blockName}=${normalizedColor}` : '';
+    }
+
+    function buildCurrentColorsBlock() {
+        const pairs = Object.values(characterColors)
+            .map(entry => formatColorBlockPair(entry?.name, getEntryEffectiveColor(entry)))
+            .filter(Boolean);
+        return pairs.length ? `[COLORS:${pairs.join(',')}]` : '';
+    }
+
+    function buildColorMetadataPromptLines() {
+        const currentBlock = buildCurrentColorsBlock();
+        if (!currentBlock) {
+            return ['MANDATORY METADATA DIRECTIVE: Terminate your reply with a single plain-text metadata line: [COLORS:Name=#RRGGBB,Name2=#RRGGBB] listing all active speakers. Code fences/Markdown wrappers are strictly forbidden.'];
+        }
+        return [
+            `Current canonical [COLORS:] reference block: ${currentBlock}`,
+            'MANDATORY METADATA DIRECTIVE: You must terminate your reply with a single plain-text [COLORS:...] line containing the exact list of speakers active in your response. For any speaker or alias appearing in your reply, copy their matching entry EXACTLY from the canonical block above. You must preserve the exact spelling of the canonical name, any aliases listed in parentheses, and their designated color hex value. Under no circumstances may you alter or omit these.',
+            'STRICT PROHIBITION (NO DUPLICATES): Never output a separate [COLORS:] entry for an alias already shown in parentheses. Example: if the canonical block contains Kurisu(Kris)=#RRGGBB, then Kris is Kurisu and a standalone Kris=#RRGGBB is strictly forbidden.',
+            'NEW CHARACTER POLICY: Only append a new Name=#RRGGBB entry if and only if a speaker appears who is completely missing from the canonical block above.',
+        ];
+    }
+
     function buildLLMColorizeRules(extraRule = '') {
         const rules = [
-            'Output rules:',
-            '1. Return the original message with color tags inserted.',
-            '2. Wrap each dialogue/thought span, including its opening and closing delimiters, in <font color=#RRGGBB>...</font>.',
-            '3. Preserve every original character, space, punctuation mark, and line break exactly; only add <font> tags and an optional final [COLORS:...] line.',
-            '4. Do not escape quote marks, add wrapper quotes, rewrite wording, translate, summarize, or add commentary.',
-            '5. If the speaker for a span is unclear, leave that span unchanged instead of guessing.',
-            '6. Do not wrap the answer in Markdown or code fences.',
+            'CRITICAL COLORIZATION DIRECTIVES (ZERO TOLERANCE FOR DEVIATION):',
+            '1. MANDATORY TAGGING: Wrap every spoken dialogue or inner thought span, including its opening and closing delimiters, inside a single <font color=#RRGGBB>...</font> tag.',
+            '2. ZERO TEXT MODIFICATION: Preserve every original character, space, punctuation mark, and line break exactly as written. You are forbidden to rewrite, translate, summarize, escape quote marks, add extra quotes, or add commentary. Only inject the <font> tags and the final [COLORS:...] metadata.',
+            '3. NO COMPROMISE EXCLUSIVITY: If the speaker for a non-thought span is completely unclear, leave it uncolored rather than guessing.',
+            '4. NO MARKDOWN WRAPPERS: Do not wrap your response in Markdown code fences or code blocks under any circumstances. Return the plain text directly.',
         ];
         if (extraRule) rules.push(extraRule);
         return rules;
@@ -1614,18 +1708,22 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             } else {
                 scheduleDomRefreshSeries();
             }
+            scheduleCustomFontRefresh(options.saveImmediately ? 0 : 120);
             return 0;
         }
         if (!settings.autoRecolor && !options.force) return 0;
         const list = Array.isArray(keys) ? keys : [keys];
-        return applyLiveColorReplacements(buildColorReplacementsFromSnapshot(snapshot, list), {
+        const changedCount = applyLiveColorReplacements(buildColorReplacementsFromSnapshot(snapshot, list), {
             nameToNewColor: buildNameToCurrentColorForKeys(list),
             saveImmediately: options.saveImmediately,
         });
+        scheduleCustomFontRefresh(options.saveImmediately ? 0 : 120);
+        return changedCount;
     }
 
     function repaintDomAfterCharacterDataChange(delay = 0) {
         if (isDomEngine()) scheduleDomRefreshSeries(delay);
+        scheduleCustomFontRefresh(delay);
     }
 
     function queueColorStateSave(options = {}) {
@@ -1733,7 +1831,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const usedAssignments = extractUsedAssignmentsFromColorizedText(cleaned, narratorColor);
         let finalText = cleaned;
         if (usedAssignments.length && !/\[COLORS?:([^\]]*)\]/i.test(finalText)) {
-            finalText += `\n[COLORS:${usedAssignments.map(({ name, color }) => `${name}=${color}`).join(',')}]`;
+            finalText += `\n[COLORS:${usedAssignments.map(({ name, color }) => formatColorBlockPair(name, color)).filter(Boolean).join(',')}]`;
         }
 
         return {
@@ -1776,7 +1874,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             '',
             `Characters: ${charList.join(', ')}`,
         ];
-        if (thoughtSymbolList) lines.push(`Also color inner thoughts when delimited by these literal symbols: ${thoughtSymbolList}.`);
+        lines.push(...buildColorMetadataPromptLines());
+        if (thoughtSymbolList) lines.push(buildThoughtSymbolColorPromptRule(thoughtSymbolList));
         if (narratorColor) lines.push(`Narrator=${narratorColor} for narration text.`);
         if (trimmedSpeaker && defaultSpeakerColor) lines.push(`Default speaker (message author): ${trimmedSpeaker}=${defaultSpeakerColor}`);
         lines.push('');
@@ -1822,7 +1921,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             '',
             `Characters: ${charList.join(', ')}`,
         ];
-        if (thoughtSymbolList) lines.push(`Also color inner thoughts when delimited by these literal symbols: ${thoughtSymbolList}.`);
+        lines.push(...buildColorMetadataPromptLines());
+        if (thoughtSymbolList) lines.push(buildThoughtSymbolColorPromptRule(thoughtSymbolList));
         if (narratorColor) lines.push(`Narrator=${narratorColor} for narration text.`);
         lines.push('');
         lines.push(...buildLLMColorizeRules('- Return all messages in order with [MSG:N] markers preserved'));
@@ -2214,7 +2314,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 aliases: normalizeAliases(options.aliases),
                 style: VALID_STYLES.has(options.style) ? options.style : '',
                 dialogueCount: Number.isFinite(options.dialogueCount) && options.dialogueCount > 0 ? Math.floor(options.dialogueCount) : 0,
-                group: String(options.group ?? '').trim()
+                group: String(options.group ?? '').trim(),
+                font: normalizeGoogleFontName(options.font)
             }
         };
     }
@@ -3674,11 +3775,11 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const aliases = Object.entries(characterColors).filter(([, v]) => v.aliases?.length).map(([, v]) => `${v.name}/${v.aliases.join('/')}`).join('; ');
         const brightnessOffset = getBrightnessOffset();
         const parts = [
-            '[Dialogue Colors]',
-            'Follow this checklist for every assistant reply:',
-            `1. Wrap every spoken dialogue span in <font color=#RRGGBB>...</font>. Put the opening and closing dialogue/thought delimiters inside the same tag. Delimiters: ${delimiterSymbolList}.`,
-            '2. Preserve normal dialogue punctuation. Do not escape quotes, add extra outer quotes, or rewrite text just to color it.',
-            mode === 'dark' ? `3. Use readable colors for a dark background. Keep lightness between ${minLightness}% and ${maxLightness}%. Never use dark/low-lightness colors.` : `3. Use readable colors for a light background. Keep lightness between ${minLightness}% and ${maxLightness}%. Never use bright/high-lightness colors.`,
+            '[DIALOGUE COLORS - SYSTEM OVERRIDE RULESET]',
+            'YOU MUST ADHERE TO THIS RULES MATRIX FOR EVERY SINGLE REPLY:',
+            `1. COLOR EVERY SPOKEN DIALOGUE SPAN: Wrap each spoken dialogue or dialogue segment inside a <font color=#RRGGBB>...</font> tag. You must place both the opening and closing delimiters (including quotes, thought markers, etc.) inside the same tag. DELIMITERS TO TRIGGER THIS: ${delimiterSymbolList}.`,
+            '2. PRESERVE ORIGINAL PUNCTUATION & TEXT: Do not escape quote marks, do not insert extra outer quote marks, and do not alter or rewrite any text just to apply colors. Keep the raw content exactly identical.',
+            mode === 'dark' ? `3. ENSURE READABILITY: You must select readable colors optimized for a dark background. Restrict lightness strictly between ${minLightness}% and ${maxLightness}%. Dark or low-contrast colors are strictly forbidden.` : `3. ENSURE READABILITY: You must select readable colors optimized for a light background. Restrict lightness strictly between ${minLightness}% and ${maxLightness}%. Bright or low-contrast colors are strictly forbidden.`,
         ];
         parts.push('Correct format example: <font color=#aabbcc>"Hello."</font>');
         if (brightnessOffset > 0) parts.push(`For newly introduced characters only, bias the chosen color about +${brightnessOffset}% lightness before finalizing it, then clamp to the hard range.`);
@@ -3694,13 +3795,13 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         if (reservedColors) parts.push(`Colors already in use: ${reservedColors}. For a new speaker, choose a distinct color that does not reuse or closely match them.`);
         if (aliases) parts.push(`Aliases: ${aliases}.`);
         if (!settings.disableNarration && settings.narratorColor) parts.push(`Narrator: ${applyThemeReadabilityAndBrightness(settings.narratorColor)}.`);
-        if (thoughtSymbols.length) parts.push(`For inner thoughts, use these literal delimiters and color both the delimiters and enclosed text with the speaker's color: ${thoughtSymbols.map(formatPromptLiteralSymbol).join(', ')}.`);
+        if (thoughtSymbols.length) parts.push(buildThoughtSymbolColorPromptRule(thoughtSymbols.map(formatPromptLiteralSymbol).join(', ')));
         if (settings.highlightMode) parts.push('Add background highlight.');
         if (settings.cssEffects) parts.push(`For intense emotion, magic, distortion, or dramatic effect, use CSS transforms. Available effects: chaos=rotate(2deg) skew(5deg); magic=scale(1.2); unease=skew(-10deg); rage=uppercase; whispers=lowercase; glitch=skew(8deg) translate(2px, -1px); tremble=rotate(1deg) translate(1px, 1px); echo=opacity:0.7, text-shadow:2px 2px currentColor; fade=opacity:0.6; glow=text-shadow:0 0 8px currentColor; shadow=text-shadow:3px 3px 2px rgba(0,0,0,0.5); blur=filter:blur(1px); shimmer=filter:brightness(1.3); distort=skew(-5deg) scale(1.05); warp=rotate(-3deg) skew(4deg); bounce=translateY(-2px); sink=translateY(2px); stretch=scaleX(1.15); squash=scaleY(0.9); tilt=rotate(5deg); spin=rotate(15deg); shrink=scale(0.9); grow=scale(1.15); drift=translateX(3px); shudder=skew(-3deg) rotate(-1deg); pulse=scale(1.08); flicker=opacity:0.8; haze=filter:blur(0.5px) opacity:0.85; static=skew(2deg) translateY(1px); void=opacity:0.5 filter:blur(2px). Wrap in <span style='transform:X; display:inline-block; background:transparent;'>text</span> for transforms, or <span style='X'>text</span> for opacity/filter/text-shadow effects.`);
-        parts.push('Give every newly introduced character a unique color.');
-        parts.push('Final line must be plain text metadata, not Markdown/code: [COLORS:Name=#RRGGBB,Name2=#RRGGBB] for all speakers in the reply.');
-        if (!settings.disableNarration) parts.push('Include Narrator=#RRGGBB if narration is used.');
-        parts.push('Include nicknames as Name(Nick)=#RRGGBB.');
+        parts.push('4. EXCLUSIVE UNIQUE COLOR ALLOCATION: Assign a highly distinct, unique color to any genuinely newly introduced character. Never assign a new color or entry to an existing alias of an established character.');
+        parts.push(...buildColorMetadataPromptLines());
+        if (!settings.disableNarration) parts.push('5. NARRATOR COLOR RULE: If narration or story description is present, you must assign the exact Narrator color to it.');
+        parts.push('6. CANONICAL NICKNAME BINDING: For any genuinely new nicknames or alternate names, you must append them directly to the canonical name as Name(Nick)=#RRGGBB. You are strictly forbidden from creating a separate Nick=#RRGGBB entry.');
         return parts.join('\n');
     }
 
@@ -3743,12 +3844,12 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const brightnessClause = brightnessOffset !== 0
             ? ` New characters: ${brightnessOffset > 0 ? '+' : ''}${brightnessOffset}% lightness bias.`
             : '';
-        parts.push('[Dialogue Colors]');
-        parts.push('Follow these rules exactly:');
-        parts.push(`1. Wrap every spoken dialogue span in <font color=#RRGGBB>...</font>. Include its opening and closing delimiters inside the tag. Delimiters: ${delimiterList}.`);
-        parts.push('2. Correct format: <font color=#aabbcc>"Hello."</font>');
-        parts.push('3. Do not escape quote marks, add wrapper quotes, rewrite text, or add commentary for the coloring task.');
-        parts.push(`4. ${mode} mode: use ${modeGuidance}; keep lightness ${minLightness}-${maxLightness}%.${brightnessClause}`);
+        parts.push('[DIALOGUE COLORS - CRITICAL SYSTEM DIRECTIVES]');
+        parts.push('YOU MUST COMPLY WITH THE FOLLOWING DIRECTIVES TO THE LETTER:');
+        parts.push(`1. WRAP EVERY DIALOGUE SPAN: You must wrap each spoken dialogue span inside a <font color=#RRGGBB>...</font> tag, ensuring its opening and closing delimiters are contained inside. DELIMITERS TO TRACK: ${delimiterList}.`);
+        parts.push('2. EXACT SPECIMEN FORMAT: <font color=#aabbcc>"Hello."</font> (Delimiters are strictly inside the font tags).');
+        parts.push('3. ABSOLUTE TEXT PRESERVATION: You are forbidden from escaping quotes, adding wrapping quotes, modifying phrasing, or inserting commentary.');
+        parts.push(`4. CONTRAST READABILITY CLAMP: You must apply ${modeGuidance}. Force all chosen hex colors to remain strictly within ${minLightness}% to ${maxLightness}% lightness.${brightnessClause}`);
 
         const customPalettePrompt = buildCustomPalettePrompt();
         if (customPalettePrompt) {
@@ -3765,14 +3866,16 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             parts.push(`Narrator: ${applyThemeReadabilityAndBrightness(settings.narratorColor)}.`);
         }
         if (thoughtSymbols.length) {
-            parts.push(`Thoughts: color delimiters+text with speaker's color (${thoughtSymbols.map(formatPromptLiteralSymbol).join(', ')}).`);
+            parts.push(buildThoughtSymbolColorPromptRule(thoughtSymbols.map(formatPromptLiteralSymbol).join(', ')));
         }
         if (settings.highlightMode) parts.push('Add background highlight.');
         if (settings.cssEffects) {
             parts.push(`CSS effects: chaos=rotate(2deg) skew(5deg), magic=scale(1.2), unease=skew(-10deg), rage=uppercase, whispers=lowercase, glitch=skew(8deg) translate(2px, -1px), tremble=rotate(1deg) translate(1px, 1px), echo=opacity:0.7 text-shadow:2px 2px, fade=opacity:0.6, glow=text-shadow:0 0 8px, shadow=text-shadow:3px 3px 2px, blur=filter:blur(1px), shimmer=filter:brightness(1.3), distort=skew(-5deg) scale(1.05), warp=rotate(-3deg) skew(4deg), bounce=translateY(-2px), sink=translateY(2px), stretch=scaleX(1.15), squash=scaleY(0.9), tilt=rotate(5deg), spin=rotate(15deg), shrink=scale(0.9), grow=scale(1.15), drift=translateX(3px), shudder=skew(-3deg) rotate(-1deg), pulse=scale(1.08), flicker=opacity:0.8, haze=filter:blur(0.5px) opacity:0.85, static=skew(2deg) translateY(1px), void=opacity:0.5 filter:blur(2px) in <span style='transform:X; display:inline-block; background:transparent;'>text</span> or <span style='X'>text</span>.`);
         }
 
-        parts.push(`End the reply with this plain-text metadata line: [COLORS:Name=#RRGGBB,Name2=#RRGGBB${!settings.disableNarration ? ',Narrator=#RRGGBB' : ''},Name(Nick)=#RRGGBB]`);
+        parts.push(...buildColorMetadataPromptLines());
+        if (!settings.disableNarration) parts.push('Include Narrator=#RRGGBB if narration is used.');
+        parts.push('For genuinely new nicknames, attach them to the canonical speaker as Name(Nick)=#RRGGBB; do not create Nick=#RRGGBB separately.');
         parts.push('Do not put the final [COLORS] line in a code block.');
 
         return parts.join('\n');
@@ -3799,11 +3902,12 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const brightnessClause = brightnessOffset !== 0
             ? ` New speakers: ${brightnessOffset > 0 ? '+' : ''}${brightnessOffset}% lightness bias.`
             : '';
-        parts.push('[Dialogue Colors DOM-only mode]');
-        parts.push('Write the roleplay reply normally. Do NOT add <font> tags or CSS spans. The local DOM renderer handles visible colors.');
-        parts.push('For speaker tracking only, append one plain-text metadata line at the very end: [COLORS:Name=#RRGGBB,Name2=#RRGGBB]');
-        parts.push('List every speaker who has dialogue or inner thoughts in your reply. Use Name(Nick)=#RRGGBB for nicknames. Omit the metadata line only when the reply has no speakers.');
-        parts.push('Do not put the metadata line in Markdown or a code fence.');
+        parts.push('[DIALOGUE COLORS - DOM STEALTH TRACKING INTERFACE]');
+        parts.push('1. NORMAL REPLY FORMAT: Write the roleplay reply exactly as normal. You are strictly forbidden from adding any visible <font> tags or CSS spans to the reply text.');
+        parts.push('2. MANDATORY METADATA APPEND: You must append exactly one plain-text [COLORS:...] line at the very end of your reply.');
+        parts.push(...buildColorMetadataPromptLines());
+        parts.push('3. ALL-SPEAKERS REGISTRATION: List every speaker who has spoken dialogue or inner thoughts in the reply. You must copy existing aliases from the canonical block as Name(Alias)=#RRGGBB. Emitting Alias=#RRGGBB separately is strictly prohibited. Omit this metadata line if and only if the reply contains zero active speakers.');
+        parts.push('4. NO MARKDOWN CODE BLOCKS: You are strictly forbidden from placing the final [COLORS] line in Markdown code blocks or code fences.');
         parts.push(`Use ${modeGuidance}.${brightnessClause}`);
         const customPalettePrompt = buildCustomPalettePrompt();
         if (customPalettePrompt) parts.push(customPalettePrompt);
@@ -3943,7 +4047,10 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         legend.innerHTML = '<div style="font-weight:bold;margin-bottom:4px;cursor:grab;">⋮⋮ Characters</div>' +
             entries.map(([, v]) => {
                 const safeColor = getEntryEffectiveColor(v);
-                return `<div style="display:flex;align-items:center;gap:4px;"><span style="width:8px;height:8px;border-radius:50%;background:${safeColor};"></span><span style="color:${safeColor}">${escapeHtml(v.name)}</span><span style="opacity:0.5;font-size:0.8em;">${v.dialogueCount || 0}</span></div>`;
+                const fontFamily = getGoogleFontFamily(v.font);
+                if (fontFamily) loadGoogleFont(v.font);
+                const fontStyle = fontFamily ? `font-family:${escapeAttr(fontFamily)};` : '';
+                return `<div style="display:flex;align-items:center;gap:4px;"><span style="width:8px;height:8px;border-radius:50%;background:${safeColor};"></span><span style="color:${safeColor};${fontStyle}">${escapeHtml(v.name)}</span><span style="opacity:0.5;font-size:0.8em;">${v.dialogueCount || 0}</span></div>`;
             }).join('');
         legend.style.display = settings.showLegend ? 'block' : 'none';
     }
@@ -3951,14 +4058,19 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     function getDialogueStats() {
         const entries = Object.entries(characterColors);
         const total = entries.reduce((s, [, v]) => s + (v.dialogueCount || 0), 0);
-        return entries.map(([, v]) => ({ name: v.name, count: v.dialogueCount || 0, pct: total ? Math.round((v.dialogueCount || 0) / total * 100) : 0, color: getEntryEffectiveColor(v) })).sort((a, b) => b.count - a.count);
+        return entries.map(([, v]) => ({ name: v.name, count: v.dialogueCount || 0, pct: total ? Math.round((v.dialogueCount || 0) / total * 100) : 0, color: getEntryEffectiveColor(v), font: normalizeGoogleFontName(v.font) })).sort((a, b) => b.count - a.count);
     }
 
     function showStatsPopup() {
         const stats = getDialogueStats();
         if (!stats.length) { toast.info('No dialogue data'); return; }
         const maxCount = Math.max(...stats.map(s => s.count), 1);
-        let html = stats.map(s => `<div style="display:flex;align-items:center;gap:6px;margin:2px 0;"><span style="width:60px;color:${s.color}">${escapeHtml(s.name)}</span><div style="flex:1;height:12px;background:var(--SmartThemeBlurTintColor);border-radius:3px;overflow:hidden;"><div style="width:${s.count / maxCount * 100}%;height:100%;background:${s.color};"></div></div><span style="width:40px;text-align:right;font-size:0.8em;">${s.count} (${s.pct}%)</span></div>`).join('');
+        let html = stats.map(s => {
+            const fontFamily = getGoogleFontFamily(s.font);
+            if (fontFamily) loadGoogleFont(s.font);
+            const fontStyle = fontFamily ? `font-family:${escapeAttr(fontFamily)};` : '';
+            return `<div style="display:flex;align-items:center;gap:6px;margin:2px 0;"><span style="width:60px;color:${s.color};${fontStyle}">${escapeHtml(s.name)}</span><div style="flex:1;height:12px;background:var(--SmartThemeBlurTintColor);border-radius:3px;overflow:hidden;"><div style="width:${s.count / maxCount * 100}%;height:100%;background:${s.color};"></div></div><span style="width:40px;text-align:right;font-size:0.8em;">${s.count} (${s.pct}%)</span></div>`;
+        }).join('');
         const popup = document.createElement('div');
         popup.id = 'dc-stats-popup';
         popup.innerHTML = `<div style="font-weight:bold;margin-bottom:8px;">Dialogue Statistics</div>${html}<button class="dc-close-popup menu_button" style="margin-top:10px;width:100%;">Close</button>`;
@@ -4195,7 +4307,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const lookup = new Map();
         for (const entry of Object.values(rawColors || {})) {
             if (!entry || isCompositeSpeakerLabel(entry.name)) continue;
-            registerLookupAssignment(lookup, entry.name, getEntryEffectiveColor(entry), entry.aliases);
+            registerLookupAssignment(lookup, entry.name, getEntryEffectiveColor(entry), entry.aliases, false, entry.font);
         }
         return lookup;
     }
@@ -4231,7 +4343,9 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             const rawColor = pair.substring(eqIdx + 1).trim();
             if (!name || !rawColor || !/^#[a-fA-F0-9]{6}$/i.test(rawColor)) continue;
             const assignedColor = normalizeHexColor(rawColor);
-            const key = name.toLowerCase();
+            const existingKey = resolveCharacterKeyByNameOrAlias(name);
+            const key = existingKey || name.toLowerCase();
+            const canonicalName = existingKey ? characterColors[existingKey].name : name;
             if (characterColors[key]) {
                 characterColors[key].dialogueCount = (characterColors[key].dialogueCount || 0) + 1;
                 if (!normalizeHexColor(characterColors[key].color, null)) {
@@ -4239,7 +4353,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 }
                 characterColors[key].baseColor = normalizeHexColor(characterColors[key].baseColor, deriveBaseColorFromEffectiveColor(getEntryEffectiveColor(characterColors[key])));
             } else {
-                const built = buildCharacterEntry(name, {
+                const built = buildCharacterEntry(canonicalName, {
                     color: assignedColor,
                     colorMode: 'effective',
                     locked: settings.autoLockDetected !== false,
@@ -4252,7 +4366,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                     const finalColor = normalizeHexColor(getEntryEffectiveColor(built.entry), null);
                     hadRemapping = true;
                     if (finalColor && finalColor !== assignedColor) {
-                        remappedAssignments.push({ name, key, oldColor: assignedColor, newColor: finalColor });
+                        remappedAssignments.push({ name: canonicalName, key, oldColor: assignedColor, newColor: finalColor });
                     }
                 }
             }
@@ -4495,12 +4609,12 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         return patterns.length ? new RegExp(`(${patterns.join('|')})`, 'g') : null;
     }
 
-    function registerLookupAssignment(lookup, name, color, aliases = [], preserveExisting = false) {
+    function registerLookupAssignment(lookup, name, color, aliases = [], preserveExisting = false, font = '') {
         const normalizedName = String(name ?? '').trim();
         const normalizedColor = normalizeHexColor(color, null);
         if (!normalizedName || !normalizedColor) return;
         const canonicalKey = normalizedName.toLowerCase();
-        const assignment = { key: canonicalKey, name: normalizedName, color: normalizedColor };
+        const assignment = { key: canonicalKey, name: normalizedName, color: normalizedColor, font: normalizeGoogleFontName(font) };
         const lookupNames = [normalizedName, ...normalizeAliases(aliases)];
         for (const lookupName of lookupNames) {
             const lookupKey = lookupName.toLowerCase();
@@ -4513,7 +4627,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     function buildNameColorLookup(extraAssignments = []) {
         const lookup = new Map();
         for (const entry of Object.values(characterColors)) {
-            registerLookupAssignment(lookup, entry.name, getEntryEffectiveColor(entry), entry.aliases);
+            registerLookupAssignment(lookup, entry.name, getEntryEffectiveColor(entry), entry.aliases, false, entry.font);
         }
         if (settings.narratorColor) {
             registerLookupAssignment(lookup, 'Narrator', applyThemeReadabilityAndBrightness(settings.narratorColor));
@@ -4532,6 +4646,55 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             registerLookupAssignment(lookup, assignment.name, assignment.color, assignment.aliases, true);
         }
         return lookup;
+    }
+
+    function setColorFontMapping(colorToFont, ambiguousColors, lockedColors, color, font, options = {}) {
+        const normalizedColor = normalizeHexColor(color, null);
+        const normalizedFont = normalizeGoogleFontName(font);
+        if (!normalizedColor || !normalizedFont) return;
+        if (lockedColors.has(normalizedColor) && !options.force) return;
+        const existing = colorToFont.get(normalizedColor);
+        if (existing && existing !== normalizedFont && !options.force) {
+            ambiguousColors.add(normalizedColor);
+            return;
+        }
+        colorToFont.set(normalizedColor, normalizedFont);
+        if (options.force) {
+            ambiguousColors.delete(normalizedColor);
+            lockedColors.add(normalizedColor);
+        }
+    }
+
+    function buildColorFontLookup(rawText = '') {
+        const colorToFont = new Map();
+        const ambiguousColors = new Set();
+        const lockedColors = new Set();
+        const lookup = buildNameColorLookup();
+        const parsed = parseColorAssignmentsFromText(rawText);
+
+        for (const [color, names] of Object.entries(parsed.namesByColor || {})) {
+            const normalizedColor = normalizeHexColor(color, null);
+            if (!normalizedColor) continue;
+            lockedColors.add(normalizedColor);
+            if (!names || names.size !== 1) {
+                colorToFont.delete(normalizedColor);
+                continue;
+            }
+            const [nameKey] = Array.from(names);
+            const assignment = lookup.get(nameKey);
+            if (assignment?.font) setColorFontMapping(colorToFont, ambiguousColors, lockedColors, normalizedColor, assignment.font, { force: true });
+            else colorToFont.delete(normalizedColor);
+        }
+
+        for (const entry of Object.values(characterColors)) {
+            if (!entry?.font) continue;
+            setColorFontMapping(colorToFont, ambiguousColors, lockedColors, getEntryEffectiveColor(entry), entry.font);
+        }
+
+        for (const color of ambiguousColors) {
+            if (!lockedColors.has(color)) colorToFont.delete(color);
+        }
+        return colorToFont;
     }
 
     function makeLengthPreservingSearchText(text) {
@@ -4637,6 +4800,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     function ensureCharacterEntry(name, color) {
         const trimmedName = String(name ?? '').trim();
         if (!trimmedName) return { key: '', entry: null, created: false };
+        const existingKey = resolveCharacterKeyByNameOrAlias(trimmedName);
+        if (existingKey) return { key: existingKey, entry: characterColors[existingKey], created: false };
         const key = trimmedName.toLowerCase();
         if (characterColors[key]) return { key, entry: characterColors[key], created: false };
         const built = buildCharacterEntry(trimmedName, {
@@ -4673,7 +4838,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             const ensured = ensureCharacterEntry(trimmedSpeakerName);
             if (!ensured?.entry) return null;
             if (ensured.created) result.createdCharacters = true;
-            registerLookupAssignment(lookup, ensured.entry.name, getEntryEffectiveColor(ensured.entry), ensured.entry.aliases);
+            registerLookupAssignment(lookup, ensured.entry.name, getEntryEffectiveColor(ensured.entry), ensured.entry.aliases, false, ensured.entry.font);
             defaultSpeaker = lookup.get(trimmedSpeakerName.toLowerCase()) || lookup.get(ensured.key) || null;
             if (defaultSpeaker && !sortedLookupKeys.includes(ensured.key)) {
                 sortedLookupKeys.push(ensured.key);
@@ -4792,7 +4957,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 end: segment.end,
                 text: segment.text,
                 delimiter: segment.delimiter,
-                assignment: assignment ? { key: assignment.key, name: assignment.name, color: assignment.color } : null
+                assignment: assignment ? { key: assignment.key, name: assignment.name, color: assignment.color, font: assignment.font } : null
             });
             previousParagraph = segment.paragraph;
         }
@@ -4812,7 +4977,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
         let finalText = updatedText;
         if (updatedText !== rawText && usedAssignments.length && !/\[COLORS?:([^\]]*)\]/i.test(finalText)) {
-            finalText += `\n[COLORS:${usedAssignments.map(({ name, color }) => `${name}=${color}`).join(',')}]`;
+            finalText += `\n[COLORS:${usedAssignments.map(({ name, color }) => formatColorBlockPair(name, color)).filter(Boolean).join(',')}]`;
         }
 
         return {
@@ -4829,6 +4994,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     const OVERRIDES_METADATA_KEY = 'dialogue_colors_overrides';
     let decorateAllTimer = null;
     let decorateLastTimer = null;
+    let customFontRefreshTimer = null;
     let isDecoratingDom = false;
     let decorateAllFirstCallTime = 0;
     let decorateLastFirstCallTime = 0;
@@ -5182,12 +5348,89 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         return ordinal >= 0 && segments[ordinal] ? segments[ordinal].index : NaN;
     }
 
+    function clearCustomFontTag(fontEl) {
+        if (!fontEl?.hasAttribute?.('data-dc-font')) return false;
+        fontEl.style.fontFamily = '';
+        if (!fontEl.getAttribute('style')) fontEl.removeAttribute('style');
+        fontEl.removeAttribute('data-dc-font');
+        return true;
+    }
+
+    function clearCustomFontsFromFontTags(root = document) {
+        let changed = false;
+        root?.querySelectorAll?.('font[data-dc-font]').forEach(fontEl => {
+            if (clearCustomFontTag(fontEl)) changed = true;
+        });
+        return changed;
+    }
+
+    function applyCustomFontsToFontTags(mesText, rawText = '') {
+        const fontTags = Array.from(mesText?.querySelectorAll?.('font[color]') || []);
+        if (!fontTags.length) return false;
+        const fontByColor = buildColorFontLookup(rawText);
+        let changed = false;
+        for (const fontEl of fontTags) {
+            const color = normalizeHexColor(fontEl.getAttribute('color'), null);
+            const font = color ? fontByColor.get(color) : '';
+            const family = getGoogleFontFamily(font);
+            if (family) {
+                loadGoogleFont(font);
+                if (fontEl.style.fontFamily !== family) {
+                    fontEl.style.fontFamily = family;
+                    changed = true;
+                }
+                if (!fontEl.hasAttribute('data-dc-font')) {
+                    fontEl.setAttribute('data-dc-font', '1');
+                    changed = true;
+                }
+            } else if (clearCustomFontTag(fontEl)) {
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    function applyCustomFontsToMessageElement(mesElement, chat = getContext()?.chat || []) {
+        const mesText = mesElement?.querySelector?.('.mes_text');
+        if (!mesText) return false;
+        if (!settings.enabled) return clearCustomFontsFromFontTags(mesText);
+        const mesIndex = Number(mesElement.getAttribute?.('mesid'));
+        const msg = Number.isFinite(mesIndex) ? chat[mesIndex] : null;
+        if (msg?.is_system) return clearCustomFontsFromFontTags(mesText);
+        return applyCustomFontsToFontTags(mesText, msg?.mes || mesText.innerHTML || '');
+    }
+
+    function applyCustomFontsToMessageElements(elements) {
+        const targets = Array.from(new Set(Array.from(elements || []).filter(Boolean)));
+        if (!targets.length) return false;
+        const chat = getContext()?.chat || [];
+        let changed = false;
+        for (const mesElement of targets) {
+            if (applyCustomFontsToMessageElement(mesElement, chat)) changed = true;
+        }
+        return changed;
+    }
+
+    function applyCustomFontsToRenderedMessages() {
+        return applyCustomFontsToMessageElements(document.querySelectorAll('#chat .mes[mesid]'));
+    }
+
+    function scheduleCustomFontRefresh(delay = 0) {
+        clearTimeout(customFontRefreshTimer);
+        customFontRefreshTimer = setTimeout(() => {
+            customFontRefreshTimer = null;
+            applyCustomFontsToRenderedMessages();
+        }, Math.max(0, Number(delay) || 0));
+    }
+
     function clearSegmentDecoration(el) {
         el.style.color = '';
         el.style.backgroundColor = '';
+        el.style.fontFamily = '';
         if (!el.getAttribute('style')) el.removeAttribute('style');
         el.removeAttribute('data-dc-colored');
         el.removeAttribute('data-dc-speaker');
+        el.removeAttribute('data-dc-font');
         el.removeAttribute('data-dc-seg');
     }
 
@@ -5195,6 +5438,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const mesText = mesElement?.querySelector?.('.mes_text');
         if (mesText) {
             mesText.querySelectorAll('[data-dc-colored], [data-dc-seg]').forEach(clearSegmentDecoration);
+            clearCustomFontsFromFontTags(mesText);
             if (mesText.hasAttribute('data-dc-narrator')) {
                 mesText.style.color = '';
                 if (!mesText.getAttribute('style')) mesText.removeAttribute('style');
@@ -5211,12 +5455,16 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         if (!mesText) return { decorated: false, createdCharacters: false, needsRetry: !!msg && !msg.is_system };
         if (suspendMessageDomWorkForEdit(mesElement, mesIndex)) return { decorated: false, createdCharacters: false, needsRetry: false };
         undecorateMessageDom(mesElement, { clearWatcher: false });
-        if (!settings.enabled || !isDomEngine() || !msg || msg.is_system) {
+        if (!settings.enabled || !msg || msg.is_system) {
             return { decorated: false, createdCharacters: false };
         }
-        // Leave messages with persisted font colors (LLM engine output) untouched.
-        if (mesText.querySelector('font[color]') || collectFontColorsFromText(msg.mes).size) {
+        const hasPersistedFontColors = mesText.querySelector('font[color]') || collectFontColorsFromText(msg.mes).size;
+        if (hasPersistedFontColors) {
+            applyCustomFontsToFontTags(mesText, msg.mes);
             clearDecoratedWatcher(mesElement);
+            return { decorated: false, createdCharacters: false };
+        }
+        if (!isDomEngine()) {
             return { decorated: false, createdCharacters: false };
         }
 
@@ -5231,6 +5479,12 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             el.setAttribute('data-dc-seg', String(seg.index));
             if (!seg.assignment) return;
             el.style.color = seg.assignment.color;
+            const family = getGoogleFontFamily(seg.assignment.font);
+            if (family) {
+                loadGoogleFont(seg.assignment.font);
+                el.style.fontFamily = family;
+                el.setAttribute('data-dc-font', '1');
+            }
             if (settings.highlightMode) el.style.backgroundColor = `${seg.assignment.color}26`;
             el.setAttribute('data-dc-colored', '1');
             el.setAttribute('data-dc-speaker', seg.assignment.key);
@@ -5728,17 +5982,27 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         runtimeState.pendingObservedMessages = new Set();
         runtimeState.chatObserverTarget = chatEl;
         runtimeState.chatObserver = new MutationObserver(mutations => {
-            if (!settings.enabled || !isDomEngine()) return;
+            if (!settings.enabled) {
+                clearCustomFontsFromFontTags(chatEl);
+                return;
+            }
             if (isDecoratingDom) { pendingDeferredMutations = true; return; }
             const immediate = new Set();
             const delayed = new Set();
+            const fontTargets = new Set();
             for (const mutation of mutations) {
                 for (const mesElement of collectMutatedMessageElements(mutation)) {
                     const mesIndex = Number(mesElement?.getAttribute?.('mesid'));
                     if (suspendMessageDomWorkForEdit(mesElement, mesIndex)) continue;
+                    fontTargets.add(mesElement);
+                    if (!isDomEngine()) continue;
                     if (shouldDecorateObservedMessageImmediately(mesElement)) immediate.add(mesElement);
                     else delayed.add(mesElement);
                 }
+            }
+            if (!isDomEngine()) {
+                applyCustomFontsToMessageElements(fontTargets);
+                return;
             }
             if (immediate.size) {
                 for (const mesElement of immediate) runtimeState.pendingObservedMessages.delete(mesElement);
@@ -5772,6 +6036,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 if (!chatEl || runtimeState.chatObserverTarget === chatEl) return;
                 setupChatObserver();
                 scheduleDomSettleRefresh(DOM_RETRY_REFRESH_DELAYS);
+                scheduleCustomFontRefresh(80);
             }, 50);
         });
         runtimeState.chatRootObserver.observe(document.body, { childList: true, subtree: true });
@@ -6082,7 +6347,7 @@ ${quoteList}`;
 
         const ensured = ensureCharacterEntry(speakerName);
         if (!ensured?.entry) return { assignment: null, created: false };
-        registerLookupAssignment(lookup, ensured.entry.name, getEntryEffectiveColor(ensured.entry), ensured.entry.aliases);
+        registerLookupAssignment(lookup, ensured.entry.name, getEntryEffectiveColor(ensured.entry), ensured.entry.aliases, false, ensured.entry.font);
         assignment = lookup.get(speakerName.toLowerCase()) || lookup.get(ensured.key) || null;
         return { assignment, created: !!ensured.created };
     }
@@ -6859,11 +7124,16 @@ ${quoteList}`;
         const pickerColor = getBaseColor(v, safeColor);
         const rowExpanded = expandedCharacterRows.has(k);
         const styleLabel = v.style || 'Normal';
+        const fontName = normalizeGoogleFontName(v.font);
+        const fontFamily = getGoogleFontFamily(fontName);
+        if (fontFamily) loadGoogleFont(fontName);
+        const fontStyle = fontFamily ? `font-family:${escapeAttr(fontFamily)};` : '';
         const statusBadges = [
             v.keep ? '<span class="dc-status-chip dc-status-chip-keep">Kept</span>' : '',
             v.locked ? '<span class="dc-status-chip dc-status-chip-lock">Locked</span>' : '',
             v.group ? `<span class="dc-status-chip">${escapeHtml(v.group)}</span>` : '',
             v.style ? `<span class="dc-status-chip">${escapeHtml(styleLabel)}</span>` : '',
+            fontName ? `<span class="dc-status-chip" style="${fontStyle}">${escapeHtml(fontName)}</span>` : '',
             getBadge(v.dialogueCount || 0) ? `<span class="dc-status-chip">${getBadge(v.dialogueCount || 0)}</span>` : ''
         ].filter(Boolean).join('');
         const aliasChips = (v.aliases || []).map(a =>
@@ -6877,8 +7147,8 @@ ${quoteList}`;
                         <input type="color" value="${pickerColor}" data-key="${safeKey}" class="dc-color-input">
                     </span>
                     <input type="text" value="${escapeAttr(pickerColor)}" data-key="${safeKey}" class="dc-color-hex text_pole" inputmode="text" autocapitalize="none" autocomplete="off" spellcheck="false" maxlength="7" aria-label="Hex color for ${escapeAttr(v.name)}" title="Enter a hex color like #ff66cc">
-                    <div class="dc-char-name-wrap" title="Dialogues: ${v.dialogueCount || 0}${v.aliases?.length ? '\nAliases: ' + escapeHtml(v.aliases.join(', ')) : ''}${v.group ? '\nGroup: ' + escapeHtml(v.group) : ''}">
-                        <div class="dc-char-name" style="color:${safeColor};">${escapeHtml(v.name)}</div>
+                    <div class="dc-char-name-wrap" title="Dialogues: ${v.dialogueCount || 0}${v.aliases?.length ? '\nAliases: ' + escapeHtml(v.aliases.join(', ')) : ''}${v.group ? '\nGroup: ' + escapeHtml(v.group) : ''}${fontName ? '\nFont: ' + escapeHtml(fontName) : ''}">
+                        <div class="dc-char-name" style="color:${safeColor};${fontStyle}">${escapeHtml(v.name)}</div>
                         <div class="dc-char-meta">
                             <span class="dc-char-count">${v.dialogueCount || 0} lines</span>
                             ${statusBadges}
@@ -6895,6 +7165,7 @@ ${quoteList}`;
                     <div class="dc-inline-toolbar">
                         <button class="dc-swap menu_button" data-key="${safeKey}" title="Swap colors">Swap</button>
                         <button class="dc-style menu_button" data-key="${safeKey}" title="Cycle text style">Style: ${escapeHtml(styleLabel)}</button>
+                        <button class="dc-font menu_button" data-key="${safeKey}" title="Set Google Font">${fontName ? 'Edit Font' : 'Set Font'}</button>
                         <button class="dc-alias menu_button" data-key="${safeKey}" title="Add alias">Add Alias</button>
                         <button class="dc-group menu_button" data-key="${safeKey}" title="Assign group">${v.group ? 'Edit Group' : 'Set Group'}</button>
                     </div>
@@ -6912,6 +7183,7 @@ ${quoteList}`;
             v.locked ? 1 : 0,
             v.group || '',
             v.style || '',
+            normalizeGoogleFontName(v.font),
             v.dialogueCount || 0,
             swapMode === k ? 1 : 0,
             (v.aliases || []).join('\u0001'),
@@ -7103,6 +7375,37 @@ ${quoteList}`;
                         }
                     }
                     else inputRow.remove();
+                };
+                inputRow.querySelector('button').onclick = submit;
+                inp.onkeydown = ev => { if (ev.key === 'Enter') submit(); if (ev.key === 'Escape') inputRow.remove(); };
+                return;
+            }
+            const fontBtn = t.closest('.dc-font');
+            if (fontBtn) {
+                const row = fontBtn.closest('.dc-char');
+                const existing = row.querySelector('.dc-inline-input');
+                if (existing) { existing.remove(); return; }
+                const key = fontBtn.dataset.key;
+                const current = normalizeGoogleFontName(characterColors[key]?.font);
+                const inputRow = document.createElement('div');
+                inputRow.className = 'dc-inline-input';
+                inputRow.style.cssText = 'display:flex;gap:4px;padding:2px 0 2px 26px;';
+                inputRow.innerHTML = `<input type="text" class="text_pole" placeholder="Google Font name..." value="${escapeAttr(current)}" style="flex:1;padding:2px 4px;font-size:0.8em;"><button class="menu_button" style="padding:2px 6px;font-size:0.8em;">Set</button>`;
+                row.appendChild(inputRow);
+                const inp = inputRow.querySelector('input');
+                inp.focus();
+                inp.select();
+                const submit = () => {
+                    if (!characterColors[key]) { inputRow.remove(); return; }
+                    const nextFont = normalizeGoogleFontName(inp.value);
+                    if ((normalizeGoogleFontName(characterColors[key].font)) !== nextFont) {
+                        characterColors[key].font = nextFont;
+                        if (nextFont) loadGoogleFont(nextFont);
+                        commit();
+                        repaintDomAfterCharacterDataChange(0);
+                    } else {
+                        inputRow.remove();
+                    }
                 };
                 inputRow.querySelector('button').onclick = submit;
                 inp.onkeydown = ev => { if (ev.key === 'Enter') submit(); if (ev.key === 'Escape') inputRow.remove(); };
@@ -7535,6 +7838,7 @@ ${quoteList}`;
             saveData();
             injectPrompt();
             scheduleDomRefreshSeries(0);
+            scheduleCustomFontRefresh(0);
         };
         $('dc-highlight').onchange = e => { settings.highlightMode = e.target.checked; saveData(); injectPrompt(); scheduleDomRefreshSeries(0); };
         $('dc-autoscan').onchange = e => { settings.autoScanOnLoad = e.target.checked; saveData(); };
@@ -7564,7 +7868,7 @@ ${quoteList}`;
         $('dc-right-click').onchange = e => { settings.enableRightClick = e.target.checked; saveData(); };
         $('dc-legend').onchange = e => { settings.showLegend = e.target.checked; saveData(); updateLegend(); };
         $('dc-disable-narration').onchange = e => { settings.disableNarration = e.target.checked; saveData(); injectPrompt(); scheduleDomRefreshSeries(0); };
-        $('dc-share-global').onchange = e => { settings.shareColorsGlobally = e.target.checked; saveData(); loadData(); updateCharList(); injectPrompt(); };
+        $('dc-share-global').onchange = e => { settings.shareColorsGlobally = e.target.checked; saveData(); loadData(); updateCharList(); injectPrompt(); scheduleCustomFontRefresh(0); };
         $('dc-css-effects').onchange = e => { settings.cssEffects = e.target.checked; saveData(); injectPrompt(); };
         $('dc-disable-toasts').onchange = e => { settings.disableToasts = e.target.checked; saveData(); };
         $('dc-engine').onchange = e => {
@@ -7579,12 +7883,14 @@ ${quoteList}`;
                 startDomHealthCheck();
                 decorateAllMessages();
                 scheduleDomSettleRefresh(DOM_RETRY_REFRESH_DELAYS);
+                scheduleCustomFontRefresh(0);
             }
             else if (wasDomEngine) {
                 stopDomHealthCheck();
                 clearAutoAttributionVerificationQueue({ clearCooldown: true });
                 cancelStreamingAttributionVerification({ clearOverrides: true });
                 undecorateAllMessages();
+                scheduleCustomFontRefresh(0);
             }
         };
         $('dc-llm-profile').onchange = e => { settings.llmConnectionProfile = e.target.value || null; saveData(); };
@@ -7836,6 +8142,7 @@ ${quoteList}`;
         setupChatObserver();
         startDomHealthCheck();
         scheduleDomRefreshSeries(150);
+        scheduleCustomFontRefresh(150);
         if (runtimeState.chatChangedRafId) cancelAnimationFrame(runtimeState.chatChangedRafId);
         runtimeState.chatChangedRafId = requestAnimationFrame(() => {
             runtimeState.chatChangedRafId = null;
@@ -7843,8 +8150,9 @@ ${quoteList}`;
             startDomHealthCheck();
             decorateAllMessages();
             scheduleDomSettleRefresh(DOM_RETRY_REFRESH_DELAYS);
+            scheduleCustomFontRefresh(0);
         });
-        setTimeout(() => { setupChatObserver(); startDomHealthCheck(); scheduleDomSettleRefresh(DOM_RETRY_REFRESH_DELAYS); }, 250);
+        setTimeout(() => { setupChatObserver(); startDomHealthCheck(); scheduleDomSettleRefresh(DOM_RETRY_REFRESH_DELAYS); scheduleCustomFontRefresh(0); }, 250);
         if (settings.autoScanOnLoad !== false && !Object.keys(characterColors).length) {
             setTimeout(() => {
                 if (document.querySelectorAll('.mes').length) scanAllMessages();
@@ -7852,6 +8160,7 @@ ${quoteList}`;
                 setupChatObserver();
                 startDomHealthCheck();
                 scheduleDomRefreshSeries(0);
+                scheduleCustomFontRefresh(0);
             }, 1000);
         }
     }
@@ -7860,10 +8169,12 @@ ${quoteList}`;
         const index = Number(mesIndex);
         if (Number.isFinite(index) && index >= 0) {
             scheduleMessageDomRepair(index, { forceVerify: true, verifyDelay: 250 });
+            scheduleCustomFontRefresh(100);
             return;
         }
 
         scheduleDomRefreshSeries(200);
+        scheduleCustomFontRefresh(200);
 
         const chatGeneration = attributionChatGeneration;
         setTimeout(() => {
@@ -7878,15 +8189,16 @@ ${quoteList}`;
         if (runtimeState.eventsRegistered) return;
         runtimeState.eventHandlers = {
             generationAfterCommands: () => injectPrompt(),
-            characterMessageRendered: () => { onNewMessage(); scheduleDomRefreshSeries(120); },
-            messageRendered: () => scheduleDomRefreshSeries(120),
+            characterMessageRendered: () => { onNewMessage(); scheduleDomRefreshSeries(120); scheduleCustomFontRefresh(120); },
+            messageRendered: () => { scheduleDomRefreshSeries(120); scheduleCustomFontRefresh(120); },
             messageUpdated: handleMessageUpdated,
-            streamToken: () => { isStreamingGenerationActive = true; scheduleDecorateLast(hasMessageQuoteOverridesForLatestMessage() ? 0 : 80); scheduleStreamingAttributionVerification(); },
+            streamToken: () => { isStreamingGenerationActive = true; scheduleDecorateLast(hasMessageQuoteOverridesForLatestMessage() ? 0 : 80); scheduleCustomFontRefresh(120); scheduleStreamingAttributionVerification(); },
             generationEnded: () => {
                 isStreamingGenerationActive = false;
                 streamingHeuristicCache.clear();
                 cancelStreamingAttributionVerification();
                 scheduleDomRefreshSeries(0);
+                scheduleCustomFontRefresh(0);
                 queueAutoAttributionVerificationForMessage((getContext()?.chat || []).length - 1, { force: true, delay: 800 });
             },
             chatCreated: resetDialogueCountsForNewChat,
@@ -7990,6 +8302,7 @@ ${quoteList}`;
                 setupChatObserver();
                 startDomHealthCheck();
                 scheduleDomRefreshSeries(150);
+                scheduleCustomFontRefresh(150);
             } else if (waitAttempts > 60) {
                 clearInterval(waitUI);
             }
