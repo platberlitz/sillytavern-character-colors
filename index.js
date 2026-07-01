@@ -230,10 +230,10 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     let isVerifyingAttribution = false;
     let pendingAttributionVerifications = [];
     const ATTRIBUTION_VERIFIER_VERSION = 3;
-    const AUTO_ATTRIBUTION_VERIFY_DELAY_MS = 1000;
-    const AUTO_ATTRIBUTION_VERIFY_STABLE_RETRY_DELAY_MS = 1200;
-    const AUTO_ATTRIBUTION_VERIFY_RETRY_DELAY_MS = 30000;
-    const STREAMING_ATTRIBUTION_VERIFY_DELAY_MS = 2000;
+    const AUTO_ATTRIBUTION_VERIFY_DELAY_MS = 300;
+    const AUTO_ATTRIBUTION_VERIFY_STABLE_RETRY_DELAY_MS = 500;
+    const AUTO_ATTRIBUTION_VERIFY_RETRY_DELAY_MS = 3000;
+    const STREAMING_ATTRIBUTION_VERIFY_DELAY_MS = 1000;
     let autoAttributionVerifyTimer = null;
     let autoAttributionVerifyTimerDue = 0;
     const pendingAutoAttributionVerifyIndices = new Map();
@@ -8253,7 +8253,16 @@ ${quoteList}`;
                 cancelStreamingAttributionVerification();
                 scheduleDomRefreshSeries(0);
                 scheduleCustomFontRefresh(0);
-                queueAutoAttributionVerificationForMessage((getContext()?.chat || []).length - 1, { force: true, delay: 800 });
+                // Run post-generation verification sweeps to make absolutely sure everything is verified.
+                queueAutoAttributionVerificationForRenderedMessages({ force: true, delay: 300 });
+                setTimeout(() => {
+                    if (isStreamingGenerationActive) return;
+                    queueAutoAttributionVerificationForRenderedMessages({ force: true, delay: 0 });
+                }, 1000);
+                setTimeout(() => {
+                    if (isStreamingGenerationActive) return;
+                    queueAutoAttributionVerificationForRenderedMessages({ force: true, delay: 0 });
+                }, 2500);
             },
             chatCreated: resetDialogueCountsForNewChat,
             chatChanged: handleChatChanged,
