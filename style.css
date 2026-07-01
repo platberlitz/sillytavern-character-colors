@@ -313,8 +313,12 @@
     overflow-y: auto !important;
     overscroll-behavior: contain;
     -webkit-overflow-scrolling: touch;
-    touch-action: pan-y;
+    touch-action: pan-y !important;
     padding-right: 2px;
+}
+
+#dc-ext .dc-char-list * {
+    touch-action: pan-y !important;
 }
 
 #dc-ext .dc-char {

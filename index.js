@@ -7355,6 +7355,12 @@ ${quoteList}`;
         if (list.__dcDelegated) return;
         list.__dcDelegated = true;
 
+        const stopPropagation = e => e.stopPropagation();
+        list.addEventListener('touchstart', stopPropagation, { passive: true });
+        list.addEventListener('touchmove', stopPropagation, { passive: true });
+        list.addEventListener('touchend', stopPropagation, { passive: true });
+        list.addEventListener('wheel', stopPropagation, { passive: true });
+
         list.addEventListener('input', (e) => {
             const t = e.target;
             if (t.classList && t.classList.contains('dc-color-input')) {
