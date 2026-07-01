@@ -309,7 +309,11 @@
     flex-direction: column;
     gap: 4px;
     max-height: 360px;
-    overflow-y: auto;
+    min-height: 0;
+    overflow-y: auto !important;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    touch-action: pan-y;
     padding-right: 2px;
 }
 
@@ -511,6 +515,9 @@
     max-width: 90vw !important;
     max-height: 70vh !important;
     overflow-y: auto !important;
+    overscroll-behavior: contain !important;
+    -webkit-overflow-scrolling: touch !important;
+    touch-action: pan-y !important;
     z-index: 9999 !important;
     background-color: var(--SmartThemeBlurTintColor, #1a1a1a) !important;
     border: 1px solid var(--SmartThemeBorderColor, #444) !important;
