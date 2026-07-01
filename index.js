@@ -1376,7 +1376,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
     function buildThoughtSymbolColorPromptRule(thoughtSymbolList) {
         if (!thoughtSymbolList) return '';
-        return `Color every inner thought delimited by ${thoughtSymbolList}; wrap opening delimiter, text, and closing delimiter in one <font color=#RRGGBB>...</font> with active/default speaker color.`;
+        return `Color thoughts delimited by ${thoughtSymbolList} using active speaker color, delimiters included.`;
     }
 
     function resolveCharacterKeyByNameOrAlias(rawName) {
@@ -1418,19 +1418,18 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     function buildColorMetadataPromptLines() {
         const currentBlock = buildCurrentColorsBlock();
         if (!currentBlock) {
-            return ['End with one plain [COLORS:Name=#RRGGBB,Name2=#RRGGBB] line for active speakers; no code fences.'];
+            return ['End with [COLORS:Name=#RRGGBB] line. No code fences.'];
         }
         return [
-            `Canonical colors: ${currentBlock}`,
-            'End with one plain [COLORS:...] line. Reuse exact canonical entries for matching names/aliases; aliases in parentheses are the same character, never Alias=#... separately. New nicknames attach as Name(Nick)=#...; add Name=#... only for truly new speakers. No code fences.',
+            `Established: ${currentBlock}`,
+            'End with [COLORS:...]. Match canonical names exactly; never separate aliases. No code fences.',
         ];
     }
 
     function buildLLMColorizeRules(extraRule = '') {
         const rules = [
-            '- Wrap each dialogue/thought span, including delimiters, in one <font color=#RRGGBB>...</font>.',
-            '- Preserve text exactly; only add font tags and final [COLORS:] metadata.',
-            '- If a non-thought speaker is unclear, leave it uncolored. No Markdown/code fences.',
+            '- Wrap dialogue/thought spans (with delimiters) in <font color=#RRGGBB>...</font>.',
+            '- Preserve text exactly; only add font tags and [COLORS:] metadata. No code fences.',
         ];
         if (extraRule) rules.push(extraRule);
         return rules;
@@ -3761,13 +3760,11 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const brightnessOffset = getBrightnessOffset();
         const parts = [
             'Dialogue Colors:',
-            `- Color each dialogue/thought span with <font color=#RRGGBB>...</font>, delimiters included (${delimiterSymbolList}).`,
-            '- Preserve text exactly; no quote escaping, wrapper quotes, rewrites, or commentary.',
-            mode === 'dark' ? `- Use readable dark-bg colors (${minLightness}-${maxLightness}% lightness).` : `- Use readable light-bg colors (${minLightness}-${maxLightness}% lightness).`,
+            `- Color spans with <font color=#RRGGBB>...</font>, delimiters included (${delimiterSymbolList}). Ex: <font color=#aabbcc>"Hello."</font>`,
+            '- Preserve text exactly; no quote escaping or commentary.',
+            mode === 'dark' ? `- Use readable colors (${minLightness}-${maxLightness}% lightness for dark bg).` : `- Use readable colors (${minLightness}-${maxLightness}% lightness for light bg).`,
         ];
-        parts.push('Example: <font color=#aabbcc>"Hello."</font>');
-        if (brightnessOffset > 0) parts.push(`New colors: +${brightnessOffset}% lightness bias, then clamp.`);
-        if (brightnessOffset < 0) parts.push(`New colors: -${Math.abs(brightnessOffset)}% lightness bias, then clamp.`);
+        if (brightnessOffset !== 0) parts.push(`New colors: ${brightnessOffset > 0 ? '+' : ''}${brightnessOffset}% lightness bias.`);
         const customPalettePrompt = buildCustomPalettePrompt();
         if (customPalettePrompt) {
             parts.push(customPalettePrompt);
@@ -3775,11 +3772,10 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             const paletteDesc = PALETTE_DESCRIPTIONS[settings.colorTheme];
             if (paletteDesc) parts.push(paletteDesc);
         }
-        if (!settings.disableNarration && settings.narratorColor) parts.push(`Narrator=${applyThemeReadabilityAndBrightness(settings.narratorColor)} for narration/story description.`);
+        if (!settings.disableNarration && settings.narratorColor) parts.push(`Narrator=${applyThemeReadabilityAndBrightness(settings.narratorColor)} for narration.`);
         if (thoughtSymbols.length) parts.push(buildThoughtSymbolColorPromptRule(thoughtSymbols.map(formatPromptLiteralSymbol).join(', ')));
         if (settings.highlightMode) parts.push('Add background highlight.');
-        if (settings.cssEffects) parts.push('Optional CSS effects: use brief inline <span style="...">...</span> for clear tone shifts (rotate/skew/scale/opacity/filter/text-shadow/text-transform).');
-        parts.push('Use distinct colors for new characters.');
+        if (settings.cssEffects) parts.push('CSS: brief inline <span style="...">...</span> for clear tone shifts.');
         parts.push(...buildColorMetadataPromptLines());
         return parts.join('\n');
     }
@@ -3795,8 +3791,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const notes = meta?.[paletteName]?.notes?.trim() || '';
         const colors = palette.map(c => normalizeHexColor(c, null)).filter(Boolean).join(', ');
         if (!colors) return '';
-        const notesPart = notes ? ` Theme notes: ${notes}.` : '';
-        return `Use custom palette "${paletteName}": ${colors}.${notesPart} Prefer these hues when assigning new character colors.`;
+        const notesPart = notes ? ` Note: ${notes}.` : '';
+        return `Use palette "${paletteName}": ${colors}.${notesPart} Prefer these for new characters.`;
     }
 
     function buildMinimalPromptInstruction() {
@@ -3807,18 +3803,13 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const delimiterList = delimiterSymbols.map(formatPromptLiteralSymbol).join(', ');
         const brightnessOffset = getBrightnessOffset();
 
-        const parts = [];
-
-        const modeGuidance = mode === 'dark'
-            ? 'readable colors for dark background (medium-to-light)'
-            : 'readable colors for light background (medium-to-dark)';
-        const brightnessClause = brightnessOffset !== 0
-            ? ` New characters: ${brightnessOffset > 0 ? '+' : ''}${brightnessOffset}% lightness bias.`
-            : '';
-        parts.push('Dialogue Colors:');
-        parts.push(`Wrap dialogue/thought spans in <font color=#RRGGBB>...</font>, delimiters included (${delimiterList}). Example: <font color=#aabbcc>"Hello."</font>`);
-        parts.push('Preserve text exactly; no extra quotes, commentary, Markdown, or code fences.');
-        parts.push(`Use ${modeGuidance}; clamp ${minLightness}-${maxLightness}% lightness.${brightnessClause}`);
+        const parts = [
+            'Dialogue Colors:',
+            `Wrap spans (delimiters included: ${delimiterList}) in <font color=#RRGGBB>...</font>. Ex: <font color=#aabbcc>"Hello."</font>`,
+            'Preserve text exactly; no extra quotes, commentary, or code fences.',
+            mode === 'dark' ? `Use readable colors for dark bg (${minLightness}-${maxLightness}% lightness).` : `Use readable colors for light bg (${minLightness}-${maxLightness}% lightness).`,
+        ];
+        if (brightnessOffset !== 0) parts.push(`New colors: ${brightnessOffset > 0 ? '+' : ''}${brightnessOffset}% lightness bias.`);
 
         const customPalettePrompt = buildCustomPalettePrompt();
         if (customPalettePrompt) {
@@ -3837,7 +3828,6 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         if (settings.highlightMode) parts.push('Add background highlight.');
 
         parts.push(...buildColorMetadataPromptLines());
-
         return parts.join('\n');
     }
 
@@ -3847,17 +3837,13 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const thoughtSymbols = getThoughtDelimiterSymbols();
         const thoughtSymbolList = thoughtSymbols.map(formatPromptLiteralSymbol).join(', ');
         const brightnessOffset = getBrightnessOffset();
-        const parts = [];
-        const modeGuidance = mode === 'dark'
-            ? `readable colors for dark background (${minLightness}-${maxLightness}% lightness, medium-to-light)`
-            : `readable colors for light background (${minLightness}-${maxLightness}% lightness, medium-to-dark)`;
-        const brightnessClause = brightnessOffset !== 0
-            ? ` New speakers: ${brightnessOffset > 0 ? '+' : ''}${brightnessOffset}% lightness bias.`
-            : '';
-        parts.push('Dialogue Colors metadata only: write the reply normally; do not add visible <font> tags or CSS spans.');
-        parts.push(...buildColorMetadataPromptLines());
-        parts.push('List every speaker with dialogue/thoughts; omit [COLORS:] only if none.');
-        parts.push(`Use ${modeGuidance}.${brightnessClause}`);
+        const parts = [
+            'Dialogue Colors (metadata only): Write reply normally; do not add visible <font> tags or CSS.',
+            ...buildColorMetadataPromptLines(),
+            'List every active speaker; omit [COLORS:] only if none.'
+        ];
+        parts.push(mode === 'dark' ? `Use dark bg colors (${minLightness}-${maxLightness}% lightness).` : `Use light bg colors (${minLightness}-${maxLightness}% lightness).`);
+        if (brightnessOffset !== 0) parts.push(`New colors: ${brightnessOffset > 0 ? '+' : ''}${brightnessOffset}% lightness bias.`);
         const customPalettePrompt = buildCustomPalettePrompt();
         if (customPalettePrompt) parts.push(customPalettePrompt);
         else {
@@ -4686,8 +4672,96 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         return !!left && !!right && left.start === right.start && left.end === right.end;
     }
 
+    const speakingVerbs = new Set([
+        'say', 'says', 'said', 'saying',
+        'ask', 'asks', 'asked', 'asking',
+        'reply', 'replies', 'replied', 'replying',
+        'retort', 'retorts', 'retorted', 'retorting',
+        'answer', 'answers', 'answered', 'answering',
+        'whisper', 'whispers', 'whispered', 'whispering',
+        'yell', 'yells', 'yelled', 'yelling',
+        'shout', 'shouts', 'shouted', 'shouting',
+        'scream', 'screams', 'screamed', 'screaming',
+        'bellow', 'bellows', 'bellowed', 'bellowing',
+        'roar', 'roars', 'roared', 'roaring',
+        'call', 'calls', 'called', 'calling',
+        'cry', 'cries', 'cried', 'crying',
+        'whimper', 'whimpers', 'whimpered', 'whimpering',
+        'sob', 'sobs', 'sobbed', 'sobbing',
+        'sigh', 'sighs', 'sighed', 'sighing',
+        'groan', 'groans', 'groaned', 'groaning',
+        'gasp', 'gasps', 'gasped', 'gasping',
+        'mutter', 'mutters', 'muttered', 'muttering',
+        'mumble', 'mumbles', 'mumbled', 'mumbling',
+        'murmur', 'murmurs', 'murmured', 'murmuring',
+        'sputter', 'sputters', 'sputtered', 'sputtering',
+        'stammer', 'stammers', 'stammered', 'stammering',
+        'stutter', 'stutters', 'stuttered', 'stuttering',
+        'giggle', 'giggles', 'giggled', 'giggling',
+        'laugh', 'laughs', 'laughed', 'laughing',
+        'chuckle', 'chuckles', 'chuckled', 'chuckling',
+        'snicker', 'snickers', 'snickered', 'snivering', 'snickering',
+        'smirk', 'smirks', 'smirked', 'smirking',
+        'grin', 'grins', 'grinned', 'grinning',
+        'smile', 'smiles', 'smiled', 'smiling',
+        'nod', 'nods', 'nodded', 'nodding',
+        'shrug', 'shrugs', 'shrugged', 'shrugging',
+        'frown', 'frowns', 'frowned', 'frowning',
+        'pout', 'pouts', 'pouted', 'pouting',
+        'sneer', 'sneers', 'sneered', 'sneering',
+        'scoff', 'scoffs', 'scoffed', 'scoffing',
+        'growl', 'growls', 'growled', 'growling',
+        'hiss', 'hisses', 'hissed', 'hissing',
+        'snap', 'snaps', 'snapped', 'snapping',
+        'bark', 'barks', 'barked', 'barking',
+        'rasp', 'rasps', 'rasped', 'rasping',
+        'croak', 'croaks', 'croaked', 'croaking',
+        'squeak', 'squeaks', 'squeaked', 'squeaking',
+        'pipe', 'pipes', 'piped', 'piping',
+        'chime', 'chimes', 'chimed', 'chiming',
+        'agree', 'agrees', 'agreed', 'agreeing',
+        'add', 'adds', 'added', 'adding',
+        'continue', 'continues', 'continued', 'continuing',
+        'comment', 'comments', 'commented', 'commenting',
+        'note', 'notes', 'noted', 'noting',
+        'observe', 'observes', 'observed', 'observing',
+        'suggest', 'suggests', 'suggested', 'suggesting',
+        'insist', 'insists', 'insisted', 'insisting',
+        'demand', 'demands', 'demanded', 'demanding',
+        'plead', 'pleads', 'pleaded', 'pleading',
+        'beg', 'begs', 'begged', 'begging',
+        'gesture', 'gestures', 'gestured', 'gesturing',
+        'motion', 'motions', 'motioned', 'motioning',
+        'wave', 'waves', 'waved', 'waving',
+        'point', 'points', 'pointed', 'pointing',
+        'turn', 'turns', 'turned', 'turning',
+        'snort', 'snorts', 'snorted', 'snorting',
+        'quip', 'quips', 'quipped', 'quipping',
+        'exclaim', 'exclaims', 'exclaimed', 'exclaiming',
+        'interject', 'interjects', 'interjected', 'interjecting',
+        'spit', 'spits', 'spat', 'spitting',
+        'muse', 'muses', 'mused', 'musing',
+        'ponder', 'ponders', 'pondered', 'pondering',
+        'think', 'thinks', 'thought', 'thinking',
+        'wonder', 'wonders', 'wondered', 'wondering',
+        'breathe', 'breathes', 'breathed', 'breathing',
+        'snarl', 'snarls', 'snarled', 'snarling',
+        'jeer', 'jeers', 'jeered', 'jeering',
+        'taunt', 'taunts', 'taunted', 'taunting',
+        'tease', 'teases', 'teased', 'teasing',
+        'scold', 'scolds', 'scolded', 'scolding',
+        'warn', 'warns', 'warned', 'warning',
+        'protest', 'protests', 'protested', 'protesting'
+    ]);
+
+    const passivePrepositions = new Set([
+        'to', 'at', 'with', 'from', 'behind', 'beside', 'next', 'near', 'against', 'toward', 'towards', 'for', 'of', 'about', 'upon', 'on', 'under', 'above', 'by', 'in', 'into', 'onto', 'through', 'across', 'around'
+    ]);
+
     function isBetterSpeakerCandidate(candidate, best) {
         if (!best) return true;
+        if (candidate.strength > best.strength) return true;
+        if (candidate.strength < best.strength) return false;
         const afterTagWindow = 30;
         const nearTie = 20;
         const candidateAfterTag = candidate.side === 'after' && candidate.distance <= afterTagWindow;
@@ -4702,7 +4776,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     const speakerRegexCache = new Map();
     function clearSpeakerRegexCache() { speakerRegexCache.clear(); }
 
-    function findClosestMentionedSpeakerInContext(maskedText, windowStart, windowEnd, segmentStart, segmentEnd, lookup, sortedLookupKeys) {
+    function findClosestMentionedSpeakerInContext(maskedText, windowStart, windowEnd, segmentStart, segmentEnd, lookup, sortedLookupKeys, defaultSpeaker = null) {
         const text = String(maskedText ?? '');
         const boundedStart = Math.max(0, Math.min(text.length, windowStart));
         const boundedEnd = Math.max(boundedStart, Math.min(text.length, windowEnd));
@@ -4735,9 +4809,43 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 } else {
                     continue;
                 }
-                const candidate = { assignment, distance, side };
+
+                // --- COMPUTE STRENGTH ---
+                const textBefore = text.slice(Math.max(0, matchStart - 30), matchStart);
+                const preMatch = textBefore.match(/\b([a-zA-Z]+)\b\s*$/);
+                const preWord = preMatch ? preMatch[1].toLowerCase() : '';
+
+                const textAfter = text.slice(matchEnd, Math.min(text.length, matchEnd + 40));
+                const postMatch = textAfter.match(/^\s*([a-zA-Z]+)\b/);
+                const postWord = postMatch ? postMatch[1].toLowerCase() : '';
+
+                const hasPostColon = /^\s*:/.test(textAfter);
+
+                const isRightBeforeQuote = (matchEnd <= segmentStart) && (segmentStart - matchEnd <= 6) && /^[ \t\r\n:,-]*$/.test(text.slice(matchEnd, segmentStart));
+                const isRightAfterQuote = (matchStart >= segmentEnd) && (matchStart - segmentEnd <= 6) && /^[ \t\r\n:,-]*$/.test(text.slice(segmentEnd, matchStart));
+
+                const endsWithPossessive = match[0].endsWith("'s") || match[0].endsWith("'S") || match[0].endsWith("'");
+                const isPassivePreposition = passivePrepositions.has(preWord);
+
+                const isPostWordSpeakingVerb = speakingVerbs.has(postWord);
+                const isPreWordSpeakingVerb = speakingVerbs.has(preWord);
+
+                const isStrongTag = isRightBeforeQuote || isPostWordSpeakingVerb || isPreWordSpeakingVerb || hasPostColon || (isRightAfterQuote && isPostWordSpeakingVerb);
+
+                let strength = 2; // Moderate (subject of sentence/action)
+                if (isStrongTag) {
+                    strength = 3; // Strongest (explicit speaking)
+                } else if (endsWithPossessive || isPassivePreposition) {
+                    strength = 1; // Weak (passive mention or possessive)
+                }
+
+                const candidate = { assignment, distance, side, strength };
                 if (isBetterSpeakerCandidate(candidate, best)) best = candidate;
             }
+        }
+
+        if (best && best.strength <= 1 && defaultSpeaker) {
+            return null;
         }
 
         return best?.assignment || null;
@@ -4865,7 +4973,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             if (!assignment) {
                 const windowStart = Math.max(segment.paragraph.start, segment.start - 240);
                 const windowEnd = Math.min(segment.paragraph.end, segment.end + 120);
-                assignment = findClosestMentionedSpeakerInContext(maskedText, windowStart, windowEnd, segment.start, segment.end, lookup, sortedLookupKeys);
+                assignment = findClosestMentionedSpeakerInContext(maskedText, windowStart, windowEnd, segment.start, segment.end, lookup, sortedLookupKeys, defaultSpeaker);
             }
 
             // Tier 3: carry only within the same paragraph/line.
