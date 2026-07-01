@@ -5469,11 +5469,85 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         return applyCustomFontsToMessageElements(document.querySelectorAll('#chat .mes[mesid]'));
     }
 
+    let cardStyleTimer = null;
+    function scheduleCardStyle(delay = 50) {
+        if (cardStyleTimer) clearTimeout(cardStyleTimer);
+        cardStyleTimer = setTimeout(() => {
+            cardStyleTimer = null;
+            styleAllCharacterCards();
+        }, Math.max(0, Number(delay) || 0));
+    }
+
+    function clearSingleCharacterCardStyles(card) {
+        if (card.hasAttribute('data-dc-card-styled')) {
+            const nameEl = card.querySelector('.ch_name');
+            if (nameEl) {
+                nameEl.style.color = '';
+                nameEl.style.fontFamily = '';
+            }
+            const avatarImg = card.querySelector('.avatar img');
+            if (avatarImg) {
+                avatarImg.style.boxShadow = '';
+                avatarImg.style.borderColor = '';
+            }
+            card.removeAttribute('data-dc-card-styled');
+        }
+    }
+
+    function clearAllCharacterCardStyles() {
+        const cards = document.querySelectorAll('[data-dc-card-styled]');
+        cards.forEach(card => clearSingleCharacterCardStyles(card));
+    }
+
+    function styleAllCharacterCards() {
+        if (!settings.enabled) {
+            clearAllCharacterCardStyles();
+            return;
+        }
+        const cards = document.querySelectorAll('.group_member, .character_select');
+        cards.forEach(card => {
+            const nameEl = card.querySelector('.ch_name');
+            if (!nameEl) return;
+            const name = nameEl.textContent.trim();
+            if (!name) return;
+            const key = resolveCharacterKeyByNameOrAlias(name);
+            if (key && characterColors[key]) {
+                const entry = characterColors[key];
+                const color = getEntryEffectiveColor(entry);
+                
+                // Apply name color
+                nameEl.style.color = color;
+                
+                // Apply custom font if set
+                if (entry.font) {
+                    loadGoogleFont(entry.font);
+                    nameEl.style.fontFamily = getGoogleFontFamily(entry.font);
+                } else {
+                    nameEl.style.fontFamily = '';
+                }
+                
+                // Apply avatar border and shadow ring
+                const avatarImg = card.querySelector('.avatar img');
+                if (avatarImg) {
+                    avatarImg.style.borderColor = color;
+                    avatarImg.style.boxShadow = `0 0 6px ${color}`;
+                }
+                
+                // Mark with a data attribute so we know it's styled by us
+                card.setAttribute('data-dc-card-styled', 'true');
+            } else {
+                // If it was styled before but no longer has a color, clear it!
+                clearSingleCharacterCardStyles(card);
+            }
+        });
+    }
+
     function scheduleCustomFontRefresh(delay = 0) {
         clearTimeout(customFontRefreshTimer);
         customFontRefreshTimer = setTimeout(() => {
             customFontRefreshTimer = null;
             applyCustomFontsToRenderedMessages();
+            scheduleCardStyle(0);
         }, Math.max(0, Number(delay) || 0));
     }
 
@@ -6082,6 +6156,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             });
         };
         runtimeState.chatRootObserver = new MutationObserver(mutations => {
+            scheduleCardStyle(100);
             if (!mutationTouchesChatRoot(mutations)) return;
             if (runtimeState.chatRootObserverTimer) clearTimeout(runtimeState.chatRootObserverTimer);
             runtimeState.chatRootObserverTimer = setTimeout(() => {
