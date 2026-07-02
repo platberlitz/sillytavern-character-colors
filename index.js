@@ -1374,9 +1374,72 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         }
     }
 
-    function buildThoughtSymbolColorPromptRule(thoughtSymbolList) {
-        if (!thoughtSymbolList) return '';
-        return `Color thoughts delimited by ${thoughtSymbolList} using active speaker color, delimiters included.`;
+    const PROMPT_THOUGHT_DELIMITER_PAIRS = Object.freeze({
+        '(': ')',
+        '[': ']',
+        '{': '}',
+        '<': '>',
+        '「': '」',
+        '『': '』',
+        '【': '】',
+        '《': '》',
+        '〈': '〉',
+        '（': '）',
+        '［': '］',
+        '｛': '｝',
+        '“': '”',
+        '‘': '’',
+        '«': '»',
+        '‹': '›',
+    });
+
+    function normalizePromptThoughtSymbols(thoughtSymbols) {
+        const symbols = Array.isArray(thoughtSymbols)
+            ? thoughtSymbols
+            : String(thoughtSymbols ?? '').split(',');
+        return [...new Set(symbols.map(formatPromptLiteralSymbol).map(s => s.trim()).filter(Boolean))];
+    }
+
+    function getPromptThoughtDelimiterPairs(thoughtSymbols) {
+        const symbols = normalizePromptThoughtSymbols(thoughtSymbols);
+        const pairs = [];
+        for (let i = 0; i < symbols.length; i++) {
+            const open = symbols[i];
+            const pairedClose = PROMPT_THOUGHT_DELIMITER_PAIRS[open];
+            const next = symbols[i + 1];
+            const close = pairedClose || open;
+            pairs.push({ open, close });
+            if (pairedClose && next === pairedClose) i++;
+        }
+        return pairs;
+    }
+
+    function formatThoughtDelimiterPattern(pair) {
+        return `${pair.open}...${pair.close}`;
+    }
+
+    function buildThoughtSymbolColorPromptExample(thoughtSymbols) {
+        const [pair] = getPromptThoughtDelimiterPairs(thoughtSymbols);
+        return pair ? `<font color=#aabbcc>${pair.open}I should run.${pair.close}</font>` : '';
+    }
+
+    function buildColorPromptExample(thoughtSymbols) {
+        const thoughtExample = buildThoughtSymbolColorPromptExample(thoughtSymbols);
+        return thoughtExample
+            ? `<font color=#aabbcc>"Hello."</font> and ${thoughtExample}`
+            : '<font color=#aabbcc>"Hello."</font>';
+    }
+
+    function buildThoughtSymbolTrackingPrompt(thoughtSymbols) {
+        const patterns = getPromptThoughtDelimiterPairs(thoughtSymbols).map(formatThoughtDelimiterPattern).join(', ');
+        return patterns ? `Track inner-thought delimiters ${patterns} as the same speaker as dialogue.` : '';
+    }
+
+    function buildThoughtSymbolColorPromptRule(thoughtSymbols) {
+        const patterns = getPromptThoughtDelimiterPairs(thoughtSymbols).map(formatThoughtDelimiterPattern).join(', ');
+        const example = buildThoughtSymbolColorPromptExample(thoughtSymbols);
+        if (!patterns || !example) return '';
+        return `Color inner thoughts wrapped in ${patterns} using the speaking character's own color (same as their dialogue), delimiters included. Example: ${example}`;
     }
 
     function resolveCharacterKeyByNameOrAlias(rawName) {
@@ -1861,14 +1924,13 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         }
 
         const thoughtSymbols = getThoughtDelimiterSymbols();
-        const thoughtSymbolList = thoughtSymbols.map(formatPromptLiteralSymbol).join(', ');
         const narratorColor = settings.narratorColor ? applyThemeReadabilityAndBrightness(settings.narratorColor) : null;
 
         const lines = [
             'Add <font color=#RRGGBB> tags to dialogue in this roleplay message based on who is speaking.',
         ];
         lines.push(...buildColorMetadataPromptLines());
-        if (thoughtSymbolList) lines.push(buildThoughtSymbolColorPromptRule(thoughtSymbolList));
+        if (thoughtSymbols.length) lines.push(buildThoughtSymbolColorPromptRule(thoughtSymbols));
         if (narratorColor) lines.push(`Narrator=${narratorColor} for narration text.`);
         if (trimmedSpeaker && defaultSpeakerColor) lines.push(`Default speaker (message author): ${trimmedSpeaker}=${defaultSpeakerColor}`);
         lines.push('');
@@ -1904,7 +1966,6 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         if (!charList.length) return [];
 
         const thoughtSymbols = getThoughtDelimiterSymbols();
-        const thoughtSymbolList = thoughtSymbols.map(formatPromptLiteralSymbol).join(', ');
         const narratorColor = settings.narratorColor ?
             applyThemeReadabilityAndBrightness(settings.narratorColor) : null;
 
@@ -1913,7 +1974,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             'Add <font color=#RRGGBB> tags to dialogue in these roleplay messages.',
         ];
         lines.push(...buildColorMetadataPromptLines());
-        if (thoughtSymbolList) lines.push(buildThoughtSymbolColorPromptRule(thoughtSymbolList));
+        if (thoughtSymbols.length) lines.push(buildThoughtSymbolColorPromptRule(thoughtSymbols));
         if (narratorColor) lines.push(`Narrator=${narratorColor} for narration text.`);
         lines.push('');
         lines.push(...buildLLMColorizeRules('- Return all messages in order with [MSG:N] markers preserved'));
@@ -3760,7 +3821,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const brightnessOffset = getBrightnessOffset();
         const parts = [
             'Dialogue Colors:',
-            `- Color spans with <font color=#RRGGBB>...</font>, delimiters included (${delimiterSymbolList}). Ex: <font color=#aabbcc>"Hello."</font>`,
+            `- Color spans with <font color=#RRGGBB>...</font>, delimiters included (${delimiterSymbolList}). Ex: ${buildColorPromptExample(thoughtSymbols)}`,
+            ...(thoughtSymbols.length ? [buildThoughtSymbolColorPromptRule(thoughtSymbols)] : []),
             '- Preserve text exactly; no quote escaping or commentary.',
             mode === 'dark' ? `- Use readable colors (${minLightness}-${maxLightness}% lightness for dark bg).` : `- Use readable colors (${minLightness}-${maxLightness}% lightness for light bg).`,
         ];
@@ -3773,7 +3835,6 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             if (paletteDesc) parts.push(paletteDesc);
         }
         if (!settings.disableNarration && settings.narratorColor) parts.push(`Narrator=${applyThemeReadabilityAndBrightness(settings.narratorColor)} for narration.`);
-        if (thoughtSymbols.length) parts.push(buildThoughtSymbolColorPromptRule(thoughtSymbols.map(formatPromptLiteralSymbol).join(', ')));
         if (settings.highlightMode) parts.push('Add background highlight.');
         if (settings.cssEffects) parts.push('CSS: brief inline <span style="...">...</span> for clear tone shifts.');
         parts.push(...buildColorMetadataPromptLines());
@@ -3805,7 +3866,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
         const parts = [
             'Dialogue Colors:',
-            `Wrap spans (delimiters included: ${delimiterList}) in <font color=#RRGGBB>...</font>. Ex: <font color=#aabbcc>"Hello."</font>`,
+            `Wrap spans (delimiters included: ${delimiterList}) in <font color=#RRGGBB>...</font>. Ex: ${buildColorPromptExample(thoughtSymbols)}`,
+            ...(thoughtSymbols.length ? [buildThoughtSymbolColorPromptRule(thoughtSymbols)] : []),
             'Preserve text exactly; no extra quotes, commentary, or code fences.',
             mode === 'dark' ? `Use readable colors for dark bg (${minLightness}-${maxLightness}% lightness).` : `Use readable colors for light bg (${minLightness}-${maxLightness}% lightness).`,
         ];
@@ -3822,9 +3884,6 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         if (!settings.disableNarration && settings.narratorColor) {
             parts.push(`Narrator=${applyThemeReadabilityAndBrightness(settings.narratorColor)} for narration.`);
         }
-        if (thoughtSymbols.length) {
-            parts.push(buildThoughtSymbolColorPromptRule(thoughtSymbols.map(formatPromptLiteralSymbol).join(', ')));
-        }
         if (settings.highlightMode) parts.push('Add background highlight.');
 
         parts.push(...buildColorMetadataPromptLines());
@@ -3835,7 +3894,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         if (!settings.enabled) return '';
         const { mode, minLightness, maxLightness } = getThemeLightnessBounds();
         const thoughtSymbols = getThoughtDelimiterSymbols();
-        const thoughtSymbolList = thoughtSymbols.map(formatPromptLiteralSymbol).join(', ');
+        const thoughtSymbolTrackingPrompt = buildThoughtSymbolTrackingPrompt(thoughtSymbols);
         const brightnessOffset = getBrightnessOffset();
         const parts = [
             'Dialogue Colors (metadata only): Write reply normally; do not add visible <font> tags or CSS.',
@@ -3850,7 +3909,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             const paletteDesc = PALETTE_DESCRIPTIONS[settings.colorTheme];
             if (paletteDesc) parts.push(paletteDesc);
         }
-        if (thoughtSymbolList) parts.push(`Track thought delimiters: ${thoughtSymbolList}.`);
+        if (thoughtSymbolTrackingPrompt) parts.push(thoughtSymbolTrackingPrompt);
         return parts.join('\n');
     }
 
