@@ -193,7 +193,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     let swapMode = null;
     let searchTerm = '';
     let expandedCharacterRows = new Set();
-    let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, thoughtSymbols: '*', disableNarration: true, shareColorsGlobally: false, cssEffects: false, autoScanNewMessages: true, autoLockDetected: true, enableRightClick: false, promptDepth: 1, autoRecolor: true, autoColorize: false, llmAttributionCheck: false, llmAttributionParallel: false, attributionConservativeOnly: false, attributionMaxTokens: 4096, domStealthColors: true, disableToasts: false, llmConnectionProfile: null, attributionConnectionProfile: null, colorSchemaVersion: COLOR_SCHEMA_VERSION, promptMode: 'inject', promptRole: 'user', sortMode: 'name', coloringEngine: 'llm' };
+    let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, thoughtSymbols: '*', disableNarration: true, shareColorsGlobally: false, cssEffects: false, autoScanNewMessages: true, autoLockDetected: true, enableRightClick: false, promptDepth: 1, autoRecolor: true, autoColorize: false, llmAttributionCheck: false, llmAttributionParallel: false, attributionConservativeOnly: false, attributionMaxTokens: 4096, domStealthColors: true, disableToasts: false, llmConnectionProfile: null, attributionConnectionProfile: null, colorSchemaVersion: COLOR_SCHEMA_VERSION, promptMode: 'inject', promptRole: 'system', sortMode: 'name', coloringEngine: 'llm' };
     const TOGGLE_SETTING_DEFAULTS = Object.freeze({
         enabled: true,
         highlightMode: false,
@@ -1282,13 +1282,13 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
         const promptNotes = notes?.trim() ? notes.trim() : 'None';
         const instruction = [
-            'Generate a color palette as a JSON array of hex colors.',
+            'Generate a color palette as a JSON array of hex strings.',
             `Theme: "${name}".`,
             `Notes: "${promptNotes}".`,
             `Return exactly ${count} colors.`,
-            'Each item must be a string like "#RRGGBB".',
-            `Base palette (optional inspiration): ${JSON.stringify(basePalette)}.`,
-            'Return ONLY the JSON array and nothing else.'
+            'Each item must be a string in "#RRGGBB" format.',
+            `Base palette for inspiration (optional): ${JSON.stringify(basePalette)}.`,
+            'Return ONLY the JSON array. No commentary, no code fence, no extra text.'
         ].join(' ');
 
         const jsonSchema = {
@@ -1420,26 +1420,26 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
     function buildThoughtSymbolColorPromptExample(thoughtSymbols) {
         const [pair] = getPromptThoughtDelimiterPairs(thoughtSymbols);
-        return pair ? `<font color=#aabbcc>${pair.open}I should run.${pair.close}</font>` : '';
+        return pair ? `<font color="#aabbcc">${pair.open}I should run.${pair.close}</font>` : '';
     }
 
     function buildColorPromptExample(thoughtSymbols) {
         const thoughtExample = buildThoughtSymbolColorPromptExample(thoughtSymbols);
         return thoughtExample
-            ? `<font color=#aabbcc>"Hello."</font> and ${thoughtExample}`
-            : '<font color=#aabbcc>"Hello."</font>';
+            ? `<font color="#aabbcc">"Hello."</font> and ${thoughtExample}`
+            : '<font color="#aabbcc">"Hello."</font>';
     }
 
     function buildThoughtSymbolTrackingPrompt(thoughtSymbols) {
         const patterns = getPromptThoughtDelimiterPairs(thoughtSymbols).map(formatThoughtDelimiterPattern).join(', ');
-        return patterns ? `Track inner-thought delimiters ${patterns} as the same speaker as dialogue.` : '';
+        return patterns ? `Inner-thought delimiters ${patterns} belong to the surrounding speaker; include them in the same color block as that speaker's dialogue.` : '';
     }
 
     function buildThoughtSymbolColorPromptRule(thoughtSymbols) {
         const patterns = getPromptThoughtDelimiterPairs(thoughtSymbols).map(formatThoughtDelimiterPattern).join(', ');
         const example = buildThoughtSymbolColorPromptExample(thoughtSymbols);
         if (!patterns || !example) return '';
-        return `Color inner thoughts wrapped in ${patterns} using the speaking character's own color (same as their dialogue), delimiters included. Example: ${example}`;
+        return `Color inner thoughts wrapped in ${patterns} with the surrounding speaker's color, delimiters included. Example: ${example}`;
     }
 
     function resolveCharacterKeyByNameOrAlias(rawName) {
@@ -1481,18 +1481,25 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     function buildColorMetadataPromptLines() {
         const currentBlock = buildCurrentColorsBlock();
         if (!currentBlock) {
-            return ['End with [COLORS:Name=#RRGGBB] line. No code fences.'];
+            return [
+                'After the reply, add one final line: [COLORS:Name=#RRGGBB,...] for every new speaker.',
+                'If there are no new speakers, omit the [COLORS:] line.',
+            ];
         }
         return [
-            `Established: ${currentBlock}`,
-            'End with [COLORS:...]. Match canonical names exactly; never separate aliases. No code fences.',
+            `Established character colors: ${currentBlock}`,
+            'Reuse those exact names and colors. Do not rename, re-color, or split aliases from their canonical name.',
+            'After the reply, add one final [COLORS:Name=#RRGGBB,...] line only for speakers not already listed.',
+            'If there are no new speakers, omit the [COLORS:] line.',
         ];
     }
 
     function buildLLMColorizeRules(extraRule = '') {
         const rules = [
-            '- Wrap dialogue/thought spans (with delimiters) in <font color=#RRGGBB>...</font>.',
-            '- Preserve text exactly; only add font tags and [COLORS:] metadata. No code fences.',
+            '- Wrap every dialogue and inner-thought span (delimiters included) in <font color="#RRGGBB">...</font>.',
+            '- Do not change, add, or remove any text; only insert color tags.',
+            '- Do not escape or alter quotes or delimiters.',
+            '- Do not output markdown code fences, commentary, or explanations.',
         ];
         if (extraRule) rules.push(extraRule);
         return rules;
@@ -1927,14 +1934,16 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const narratorColor = settings.narratorColor ? applyThemeReadabilityAndBrightness(settings.narratorColor) : null;
 
         const lines = [
-            'Add <font color=#RRGGBB> tags to dialogue in this roleplay message based on who is speaking.',
+            '[Dialogue Colors — colorize existing message]',
+            'Add <font color="#RRGGBB">...</font> tags to the dialogue and inner-thought spans in the message below.',
         ];
-        lines.push(...buildColorMetadataPromptLines());
-        if (thoughtSymbols.length) lines.push(buildThoughtSymbolColorPromptRule(thoughtSymbols));
-        if (narratorColor) lines.push(`Narrator=${narratorColor} for narration text.`);
-        if (trimmedSpeaker && defaultSpeakerColor) lines.push(`Default speaker (message author): ${trimmedSpeaker}=${defaultSpeakerColor}`);
+        lines.push(...buildLLMColorizeRules('- Return the complete message with color tags added. No commentary.'));
         lines.push('');
-        lines.push(...buildLLMColorizeRules('- Return the modified text only, no commentary'));
+        lines.push(`Known speakers and colors: ${charList.join(', ')}`);
+        lines.push(...buildColorMetadataPromptLines());
+        if (thoughtSymbols.length) lines.push(`- ${buildThoughtSymbolColorPromptRule(thoughtSymbols)}`);
+        if (narratorColor) lines.push(`- Narrator text: <font color="${narratorColor}">...</font>.`);
+        if (trimmedSpeaker && defaultSpeakerColor) lines.push(`- Default speaker (message author): ${trimmedSpeaker}=${defaultSpeakerColor}.`);
         lines.push('');
         lines.push(rawText);
 
@@ -1971,13 +1980,15 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
         // Build instruction
         const lines = [
-            'Add <font color=#RRGGBB> tags to dialogue in these roleplay messages.',
+            '[Dialogue Colors — colorize existing messages]',
+            'Add <font color="#RRGGBB">...</font> tags to the dialogue and inner-thought spans in each [MSG:N] block below.',
         ];
-        lines.push(...buildColorMetadataPromptLines());
-        if (thoughtSymbols.length) lines.push(buildThoughtSymbolColorPromptRule(thoughtSymbols));
-        if (narratorColor) lines.push(`Narrator=${narratorColor} for narration text.`);
+        lines.push(...buildLLMColorizeRules('- Preserve every [MSG:N] marker and return all messages in order. Do not combine messages.'));
         lines.push('');
-        lines.push(...buildLLMColorizeRules('- Return all messages in order with [MSG:N] markers preserved'));
+        lines.push(`Known speakers and colors: ${charList.join(', ')}`);
+        lines.push(...buildColorMetadataPromptLines());
+        if (thoughtSymbols.length) lines.push(`- ${buildThoughtSymbolColorPromptRule(thoughtSymbols)}`);
+        if (narratorColor) lines.push(`- Narrator text: <font color="${narratorColor}">...</font>.`);
         lines.push('');
 
         // Add all messages with markers
@@ -3567,7 +3578,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         settings.thoughtSymbols = '*';
         settings.narratorColor = '';
         settings.promptDepth = 1;
-        settings.promptRole = 'user';
+        settings.promptRole = 'system';
         settings.promptMode = 'inject';
         settings.sortMode = 'name';
         settings.coloringEngine = 'llm';
@@ -3812,35 +3823,6 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         return String(symbol ?? '');
     }
 
-    function buildPromptInstruction() {
-        if (!settings.enabled) return '';
-        const { mode, minLightness, maxLightness } = getThemeLightnessBounds();
-        const thoughtSymbols = getThoughtDelimiterSymbols();
-        const delimiterSymbols = [...new Set(['"', ...thoughtSymbols])];
-        const delimiterSymbolList = delimiterSymbols.map(formatPromptLiteralSymbol).join(', ');
-        const brightnessOffset = getBrightnessOffset();
-        const parts = [
-            'Dialogue Colors:',
-            `- Color spans with <font color=#RRGGBB>...</font>, delimiters included (${delimiterSymbolList}). Ex: ${buildColorPromptExample(thoughtSymbols)}`,
-            ...(thoughtSymbols.length ? [buildThoughtSymbolColorPromptRule(thoughtSymbols)] : []),
-            '- Preserve text exactly; no quote escaping or commentary.',
-            mode === 'dark' ? `- Use readable colors (${minLightness}-${maxLightness}% lightness for dark bg).` : `- Use readable colors (${minLightness}-${maxLightness}% lightness for light bg).`,
-        ];
-        if (brightnessOffset !== 0) parts.push(`New colors: ${brightnessOffset > 0 ? '+' : ''}${brightnessOffset}% lightness bias.`);
-        const customPalettePrompt = buildCustomPalettePrompt();
-        if (customPalettePrompt) {
-            parts.push(customPalettePrompt);
-        } else {
-            const paletteDesc = PALETTE_DESCRIPTIONS[settings.colorTheme];
-            if (paletteDesc) parts.push(paletteDesc);
-        }
-        if (!settings.disableNarration && settings.narratorColor) parts.push(`Narrator=${applyThemeReadabilityAndBrightness(settings.narratorColor)} for narration.`);
-        if (settings.highlightMode) parts.push('Add background highlight.');
-        if (settings.cssEffects) parts.push('CSS: brief inline <span style="...">...</span> for clear tone shifts.');
-        parts.push(...buildColorMetadataPromptLines());
-        return parts.join('\n');
-    }
-
     function buildCustomPalettePrompt() {
         if (!settings.colorTheme?.startsWith('custom:')) return '';
         const paletteName = settings.colorTheme.slice(7);
@@ -3865,26 +3847,40 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const brightnessOffset = getBrightnessOffset();
 
         const parts = [
-            'Dialogue Colors:',
-            `Wrap spans (delimiters included: ${delimiterList}) in <font color=#RRGGBB>...</font>. Ex: ${buildColorPromptExample(thoughtSymbols)}`,
-            ...(thoughtSymbols.length ? [buildThoughtSymbolColorPromptRule(thoughtSymbols)] : []),
-            'Preserve text exactly; no extra quotes, commentary, or code fences.',
-            mode === 'dark' ? `Use readable colors for dark bg (${minLightness}-${maxLightness}% lightness).` : `Use readable colors for light bg (${minLightness}-${maxLightness}% lightness).`,
+            '[Dialogue Colors — output formatting only]',
+            'Wrap every dialogue span and inner-thought span (delimiters included) in <font color="#RRGGBB">...</font>.',
+            `- Delimiters: ${delimiterList}`,
+            `- Example: ${buildColorPromptExample(thoughtSymbols)}`,
         ];
-        if (brightnessOffset !== 0) parts.push(`New colors: ${brightnessOffset > 0 ? '+' : ''}${brightnessOffset}% lightness bias.`);
+        if (thoughtSymbols.length) {
+            parts.push(`- ${buildThoughtSymbolColorPromptRule(thoughtSymbols)}`);
+        }
+        parts.push(
+            '- Do not change any text; only add color tags.',
+            '- Do not escape, add, or remove quotes or delimiters.',
+            '- Do not output code fences, commentary, or explanations.',
+            mode === 'dark'
+                ? `- Use readable colors for a dark background (${minLightness}-${maxLightness}% lightness).`
+                : `- Use readable colors for a light background (${minLightness}-${maxLightness}% lightness).`
+        );
+        if (brightnessOffset !== 0) {
+            parts.push(`- New-character color bias: ${brightnessOffset > 0 ? '+' : ''}${brightnessOffset}% lightness.`);
+        }
 
         const customPalettePrompt = buildCustomPalettePrompt();
         if (customPalettePrompt) {
-            parts.push(customPalettePrompt);
+            parts.push(`- ${customPalettePrompt}`);
         } else {
             const paletteDesc = PALETTE_DESCRIPTIONS[settings.colorTheme];
-            if (paletteDesc) parts.push(paletteDesc);
+            if (paletteDesc) parts.push(`- ${paletteDesc}`);
         }
 
         if (!settings.disableNarration && settings.narratorColor) {
-            parts.push(`Narrator=${applyThemeReadabilityAndBrightness(settings.narratorColor)} for narration.`);
+            parts.push(`- Narrator text: <font color="${applyThemeReadabilityAndBrightness(settings.narratorColor)}">...</font>.`);
         }
-        if (settings.highlightMode) parts.push('Add background highlight.');
+        if (settings.highlightMode) {
+            parts.push('- Add a subtle background highlight to colored spans when it improves readability.');
+        }
 
         parts.push(...buildColorMetadataPromptLines());
         return parts.join('\n');
@@ -3896,20 +3892,28 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const thoughtSymbols = getThoughtDelimiterSymbols();
         const thoughtSymbolTrackingPrompt = buildThoughtSymbolTrackingPrompt(thoughtSymbols);
         const brightnessOffset = getBrightnessOffset();
+
         const parts = [
-            'Dialogue Colors (metadata only): Write reply normally; do not add visible <font> tags or CSS.',
-            ...buildColorMetadataPromptLines(),
-            'List every active speaker; omit [COLORS:] only if none.'
+            '[Dialogue Colors — metadata only]',
+            'Write the reply normally. Do not add visible <font> tags, CSS color formatting, or color commentary in the reply text.',
         ];
-        parts.push(mode === 'dark' ? `Use dark bg colors (${minLightness}-${maxLightness}% lightness).` : `Use light bg colors (${minLightness}-${maxLightness}% lightness).`);
-        if (brightnessOffset !== 0) parts.push(`New colors: ${brightnessOffset > 0 ? '+' : ''}${brightnessOffset}% lightness bias.`);
-        const customPalettePrompt = buildCustomPalettePrompt();
-        if (customPalettePrompt) parts.push(customPalettePrompt);
-        else {
-            const paletteDesc = PALETTE_DESCRIPTIONS[settings.colorTheme];
-            if (paletteDesc) parts.push(paletteDesc);
+        parts.push(...buildColorMetadataPromptLines());
+        parts.push(
+            mode === 'dark'
+                ? `- Use dark-background colors (${minLightness}-${maxLightness}% lightness) when choosing new colors.`
+                : `- Use light-background colors (${minLightness}-${maxLightness}% lightness) when choosing new colors.`
+        );
+        if (brightnessOffset !== 0) {
+            parts.push(`- New-character color bias: ${brightnessOffset > 0 ? '+' : ''}${brightnessOffset}% lightness.`);
         }
-        if (thoughtSymbolTrackingPrompt) parts.push(thoughtSymbolTrackingPrompt);
+        const customPalettePrompt = buildCustomPalettePrompt();
+        if (customPalettePrompt) {
+            parts.push(`- ${customPalettePrompt}`);
+        } else {
+            const paletteDesc = PALETTE_DESCRIPTIONS[settings.colorTheme];
+            if (paletteDesc) parts.push(`- ${paletteDesc}`);
+        }
+        if (thoughtSymbolTrackingPrompt) parts.push(`- ${thoughtSymbolTrackingPrompt}`);
         return parts.join('\n');
     }
 
@@ -6496,26 +6500,31 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             ? 'Include a correction only when the current speaker is Uncolored/Unknown and the speaker is clear enough to color it.'
             : 'Include a correction when the current speaker is clearly wrong, or when a segment is Uncolored/Unknown and the speaker is clear enough to color it.';
         const thoughtLine = thoughtSymbolList
-            ? `\nConfigured inner-thought delimiters: ${thoughtSymbolList}. Treat those as dialogue segments that also need speaker attribution.`
+            ? `\n- Configured inner-thought delimiters: ${thoughtSymbolList}. Treat those as dialogue segments that also need speaker attribution.`
             : '';
 
-        return `Task: verify speaker attribution for a local DOM-only dialogue colorizer.
+        return `[Dialogue Colors — verify quote speakers]
 Return ONLY valid JSON. No reasoning, no Markdown, no code fence, no extra text.
-Schema exactly: {"corrections":[{"index":0,"speaker":"Name"}]}
-If there are no corrections, return exactly: {"corrections":[]}
+
+Required schema:
+{"corrections":[{"index":0,"speaker":"Name"}]}
+
+If there are no corrections, return exactly:
+{"corrections":[]}
 
 Rules:
 1. ${conservativeLine}
 2. If the current speaker is already correct, omit that segment.
 3. If the speaker is unclear or only a guess, omit that segment.
-4. Use one speaker name only, preferably from Known speakers and aliases.
+4. Use one speaker name only, preferably from the known speakers and aliases.
 5. Do not invent a speaker unless the full message text explicitly names them.
 6. Do not use Unknown, Unclear, None, N/A, Narrator, or a group/composite name as a speaker correction.
-7. Correction indexes must match the numbered segment list.
+7. Correction indexes must match the numbered segment list exactly.
 
-Message index: ${mesIndex}
-Message speaker/fallback: ${msg?.name || 'Unknown'}
-Known speakers and aliases: ${knownList}${thoughtLine}
+Context:
+- Message index: ${mesIndex}
+- Message speaker/fallback: ${msg?.name || 'Unknown'}
+- Known speakers and aliases: ${knownList}${thoughtLine}
 
 Full message text:
 ${msg?.mes || ''}
@@ -7769,7 +7778,7 @@ ${quoteList}`;
         if ($('dc-narrator')) $('dc-narrator').value = settings.narratorColor || '#888888';
         if ($('dc-thought-symbols')) $('dc-thought-symbols').value = settings.thoughtSymbols || '';
         if ($('dc-prompt-depth')) $('dc-prompt-depth').value = settings.promptDepth ?? 1;
-        if ($('dc-prompt-role')) $('dc-prompt-role').value = settings.promptRole || 'user';
+        if ($('dc-prompt-role')) $('dc-prompt-role').value = settings.promptRole || 'system';
         if ($('dc-prompt-mode')) $('dc-prompt-mode').value = settings.promptMode || 'inject';
         if ($('dc-sort')) $('dc-sort').value = settings.sortMode || 'name';
         refreshPresetDropdown();
