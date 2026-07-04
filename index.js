@@ -1436,10 +1436,12 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
     }
 
     function buildThoughtSymbolColorPromptRule(thoughtSymbols) {
-        const patterns = getPromptThoughtDelimiterPairs(thoughtSymbols).map(formatThoughtDelimiterPattern).join(', ');
+        const pairs = getPromptThoughtDelimiterPairs(thoughtSymbols);
+        const patterns = pairs.map(formatThoughtDelimiterPattern).join(', ');
         const example = buildThoughtSymbolColorPromptExample(thoughtSymbols);
+        const [pair] = pairs;
         if (!patterns || !example) return '';
-        return `Color inner thoughts wrapped in ${patterns} with the surrounding speaker's color, delimiters included. Example: ${example}`;
+        return `Thought delimiter HARD RULE: color every ${patterns} span as one unit; opening and closing delimiters must be inside the same <font> tag. Correct: ${example}. Wrong: ${pair.open}<font color="#aabbcc">I should run.</font>${pair.close}.`;
     }
 
     function resolveCharacterKeyByNameOrAlias(rawName) {
@@ -1471,32 +1473,51 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         return blockName ? `${blockName}=${normalizedColor}` : '';
     }
 
-    function buildCurrentColorsBlock() {
+    function buildCurrentColorPairsList() {
         const pairs = Object.values(characterColors)
             .map(entry => formatColorBlockPair(entry?.name, getEntryEffectiveColor(entry)))
             .filter(Boolean);
-        return pairs.length ? `[COLORS:${pairs.join(',')}]` : '';
+        return pairs.join(',');
     }
 
-    function buildColorMetadataPromptLines() {
-        const currentBlock = buildCurrentColorsBlock();
-        if (!currentBlock) {
+    function buildColorMetadataPromptLines(options = {}) {
+        const usageBlockMode = options.usageBlockMode || 'used';
+        const currentPairs = buildCurrentColorPairsList();
+        if (usageBlockMode === 'new') {
+            if (!currentPairs) {
+                return [
+                    'After the reply, add one final line: [COLORS:Name=#RRGGBB,...] for every new speaker.',
+                    'If there are no new speakers, omit the [COLORS:] line.',
+                ];
+            }
             return [
-                'After the reply, add one final line: [COLORS:Name=#RRGGBB,...] for every new speaker.',
+                `Known colors: ${currentPairs}`,
+                'Reuse those exact names and colors. Do not rename, re-color, or split aliases from their canonical name.',
+                'After the reply, add one final [COLORS:Name=#RRGGBB,...] line only for speakers not already listed.',
                 'If there are no new speakers, omit the [COLORS:] line.',
             ];
         }
+
+        if (!currentPairs) {
+            return [
+                'When any dialogue/thought/narration is colored, end with exactly one final line: [COLORS:Name=#RRGGBB,...].',
+                'Include every speaker whose dialogue/thought/narration you colored in this reply. Omit only if no dialogue/thought/narration was colored.',
+                'The [COLORS:] line must be the final output line, after the reply text.',
+            ];
+        }
         return [
-            `Established character colors: ${currentBlock}`,
+            `Known colors: ${currentPairs}`,
             'Reuse those exact names and colors. Do not rename, re-color, or split aliases from their canonical name.',
-            'After the reply, add one final [COLORS:Name=#RRGGBB,...] line only for speakers not already listed.',
-            'If there are no new speakers, omit the [COLORS:] line.',
+            'When any dialogue/thought/narration is colored, end with exactly one final line: [COLORS:Name=#RRGGBB,...].',
+            'Include every speaker whose dialogue/thought/narration you colored in this reply, including already-known speakers. Omit only if no dialogue/thought/narration was colored.',
+            'The [COLORS:] line must be the final output line, after the reply text.',
         ];
     }
 
     function buildLLMColorizeRules(extraRule = '') {
         const rules = [
-            '- Wrap every dialogue and inner-thought span (delimiters included) in <font color="#RRGGBB">...</font>.',
+            '- Wrap every complete dialogue and inner-thought span in <font color="#RRGGBB">...</font>.',
+            '- For delimiter spans, the opening and closing delimiters must be inside the same <font> tag.',
             '- Do not change, add, or remove any text; only insert color tags.',
             '- Do not escape or alter quotes or delimiters.',
             '- Do not output markdown code fences, commentary, or explanations.',
@@ -3847,8 +3868,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         const brightnessOffset = getBrightnessOffset();
 
         const parts = [
-            '[Dialogue Colors — output formatting only]',
-            'Wrap every dialogue span and inner-thought span (delimiters included) in <font color="#RRGGBB">...</font>.',
+            '[Dialogue Colors — strict output]',
+            'Only add <font color="#RRGGBB">...</font> tags to dialogue/thought spans.',
             `- Delimiters: ${delimiterList}`,
             `- Example: ${buildColorPromptExample(thoughtSymbols)}`,
         ];
@@ -3856,9 +3877,8 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             parts.push(`- ${buildThoughtSymbolColorPromptRule(thoughtSymbols)}`);
         }
         parts.push(
-            '- Do not change any text; only add color tags.',
-            '- Do not escape, add, or remove quotes or delimiters.',
-            '- Do not output code fences, commentary, or explanations.',
+            '- Preserve exact text; do not add, remove, escape, or move quotes/delimiters.',
+            '- No code fences, commentary, or explanations.',
             mode === 'dark'
                 ? `- Use readable colors for a dark background (${minLightness}-${maxLightness}% lightness).`
                 : `- Use readable colors for a light background (${minLightness}-${maxLightness}% lightness).`
@@ -3897,7 +3917,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
             '[Dialogue Colors — metadata only]',
             'Write the reply normally. Do not add visible <font> tags, CSS color formatting, or color commentary in the reply text.',
         ];
-        parts.push(...buildColorMetadataPromptLines());
+        parts.push(...buildColorMetadataPromptLines({ usageBlockMode: 'new' }));
         parts.push(
             mode === 'dark'
                 ? `- Use dark-background colors (${minLightness}-${maxLightness}% lightness) when choosing new colors.`
@@ -4329,6 +4349,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         let foundNew = false;
         let hadRemapping = false;
         const remappedAssignments = [];
+        const countedKeys = new Set();
         const colorPairs = pairsString.split(',');
         for (const pair of colorPairs) {
             const eqIdx = pair.indexOf('=');
@@ -4365,6 +4386,7 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                     }
                 }
             }
+            countedKeys.add(key);
             if (nicknames.length) {
                 characterColors[key].aliases = characterColors[key].aliases || [];
                 nicknames.forEach(nick => {
@@ -4374,7 +4396,63 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
                 });
             }
         }
-        return { foundNew, hadRemapping, remappedAssignments };
+        return { foundNew, hadRemapping, remappedAssignments, countedKeys: Array.from(countedKeys) };
+    }
+
+    function processColorBlocksInText(text) {
+        const colorBlockRegex = /\[COLORS?:([^\]]*)\]/gi;
+        const countedKeys = new Set();
+        let match;
+        let foundColorBlock = false;
+        let foundNew = false;
+        let hadRemapping = false;
+        const remappedAssignments = [];
+
+        while ((match = colorBlockRegex.exec(text || '')) !== null) {
+            const result = processColorPairs(match[1]);
+            foundColorBlock = true;
+            if (result.foundNew) foundNew = true;
+            if (result.hadRemapping) hadRemapping = true;
+            if (Array.isArray(result.remappedAssignments)) remappedAssignments.push(...result.remappedAssignments);
+            if (Array.isArray(result.countedKeys)) result.countedKeys.forEach(key => countedKeys.add(key));
+        }
+
+        return { foundColorBlock, foundNew, hadRemapping, remappedAssignments, countedKeys };
+    }
+
+    function buildUniqueKnownColorStatsLookup() {
+        const lookup = new Map();
+        const ambiguousColors = new Set();
+
+        for (const [key, entry] of Object.entries(characterColors)) {
+            const color = normalizeHexColor(getEntryEffectiveColor(entry), null);
+            if (!color || ambiguousColors.has(color)) continue;
+            if (lookup.has(color)) {
+                lookup.delete(color);
+                ambiguousColors.add(color);
+                continue;
+            }
+            lookup.set(color, { key, entry });
+        }
+
+        return lookup;
+    }
+
+    function countFontColorStatsFromKnownColors(text, countedKeys = new Set(), colorLookup = buildUniqueKnownColorStatsLookup()) {
+        let count = 0;
+        const existingKeys = countedKeys instanceof Set ? countedKeys : new Set(countedKeys || []);
+
+        for (const color of collectFontColorsFromText(text)) {
+            const assignment = colorLookup.get(normalizeHexColor(color, null));
+            if (!assignment?.key || existingKeys.has(assignment.key)) continue;
+            const entry = characterColors[assignment.key];
+            if (!entry) continue;
+            entry.dialogueCount = (entry.dialogueCount || 0) + 1;
+            existingKeys.add(assignment.key);
+            count++;
+        }
+
+        return count;
     }
 
     function parseColorBlock(element) {
@@ -4418,14 +4496,17 @@ import { escapeHtml, escapeRegex } from '/scripts/utils.js';
         Object.values(characterColors).forEach(c => c.dialogueCount = 0);
         const ctx = getContext();
         const chat = ctx?.chat || [];
-        const colorBlockRegex = /\[COLORS?:([^\]]*)\]/gi;
+        const processedMessages = [];
 
         for (const msg of chat) {
             const text = msg?.mes || '';
-            let match;
-            while ((match = colorBlockRegex.exec(text)) !== null) {
-                processColorPairs(match[1]); // Return value not needed here
-            }
+            const result = processColorBlocksInText(text);
+            processedMessages.push({ text, countedKeys: result.countedKeys });
+        }
+
+        const colorLookup = buildUniqueKnownColorStatsLookup();
+        for (const { text, countedKeys } of processedMessages) {
+            countFontColorStatsFromKnownColors(text, countedKeys, colorLookup);
         }
 
         commit();
@@ -7121,17 +7202,11 @@ ${quoteList}`;
                 return;
             }
             lastProcessedMessageSignature = signature;
-            const colorBlockRegex = /\[COLORS?:([^\]]*)\]/gi;
-            let match;
-            let foundColorBlock = false;
-            let hadRemapping = false;
-            const remappedAssignments = [];
-            while ((match = colorBlockRegex.exec(text)) !== null) {
-                const result = processColorPairs(match[1]);
-                foundColorBlock = true;
-                if (result.hadRemapping) hadRemapping = true;
-                if (Array.isArray(result.remappedAssignments)) remappedAssignments.push(...result.remappedAssignments);
-            }
+            const colorStats = processColorBlocksInText(text);
+            countFontColorStatsFromKnownColors(text, colorStats.countedKeys);
+            const foundColorBlock = colorStats.foundColorBlock;
+            const hadRemapping = colorStats.hadRemapping;
+            const remappedAssignments = colorStats.remappedAssignments;
             saveData(); updateCharList(); injectPrompt();
 
             let latestRemapChanged = false;
