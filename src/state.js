@@ -1,0 +1,222 @@
+// state.js - extracted from index.js (mechanical split)
+
+export const RUNTIME_GUARD_KEY = '__dialogueColorsRuntime_v1';
+
+export const runtimeState = {
+    initialized: true,
+    contextMenuSetup: false,
+    keyboardSetup: false,
+    eventsRegistered: false,
+    eventHandlers: null,
+    chatObserver: null,
+    chatObserverTarget: null,
+    chatRootObserver: null,
+    chatRootObserverTimer: null,
+    chatObserverTimer: null,
+    domHealthCheckTimer: null,
+    chatChangedRafId: null,
+    // Per-message self-terminating observers that replace the old polling settle timers.
+    // Keyed by the .mes element; value is { observer, fallbackTimer }.
+    messageSettleObservers: new Map(),
+    // Long-lived observers on decorated messages that re-decorate when an
+    // external agent (e.g. Prose Polisher) rebuilds .mes_text innerHTML.
+    // Keyed by the .mes element; value is { observer, mesText }.
+    decoratedWatchers: new Map(),
+    // Coalesced post-mutation repairs keyed by message index. These force
+    // a repaint before decoration when agents rewrite msg.mes after gen.
+    messageDomRepairTimers: new Map(),
+    pendingObservedMessages: new Set(),
+};
+
+export function isDomEngine() {
+    return settings.coloringEngine === 'dom';
+}
+
+export const MODULE_NAME = 'dialogue-colors';
+
+export const COLOR_SCHEMA_VERSION = 4;
+
+export const LEGACY_GLOBAL_SETTINGS_KEY = 'dc_global_settings';
+
+export const GLOBAL_SETTINGS_V2_KEY = 'dc_global_settings_v2';
+
+export const PRESETS_KEY = 'dc_presets';
+
+export const LEGEND_POSITION_KEY = 'dc_legend_position';
+
+export let characterColors = {};
+
+export const loadedGoogleFonts = new Set();
+
+export let colorHistory = [];
+
+export let historyIndex = -1;
+
+export let swapMode = null;
+
+export let searchTerm = '';
+
+export let expandedCharacterRows = new Set();
+
+export let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, thoughtSymbols: '*', disableNarration: true, shareColorsGlobally: false, cssEffects: false, autoScanNewMessages: true, autoLockDetected: true, enableRightClick: false, promptDepth: 1, autoRecolor: true, autoColorize: false, llmAttributionCheck: false, llmAttributionParallel: false, attributionConservativeOnly: false, attributionMaxTokens: 4096, domStealthColors: true, disableToasts: false, llmConnectionProfile: null, attributionConnectionProfile: null, colorSchemaVersion: COLOR_SCHEMA_VERSION, promptMode: 'inject', promptRole: 'system', sortMode: 'name', coloringEngine: 'llm' };
+
+export const TOGGLE_SETTING_DEFAULTS = Object.freeze({
+    enabled: true,
+    highlightMode: false,
+    autoScanOnLoad: true,
+    showLegend: false,
+    disableNarration: true,
+    shareColorsGlobally: false,
+    cssEffects: false,
+    autoScanNewMessages: true,
+    autoLockDetected: true,
+    enableRightClick: false,
+    autoRecolor: true,
+    autoColorize: false,
+    llmAttributionCheck: false,
+    llmAttributionParallel: false,
+    attributionConservativeOnly: false,
+    domStealthColors: true,
+    disableToasts: false,
+});
+
+export const GLOBAL_TOGGLE_KEYS = Object.freeze(Object.keys(TOGGLE_SETTING_DEFAULTS));
+
+export const GLOBAL_VISUAL_KEYS = Object.freeze(['thoughtSymbols', 'themeMode', 'colorTheme', 'brightness', 'promptDepth', 'promptRole', 'promptMode', 'coloringEngine']);
+
+export const GLOBAL_SETTINGS_V2_KEYS = Object.freeze([...new Set([...GLOBAL_VISUAL_KEYS, ...GLOBAL_TOGGLE_KEYS])]);
+
+export const ACTIVE_SETTING_KEYS = Object.freeze([...new Set([...GLOBAL_SETTINGS_V2_KEYS, 'narratorColor', 'llmConnectionProfile', 'attributionConnectionProfile', 'attributionConservativeOnly', 'attributionMaxTokens', 'colorSchemaVersion', 'sortMode'])]);
+
+export const LEGACY_AUTO_SYNC_ENABLED_KEY = 'dc_autosync_enabled';
+
+export const AUTO_SYNC_SAVE_TIMEOUT_MS = 15000;
+
+export let lastCharKey = null;
+
+// Phase 3A: Legend event listener cleanup
+export let lastProcessedMessageSignature = '';
+
+// Phase 3A: Legend event listener cleanup
+export let legendListeners = null;
+
+export let autoRecolorHintShown = false;
+
+export let isRecoloring = false;
+
+export let isColorizing = false;
+
+export let isAutoColorizing = false;
+
+export let isVerifyingAttribution = false;
+
+export let pendingAttributionVerifications = [];
+
+export const ATTRIBUTION_VERIFIER_VERSION = 3;
+
+export const AUTO_ATTRIBUTION_VERIFY_DELAY_MS = 300;
+
+export const AUTO_ATTRIBUTION_VERIFY_STABLE_RETRY_DELAY_MS = 500;
+
+export const AUTO_ATTRIBUTION_VERIFY_RETRY_DELAY_MS = 3000;
+
+export const STREAMING_ATTRIBUTION_VERIFY_DELAY_MS = 1000;
+
+export let autoAttributionVerifyTimer = null;
+
+export let autoAttributionVerifyTimerDue = 0;
+
+export const pendingAutoAttributionVerifyIndices = new Map();
+
+export const recentAutoAttributionVerifyAttempts = new Map();
+
+export let isStreamingGenerationActive = false;
+
+export let streamingAttributionVerifyTimer = null;
+
+export let streamingAttributionGeneration = 0;
+
+export let lastStreamingAttributionVerifyKey = '';
+
+export let attributionChatGeneration = 0;
+
+export const streamingAttributionOverrides = new Map();
+
+export const streamingHeuristicCache = new Map();
+
+export const LIVE_CHAT_SAVE_DELAY_MS = 350;
+
+export const COLOR_STATE_SAVE_DELAY_MS = 180;
+
+export let liveChatSaveTimer = null;
+
+export let colorStateSaveTimer = null;
+
+export let pendingLiveChatSave = false;
+
+export let pendingColorStateSaveData = false;
+
+export let pendingColorStateHistory = false;
+
+export let pendingColorStateUpdateList = false;
+
+// Auto-sync state
+export let pendingColorStateInjectPrompt = false;
+
+// Auto-sync state
+export let autoSyncEnabled = false;
+
+export let autoSyncInterval = null;
+
+export let autoSyncLastTimestamp = null;
+
+export let autoSyncSequence = 0;
+
+export let autoSyncPendingRecord = null;
+
+export let autoSyncSaveTimeout = null;
+
+export let autoSyncStatusError = '';
+
+export let immediateSettingsSaveInFlight = false;
+
+export let immediateSettingsSaveQueued = false;
+
+export function setAttributionChatGeneration(value) { attributionChatGeneration = value; return value; }
+export function setAutoAttributionVerifyTimer(value) { autoAttributionVerifyTimer = value; return value; }
+export function setAutoAttributionVerifyTimerDue(value) { autoAttributionVerifyTimerDue = value; return value; }
+export function setAutoRecolorHintShown(value) { autoRecolorHintShown = value; return value; }
+export function setAutoSyncEnabled(value) { autoSyncEnabled = value; return value; }
+export function setAutoSyncInterval(value) { autoSyncInterval = value; return value; }
+export function setAutoSyncLastTimestamp(value) { autoSyncLastTimestamp = value; return value; }
+export function setAutoSyncPendingRecord(value) { autoSyncPendingRecord = value; return value; }
+export function setAutoSyncSaveTimeout(value) { autoSyncSaveTimeout = value; return value; }
+export function setAutoSyncSequence(value) { autoSyncSequence = value; return value; }
+export function setAutoSyncStatusError(value) { autoSyncStatusError = value; return value; }
+export function setCharacterColors(value) { characterColors = value; return value; }
+export function setColorHistory(value) { colorHistory = value; return value; }
+export function setColorStateSaveTimer(value) { colorStateSaveTimer = value; return value; }
+export function setExpandedCharacterRows(value) { expandedCharacterRows = value; return value; }
+export function setHistoryIndex(value) { historyIndex = value; return value; }
+export function setImmediateSettingsSaveInFlight(value) { immediateSettingsSaveInFlight = value; return value; }
+export function setImmediateSettingsSaveQueued(value) { immediateSettingsSaveQueued = value; return value; }
+export function setIsAutoColorizing(value) { isAutoColorizing = value; return value; }
+export function setIsColorizing(value) { isColorizing = value; return value; }
+export function setIsRecoloring(value) { isRecoloring = value; return value; }
+export function setIsStreamingGenerationActive(value) { isStreamingGenerationActive = value; return value; }
+export function setIsVerifyingAttribution(value) { isVerifyingAttribution = value; return value; }
+export function setLastCharKey(value) { lastCharKey = value; return value; }
+export function setLastProcessedMessageSignature(value) { lastProcessedMessageSignature = value; return value; }
+export function setLastStreamingAttributionVerifyKey(value) { lastStreamingAttributionVerifyKey = value; return value; }
+export function setLegendListeners(value) { legendListeners = value; return value; }
+export function setLiveChatSaveTimer(value) { liveChatSaveTimer = value; return value; }
+export function setPendingAttributionVerifications(value) { pendingAttributionVerifications = value; return value; }
+export function setPendingColorStateHistory(value) { pendingColorStateHistory = value; return value; }
+export function setPendingColorStateInjectPrompt(value) { pendingColorStateInjectPrompt = value; return value; }
+export function setPendingColorStateSaveData(value) { pendingColorStateSaveData = value; return value; }
+export function setPendingColorStateUpdateList(value) { pendingColorStateUpdateList = value; return value; }
+export function setPendingLiveChatSave(value) { pendingLiveChatSave = value; return value; }
+export function setSearchTerm(value) { searchTerm = value; return value; }
+export function setStreamingAttributionGeneration(value) { streamingAttributionGeneration = value; return value; }
+export function setStreamingAttributionVerifyTimer(value) { streamingAttributionVerifyTimer = value; return value; }
+export function setSwapMode(value) { swapMode = value; return value; }

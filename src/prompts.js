@@ -1,0 +1,312 @@
+// prompts.js - extracted from index.js (mechanical split)
+import { resolveCharacterKeyByNameOrAlias } from './color-blocks.js';
+import { applyThemeReadabilityAndBrightness, getBrightnessOffset, getCustomPaletteMeta, getCustomPalettes, getEntryEffectiveColor, getThemeLightnessBounds } from './palettes.js';
+import { escapeHtml, extension_prompt_roles, extension_prompt_types, setExtensionPrompt } from './st-api.js';
+import { MODULE_NAME, characterColors, isDomEngine, settings } from './state.js';
+import { normalizeAliases, normalizeHexColor } from './utils.js';
+
+export let injectDebouncedTimer = null;
+
+export const PROMPT_THOUGHT_DELIMITER_PAIRS = Object.freeze({
+    '(': ')',
+    '[': ']',
+    '{': '}',
+    '<': '>',
+    '「': '」',
+    '『': '』',
+    '【': '】',
+    '《': '》',
+    '〈': '〉',
+    '（': '）',
+    '［': '］',
+    '｛': '｝',
+    '“': '”',
+    '‘': '’',
+    '«': '»',
+    '‹': '›',
+});
+
+export function normalizePromptThoughtSymbols(thoughtSymbols) {
+    const symbols = Array.isArray(thoughtSymbols)
+        ? thoughtSymbols
+        : String(thoughtSymbols ?? '').split(',');
+    return [...new Set(symbols.map(formatPromptLiteralSymbol).map(s => s.trim()).filter(Boolean))];
+}
+
+export function getPromptThoughtDelimiterPairs(thoughtSymbols) {
+    const symbols = normalizePromptThoughtSymbols(thoughtSymbols);
+    const pairs = [];
+    for (let i = 0; i < symbols.length; i++) {
+        const open = symbols[i];
+        const pairedClose = PROMPT_THOUGHT_DELIMITER_PAIRS[open];
+        const next = symbols[i + 1];
+        const close = pairedClose || open;
+        pairs.push({ open, close });
+        if (pairedClose && next === pairedClose) i++;
+    }
+    return pairs;
+}
+
+export function formatThoughtDelimiterPattern(pair) {
+    return `${pair.open}...${pair.close}`;
+}
+
+export function buildThoughtSymbolColorPromptExample(thoughtSymbols) {
+    const [pair] = getPromptThoughtDelimiterPairs(thoughtSymbols);
+    return pair ? `<font color="#aabbcc">${pair.open}I should run.${pair.close}</font>` : '';
+}
+
+export function buildColorPromptExample(thoughtSymbols) {
+    const thoughtExample = buildThoughtSymbolColorPromptExample(thoughtSymbols);
+    return thoughtExample
+        ? `<font color="#aabbcc">"Hello."</font> and ${thoughtExample}`
+        : '<font color="#aabbcc">"Hello."</font>';
+}
+
+export function buildThoughtSymbolTrackingPrompt(thoughtSymbols) {
+    const patterns = getPromptThoughtDelimiterPairs(thoughtSymbols).map(formatThoughtDelimiterPattern).join(', ');
+    return patterns ? `Inner-thought delimiters ${patterns} belong to the surrounding speaker; include them in the same color block as that speaker's dialogue.` : '';
+}
+
+export function buildThoughtSymbolColorPromptRule(thoughtSymbols) {
+    const pairs = getPromptThoughtDelimiterPairs(thoughtSymbols);
+    const patterns = pairs.map(formatThoughtDelimiterPattern).join(', ');
+    const example = buildThoughtSymbolColorPromptExample(thoughtSymbols);
+    const [pair] = pairs;
+    if (!patterns || !example) return '';
+    return `Thought delimiter HARD RULE: color every ${patterns} span as one unit; opening and closing delimiters must be inside the same <font> tag. Correct: ${example}. Wrong: ${pair.open}<font color="#aabbcc">I should run.</font>${pair.close}.`;
+}
+
+export function formatColorBlockName(entry) {
+    const name = String(entry?.name ?? '').trim();
+    if (!name) return '';
+    const nameKey = name.toLowerCase();
+    const aliases = normalizeAliases(entry.aliases)
+        .filter(alias => alias.toLowerCase() !== nameKey);
+    return `${name}${aliases.map(alias => `(${alias})`).join('')}`;
+}
+
+export function formatColorBlockPair(name, color) {
+    const normalizedColor = normalizeHexColor(color, null);
+    if (!normalizedColor) return '';
+    const key = resolveCharacterKeyByNameOrAlias(name);
+    const blockName = key ? formatColorBlockName(characterColors[key]) : String(name ?? '').trim();
+    return blockName ? `${blockName}=${normalizedColor}` : '';
+}
+
+export function buildCurrentColorPairsList() {
+    const pairs = Object.values(characterColors)
+        .map(entry => formatColorBlockPair(entry?.name, getEntryEffectiveColor(entry)))
+        .filter(Boolean);
+    return pairs.join(',');
+}
+
+export function buildColorMetadataPromptLines(options = {}) {
+    const usageBlockMode = options.usageBlockMode || 'used';
+    const currentPairs = buildCurrentColorPairsList();
+    if (usageBlockMode === 'new') {
+        if (!currentPairs) {
+            return [
+                'After the reply, add one final line: [COLORS:Name=#RRGGBB,...] for every new speaker.',
+                'If there are no new speakers, omit the [COLORS:] line.',
+            ];
+        }
+        return [
+            `Known colors: ${currentPairs}`,
+            'Reuse those exact names and colors. Do not rename, re-color, or split aliases from their canonical name.',
+            'After the reply, add one final [COLORS:Name=#RRGGBB,...] line only for speakers not already listed.',
+            'If there are no new speakers, omit the [COLORS:] line.',
+        ];
+    }
+
+    if (!currentPairs) {
+        return [
+            'When any dialogue/thought/narration is colored, end with exactly one final line: [COLORS:Name=#RRGGBB,...].',
+            'Include every speaker whose dialogue/thought/narration you colored in this reply. Omit only if no dialogue/thought/narration was colored.',
+            'The [COLORS:] line must be the final output line, after the reply text.',
+        ];
+    }
+    return [
+        `Known colors: ${currentPairs}`,
+        'Reuse those exact names and colors. Do not rename, re-color, or split aliases from their canonical name.',
+        'When any dialogue/thought/narration is colored, end with exactly one final line: [COLORS:Name=#RRGGBB,...].',
+        'Include every speaker whose dialogue/thought/narration you colored in this reply, including already-known speakers. Omit only if no dialogue/thought/narration was colored.',
+        'The [COLORS:] line must be the final output line, after the reply text.',
+    ];
+}
+
+export function buildLLMColorizeRules(extraRule = '') {
+    const rules = [
+        '- Wrap every complete dialogue and inner-thought span in <font color="#RRGGBB">...</font>.',
+        '- For delimiter spans, the opening and closing delimiters must be inside the same <font> tag.',
+        '- Do not change, add, or remove any text; only insert color tags.',
+        '- Do not escape or alter quotes or delimiters.',
+        '- Do not output markdown code fences, commentary, or explanations.',
+    ];
+    if (extraRule) rules.push(extraRule);
+    return rules;
+}
+
+export const PALETTE_DESCRIPTIONS = {
+    pastel: 'Use soft pastel tones.',
+    neon: 'Use vivid neon colors.',
+    earth: 'Use earthy, natural tones.',
+    jewel: 'Use rich jewel tones.',
+    muted: 'Use muted, desaturated tones.',
+    jade: 'Use jade/teal greens.',
+    forest: 'Use forest/woodland greens.',
+    ocean: 'Use ocean/aquatic blues.',
+    sunset: 'Use sunset colors (oranges, pinks, golds).',
+    aurora: 'Use aurora/northern lights purples and greens.',
+    warm: 'Use warm tones (reds, oranges, yellows).',
+    cool: 'Use cool tones (blues, teals, purples).',
+    berry: 'Use berry/magenta shades.',
+    monochrome: 'Use only grayscale.',
+    protanopia: 'Use colorblind-safe colors (protanopia type).',
+    deuteranopia: 'Use colorblind-safe colors (deuteranopia type).',
+    tritanopia: 'Use colorblind-safe colors (tritanopia type).',
+};
+
+export function getThoughtDelimiterSymbols() {
+    return [...new Set(String(settings.thoughtSymbols || '').split('').filter(s => s && s.trim()))];
+}
+
+export function formatPromptLiteralSymbol(symbol) {
+    return String(symbol ?? '');
+}
+
+export function buildCustomPalettePrompt() {
+    if (!settings.colorTheme?.startsWith('custom:')) return '';
+    const paletteName = settings.colorTheme.slice(7);
+    if (!paletteName) return '';
+    const customs = getCustomPalettes();
+    const palette = customs[paletteName];
+    if (!Array.isArray(palette) || !palette.length) return '';
+    const meta = getCustomPaletteMeta();
+    const notes = meta?.[paletteName]?.notes?.trim() || '';
+    const colors = palette.map(c => normalizeHexColor(c, null)).filter(Boolean).join(', ');
+    if (!colors) return '';
+    const notesPart = notes ? ` Note: ${notes}.` : '';
+    return `Use palette "${paletteName}": ${colors}.${notesPart} Prefer these for new characters.`;
+}
+
+export function buildMinimalPromptInstruction() {
+    if (!settings.enabled) return '';
+    const { mode, minLightness, maxLightness } = getThemeLightnessBounds();
+    const thoughtSymbols = getThoughtDelimiterSymbols();
+    const delimiterSymbols = [...new Set(['"', ...thoughtSymbols])];
+    const delimiterList = delimiterSymbols.map(formatPromptLiteralSymbol).join(', ');
+    const brightnessOffset = getBrightnessOffset();
+
+    const parts = [
+        '[Dialogue Colors — strict output]',
+        'Only add <font color="#RRGGBB">...</font> tags to dialogue/thought spans.',
+        `- Delimiters: ${delimiterList}`,
+        `- Example: ${buildColorPromptExample(thoughtSymbols)}`,
+    ];
+    if (thoughtSymbols.length) {
+        parts.push(`- ${buildThoughtSymbolColorPromptRule(thoughtSymbols)}`);
+    }
+    parts.push(
+        '- Preserve exact text; do not add, remove, escape, or move quotes/delimiters.',
+        '- No code fences, commentary, or explanations.',
+        mode === 'dark'
+            ? `- Use readable colors for a dark background (${minLightness}-${maxLightness}% lightness).`
+            : `- Use readable colors for a light background (${minLightness}-${maxLightness}% lightness).`
+    );
+    if (brightnessOffset !== 0) {
+        parts.push(`- New-character color bias: ${brightnessOffset > 0 ? '+' : ''}${brightnessOffset}% lightness.`);
+    }
+
+    const customPalettePrompt = buildCustomPalettePrompt();
+    if (customPalettePrompt) {
+        parts.push(`- ${customPalettePrompt}`);
+    } else {
+        const paletteDesc = PALETTE_DESCRIPTIONS[settings.colorTheme];
+        if (paletteDesc) parts.push(`- ${paletteDesc}`);
+    }
+
+    if (!settings.disableNarration && settings.narratorColor) {
+        parts.push(`- Narrator text: <font color="${applyThemeReadabilityAndBrightness(settings.narratorColor)}">...</font>.`);
+    }
+    if (settings.highlightMode) {
+        parts.push('- Add a subtle background highlight to colored spans when it improves readability.');
+    }
+
+    parts.push(...buildColorMetadataPromptLines());
+    return parts.join('\n');
+}
+
+export function buildDomStealthColorsInstruction() {
+    if (!settings.enabled) return '';
+    const { mode, minLightness, maxLightness } = getThemeLightnessBounds();
+    const thoughtSymbols = getThoughtDelimiterSymbols();
+    const thoughtSymbolTrackingPrompt = buildThoughtSymbolTrackingPrompt(thoughtSymbols);
+    const brightnessOffset = getBrightnessOffset();
+
+    const parts = [
+        '[Dialogue Colors — metadata only]',
+        'Write the reply normally. Do not add visible <font> tags, CSS color formatting, or color commentary in the reply text.',
+    ];
+    parts.push(...buildColorMetadataPromptLines({ usageBlockMode: 'new' }));
+    parts.push(
+        mode === 'dark'
+            ? `- Use dark-background colors (${minLightness}-${maxLightness}% lightness) when choosing new colors.`
+            : `- Use light-background colors (${minLightness}-${maxLightness}% lightness) when choosing new colors.`
+    );
+    if (brightnessOffset !== 0) {
+        parts.push(`- New-character color bias: ${brightnessOffset > 0 ? '+' : ''}${brightnessOffset}% lightness.`);
+    }
+    const customPalettePrompt = buildCustomPalettePrompt();
+    if (customPalettePrompt) {
+        parts.push(`- ${customPalettePrompt}`);
+    } else {
+        const paletteDesc = PALETTE_DESCRIPTIONS[settings.colorTheme];
+        if (paletteDesc) parts.push(`- ${paletteDesc}`);
+    }
+    if (thoughtSymbolTrackingPrompt) parts.push(`- ${thoughtSymbolTrackingPrompt}`);
+    return parts.join('\n');
+}
+
+export function buildColoredPromptPreview() {
+    if (!settings.enabled) return '<span style="opacity:0.5">(disabled)</span>';
+    if (isDomEngine()) {
+        if (settings.domStealthColors) return '<span style="opacity:0.5">(local DOM engine + stealth colors block)</span>';
+        return '<span style="opacity:0.5">(local DOM engine: no prompt injected)</span>';
+    }
+    const entries = Object.entries(characterColors);
+    if (!entries.length) return '<span style="opacity:0.5">(no characters)</span>';
+    return entries.map(([, v]) => `<span style="color:${getEntryEffectiveColor(v)}">${escapeHtml(v.name)}</span>`).join(', ');
+}
+
+export function injectPrompt() {
+    if (injectDebouncedTimer) clearTimeout(injectDebouncedTimer);
+    injectDebouncedTimer = setTimeout(() => {
+        let promptText = '';
+        if (settings.enabled && !isDomEngine() && settings.promptMode !== 'macro') {
+            promptText = buildMinimalPromptInstruction();
+        } else if (settings.enabled && isDomEngine() && settings.domStealthColors) {
+            promptText = buildDomStealthColorsInstruction();
+        }
+        const role = settings.promptRole === 'user' ? extension_prompt_roles.USER : extension_prompt_roles.SYSTEM;
+        setExtensionPrompt(MODULE_NAME, promptText, extension_prompt_types.IN_CHAT, settings.promptDepth, false, role);
+        const p = document.getElementById('dc-prompt-preview');
+        if (p) p.innerHTML = buildColoredPromptPreview();
+        updateSystemPromptDisplay();
+    }, 50);
+}
+
+// Phase 3A: Legend with event listener cleanup
+
+export function updateSystemPromptDisplay() {
+    const container = document.getElementById('dc-system-prompt-container');
+    if (!container) return;
+
+    if (settings.promptMode === 'macro' && settings.enabled && !isDomEngine()) {
+        container.style.display = 'block';
+        const textarea = document.getElementById('dc-system-prompt-text');
+        if (textarea) textarea.value = '{{dialoguecolors}}';
+    } else {
+        container.style.display = 'none';
+    }
+}

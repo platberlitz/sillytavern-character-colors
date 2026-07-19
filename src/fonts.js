@@ -1,0 +1,180 @@
+// fonts.js - extracted from index.js (mechanical split)
+import { buildColorFontLookup, resolveCharacterKeyByNameOrAlias } from './color-blocks.js';
+import { getEntryEffectiveColor } from './palettes.js';
+import { getContext } from './st-api.js';
+import { characterColors, loadedGoogleFonts, settings } from './state.js';
+import { getGoogleFontFamily, normalizeGoogleFontName, normalizeHexColor } from './utils.js';
+
+export function loadGoogleFont(fontName) {
+    const normalized = normalizeGoogleFontName(fontName);
+    if (!normalized || typeof document === 'undefined' || !document.head) return normalized;
+    const key = normalized.toLowerCase();
+    if (loadedGoogleFonts.has(key)) return normalized;
+    loadedGoogleFonts.add(key);
+    const family = encodeURIComponent(normalized).replace(/%20/g, '+');
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = `https://fonts.googleapis.com/css2?family=${family}:ital,wght@0,400;0,700;1,400;1,700&display=swap`;
+    link.dataset.dcGoogleFont = key;
+    link.onerror = () => {
+        const fallback = document.createElement('link');
+        fallback.rel = 'stylesheet';
+        fallback.href = `https://fonts.googleapis.com/css2?family=${family}&display=swap`;
+        fallback.dataset.dcGoogleFontFallback = key;
+        document.head.appendChild(fallback);
+    };
+    document.head.appendChild(link);
+    return normalized;
+}
+
+export let customFontRefreshTimer = null;
+
+export function clearCustomFontTag(fontEl) {
+    if (!fontEl?.hasAttribute?.('data-dc-font')) return false;
+    fontEl.style.fontFamily = '';
+    if (!fontEl.getAttribute('style')) fontEl.removeAttribute('style');
+    fontEl.removeAttribute('data-dc-font');
+    return true;
+}
+
+export function clearCustomFontsFromFontTags(root = document) {
+    let changed = false;
+    root?.querySelectorAll?.('font[data-dc-font]').forEach(fontEl => {
+        if (clearCustomFontTag(fontEl)) changed = true;
+    });
+    return changed;
+}
+
+export function applyCustomFontsToFontTags(mesText, rawText = '') {
+    const fontTags = Array.from(mesText?.querySelectorAll?.('font[color]') || []);
+    if (!fontTags.length) return false;
+    const fontByColor = buildColorFontLookup(rawText);
+    let changed = false;
+    for (const fontEl of fontTags) {
+        const color = normalizeHexColor(fontEl.getAttribute('color'), null);
+        const font = color ? fontByColor.get(color) : '';
+        const family = getGoogleFontFamily(font);
+        if (family) {
+            loadGoogleFont(font);
+            if (fontEl.style.fontFamily !== family) {
+                fontEl.style.fontFamily = family;
+                changed = true;
+            }
+            if (!fontEl.hasAttribute('data-dc-font')) {
+                fontEl.setAttribute('data-dc-font', '1');
+                changed = true;
+            }
+        } else if (clearCustomFontTag(fontEl)) {
+            changed = true;
+        }
+    }
+    return changed;
+}
+
+export function applyCustomFontsToMessageElement(mesElement, chat = getContext()?.chat || []) {
+    const mesText = mesElement?.querySelector?.('.mes_text');
+    if (!mesText) return false;
+    if (!settings.enabled) return clearCustomFontsFromFontTags(mesText);
+    const mesIndex = Number(mesElement.getAttribute?.('mesid'));
+    const msg = Number.isFinite(mesIndex) ? chat[mesIndex] : null;
+    if (msg?.is_system) return clearCustomFontsFromFontTags(mesText);
+    return applyCustomFontsToFontTags(mesText, msg?.mes || mesText.innerHTML || '');
+}
+
+export function applyCustomFontsToMessageElements(elements) {
+    const targets = Array.from(new Set(Array.from(elements || []).filter(Boolean)));
+    if (!targets.length) return false;
+    const chat = getContext()?.chat || [];
+    let changed = false;
+    for (const mesElement of targets) {
+        if (applyCustomFontsToMessageElement(mesElement, chat)) changed = true;
+    }
+    return changed;
+}
+
+export function applyCustomFontsToRenderedMessages() {
+    return applyCustomFontsToMessageElements(document.querySelectorAll('#chat .mes[mesid]'));
+}
+
+export let cardStyleTimer = null;
+
+export function scheduleCardStyle(delay = 50) {
+    if (cardStyleTimer) clearTimeout(cardStyleTimer);
+    cardStyleTimer = setTimeout(() => {
+        cardStyleTimer = null;
+        styleAllCharacterCards();
+    }, Math.max(0, Number(delay) || 0));
+}
+
+export function clearSingleCharacterCardStyles(card) {
+    if (card.hasAttribute('data-dc-card-styled')) {
+        const nameEl = card.querySelector('.ch_name');
+        if (nameEl) {
+            nameEl.style.color = '';
+            nameEl.style.fontFamily = '';
+        }
+        const avatarImg = card.querySelector('.avatar img');
+        if (avatarImg) {
+            avatarImg.style.boxShadow = '';
+            avatarImg.style.borderColor = '';
+        }
+        card.removeAttribute('data-dc-card-styled');
+    }
+}
+
+export function clearAllCharacterCardStyles() {
+    const cards = document.querySelectorAll('[data-dc-card-styled]');
+    cards.forEach(card => clearSingleCharacterCardStyles(card));
+}
+
+export function styleAllCharacterCards() {
+    if (!settings.enabled) {
+        clearAllCharacterCardStyles();
+        return;
+    }
+    const cards = document.querySelectorAll('.group_member, .character_select');
+    cards.forEach(card => {
+        const nameEl = card.querySelector('.ch_name');
+        if (!nameEl) return;
+        const name = nameEl.textContent.trim();
+        if (!name) return;
+        const key = resolveCharacterKeyByNameOrAlias(name);
+        if (key && characterColors[key]) {
+            const entry = characterColors[key];
+            const color = getEntryEffectiveColor(entry);
+            
+            // Apply name color
+            nameEl.style.color = color;
+            
+            // Apply custom font if set
+            if (entry.font) {
+                loadGoogleFont(entry.font);
+                nameEl.style.fontFamily = getGoogleFontFamily(entry.font);
+            } else {
+                nameEl.style.fontFamily = '';
+            }
+            
+            // Apply avatar border and shadow ring
+            const avatarImg = card.querySelector('.avatar img');
+            if (avatarImg) {
+                avatarImg.style.borderColor = color;
+                avatarImg.style.boxShadow = `0 0 6px ${color}`;
+            }
+            
+            // Mark with a data attribute so we know it's styled by us
+            card.setAttribute('data-dc-card-styled', 'true');
+        } else {
+            // If it was styled before but no longer has a color, clear it!
+            clearSingleCharacterCardStyles(card);
+        }
+    });
+}
+
+export function scheduleCustomFontRefresh(delay = 0) {
+    clearTimeout(customFontRefreshTimer);
+    customFontRefreshTimer = setTimeout(() => {
+        customFontRefreshTimer = null;
+        applyCustomFontsToRenderedMessages();
+        scheduleCardStyle(0);
+    }, Math.max(0, Number(delay) || 0));
+}
