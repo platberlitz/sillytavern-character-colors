@@ -540,6 +540,198 @@ export function applyHexInputForElement(i, options = {}) {
 
 // Event delegation: handlers are installed once on the list container, so
 // re-rendering rows never needs to rebind per-row listeners.
+function handleColorDotClick(dotEl) {
+    const input = dotEl.nextElementSibling;
+    if (input?.classList.contains('dc-color-input')) input.click();
+}
+
+function handleMoreClick(moreBtn) {
+    toggleCharacterRowExpansion(moreBtn.dataset.key);
+    updateCharList();
+}
+
+function handleDeleteClick(delBtn) {
+    removeCharacterKeys([delBtn.dataset.key], {
+        actionLabel: 'Deleted',
+        emptyMessage: 'Character already removed.',
+        blockedMessage: 'Turn off Keep before deleting this character.'
+    });
+}
+
+function handleKeepClick(keepBtn) {
+    const key = keepBtn.dataset.key;
+    if (!characterColors[key]) return;
+    characterColors[key].keep = !characterColors[key].keep;
+    saveHistory();
+    saveData();
+    updateCharList();
+    toast.info(characterColors[key].keep ? `${characterColors[key].name} will now survive Clear and bulk delete.` : `${characterColors[key].name} can now be cleared or deleted normally.`);
+}
+
+function handleLockClick(lockBtn) {
+    const key = lockBtn.dataset.key;
+    if (!characterColors[key]) return;
+    const wasLocked = !!characterColors[key].locked;
+    characterColors[key].locked = !characterColors[key].locked;
+    saveHistory();
+    saveData(); updateCharList();
+    if (!wasLocked && characterColors[key]?.locked) {
+        const duplicateKeys = collectDuplicateColorKeys();
+        if (duplicateKeys.length) {
+            removeCharacterKeys(duplicateKeys, {
+                actionLabel: 'Auto-cleared',
+                itemLabel: 'duplicate-color character',
+                blockedMessage: 'Only pinned duplicate-color characters remain. Turn off Keep first.'
+            });
+        }
+    }
+}
+
+function handleSwapClick(swapBtn) {
+    if (!swapMode) { setSwapMode(swapBtn.dataset.key); updateCharList(); toast.info('Click another character to swap'); }
+    else if (swapMode === swapBtn.dataset.key) { setSwapMode(null); updateCharList(); }
+    else { swapColors(swapMode, swapBtn.dataset.key); setSwapMode(null); }
+}
+
+function handleStyleClick(styleBtn) {
+    const key = styleBtn.dataset.key;
+    if (!characterColors[key]) return;
+    const styles = ['', 'bold', 'italic', 'bold italic'];
+    const curr = characterColors[key].style || '';
+    characterColors[key].style = styles[(styles.indexOf(curr) + 1) % styles.length];
+    commit();
+    repaintDomAfterCharacterDataChange(0);
+}
+
+function handleAliasRemoveClick(e, aliasRemoveBtn) {
+    e.stopPropagation();
+    const key = aliasRemoveBtn.dataset.key;
+    const alias = aliasRemoveBtn.dataset.alias;
+    if (characterColors[key]?.aliases) {
+        const nextAliases = characterColors[key].aliases.filter(a => a !== alias);
+        if (nextAliases.length !== characterColors[key].aliases.length) {
+            characterColors[key].aliases = nextAliases;
+            commit();
+            repaintDomAfterCharacterDataChange(0);
+        }
+    }
+}
+
+function handleAliasClick(aliasBtn) {
+    const row = aliasBtn.closest('.dc-char');
+    const existing = row.querySelector('.dc-inline-input');
+    if (existing) { existing.remove(); return; }
+    const inputRow = document.createElement('div');
+    inputRow.className = 'dc-inline-input';
+    inputRow.style.cssText = 'display:flex;gap:4px;padding:2px 0 2px 26px;';
+    inputRow.innerHTML = `<input type="text" class="text_pole" placeholder="Alias name..." style="flex:1;padding:2px 4px;font-size:0.8em;"><button class="menu_button" style="padding:2px 6px;font-size:0.8em;">Add</button>`;
+    row.appendChild(inputRow);
+    const inp = inputRow.querySelector('input');
+    inp.focus();
+    const submit = () => {
+        const alias = inp.value.trim();
+        if (alias) {
+            const aliases = characterColors[aliasBtn.dataset.key].aliases = characterColors[aliasBtn.dataset.key].aliases || [];
+            if (!aliases.includes(alias)) {
+                aliases.push(alias);
+                commit();
+                repaintDomAfterCharacterDataChange(0);
+            } else {
+                inputRow.remove();
+            }
+        }
+        else inputRow.remove();
+    };
+    inputRow.querySelector('button').onclick = submit;
+    inp.onkeydown = ev => { if (ev.key === 'Enter') submit(); if (ev.key === 'Escape') inputRow.remove(); };
+}
+
+function handleFontClick(fontBtn) {
+    const row = fontBtn.closest('.dc-char');
+    const existing = row.querySelector('.dc-inline-input');
+    if (existing) { existing.remove(); return; }
+    const key = fontBtn.dataset.key;
+    const current = normalizeGoogleFontName(characterColors[key]?.font);
+    const inputRow = document.createElement('div');
+    inputRow.className = 'dc-inline-input';
+    inputRow.style.cssText = 'display:flex;gap:4px;padding:2px 0 2px 26px;';
+    inputRow.innerHTML = `<input type="text" class="text_pole" placeholder="Google Font name..." value="${escapeAttr(current)}" style="flex:1;padding:2px 4px;font-size:0.8em;"><button class="menu_button" style="padding:2px 6px;font-size:0.8em;">Set</button>`;
+    row.appendChild(inputRow);
+    const inp = inputRow.querySelector('input');
+    inp.focus();
+    inp.select();
+    const submit = () => {
+        if (!characterColors[key]) { inputRow.remove(); return; }
+        const nextFont = normalizeGoogleFontName(inp.value);
+        if ((normalizeGoogleFontName(characterColors[key].font)) !== nextFont) {
+            characterColors[key].font = nextFont;
+            if (nextFont) loadGoogleFont(nextFont);
+            commit();
+            repaintDomAfterCharacterDataChange(0);
+        } else {
+            inputRow.remove();
+        }
+    };
+    inputRow.querySelector('button').onclick = submit;
+    inp.onkeydown = ev => { if (ev.key === 'Enter') submit(); if (ev.key === 'Escape') inputRow.remove(); };
+}
+
+function handleGroupClick(groupBtn) {
+    const row = groupBtn.closest('.dc-char');
+    const existing = row.querySelector('.dc-inline-input');
+    if (existing) { existing.remove(); return; }
+    const key = groupBtn.dataset.key;
+    const current = characterColors[key]?.group || '';
+    const inputRow = document.createElement('div');
+    inputRow.className = 'dc-inline-input';
+    inputRow.style.cssText = 'display:flex;gap:4px;padding:2px 0 2px 26px;';
+    inputRow.innerHTML = `<input type="text" class="text_pole" placeholder="Group name..." value="${escapeHtml(current)}" style="flex:1;padding:2px 4px;font-size:0.8em;"><button class="menu_button" style="padding:2px 6px;font-size:0.8em;">Set</button>`;
+    row.appendChild(inputRow);
+    const inp = inputRow.querySelector('input');
+    inp.focus();
+    inp.select();
+    const submit = () => {
+        const nextGroup = inp.value.trim();
+        if ((characterColors[key]?.group || '') !== nextGroup) {
+            characterColors[key].group = nextGroup;
+            saveHistory();
+            saveData(); updateCharList();
+        } else {
+            inputRow.remove();
+        }
+    };
+    inputRow.querySelector('button').onclick = submit;
+    inp.onkeydown = ev => { if (ev.key === 'Enter') submit(); if (ev.key === 'Escape') inputRow.remove(); };
+}
+
+function handleCharListClick(e) {
+    const t = e.target;
+    if (!t || !t.closest) return;
+
+    const dotEl = t.closest('.dc-color-dot');
+    if (dotEl) { handleColorDotClick(dotEl); return; }
+    const moreBtn = t.closest('.dc-more');
+    if (moreBtn) { handleMoreClick(moreBtn); return; }
+    const delBtn = t.closest('.dc-del');
+    if (delBtn) { handleDeleteClick(delBtn); return; }
+    const keepBtn = t.closest('.dc-keep');
+    if (keepBtn) { handleKeepClick(keepBtn); return; }
+    const lockBtn = t.closest('.dc-lock');
+    if (lockBtn) { handleLockClick(lockBtn); return; }
+    const swapBtn = t.closest('.dc-swap');
+    if (swapBtn) { handleSwapClick(swapBtn); return; }
+    const styleBtn = t.closest('.dc-style');
+    if (styleBtn) { handleStyleClick(styleBtn); return; }
+    const aliasRemoveBtn = t.closest('.dc-alias-remove');
+    if (aliasRemoveBtn) { handleAliasRemoveClick(e, aliasRemoveBtn); return; }
+    const aliasBtn = t.closest('.dc-alias');
+    if (aliasBtn) { handleAliasClick(aliasBtn); return; }
+    const fontBtn = t.closest('.dc-font');
+    if (fontBtn) { handleFontClick(fontBtn); return; }
+    const groupBtn = t.closest('.dc-group');
+    if (groupBtn) { handleGroupClick(groupBtn); return; }
+}
+
 export function installCharListDelegation(list) {
     if (list.__dcDelegated) return;
     list.__dcDelegated = true;
@@ -585,186 +777,7 @@ export function installCharListDelegation(list) {
         }
     });
 
-    list.addEventListener('click', (e) => {
-        const t = e.target;
-        if (!t || !t.closest) return;
-
-        const dotEl = t.closest('.dc-color-dot');
-        if (dotEl) {
-            const input = dotEl.nextElementSibling;
-            if (input?.classList.contains('dc-color-input')) input.click();
-            return;
-        }
-        const moreBtn = t.closest('.dc-more');
-        if (moreBtn) {
-            toggleCharacterRowExpansion(moreBtn.dataset.key);
-            updateCharList();
-            return;
-        }
-        const delBtn = t.closest('.dc-del');
-        if (delBtn) {
-            removeCharacterKeys([delBtn.dataset.key], {
-                actionLabel: 'Deleted',
-                emptyMessage: 'Character already removed.',
-                blockedMessage: 'Turn off Keep before deleting this character.'
-            });
-            return;
-        }
-        const keepBtn = t.closest('.dc-keep');
-        if (keepBtn) {
-            const key = keepBtn.dataset.key;
-            if (!characterColors[key]) return;
-            characterColors[key].keep = !characterColors[key].keep;
-            saveHistory();
-            saveData();
-            updateCharList();
-            toast.info(characterColors[key].keep ? `${characterColors[key].name} will now survive Clear and bulk delete.` : `${characterColors[key].name} can now be cleared or deleted normally.`);
-            return;
-        }
-        const lockBtn = t.closest('.dc-lock');
-        if (lockBtn) {
-            const key = lockBtn.dataset.key;
-            if (!characterColors[key]) return;
-            const wasLocked = !!characterColors[key].locked;
-            characterColors[key].locked = !characterColors[key].locked;
-            saveHistory();
-            saveData(); updateCharList();
-            if (!wasLocked && characterColors[key]?.locked) {
-                const duplicateKeys = collectDuplicateColorKeys();
-                if (duplicateKeys.length) {
-                    removeCharacterKeys(duplicateKeys, {
-                        actionLabel: 'Auto-cleared',
-                        itemLabel: 'duplicate-color character',
-                        blockedMessage: 'Only pinned duplicate-color characters remain. Turn off Keep first.'
-                    });
-                }
-            }
-            return;
-        }
-        const swapBtn = t.closest('.dc-swap');
-        if (swapBtn) {
-            if (!swapMode) { setSwapMode(swapBtn.dataset.key); updateCharList(); toast.info('Click another character to swap'); }
-            else if (swapMode === swapBtn.dataset.key) { setSwapMode(null); updateCharList(); }
-            else { swapColors(swapMode, swapBtn.dataset.key); setSwapMode(null); }
-            return;
-        }
-        const styleBtn = t.closest('.dc-style');
-        if (styleBtn) {
-            const key = styleBtn.dataset.key;
-            if (!characterColors[key]) return;
-            const styles = ['', 'bold', 'italic', 'bold italic'];
-            const curr = characterColors[key].style || '';
-            characterColors[key].style = styles[(styles.indexOf(curr) + 1) % styles.length];
-            commit();
-            repaintDomAfterCharacterDataChange(0);
-            return;
-        }
-        const aliasRemoveBtn = t.closest('.dc-alias-remove');
-        if (aliasRemoveBtn) {
-            e.stopPropagation();
-            const key = aliasRemoveBtn.dataset.key;
-            const alias = aliasRemoveBtn.dataset.alias;
-            if (characterColors[key]?.aliases) {
-                const nextAliases = characterColors[key].aliases.filter(a => a !== alias);
-                if (nextAliases.length !== characterColors[key].aliases.length) {
-                    characterColors[key].aliases = nextAliases;
-                    commit();
-                    repaintDomAfterCharacterDataChange(0);
-                }
-            }
-            return;
-        }
-        const aliasBtn = t.closest('.dc-alias');
-        if (aliasBtn) {
-            const row = aliasBtn.closest('.dc-char');
-            const existing = row.querySelector('.dc-inline-input');
-            if (existing) { existing.remove(); return; }
-            const inputRow = document.createElement('div');
-            inputRow.className = 'dc-inline-input';
-            inputRow.style.cssText = 'display:flex;gap:4px;padding:2px 0 2px 26px;';
-            inputRow.innerHTML = `<input type="text" class="text_pole" placeholder="Alias name..." style="flex:1;padding:2px 4px;font-size:0.8em;"><button class="menu_button" style="padding:2px 6px;font-size:0.8em;">Add</button>`;
-            row.appendChild(inputRow);
-            const inp = inputRow.querySelector('input');
-            inp.focus();
-            const submit = () => {
-                const alias = inp.value.trim();
-                if (alias) {
-                    const aliases = characterColors[aliasBtn.dataset.key].aliases = characterColors[aliasBtn.dataset.key].aliases || [];
-                    if (!aliases.includes(alias)) {
-                        aliases.push(alias);
-                        commit();
-                        repaintDomAfterCharacterDataChange(0);
-                    } else {
-                        inputRow.remove();
-                    }
-                }
-                else inputRow.remove();
-            };
-            inputRow.querySelector('button').onclick = submit;
-            inp.onkeydown = ev => { if (ev.key === 'Enter') submit(); if (ev.key === 'Escape') inputRow.remove(); };
-            return;
-        }
-        const fontBtn = t.closest('.dc-font');
-        if (fontBtn) {
-            const row = fontBtn.closest('.dc-char');
-            const existing = row.querySelector('.dc-inline-input');
-            if (existing) { existing.remove(); return; }
-            const key = fontBtn.dataset.key;
-            const current = normalizeGoogleFontName(characterColors[key]?.font);
-            const inputRow = document.createElement('div');
-            inputRow.className = 'dc-inline-input';
-            inputRow.style.cssText = 'display:flex;gap:4px;padding:2px 0 2px 26px;';
-            inputRow.innerHTML = `<input type="text" class="text_pole" placeholder="Google Font name..." value="${escapeAttr(current)}" style="flex:1;padding:2px 4px;font-size:0.8em;"><button class="menu_button" style="padding:2px 6px;font-size:0.8em;">Set</button>`;
-            row.appendChild(inputRow);
-            const inp = inputRow.querySelector('input');
-            inp.focus();
-            inp.select();
-            const submit = () => {
-                if (!characterColors[key]) { inputRow.remove(); return; }
-                const nextFont = normalizeGoogleFontName(inp.value);
-                if ((normalizeGoogleFontName(characterColors[key].font)) !== nextFont) {
-                    characterColors[key].font = nextFont;
-                    if (nextFont) loadGoogleFont(nextFont);
-                    commit();
-                    repaintDomAfterCharacterDataChange(0);
-                } else {
-                    inputRow.remove();
-                }
-            };
-            inputRow.querySelector('button').onclick = submit;
-            inp.onkeydown = ev => { if (ev.key === 'Enter') submit(); if (ev.key === 'Escape') inputRow.remove(); };
-            return;
-        }
-        const groupBtn = t.closest('.dc-group');
-        if (groupBtn) {
-            const row = groupBtn.closest('.dc-char');
-            const existing = row.querySelector('.dc-inline-input');
-            if (existing) { existing.remove(); return; }
-            const key = groupBtn.dataset.key;
-            const current = characterColors[key]?.group || '';
-            const inputRow = document.createElement('div');
-            inputRow.className = 'dc-inline-input';
-            inputRow.style.cssText = 'display:flex;gap:4px;padding:2px 0 2px 26px;';
-            inputRow.innerHTML = `<input type="text" class="text_pole" placeholder="Group name..." value="${escapeHtml(current)}" style="flex:1;padding:2px 4px;font-size:0.8em;"><button class="menu_button" style="padding:2px 6px;font-size:0.8em;">Set</button>`;
-            row.appendChild(inputRow);
-            const inp = inputRow.querySelector('input');
-            inp.focus();
-            inp.select();
-            const submit = () => {
-                const nextGroup = inp.value.trim();
-                if ((characterColors[key]?.group || '') !== nextGroup) {
-                    characterColors[key].group = nextGroup;
-                    saveHistory();
-                    saveData(); updateCharList();
-                } else {
-                    inputRow.remove();
-                }
-            };
-            inputRow.querySelector('button').onclick = submit;
-            inp.onkeydown = ev => { if (ev.key === 'Enter') submit(); if (ev.key === 'Escape') inputRow.remove(); };
-            return;
-        }
-    });
+    list.addEventListener('click', handleCharListClick);
 }
 
 // Phase 5B: Alias chips, Phase 6B: Group headers, Phase 5D: Harmony on dblclick
@@ -910,9 +923,8 @@ export function syncUIWithSettings() {
     applyControlHelpText();
 }
 
-export function createUI() {
-    if (document.getElementById('dc-ext')) return;
-    const html = `
+function buildSettingsPanelHtml() {
+    return `
     <div id="dc-ext" class="inline-drawer">
         <div class="inline-drawer-toggle inline-drawer-header"><b>Dialogue Colors</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
         <div class="inline-drawer-content" style="padding:10px;font-size:0.9em;">
@@ -1147,12 +1159,9 @@ export function createUI() {
             <div id="dc-prompt-preview" style="font-size:0.75em;max-height:40px;overflow-y:auto;padding:3px;background:var(--SmartThemeBlurTintColor);border-radius:3px;"></div>
         </div>
     </div>`;
-    document.getElementById('extensions_settings')?.insertAdjacentHTML('beforeend', html);
+}
 
-    const $ = id => document.getElementById(id);
-
-    syncUIWithSettings();
-
+function bindSettingsPanelControls($) {
     $('dc-enabled').onchange = e => {
         settings.enabled = e.target.checked;
         if (!settings.enabled) {
@@ -1406,6 +1415,17 @@ export function createUI() {
     $('dc-sort').onchange = e => { settings.sortMode = e.target.value; saveData(); updateCharList(); };
     $('dc-add-btn').onclick = () => { addCharacter($('dc-add-name').value); $('dc-add-name').value = ''; };
     $('dc-add-name').onkeypress = e => { if (e.key === 'Enter') $('dc-add-btn').click(); };
+
+}
+
+export function createUI() {
+    if (document.getElementById('dc-ext')) return;
+    document.getElementById('extensions_settings')?.insertAdjacentHTML('beforeend', buildSettingsPanelHtml());
+
+    const $ = id => document.getElementById(id);
+
+    syncUIWithSettings();
+    bindSettingsPanelControls($);
 
     registerKeyboardShortcuts();
     applyControlHelpText();
