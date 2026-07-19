@@ -3,7 +3,7 @@ import { DOM_RETRY_REFRESH_DELAYS, decorateAllMessages, scheduleDomSettleRefresh
 import { commit } from './live-colors.js';
 import { applyThemeReadabilityAndBrightness, buildCharacterEntry, checkColorConflicts, deriveBaseColorFromEffectiveColor, getEntryEffectiveColor, setEntryFromEffectiveColor } from './palettes.js';
 import { getThoughtDelimiterSymbols } from './prompts.js';
-import { escapeRegex, getContext } from './st-api.js';
+import { escapeHtml, escapeRegex, getContext } from './st-api.js';
 import { characterColors, isDomEngine, settings } from './state.js';
 import { captureOpenDetailsState, isCompositeSpeakerLabel, normalizeAliases, normalizeGoogleFontName, normalizeHexColor, parseNameWithNicknames, restoreOpenDetailsState, splitCompositeSpeakerName, toast } from './utils.js';
 
@@ -270,7 +270,7 @@ export function scanAllMessages() {
         scheduleDomSettleRefresh(DOM_RETRY_REFRESH_DELAYS);
     }
     const conflicts = checkColorConflicts();
-    if (conflicts.length) toast.warning(`Similar: ${conflicts.slice(0, 3).map(c => c.join(' & ')).join(', ')}`);
+    if (conflicts.length) toast.warning(`Similar: ${conflicts.slice(0, 3).map(c => c.map(escapeHtml).join(' & ')).join(', ')}`);
     toast.info(`Found ${Object.keys(characterColors).length} characters`);
 }
 
@@ -373,7 +373,11 @@ export function buildDialogueRegex() {
             patterns.push(`${escapedOpen}([^${escapedClose}]+)${escapedClose}`);
         } else {
             const escaped = escapeRegex(delimiter);
-            patterns.push(`${escaped}([^${escaped}]+)${escaped}`);
+            // Reject doubled delimiters (e.g. markdown **bold** or __bold__) so a
+            // bold span is not misattributed as a thought/delimiter segment; such
+            // segments never match rendered <em> elements and previously caused a
+            // permanent readiness/health-check re-render loop in the DOM engine.
+            patterns.push(`(?<!${escaped})${escaped}([^${escaped}]+)${escaped}(?!${escaped})`);
         }
     }
     return patterns.length ? new RegExp(`(${patterns.join('|')})`, 'g') : null;

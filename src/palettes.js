@@ -4,7 +4,7 @@ import { createRestoreSnapshot, showUndoToast } from './history.js';
 import { applyLiveColorChangesFromSnapshot, captureEffectiveColorSnapshot, commit, repaintDomAfterCharacterDataChange } from './live-colors.js';
 import { callLLMWithProfile } from './llm.js';
 import { injectPrompt } from './prompts.js';
-import { generateQuietPrompt } from './st-api.js';
+import { escapeHtml, generateQuietPrompt } from './st-api.js';
 import { characterColors, expandedCharacterRows, setCharacterColors, setExpandedCharacterRows, setSwapMode, settings, swapMode } from './state.js';
 import { getAutoSyncRecord, isPlainObject, persistModuleStore, saveData } from './storage.js';
 import { COLOR_CONFLICT_HUE_THRESHOLD, COLOR_CONFLICT_LIGHTNESS_THRESHOLD, VALID_STYLES, colorDistance, hexToHsl, hslToHex, normalizeAliases, normalizeCharacterEntry, normalizeGoogleFontName, normalizeHexColor, toast } from './utils.js';
@@ -254,7 +254,7 @@ export function autoResolveConflicts() {
     });
     applyLiveColorChangesFromSnapshot(snapshot, changedKeys);
     commit();
-    toast.success(`Fixed: ${fixedPairs.join('; ')}`);
+    toast.success(`Fixed: ${fixedPairs.map(escapeHtml).join('; ')}`);
 }
 
 // Phase 5A: Preset management with dropdown UI
@@ -294,7 +294,7 @@ export function saveColorPreset() {
     if (!persistPresets(presets)) return;
     nameInput.value = '';
     refreshPresetDropdown();
-    toast.success(`Preset "${name}" saved`);
+    toast.success(`Preset "${escapeHtml(name)}" saved`);
 }
 
 export function loadColorPreset() {
@@ -323,7 +323,7 @@ export function loadColorPreset() {
     }
     if (changed) applyLiveColorChangesFromSnapshot(snapshot, changedKeys);
     commit({ history: changed });
-    toast.success(`Preset "${name}" loaded`);
+    toast.success(`Preset "${escapeHtml(name)}" loaded`);
 }
 
 export function deleteColorPreset() {
@@ -338,7 +338,7 @@ export function deleteColorPreset() {
     delete presets[name];
     if (!persistPresets(presets)) return;
     refreshPresetDropdown();
-    toast.success(`Preset "${name}" deleted`);
+    toast.success(`Preset "${escapeHtml(name)}" deleted`);
 }
 
 // Phase 5C: Custom palettes
@@ -657,7 +657,7 @@ export async function generateCustomPaletteFromWords(inputName = '', inputNotes 
     const notes = String(inputNotes || inlineInputs.notes || '');
     const customs = getCustomPalettes();
     if (customs[name] && !shouldOverwritePalette()) {
-        toast.warning(`Custom palette "${name}" exists. Enable "Overwrite existing" to replace it.`);
+        toast.warning(`Custom palette "${escapeHtml(name)}" exists. Enable "Overwrite existing" to replace it.`);
         return;
     }
 
@@ -679,7 +679,7 @@ export async function generateCustomPaletteFromWords(inputName = '', inputNotes 
     setCustomPaletteMetaEntry(name, { source, notes: notes.trim(), createdAt: Date.now() });
     refreshPaletteDropdown();
     const label = source === 'llm' ? 'LLM-enhanced' : (source === 'hybrid-fallback' ? 'local fallback' : 'local');
-    toast.success(`Custom palette "${name}" saved (${label})`);
+    toast.success(`Custom palette "${escapeHtml(name)}" saved (${label})`);
 }
 
 export function saveCustomPalette() {
@@ -692,14 +692,14 @@ export function saveCustomPalette() {
     if (!colors.length) { toast.warning('No characters to save palette from'); return; }
     const customs = getCustomPalettes();
     if (customs[name] && !shouldOverwritePalette()) {
-        toast.warning(`Custom palette "${name}" exists. Enable "Overwrite existing" to replace it.`);
+        toast.warning(`Custom palette "${escapeHtml(name)}" exists. Enable "Overwrite existing" to replace it.`);
         return;
     }
     customs[name] = colors;
     saveCustomPalettes(customs);
     setCustomPaletteMetaEntry(name, { source: 'heuristic', notes: '', createdAt: Date.now() });
     refreshPaletteDropdown();
-    toast.success(`Custom palette "${name}" saved`);
+    toast.success(`Custom palette "${escapeHtml(name)}" saved`);
 }
 
 export function deleteCustomPalette() {
@@ -715,7 +715,7 @@ export function deleteCustomPalette() {
     invalidateThemeCache();
     refreshPaletteDropdown();
     injectPrompt();
-    toast.success(`Custom palette "${paletteName}" deleted`);
+    toast.success(`Custom palette "${escapeHtml(paletteName)}" deleted`);
 }
 
 // Phase 5D: Color harmony suggestions

@@ -724,10 +724,14 @@ export async function colorizeMessages(targetMode = 'all') {
             }
 
             // Apply batch results
+            const capturedTextByIndex = new Map(messageBatch.map(entry => [entry.msgIndex, entry.rawText]));
             const processedIndices = new Set();
             for (const result of batchResults) {
                 if (result.changed && result.msgIndex != null) {
-                    chat[result.msgIndex].mes = result.updatedText;
+                    const target = chat[result.msgIndex];
+                    // Skip if the message was deleted or edited while the LLM call ran.
+                    if (!target || target.mes !== capturedTextByIndex.get(result.msgIndex)) continue;
+                    target.mes = result.updatedText;
                     colorizedCount++;
                     processedIndices.add(result.msgIndex);
                     updatedMessageIndices.add(result.msgIndex);
@@ -749,6 +753,9 @@ export async function colorizeMessages(targetMode = 'all') {
                 } catch (e) {
                     console.warn('[Dialogue Colors] Individual LLM colorize failed:', e);
                 }
+
+                // Bail if the message was edited or deleted while the LLM call ran.
+                if (chat[i] !== msg || msg.mes !== rawText) continue;
 
                 if (!result || !result.changed) {
                     result = colorizeMessageText(rawText, msg.name, { autoAddMessageSpeaker: true });
@@ -773,7 +780,9 @@ export async function colorizeMessages(targetMode = 'all') {
         // Persist and refresh only the affected message DOM nodes.
         if (colorizedCount > 0) {
             if (typeof ctx?.saveChat === 'function') await ctx.saveChat();
-            for (const index of updatedMessageIndices) await refreshMessageDom(index, chat[index]);
+            for (const index of updatedMessageIndices) {
+                if (chat[index]) await refreshMessageDom(index, chat[index]);
+            }
             toast.info(`Colorized ${colorizedCount} message${colorizedCount !== 1 ? 's' : ''}${skippedNoColor > 0 ? ` (${skippedNoColor} skipped — no speaker/color match)` : ''}.`);
         } else if (skippedNoColor > 0) {
             toast.info(`No uncolored dialogue found; ${skippedNoColor} message${skippedNoColor !== 1 ? 's' : ''} skipped (no known speaker/color could be resolved).`);
@@ -867,6 +876,11 @@ export function onNewMessage() {
                 const lastMesEl = document.querySelector('.mes:last-child');
                 clearAutoColorizeIndicators();
                 showAutoColorizeIndicator(lastMesEl);
+                // Capture identity + current text so we can revalidate after the LLM await
+                // (the user may swipe/edit/regenerate, or a new message may arrive, mid-call).
+                const mesIndex = chat.length - 1;
+                const capturedChat = chat;
+                const colorizeInput = lastMsg.mes || text;
                 try {
                     syncAllEffectiveColors();
                     // Pre-register all unique non-user speaker names for attribution
@@ -881,26 +895,31 @@ export function onNewMessage() {
                     // Try LLM path first, fall back to regex
                     let result = null;
                     try {
-                        result = await colorizeMessageWithLLM(text, lastMsg.name);
+                        result = await colorizeMessageWithLLM(colorizeInput, lastMsg.name);
                     } catch (e) {
                         console.warn('[Dialogue Colors] LLM auto-colorize failed, falling back to regex:', e);
                     }
                     if (!result || !result.changed) {
-                        result = colorizeMessageText(text, lastMsg.name, { autoAddMessageSpeaker: true });
+                        result = colorizeMessageText(colorizeInput, lastMsg.name, { autoAddMessageSpeaker: true });
                         if (result.createdCharacters) {
                             commit();
                         }
                     }
                     if (result.changed) {
-                        lastMsg.mes = result.updatedText;
-                        setLastProcessedMessageSignature(`${chat.length}|${sigId}|${lastMsg.mes}`);
-
+                        // Revalidate: bail out rather than clobber a swiped/edited message
+                        // or render into a DOM node that now belongs to a different message.
                         const ctx2 = getContext();
+                        if (ctx2?.chat !== capturedChat || capturedChat[mesIndex] !== lastMsg || lastMsg.mes !== colorizeInput) {
+                            return;
+                        }
+                        lastMsg.mes = result.updatedText;
+                        setLastProcessedMessageSignature(`${capturedChat.length}|${sigId}|${lastMsg.mes}`);
+
                         if (typeof ctx2?.saveChat === 'function') {
                             await ctx2.saveChat();
                         }
 
-                        await refreshMessageDom(chat.length - 1, lastMsg);
+                        await refreshMessageDom(mesIndex, lastMsg);
                         toast.info('Auto-colorized latest message.');
                     }
                 } finally {

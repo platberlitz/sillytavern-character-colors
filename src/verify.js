@@ -33,6 +33,9 @@ export function pruneRecentAutoAttributionVerifyAttempts(now = Date.now()) {
     for (const [key, timestamp] of recentAutoAttributionVerifyAttempts.entries()) {
         if (now - timestamp > maxAge) recentAutoAttributionVerifyAttempts.delete(key);
     }
+    for (const [key, record] of stabilityVerifyRetries.entries()) {
+        if (now - record.at > maxAge) stabilityVerifyRetries.delete(key);
+    }
 }
 
 export function clearAutoAttributionVerificationQueue(options = {}) {
@@ -40,7 +43,10 @@ export function clearAutoAttributionVerificationQueue(options = {}) {
     setAutoAttributionVerifyTimer(null);
     setAutoAttributionVerifyTimerDue(0);
     pendingAutoAttributionVerifyIndices.clear();
-    if (options.clearCooldown) recentAutoAttributionVerifyAttempts.clear();
+    if (options.clearCooldown) {
+        recentAutoAttributionVerifyAttempts.clear();
+        stabilityVerifyRetries.clear();
+    }
 }
 
 export function shouldQueueAutoAttributionVerification(mesIndex, msg, options = {}) {
@@ -105,10 +111,22 @@ export function queueAutoAttributionVerificationForRenderedMessages(options = {}
     return queueAutoAttributionVerificationForElements(messages, options);
 }
 
+// Cap forced stability re-checks so a nondeterministic model that flip-flops on
+// a segment cannot loop forever (each pass costs a full LLM call + repaint).
+const AUTO_VERIFY_STABILITY_MAX_RETRIES = 2;
+const stabilityVerifyRetries = new Map(); // verify key -> { count, at }
+
 export function queueAutoAttributionVerificationAfterCorrections(mesIndex, result, options = {}) {
     if (!result?.checked || !(result.corrections > 0)) return false;
     const index = Number(mesIndex);
     if (!Number.isFinite(index) || index < 0) return false;
+    const msg = getContext()?.chat?.[index];
+    if (!msg) return false;
+    const key = getAutoAttributionVerifyKey(index, msg);
+    const record = stabilityVerifyRetries.get(key);
+    const count = record?.count || 0;
+    if (count >= AUTO_VERIFY_STABILITY_MAX_RETRIES) return false;
+    stabilityVerifyRetries.set(key, { count: count + 1, at: Date.now() });
     return queueAutoAttributionVerificationForMessage(index, {
         force: true,
         delay: options.delay ?? AUTO_ATTRIBUTION_VERIFY_STABLE_RETRY_DELAY_MS,
@@ -131,10 +149,13 @@ export async function drainAutoAttributionVerificationQueue() {
     pruneRecentAutoAttributionVerifyAttempts();
     const deferredItems = [];
 
-    for (const item of queued) {
+    for (let i = 0; i < queued.length; i++) {
+        const item = queued[i];
         if (!isAutoAttributionVerificationEnabled()) break;
         if (isStreamingGenerationActive) {
-            pendingAutoAttributionVerifyIndices.set(item.key, item);
+            // Streaming started mid-drain: re-queue the whole unprocessed suffix,
+            // not just the current item, so no message silently loses verification.
+            for (const rest of queued.slice(i)) pendingAutoAttributionVerifyIndices.set(rest.key, rest);
             scheduleAutoAttributionVerificationDrain(AUTO_ATTRIBUTION_VERIFY_DELAY_MS);
             break;
         }
@@ -244,7 +265,10 @@ export function parseAttributionVerifierResponse(responseText) {
         try {
             const parsed = JSON.parse(trimmed);
             const corrections = Array.isArray(parsed) ? parsed : parsed?.corrections;
-            return Array.isArray(corrections) ? corrections : [];
+            // Only accept candidates that actually carry a corrections array; a
+            // parseable-but-wrong-shape object (e.g. a trailing status object)
+            // must not hide the real answer later in the candidate list.
+            if (Array.isArray(corrections)) return corrections;
         } catch { /* try next candidate */ }
     }
     return null;
@@ -312,7 +336,11 @@ ${quoteList}`;
 
 export function resolveVerifierSpeakerName(rawName, lookup) {
     const speakerName = String(rawName ?? '').trim();
+    // Reject control characters (prompt-injection vector into future verifier
+    // prompts) and [COLORS:...] block delimiters (would corrupt the block on
+    // the next ingest round-trip).
     if (!speakerName || speakerName.length > 80 || isCompositeSpeakerLabel(speakerName)) return { assignment: null, created: false };
+    if (/[\r\n\t\[\]=,()]/.test(speakerName)) return { assignment: null, created: false };
     const normalized = speakerName.toLowerCase();
     if (['unknown', 'unclear', 'narrator', 'none', 'n/a'].includes(normalized)) return { assignment: null, created: false };
 
@@ -384,6 +412,7 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
     };
 
     let corrections = null;
+    const textBeforeVerify = msg.mes;
     try {
         const response = await callLLMWithProfile(buildAttributionVerifierPrompt(msg, mesIndex, segments, lookup), {
             profileId: settings.attributionConnectionProfile,
@@ -403,6 +432,19 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
         console.warn('[Dialogue Colors] LLM attribution verification returned invalid JSON.');
         if (!quiet) toast.warning('Color verification failed (see console).');
         persistCreatedCharacters();
+        return { checked: false, corrections: 0, createdCharacters: false };
+    }
+
+    // The message may have been edited/swiped/regenerated while the LLM call was
+    // in flight; applying corrections computed from the old text would persist
+    // wrong overrides under the new text's hash. For the streaming (transient)
+    // path, appended tokens are fine — only non-append changes abort.
+    if (getContext()?.chat?.[mesIndex] !== msg) {
+        return { checked: false, corrections: 0, createdCharacters: false };
+    }
+    const textUnchanged = msg.mes === textBeforeVerify;
+    const textOnlyAppended = useTransientOverrides && msg.mes.startsWith(textBeforeVerify);
+    if (!textUnchanged && !textOnlyAppended) {
         return { checked: false, corrections: 0, createdCharacters: false };
     }
 

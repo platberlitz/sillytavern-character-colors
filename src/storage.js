@@ -99,7 +99,8 @@ export function getLegacyAutoSyncEnabledPreference() {
     const legacy = getLegacyLocalStorageValue(LEGACY_AUTO_SYNC_ENABLED_KEY);
     if (legacy === 'true') return true;
     if (legacy === 'false') return false;
-    return true;
+    // Fresh installs default to off — auto-sync must be an explicit opt-in.
+    return false;
 }
 
 export function cleanupLegacyAutoSyncPreference() {
@@ -730,6 +731,8 @@ export function restoreAllSettingsToDefaults() {
     settings.sortMode = 'name';
     settings.coloringEngine = 'llm';
     settings.llmConnectionProfile = null;
+    settings.attributionConnectionProfile = null;
+    settings.attributionMaxTokens = 4096;
     settings.colorSchemaVersion = COLOR_SCHEMA_VERSION;
 
     applySettingsSnapshotWithRefresh(settings);
@@ -788,6 +791,10 @@ export function disableAutoSync() {
     setAutoSyncEnabled(false);
     stopAutoSyncPolling();
     saveSettingsToStore({ force: true });
+    // Polling is stopped, so the save echo that would normally confirm the
+    // pending record never arrives — clear it now or the 15s timeout paints a
+    // spurious "Save failed" status.
+    clearAutoSyncPending();
     toast.info('Auto-sync disabled');
 }
 

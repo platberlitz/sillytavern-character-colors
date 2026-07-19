@@ -80,9 +80,13 @@ export function buildThoughtSymbolColorPromptRule(thoughtSymbols) {
 export function formatColorBlockName(entry) {
     const name = String(entry?.name ?? '').trim();
     if (!name) return '';
+    // A name containing block delimiters cannot round-trip through ingest;
+    // skip it rather than emit a corrupt [COLORS:] block.
+    if (/[\[\]=,()]/.test(name)) return '';
     const nameKey = name.toLowerCase();
     const aliases = normalizeAliases(entry.aliases)
-        .filter(alias => alias.toLowerCase() !== nameKey);
+        .filter(alias => alias.toLowerCase() !== nameKey)
+        .filter(alias => !/[\[\]=,()]/.test(alias));
     return `${name}${aliases.map(alias => `(${alias})`).join('')}`;
 }
 

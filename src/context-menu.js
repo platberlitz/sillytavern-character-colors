@@ -1,7 +1,7 @@
 // context-menu.js - extracted from index.js (mechanical split)
 import { attributeDialogueSegments } from './attribution.js';
 import { cancelMessageDomFollowupRepairs, clearMessageDomRepairTimer, clearStreamingAttributionOverrides, decorateMessageDomFromCurrentRender, getMessageIndexFromElement, markMessageAttributionVerified, matchSegmentsToElements, refreshMessageDom, resolveDomSegmentIndexForElement, scheduleMessageDomFollowupRepair, setMessageQuoteOverride } from './dom-engine.js';
-import { applyLiveColorChangesFromSnapshot, captureEffectiveColorSnapshot, commit, flushChatSave, queueChatSave, updateTextColorReferences } from './live-colors.js';
+import { applyLiveColorChangesFromSnapshot, captureEffectiveColorSnapshot, commit, flushChatSave, queueChatSave, updateTextColorReferences, updateVisibleMessageColors } from './live-colors.js';
 import { buildCharacterEntry, getEntryEffectiveColor, setEntryFromEffectiveColor } from './palettes.js';
 import { escapeHtml, getContext, power_user } from './st-api.js';
 import { characterColors, isDomEngine, runtimeState, settings } from './state.js';
@@ -134,6 +134,11 @@ function showMenu(e, fontTag, qElement = null) {
             } else {
                 fontTag.setAttribute('color', finalColor);
                 textUpdated = updateMessageTextForFontTag(fontTag, originalFontColor, finalColor);
+                if (textUpdated) {
+                    // updateTextColorReferences rewrites every same-colored span in
+                    // msg.mes; sync the rest of the rendered DOM to match right away.
+                    updateVisibleMessageColors(mesIndex, { [originalFontColor]: finalColor });
+                }
             }
 
             commit();
@@ -145,7 +150,7 @@ function showMenu(e, fontTag, qElement = null) {
                 flushChatSave();
             }
 
-            toast.success(`Assigned to ${name}`);
+            toast.success(`Assigned to ${escapeHtml(name)}`);
         }
         menu.remove();
     };
@@ -247,6 +252,16 @@ function showSelectionMenu(e, selection, range, selectedText, mesEl) {
 
         // Capture rendered offsets BEFORE mutating the DOM with surroundContents.
         const mesTextEl = mesEl.querySelector('.mes_text');
+        // The message may have re-rendered (streaming, MESSAGE_UPDATED, another
+        // agent) since the menu opened. A detached or out-of-message range would
+        // produce garbage offsets and wrap the wrong occurrence in msg.mes.
+        if (!range.startContainer?.isConnected
+            || !mesTextEl?.contains(range.startContainer)
+            || !mesTextEl?.contains(range.endContainer)) {
+            toast.error('Selection is no longer valid — the message was re-rendered. Please re-select the text.');
+            menu.remove();
+            return;
+        }
         const renderedCharOffset = getRenderedCharOffset(mesTextEl, range);
         const renderedLen = mesTextEl ? mesTextEl.textContent.length : 0;
 
@@ -274,10 +289,16 @@ function showSelectionMenu(e, selection, range, selectedText, mesEl) {
         if (textUpdated) {
             queueChatSave();
             flushChatSave();
+            commit();
+            toast.success(`Assigned to ${escapeHtml(name)}`);
+        } else {
+            // The rendered selection was not found verbatim in msg.mes (markdown
+            // constructs consumed). Re-render to undo the visual wrap rather than
+            // report a success that would silently vanish on the next render.
+            commit();
+            toast.error('Could not locate the selection in the message source — nothing was colored.');
+            refreshMessageDom(msgIndex, msg);
         }
-
-        commit();
-        toast.success(`Assigned to ${name}`);
         menu.remove();
     };
 
@@ -304,7 +325,7 @@ export function setupContextMenu() {
             return;
         }
         const sel = window.getSelection();
-        if (sel && !sel.isCollapsed && mesText.contains(sel.anchorNode)) {
+        if (sel && !sel.isCollapsed && mesText.contains(sel.anchorNode) && mesText.contains(sel.focusNode)) {
             const range = sel.getRangeAt(0);
             const selectedText = sel.toString().trim();
             if (selectedText && mesText.closest('.mes')) {

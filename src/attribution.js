@@ -195,6 +195,9 @@ export function findClosestMentionedSpeakerInContext(maskedText, windowStart, wi
 export function ensureCharacterEntry(name, color) {
     const trimmedName = String(name ?? '').trim();
     if (!trimmedName) return { key: '', entry: null, created: false };
+    // Names containing [COLORS:] block delimiters or control characters would
+    // corrupt the color block on the next ingest round-trip; refuse to create them.
+    if (/[\r\n\t\[\]=,()]/.test(trimmedName)) return { key: '', entry: null, created: false };
     const existingKey = resolveCharacterKeyByNameOrAlias(trimmedName);
     if (existingKey) return { key: existingKey, entry: characterColors[existingKey], created: false };
     const key = trimmedName.toLowerCase();

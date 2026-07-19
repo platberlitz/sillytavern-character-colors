@@ -362,6 +362,12 @@ export function hideAutoColorizeIndicator(mesElement) {
 
 export function addCharacter(name, color) {
     if (!name.trim()) return;
+    // Names with [COLORS:] block delimiters or control characters cannot
+    // round-trip through ingest and would corrupt the prompt block.
+    if (/[\r\n\t\[\]=,()]/.test(name.trim())) {
+        toast.error('Character names cannot contain brackets, commas, equals signs, parentheses, or line breaks.');
+        return;
+    }
     const key = name.trim().toLowerCase();
     const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
     let needsDomRepaint = false;
@@ -565,7 +571,7 @@ function handleKeepClick(keepBtn) {
     saveHistory();
     saveData();
     updateCharList();
-    toast.info(characterColors[key].keep ? `${characterColors[key].name} will now survive Clear and bulk delete.` : `${characterColors[key].name} can now be cleared or deleted normally.`);
+    toast.info(characterColors[key].keep ? `${escapeHtml(characterColors[key].name)} will now survive Clear and bulk delete.` : `${escapeHtml(characterColors[key].name)} can now be cleared or deleted normally.`);
 }
 
 function handleLockClick(lockBtn) {
@@ -876,7 +882,7 @@ export function autoAssignFromCard() {
         const key = char?.name?.toLowerCase();
         if (key && !characterColors[key]) {
             addCharacter(char.name);
-            toast.success(`Added ${char.name}`);
+            toast.success(`Added ${escapeHtml(char.name)}`);
         }
     } catch { }
 }
@@ -1196,7 +1202,13 @@ function bindSettingsPanelControls($) {
         saveData();
     };
     $('dc-attr-conservative').onchange = e => { settings.attributionConservativeOnly = e.target.checked; saveData(); };
-    $('dc-attr-max-tokens').oninput = e => { settings.attributionMaxTokens = parseInt(e.target.value, 10) || 4096; saveData(); };
+    $('dc-attr-max-tokens').oninput = e => {
+        // Clamp to the input's declared range; sub-minimum values truncate the
+        // verifier's JSON output and make every verification fail parsing.
+        const parsed = parseInt(e.target.value, 10) || 4096;
+        settings.attributionMaxTokens = Math.min(32768, Math.max(256, parsed));
+        saveData();
+    };
     $('dc-stealth-colors').onchange = e => { settings.domStealthColors = e.target.checked; saveData(); injectPrompt(); };
     $('dc-right-click').onchange = e => { settings.enableRightClick = e.target.checked; saveData(); };
     $('dc-legend').onchange = e => { settings.showLegend = e.target.checked; saveData(); updateLegend(); };
@@ -1318,7 +1330,7 @@ function bindSettingsPanelControls($) {
             }
             commit();
             if (needsDomRepaint) repaintDomAfterCharacterDataChange(0);
-            toast.success(`Set ${char.name} to ${color}`);
+            toast.success(`Set ${escapeHtml(char.name)} to ${color}`);
         } catch {
             toast.error('Failed to extract avatar color');
         }

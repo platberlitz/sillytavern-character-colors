@@ -42,9 +42,13 @@ export async function refreshMessageDom(messageIndex, message) {
     const ctx = getContext();
     if (typeof ctx?.updateMessageBlock === 'function') {
         let timeoutId = null;
+        let timedOut = false;
         try {
             const updatePromise = Promise.resolve(ctx.updateMessageBlock(messageIndex, message ?? ctx?.chat?.[messageIndex]))
-                .finally(() => restoreMessageOpenDetailsState(mesElement, messageIndex, openDetailsState));
+                // Skip the deferred details-restore if the fallback path already
+                // took over; re-applying the stale snapshot would revert any
+                // <details> the user toggled in the interim.
+                .finally(() => { if (!timedOut) restoreMessageOpenDetailsState(mesElement, messageIndex, openDetailsState); });
             const status = await Promise.race([
                 updatePromise.then(() => 'updated'),
                 new Promise(resolve => {
@@ -52,6 +56,7 @@ export async function refreshMessageDom(messageIndex, message) {
                 }),
             ]);
             if (status === 'updated') return true;
+            timedOut = true;
             console.warn('[Dialogue Colors] updateMessageBlock timed out, using fallback render.');
         } catch (e) {
             console.warn('[Dialogue Colors] updateMessageBlock failed, using fallback render:', e);
@@ -285,6 +290,7 @@ export function clearMessageDomRepairTimers() {
     // Also clear all per-message follow-up repair timers.
     for (const timers of messageDomFollowupTimers.values()) timers.forEach(clearTimeout);
     messageDomFollowupTimers.clear();
+    healthRefreshAttempts.clear();
 }
 
 export function scheduleMessageDomRepair(mesIndex, options = {}) {
@@ -309,6 +315,7 @@ export function scheduleMessageDomRepair(mesIndex, options = {}) {
             await decorateMessageDomFromCurrentRender(index, msg, {
                 queueVerification: options.queueVerification !== false,
                 timeoutMs: options.timeoutMs ?? 700,
+                renderFallback: options.renderFallback,
             });
 
             if (chatGeneration !== attributionChatGeneration) return;
@@ -816,10 +823,14 @@ export function attachMessageSettleObserver(mesElement, mesIndex) {
             cleanup();
             return;
         }
-        const msg = getContext()?.chat?.[mesIndex];
+        // Re-read the index: ST renumbers mesid attributes after deletions, so a
+        // closed-over mesIndex may now point at a different message.
+        const currentMesIndex = Number(mesElement.getAttribute('mesid'));
+        const effectiveIndex = Number.isFinite(currentMesIndex) ? currentMesIndex : mesIndex;
+        const msg = getContext()?.chat?.[effectiveIndex];
         if (!msg) { cleanup(); return; }
-        if (suspendMessageDomWorkForEdit(mesElement, mesIndex)) { cleanup(); return; }
-        const result = decorateMessageDom(mesElement, msg, mesIndex);
+        if (suspendMessageDomWorkForEdit(mesElement, effectiveIndex)) { cleanup(); return; }
+        const result = decorateMessageDom(mesElement, msg, effectiveIndex);
         if (result.createdCharacters) {
             queueColorStateSave({ history: false, injectPrompt: false });
         }
@@ -828,7 +839,7 @@ export function attachMessageSettleObserver(mesElement, mesIndex) {
             cleanup();
             // Decoration succeeded: arm the long-lived watcher so a later
             // external re-render (e.g. Prose Polisher) re-decorates.
-            if (result.decorated) watchDecoratedMessage(mesElement, mesIndex);
+            if (result.decorated) watchDecoratedMessage(mesElement, effectiveIndex);
         }
     };
 
@@ -886,7 +897,9 @@ export function watchDecoratedMessage(mesElement, mesIndex) {
             return;
         }
         if (isDecoratingDom) return;
-        const repairIndex = Number(mesIndex);
+        // Re-read the index: ST renumbers mesid attributes after deletions.
+        const currentMesIndex = Number(mesElement.getAttribute('mesid'));
+        const repairIndex = Number.isFinite(currentMesIndex) ? currentMesIndex : Number(mesIndex);
         if (runtimeState.messageDomRepairTimers.has(repairIndex)) return;
         if (suspendMessageDomWorkForEdit(mesElement, repairIndex)) return;
         // Re-query .mes_text: external agents may replace the node entirely.
@@ -896,7 +909,7 @@ export function watchDecoratedMessage(mesElement, mesIndex) {
         if (currentMesText.querySelector('font[color]')) return;
         // If our decorations are still present, the rebuild didn't wipe them.
         if (currentMesText.querySelector('[data-dc-colored]') || currentMesText.querySelector('[data-dc-narrator]')) return;
-        const msg = getContext()?.chat?.[mesIndex];
+        const msg = getContext()?.chat?.[repairIndex];
         if (!msg || msg.is_system) return;
         decorateObservedMessages([mesElement]);
     });
@@ -922,6 +935,11 @@ export function collectDomHealthCheckMessages() {
     }
     return Array.from(selected).slice(0, DOM_HEALTH_CHECK_VISIBLE_LIMIT);
 }
+
+// Consecutive health-check 'refresh' attempts per message+text. Caps the
+// re-render loop when a segment can never match the rendered DOM.
+const DOM_HEALTH_REFRESH_MAX_ATTEMPTS = 4;
+const healthRefreshAttempts = new Map();
 
 export function getMessageDomHealthRepairType(mesElement, msg, mesIndex) {
     const mesText = mesElement?.querySelector?.('.mes_text');
@@ -966,10 +984,21 @@ export function runDomHealthCheck() {
         const msg = chat[mesIndex];
         if (suspendMessageDomWorkForEdit(mesElement, mesIndex)) continue;
         const repairType = getMessageDomHealthRepairType(mesElement, msg, mesIndex);
+        const attemptsKey = `${mesIndex}:${hashMessageText(msg?.mes)}`;
         if (repairType === 'refresh') {
-            scheduleMessageDomRepair(mesIndex, { delay: 0, verify: false });
+            // Back off after a few consecutive failures: if a segment can never
+            // match the rendered DOM (e.g. **bold** rendered as <strong>), an
+            // unbounded refresh loop re-renders innerHTML every tick (flicker).
+            const attempts = healthRefreshAttempts.get(attemptsKey) || 0;
+            if (attempts < DOM_HEALTH_REFRESH_MAX_ATTEMPTS) {
+                healthRefreshAttempts.set(attemptsKey, attempts + 1);
+                // renderFallback:false — the health check must never rewrite
+                // .mes_text innerHTML; that retriggers the observer cascade.
+                scheduleMessageDomRepair(mesIndex, { delay: 0, verify: false, renderFallback: false });
+            }
             continue;
         }
+        healthRefreshAttempts.delete(attemptsKey);
         if (repairType === 'decorate') {
             decorateTargets.add(mesElement);
             continue;
