@@ -325,12 +325,13 @@ export function parseNamedColorAssignmentsFromText(text) {
 }
 
 export function buildDialogueRegex() {
-    const delimiters = new Set(['"']);
+    const delimiters = new Set(['"', '“']);
     for (const ch of getThoughtDelimiterSymbols()) {
         delimiters.add(ch);
     }
     
     const ASYMMETRIC_MAP = {
+        '“': '”',
         '『': '』',
         '「': '」',
         '（': '）',
