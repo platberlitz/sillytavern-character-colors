@@ -504,6 +504,12 @@
     font-size: 0.82em;
 }
 
+#dc-ext .dc-gradient-motion-paused {
+    display: none;
+    opacity: 0.72;
+    font-size: 0.9em;
+}
+
 #dc-ext .dc-gradient-compact-colors,
 #dc-ext .dc-gradient-presets,
 #dc-ext .dc-gradient-geometry,
@@ -692,27 +698,35 @@
 
 .dc-gradient-text.dc-gradient-animated,
 .dc-gradient-surface.dc-gradient-animated {
-    background-size: 220% 220%;
-    animation: dc-gradient-drift var(--dc-gradient-duration, 8s) ease-in-out infinite;
+    background-size: 260% 260%;
+    animation: dc-gradient-drift var(--dc-gradient-duration, 8s) linear infinite;
     animation-direction: var(--dc-gradient-direction, alternate);
 }
 
 .dc-gradient-text.dc-gradient-highlight.dc-gradient-animated {
-    background-size: 100% 100%, 220% 220%;
+    background-size: 100% 100%, 260% 260%;
     animation-name: dc-gradient-highlight-drift;
 }
 
 @keyframes dc-gradient-drift {
-    from { background-position: 0% 50%; }
-    to { background-position: 100% 50%; }
+    0% { background-position: 0% 50%; }
+    33% { background-position: 100% 0%; }
+    66% { background-position: 0% 100%; }
+    100% { background-position: 100% 50%; }
 }
 
 @keyframes dc-gradient-highlight-drift {
-    from { background-position: 0 0, 0% 50%; }
-    to { background-position: 0 0, 100% 50%; }
+    0% { background-position: 0 0, 0% 50%; }
+    33% { background-position: 0 0, 100% 0%; }
+    66% { background-position: 0 0, 0% 100%; }
+    100% { background-position: 0 0, 100% 50%; }
 }
 
 @media (prefers-reduced-motion: reduce) {
+    #dc-ext .dc-gradient-motion-paused {
+        display: inline;
+    }
+
     .dc-gradient-text.dc-gradient-animated,
     .dc-gradient-surface.dc-gradient-animated {
         animation: none !important;

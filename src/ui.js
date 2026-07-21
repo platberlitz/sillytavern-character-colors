@@ -21,6 +21,7 @@ export const DYNAMIC_CONTROL_HELP_TEXT = Object.freeze({
     '.dc-color-input': 'Pick a color directly. Double-click for harmony suggestions.',
     '.dc-gradient-toggle': 'Enable or remove this character gradient.',
     '.dc-gradient-randomize': 'Create a new random gradient while keeping this character’s primary color.',
+    '.dc-gradient-animation-enabled': 'Continuously drift the gradient colors across dialogue and labels. Your device’s Reduce Motion setting pauses the effect.',
     '.dc-gradient-preview': 'Live preview of this character gradient.',
     '.dc-gradient-add-stop': 'Add another gradient color stop.',
     '.dc-gradient-apply-preset': 'Apply the selected built-in or custom gradient preset.',
@@ -706,7 +707,7 @@ function buildGradientEditorHtml(key, entry) {
                     </select>
                 </label>
                 ${gradient.type === 'linear' ? `<label>Direction <select class="dc-gradient-direction text_pole" data-key="${safeKey}" aria-label="Linear gradient direction for ${safeName}">${buildGradientDirectionOptions(gradient.angle)}</select></label>` : ''}
-                <label class="checkbox_label"><input type="checkbox" class="dc-gradient-animation-enabled" data-key="${safeKey}"${gradient.animation.enabled ? ' checked' : ''}><span>Animate</span></label>
+                <label class="checkbox_label dc-gradient-animation-toggle"><input type="checkbox" class="dc-gradient-animation-enabled" data-key="${safeKey}"${gradient.animation.enabled ? ' checked' : ''}><span>Drift colors</span><span class="dc-gradient-motion-paused">Paused by Reduce Motion</span></label>
                 <div class="dc-gradient-preview dc-gradient-surface${previewClasses}" role="img" aria-label="Live gradient preview for ${safeName}"${previewAttributes} style="${escapeAttr(buildGradientSurfaceStyle(entry))}"></div>
                 ${presetControls}
             </div>
