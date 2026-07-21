@@ -346,6 +346,8 @@
 }
 
 #dc-ext .dc-char-name {
+    width: fit-content;
+    max-width: 100%;
     font-weight: 700;
     line-height: 1.2;
     overflow: hidden;
@@ -651,6 +653,7 @@
 
 .dc-gradient-text {
     color: var(--dc-gradient-fallback, currentColor);
+    text-shadow: none !important;
     background-color: transparent;
     background-image: var(--dc-gradient, var(--dc-text-gradient));
     background-repeat: no-repeat;
