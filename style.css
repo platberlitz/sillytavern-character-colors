@@ -894,6 +894,8 @@
 
     #dc-ext .dc-char-list {
         gap: 4px;
+        max-height: min(72vh, 640px);
+        max-height: min(72dvh, 640px);
     }
 
     #dc-ext .dc-alias-list,

@@ -21,12 +21,14 @@ A SillyTavern extension that color-codes each character's dialogue automatically
 - **Cleaner everyday workflow** - Common actions are grouped into **Basic**, **Characters**, **Advanced**, and **Danger Zone**.
 - **Per-chat or global colors** - Store colors per chat or share them across all chats.
 - **Auto-lock detected characters** - Newly detected characters can lock automatically by default.
+- **Random gradients for new NPCs** - Optionally give newly added NPCs a randomized gradient while leaving current cards, group members, and the user persona solid. This is off by default.
 - **Right-click / long-press reassignment** - Optional manual reassignment on dialogue text.
 - **Per-chat quote overrides** - DOM-mode manual quote assignments are stored in chat metadata and reapplied on render.
 - **Undo / Redo** - Undo destructive or accidental changes quickly inside the extension panel.
 - **Custom palettes and presets** - Save reusable color setups without losing advanced flexibility.
 - **Per-character Google Font** - Assign a Google Font name to any character; it loads and applies to their dialogue, legend, stats, and character card.
 - **Per-character text style** - Cycle each character through Normal, Bold, Italic, or Bold Italic.
+- **Custom character gradients** - Build linear or radial 2–5 stop gradients, animate them, choose from 16 built-in presets, reuse custom presets, or randomize while preserving the character's primary color.
 - **Color harmony suggestions** - Double-click a character's color dot to open a popup with complementary, triadic, and analogous color suggestions.
 - **Floating legend** - Show a draggable legend of active character colors.
 - **Dialogue statistics** - Open a popup showing how many lines each character has spoken.

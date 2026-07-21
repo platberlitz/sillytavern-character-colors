@@ -1,6 +1,6 @@
 // ui.js - extracted from index.js (mechanical split)
 import { clearSpeakerRegexCache } from './attribution.js';
-import { scanAllMessages } from './color-blocks.js';
+import { resolveCharacterKeyByNameOrAlias, scanAllMessages } from './color-blocks.js';
 import { DOM_RETRY_REFRESH_DELAYS, decorateAllMessages, scheduleDomRefreshSeries, scheduleDomSettleRefresh, setupChatObserver, setupChatRootObserver, startDomHealthCheck, stopDomHealthCheck, undecorateAllMessages } from './dom-engine.js';
 import { loadGoogleFont, scheduleCustomFontRefresh } from './fonts.js';
 import { getGradientRenderState } from './gradient-rendering.js';
@@ -8,7 +8,7 @@ import { BUILTIN_GRADIENT_PRESETS, DEFAULT_GRADIENT_ANGLE, DEFAULT_GRADIENT_DURA
 import { createRestoreSnapshot, redo, saveHistory, showUndoToast, undo } from './history.js';
 import { applyFastColorUiUpdates, applyLiveColorChangesFromSnapshot, captureEffectiveColorSnapshot, colorizeMessages, commit, flushChatSave, flushColorStateSave, queueColorStateSave, recolorAllMessages, repaintDomAfterCharacterDataChange } from './live-colors.js';
 import { registerKeyboardShortcuts } from './main.js';
-import { applyGradientPreset, autoResolveConflicts, buildCharacterEntry, buildKeepAwareRemovalMessage, collectDuplicateColorKeys, deleteColorPreset, deleteCustomPalette, detectTheme, flipColorsForTheme, generateCustomPaletteFromWords, getBaseColor, getEntryEffectiveColor, getKeptKeys, getNextColor, invalidateThemeCache, keepCharacterKeysOnly, loadColorPreset, refreshPaletteDropdown, refreshPresetDropdown, regenerateAllColors, removeCharacterKeys, saveColorPreset, saveCustomPalette, setEntryFromBaseColor, setEntryGradient, showHarmonyPopup, suggestColorForName, swapEntryColorData, syncAllEffectiveColors } from './palettes.js';
+import { applyGradientPreset, autoResolveConflicts, buildCharacterEntry, buildKeepAwareRemovalMessage, collectDuplicateColorKeys, createRandomGradient, deleteColorPreset, deleteCustomPalette, detectTheme, flipColorsForTheme, generateCustomPaletteFromWords, getBaseColor, getEntryEffectiveColor, getKeptKeys, getNextColor, invalidateThemeCache, keepCharacterKeysOnly, loadColorPreset, refreshPaletteDropdown, refreshPresetDropdown, regenerateAllColors, removeCharacterKeys, saveColorPreset, saveCustomPalette, setEntryFromBaseColor, setEntryGradient, showHarmonyPopup, suggestColorForName, swapEntryColorData, syncAllEffectiveColors } from './palettes.js';
 import { injectPrompt, updateSystemPromptDisplay } from './prompts.js';
 import { escapeHtml, getContext } from './st-api.js';
 import { autoRecolorHintShown, characterColors, expandedCharacterRows, isDomEngine, legendListeners, searchTerm, setAutoRecolorHintShown, setCharacterColors, setLegendListeners, setSearchTerm, setSwapMode, settings, swapMode } from './state.js';
@@ -20,6 +20,7 @@ export const DYNAMIC_CONTROL_HELP_TEXT = Object.freeze({
     '.dc-color-dot': 'Click to open the color picker for this character.',
     '.dc-color-input': 'Pick a color directly. Double-click for harmony suggestions.',
     '.dc-gradient-toggle': 'Enable or remove this character gradient.',
+    '.dc-gradient-randomize': 'Create a new random gradient while keeping this character’s primary color.',
     '.dc-gradient-preview': 'Live preview of this character gradient.',
     '.dc-gradient-add-stop': 'Add another gradient color stop.',
     '.dc-gradient-apply-preset': 'Apply the selected built-in or custom gradient preset.',
@@ -534,7 +535,7 @@ export function addCharacter(name, color) {
         toast.error('Character names cannot contain brackets, commas, equals signs, parentheses, or line breaks.');
         return;
     }
-    const key = name.trim().toLowerCase();
+    const key = resolveCharacterKeyByNameOrAlias(name) || name.trim().toLowerCase();
     const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
     let needsDomRepaint = false;
     if (characterColors[key]) {
@@ -652,6 +653,7 @@ function buildGradientEditorHtml(key, entry) {
                 <select class="dc-gradient-preset-picker text_pole" data-key="${safeKey}" aria-label="Gradient preset for ${safeName}">${presetOptions}</select>
             </label>
             <button type="button" class="dc-gradient-apply-preset menu_button" data-key="${safeKey}">Apply</button>
+            <button type="button" class="dc-gradient-randomize menu_button" data-key="${safeKey}" aria-label="Randomize gradient for ${safeName}">Randomize</button>
         </div>`;
     if (!gradient) {
         return `
@@ -1239,6 +1241,15 @@ function handleGradientToggle(toggleButton) {
     applyGradientValue(key, entry.gradient ? null : createDefaultGradient(entry), { commitImmediately: true, saveImmediately: true });
 }
 
+function handleGradientRandomize(button) {
+    const key = button.dataset.key;
+    const entry = characterColors[key];
+    if (!entry) return;
+    const gradient = createRandomGradient(entry);
+    if (!gradient) return;
+    applyGradientValue(key, gradient, { commitImmediately: true, saveImmediately: true });
+}
+
 function getNewGradientStopPosition(gradient) {
     const positions = [0, gradient.primaryPosition, ...gradient.stops.map(stop => stop.position), 100]
         .sort((left, right) => left - right);
@@ -1388,6 +1399,8 @@ function handleCharListClick(e) {
     if (dotEl) { handleColorDotClick(dotEl); return; }
     const gradientToggle = t.closest('.dc-gradient-toggle');
     if (gradientToggle) { handleGradientToggle(gradientToggle); return; }
+    const gradientRandomize = t.closest('.dc-gradient-randomize');
+    if (gradientRandomize) { handleGradientRandomize(gradientRandomize); return; }
     const gradientAddStop = t.closest('.dc-gradient-add-stop');
     if (gradientAddStop) { handleGradientAddStop(gradientAddStop); return; }
     const gradientRemoveStop = t.closest('.dc-gradient-remove-stop');
@@ -1579,7 +1592,7 @@ export function updateCharList() {
 export function setControlHelp(element, text) {
     if (!element || !text) return;
     element.title = text;
-    element.setAttribute('aria-label', text);
+    if (!element.hasAttribute('aria-label')) element.setAttribute('aria-label', text);
 }
 
 export function applyControlHelpText(root = document) {
@@ -1625,6 +1638,7 @@ export function syncUIWithSettings() {
     if ($('dc-autoscan')) $('dc-autoscan').checked = settings.autoScanOnLoad !== false;
     if ($('dc-autoscan-new')) $('dc-autoscan-new').checked = settings.autoScanNewMessages !== false;
     if ($('dc-auto-lock')) $('dc-auto-lock').checked = settings.autoLockDetected !== false;
+    if ($('dc-auto-random-gradients')) $('dc-auto-random-gradients').checked = settings.autoRandomNpcGradients === true;
     if ($('dc-auto-recolor')) $('dc-auto-recolor').checked = settings.autoRecolor !== false;
     if ($('dc-auto-colorize')) $('dc-auto-colorize').checked = settings.autoColorize || false;
     if ($('dc-llm-attr-check')) $('dc-llm-attr-check').checked = settings.llmAttributionCheck || false;
@@ -1756,6 +1770,7 @@ function buildSettingsPanelHtml() {
                                 <label class="checkbox_label"><input type="checkbox" id="dc-autoscan" data-help="Automatically scan existing chat messages after chat load."><span>Auto-scan on chat load</span></label>
                                 <label class="checkbox_label"><input type="checkbox" id="dc-autoscan-new" data-help="Automatically scan newly arriving messages for speakers/colors."><span>Auto-scan new messages</span></label>
                                 <label class="checkbox_label"><input type="checkbox" id="dc-auto-lock" data-help="Automatically lock newly detected characters."><span>Auto-lock new characters</span></label>
+                                <label class="checkbox_label"><input type="checkbox" id="dc-auto-random-gradients" data-help="Give newly added NPCs a random 2–5 stop gradient while keeping their primary color. Current cards, group members, and user names stay solid."><span>Random gradients for new NPCs</span></label>
                                 <label class="checkbox_label dc-llm-only"><input type="checkbox" id="dc-auto-colorize" data-help="Automatically colorize messages when the model skips color tags."><span>Auto-colorize fallback</span></label>
                                 <label class="checkbox_label"><input type="checkbox" id="dc-right-click" data-help="Enable right-click or long-press reassignment on dialogue."><span>Enable right-click reassignment</span></label>
                                 <label class="checkbox_label"><input type="checkbox" id="dc-disable-narration" data-help="Skip narrator color instructions."><span>Disable narration coloring</span></label>
@@ -1913,6 +1928,7 @@ function bindSettingsPanelControls($) {
     $('dc-autoscan').onchange = e => { settings.autoScanOnLoad = e.target.checked; saveData(); };
     $('dc-autoscan-new').onchange = e => { settings.autoScanNewMessages = e.target.checked; saveData(); };
     $('dc-auto-lock').onchange = e => { settings.autoLockDetected = e.target.checked; saveData(); };
+    $('dc-auto-random-gradients').onchange = e => { settings.autoRandomNpcGradients = e.target.checked; saveData(); };
     $('dc-auto-recolor').onchange = e => { settings.autoRecolor = e.target.checked; saveData(); };
     $('dc-auto-colorize').onchange = e => { settings.autoColorize = e.target.checked; saveData(); };
     $('dc-llm-attr-check').onchange = e => {

@@ -1,5 +1,6 @@
 // context-menu.js - extracted from index.js (mechanical split)
 import { attributeDialogueSegments } from './attribution.js';
+import { resolveCharacterKeyByNameOrAlias } from './color-blocks.js';
 import { cancelMessageDomFollowupRepairs, clearMessageDomRepairTimer, clearStreamingAttributionOverrides, decorateMessageDomFromCurrentRender, getMessageIndexFromElement, markMessageAttributionVerified, matchSegmentsToElements, refreshMessageDom, resolveDomSegmentIndexForElement, scheduleMessageDomFollowupRepair, setMessageQuoteOverride } from './dom-engine.js';
 import { applyLiveColorChangesFromSnapshot, captureEffectiveColorSnapshot, commit, flushChatSave, queueChatSave, updateTextColorReferences, updateVisibleMessageColors } from './live-colors.js';
 import { buildCharacterEntry, getEntryEffectiveColor, setEntryFromEffectiveColor } from './palettes.js';
@@ -59,7 +60,7 @@ function showMenu(e, fontTag, qElement = null) {
 
     nameInput.addEventListener('input', () => {
         const name = nameInput.value.trim();
-        const key = name.toLowerCase();
+        const key = resolveCharacterKeyByNameOrAlias(name) || name.toLowerCase();
         if (characterColors[key]) {
             const existingColor = getEntryEffectiveColor(characterColors[key]);
             colorInput.value = existingColor;
@@ -72,7 +73,7 @@ function showMenu(e, fontTag, qElement = null) {
         const name = nameInput.value.trim();
         const pickerColor = normalizeHexColor(colorInput.value, color);
         if (name) {
-            const key = name.toLowerCase();
+            const key = resolveCharacterKeyByNameOrAlias(name) || name.toLowerCase();
             let finalColor = pickerColor;
             let textUpdated = false;
             let existingColorChanged = false;
@@ -207,7 +208,7 @@ function showSelectionMenu(e, selection, range, selectedText, mesEl) {
 
     nameInput.addEventListener('input', () => {
         const name = nameInput.value.trim();
-        const key = name.toLowerCase();
+        const key = resolveCharacterKeyByNameOrAlias(name) || name.toLowerCase();
         if (characterColors[key]) {
             const existingColor = getEntryEffectiveColor(characterColors[key]);
             colorInput.value = existingColor;
@@ -220,7 +221,7 @@ function showSelectionMenu(e, selection, range, selectedText, mesEl) {
         const pickerColor = normalizeHexColor(colorInput.value, '#888888');
         if (!name) { menu.remove(); return; }
 
-        const key = name.toLowerCase();
+        const key = resolveCharacterKeyByNameOrAlias(name) || name.toLowerCase();
         let finalColor = pickerColor;
 
         const existingSnapshot = characterColors[key]

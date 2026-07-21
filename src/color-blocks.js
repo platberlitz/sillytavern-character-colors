@@ -1,6 +1,6 @@
 // color-blocks.js - extracted from index.js (mechanical split)
 import { DOM_RETRY_REFRESH_DELAYS, decorateAllMessages, scheduleDomSettleRefresh } from './dom-engine.js';
-import { commit } from './live-colors.js';
+import { commit, repaintDomAfterCharacterDataChange } from './live-colors.js';
 import { applyThemeReadabilityAndBrightness, buildCharacterEntry, checkColorConflicts, deriveBaseColorFromEffectiveColor, getEntryEffectiveColor, setEntryFromEffectiveColor } from './palettes.js';
 import { getThoughtDelimiterSymbols } from './prompts.js';
 import { escapeHtml, escapeRegex, getContext } from './st-api.js';
@@ -268,6 +268,8 @@ export function scanAllMessages() {
     if (isDomEngine()) {
         decorateAllMessages();
         scheduleDomSettleRefresh(DOM_RETRY_REFRESH_DELAYS);
+    } else {
+        repaintDomAfterCharacterDataChange(0);
     }
     const conflicts = checkColorConflicts();
     if (conflicts.length) toast.warning(`Similar: ${conflicts.slice(0, 3).map(c => c.map(escapeHtml).join(' & ')).join(', ')}`);

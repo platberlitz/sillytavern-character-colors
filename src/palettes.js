@@ -1,11 +1,11 @@
 // palettes.js - extracted from index.js (mechanical split)
 import { clearSpeakerRegexCache } from './attribution.js';
-import { applyGradientPresetToEntry, cloneGradient, mapGradientStops, normalizeGradient, serializeGradient, synchronizeGradientEffectiveColors } from './gradients.js';
+import { applyGradientPresetToEntry, buildRandomGradient, cloneGradient, mapGradientStops, normalizeGradient, serializeGradient, synchronizeGradientEffectiveColors } from './gradients.js';
 import { createRestoreSnapshot, showUndoToast } from './history.js';
 import { applyLiveColorChangesFromSnapshot, captureEffectiveColorSnapshot, commit, repaintDomAfterCharacterDataChange } from './live-colors.js';
 import { callLLMWithProfile } from './llm.js';
 import { injectPrompt } from './prompts.js';
-import { escapeHtml, generateQuietPrompt } from './st-api.js';
+import { escapeHtml, generateQuietPrompt, getContext } from './st-api.js';
 import { characterColors, expandedCharacterRows, setCharacterColors, setExpandedCharacterRows, setSwapMode, settings, swapMode } from './state.js';
 import { getAutoSyncRecord, isPlainObject, persistModuleStore, saveData } from './storage.js';
 import { COLOR_CONFLICT_HUE_THRESHOLD, COLOR_CONFLICT_LIGHTNESS_THRESHOLD, VALID_STYLES, colorDistance, hexToHsl, hslToHex, normalizeAliases, normalizeCharacterEntry, normalizeGoogleFontName, normalizeHexColor, toast } from './utils.js';
@@ -881,6 +881,76 @@ export function setEntryGradient(entry, gradient) {
     return entry.gradient;
 }
 
+function getActiveGradientPaletteColors() {
+    if (settings.colorTheme?.startsWith('custom:')) {
+        const customPalette = getCustomPalettes()[settings.colorTheme.slice(7)];
+        if (customPalette?.length) return customPalette;
+    }
+    return (COLOR_THEMES[settings.colorTheme] || COLOR_THEMES.pastel)
+        .map(([hue, saturation, lightness]) => hslToHex(hue, saturation, lightness));
+}
+
+export function createRandomGradient(entry, options = {}) {
+    if (!entry) return null;
+    const animation = options.preserveAnimation === false ? null : normalizeGradient(entry.gradient)?.animation;
+    const gradient = buildRandomGradient(getBaseColor(entry), {
+        palette: getActiveGradientPaletteColors(),
+        animation: animation || undefined,
+        totalStops: options.totalStops,
+        transformColor: applyThemeReadabilityAndBrightness,
+    }, options.random);
+    return synchronizeGradientEffectiveColors(gradient, applyThemeReadabilityAndBrightness);
+}
+
+function getCurrentGroupCharacterNames(context) {
+    const characters = Array.isArray(context?.characters)
+        ? context.characters
+        : Object.values(context?.characters || {});
+    const groups = Array.isArray(context?.groups) ? context.groups : [];
+    const currentGroup = context?.group
+        || groups.find(group => String(group?.id ?? group?.groupId ?? '') === String(context?.groupId ?? ''));
+    const members = [
+        ...(Array.isArray(currentGroup?.members) ? currentGroup.members : []),
+        ...(Array.isArray(context?.groupMembers) ? context.groupMembers : []),
+    ];
+    const names = [];
+    for (const member of members) {
+        const memberName = typeof member === 'object' ? member?.name : '';
+        const memberRef = typeof member === 'object'
+            ? member?.avatar ?? member?.id ?? member?.characterId
+            : member;
+        const character = characters.find(candidate => [candidate?.avatar, candidate?.id, candidate?.characterId, candidate?.name]
+            .some(value => value !== undefined && String(value) === String(memberRef)));
+        const name = memberName || character?.name;
+        if (name) names.push(name);
+    }
+    return names;
+}
+
+function isPrimaryConversationIdentity(name) {
+    const normalizedName = String(name ?? '').trim().toLowerCase();
+    if (!normalizedName) return false;
+    try {
+        const context = getContext();
+        const currentCharacter = context?.characters?.[context?.characterId];
+        const primaryNames = [
+            context?.name1,
+            context?.userName,
+            context?.user_name,
+            context?.name2,
+            currentCharacter?.name,
+            ...getCurrentGroupCharacterNames(context),
+        ].map(value => String(value ?? '').trim().toLowerCase()).filter(Boolean);
+        return primaryNames.includes(normalizedName);
+    } catch {
+        return false;
+    }
+}
+
+export function shouldAutoRandomizeNpcGradient(name) {
+    return settings.autoRandomNpcGradients === true && !isPrimaryConversationIdentity(name);
+}
+
 export function applyGradientPreset(entry, preset) {
     const applied = applyGradientPresetToEntry(entry, preset, applyThemeReadabilityAndBrightness);
     if (!applied) return null;
@@ -1008,23 +1078,29 @@ export function buildCharacterEntry(name, options = {}) {
     const baseColor = colorMode === 'base' && normalizedSourceColor && !remapped
         ? normalizedSourceColor
         : deriveBaseColorFromEffectiveColor(assignedColor);
-    const gradient = synchronizeGradientEffectiveColors(normalizeGradient(options.gradient), applyThemeReadabilityAndBrightness);
+    const suppliedGradient = synchronizeGradientEffectiveColors(normalizeGradient(options.gradient), applyThemeReadabilityAndBrightness);
+
+    const entry = {
+        color: assignedColor,
+        baseColor,
+        name: trimmedName,
+        locked: !!options.locked,
+        keep: !!options.keep,
+        aliases: normalizeAliases(options.aliases),
+        style: VALID_STYLES.has(options.style) ? options.style : '',
+        dialogueCount: Number.isFinite(options.dialogueCount) && options.dialogueCount > 0 ? Math.floor(options.dialogueCount) : 0,
+        group: String(options.group ?? '').trim(),
+        font: normalizeGoogleFontName(options.font),
+        gradient: suppliedGradient,
+    };
+    if (!entry.gradient && options.randomGradient !== false
+        && (options.randomGradient === true || shouldAutoRandomizeNpcGradient(trimmedName))) {
+        entry.gradient = createRandomGradient(entry, { preserveAnimation: false });
+    }
 
     return {
         key,
         remapped,
-        entry: {
-            color: assignedColor,
-            baseColor,
-            name: trimmedName,
-            locked: !!options.locked,
-            keep: !!options.keep,
-            aliases: normalizeAliases(options.aliases),
-            style: VALID_STYLES.has(options.style) ? options.style : '',
-            dialogueCount: Number.isFinite(options.dialogueCount) && options.dialogueCount > 0 ? Math.floor(options.dialogueCount) : 0,
-            group: String(options.group ?? '').trim(),
-            font: normalizeGoogleFontName(options.font),
-            gradient,
-        }
+        entry,
     };
 }
