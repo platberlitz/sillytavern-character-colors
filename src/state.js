@@ -34,7 +34,7 @@ export function isDomEngine() {
 
 export const MODULE_NAME = 'dialogue-colors';
 
-export const COLOR_SCHEMA_VERSION = 4;
+export const COLOR_SCHEMA_VERSION = 5;
 
 export const LEGACY_GLOBAL_SETTINGS_KEY = 'dc_global_settings';
 

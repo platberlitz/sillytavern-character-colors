@@ -1,12 +1,13 @@
 // storage.js - extracted from index.js (mechanical split)
 import { clearSpeakerRegexCache } from './attribution.js';
+import { createGradientPresetFromEntry, normalizeGradient, normalizeGradientPreset, normalizeGradientPresetName, normalizeGradientPresets, serializeGradient } from './gradients.js';
 import { saveHistory, showUndoToast } from './history.js';
 import { applyLiveColorChangesFromSnapshot, captureEffectiveColorSnapshot, commit } from './live-colors.js';
 import { CUSTOM_PALETTE_KEY, CUSTOM_PALETTE_META_KEY, applyThemeReadabilityAndBrightness, deriveBaseColorFromEffectiveColor, getBaseColor, invalidateThemeCache, normalizeCustomPalettes, syncAllEffectiveColors } from './palettes.js';
 import { injectPrompt } from './prompts.js';
 import { extension_settings, getCharacters, getContext, getRequestHeaders, saveCharacterDebounced, saveSettings, saveSettingsDebounced } from './st-api.js';
 import { ACTIVE_SETTING_KEYS, AUTO_SYNC_SAVE_TIMEOUT_MS, COLOR_SCHEMA_VERSION, GLOBAL_SETTINGS_V2_KEY, GLOBAL_SETTINGS_V2_KEYS, GLOBAL_VISUAL_KEYS, LEGACY_AUTO_SYNC_ENABLED_KEY, LEGACY_GLOBAL_SETTINGS_KEY, LEGEND_POSITION_KEY, MODULE_NAME, PRESETS_KEY, TOGGLE_SETTING_DEFAULTS, autoSyncEnabled, autoSyncInterval, autoSyncLastTimestamp, autoSyncPendingRecord, autoSyncSaveTimeout, autoSyncSequence, autoSyncStatusError, characterColors, colorHistory, historyIndex, immediateSettingsSaveInFlight, immediateSettingsSaveQueued, lastProcessedMessageSignature, setAutoSyncEnabled, setAutoSyncInterval, setAutoSyncLastTimestamp, setAutoSyncPendingRecord, setAutoSyncSaveTimeout, setAutoSyncSequence, setAutoSyncStatusError, setCharacterColors, setColorHistory, setHistoryIndex, setImmediateSettingsSaveInFlight, setImmediateSettingsSaveQueued, setLastProcessedMessageSignature, settings } from './state.js';
-import { syncUIWithSettings, updateCharList } from './ui.js';
+import { refreshGradientPresetControls, syncUIWithSettings, updateCharList } from './ui.js';
 import { normalizeBoolean, normalizeCharacterColors, normalizeHexColor, toast } from './utils.js';
 
 export function normalizeToggleSettings() {
@@ -103,6 +104,27 @@ export function getLegacyAutoSyncEnabledPreference() {
     return false;
 }
 
+export function normalizeStoredColorPresets(source) {
+    if (!isPlainObject(source)) return {};
+    const presets = {};
+    for (const [name, entries] of Object.entries(source)) {
+        presets[name] = Array.isArray(entries)
+            ? entries.map(entry => isPlainObject(entry) ? { ...entry, gradient: serializeGradient(entry.gradient) } : entry)
+            : entries;
+    }
+    return presets;
+}
+
+export function normalizeStoredColorData(source) {
+    if (!isPlainObject(source)) return {};
+    const colorData = {};
+    for (const [key, value] of Object.entries(source)) {
+        const normalized = normalizeColorDataEntry(value);
+        colorData[key] = normalized || value;
+    }
+    return colorData;
+}
+
 export function cleanupLegacyAutoSyncPreference() {
     // localStorage is now read-only legacy input; do not write back to browser storage.
 }
@@ -119,10 +141,11 @@ export function buildAutoSyncRecord(source = {}) {
         autoSyncEnabled: typeof source?.autoSyncEnabled === 'boolean' ? source.autoSyncEnabled : getLegacyAutoSyncEnabledPreference(),
         settings: normalizedSettings,
         globalSettings: normalizeStoredSettings(source?.globalSettings),
-        colorData: isPlainObject(source?.colorData) ? source.colorData : {},
-        presets: isPlainObject(source?.presets) ? source.presets : {},
+        colorData: normalizeStoredColorData(source?.colorData),
+        presets: normalizeStoredColorPresets(source?.presets),
         customPalettes: isPlainObject(source?.customPalettes) ? source.customPalettes : {},
         customPaletteMeta: isPlainObject(source?.customPaletteMeta) ? source.customPaletteMeta : {},
+        customGradientPresets: normalizeGradientPresets(source?.customGradientPresets),
         ui: isPlainObject(source?.ui) ? source.ui : {},
         legacyLocalStorageMigrated: !!source?.legacyLocalStorageMigrated,
     };
@@ -140,6 +163,9 @@ export function mergeIncomingAutoSyncRecord(source) {
         presets: Object.keys(incoming.presets || {}).length ? incoming.presets : current.presets,
         customPalettes: Object.keys(incoming.customPalettes || {}).length ? incoming.customPalettes : current.customPalettes,
         customPaletteMeta: Object.keys(incoming.customPaletteMeta || {}).length ? incoming.customPaletteMeta : current.customPaletteMeta,
+        customGradientPresets: Object.prototype.hasOwnProperty.call(source || {}, 'customGradientPresets')
+            ? incoming.customGradientPresets
+            : current.customGradientPresets,
         ui: Object.keys(incoming.ui || {}).length ? incoming.ui : current.ui,
         legacyLocalStorageMigrated: current.legacyLocalStorageMigrated || incoming.legacyLocalStorageMigrated,
     });
@@ -189,6 +215,61 @@ export function getAutoSyncRecord(create = false) {
     const created = buildAutoSyncRecord({});
     extension_settings[MODULE_NAME] = created;
     return created;
+}
+
+export function getCustomGradientPresets() {
+    return normalizeGradientPresets(getAutoSyncRecord(true).customGradientPresets);
+}
+
+function persistCustomGradientPresetRecord(record, options = {}) {
+    if (!autoSyncEnabled) {
+        persistModuleStore(record, options);
+        return;
+    }
+    persistModuleStore(record, { debounce: false });
+    saveSettingsToStore({ force: true });
+    if (options.immediate) queueImmediateSettingsSave();
+}
+
+export function saveCustomGradientPreset(name, source, options = {}) {
+    const normalizedName = normalizeGradientPresetName(name);
+    const preset = createGradientPresetFromEntry(source) || normalizeGradientPreset(source);
+    if (!normalizedName || !preset) return null;
+    const record = getAutoSyncRecord(true);
+    record.version = COLOR_SCHEMA_VERSION;
+    record.customGradientPresets = normalizeGradientPresets(record.customGradientPresets);
+    if (Object.prototype.hasOwnProperty.call(record.customGradientPresets, normalizedName) && options.overwrite !== true) return null;
+    record.customGradientPresets[normalizedName] = preset;
+    persistCustomGradientPresetRecord(record, options);
+    return normalizeGradientPreset(preset);
+}
+
+export function renameCustomGradientPreset(currentName, nextName, options = {}) {
+    const current = normalizeGradientPresetName(currentName);
+    const next = normalizeGradientPresetName(nextName);
+    const presets = getCustomGradientPresets();
+    if (!current || !next || !presets[current] || (current !== next && presets[next])) return false;
+    if (current !== next) {
+        presets[next] = presets[current];
+        delete presets[current];
+    }
+    const record = getAutoSyncRecord(true);
+    record.version = COLOR_SCHEMA_VERSION;
+    record.customGradientPresets = presets;
+    persistCustomGradientPresetRecord(record, options);
+    return true;
+}
+
+export function deleteCustomGradientPreset(name, options = {}) {
+    const normalizedName = normalizeGradientPresetName(name);
+    const presets = getCustomGradientPresets();
+    if (!normalizedName || !Object.prototype.hasOwnProperty.call(presets, normalizedName)) return false;
+    delete presets[normalizedName];
+    const record = getAutoSyncRecord(true);
+    record.version = COLOR_SCHEMA_VERSION;
+    record.customGradientPresets = presets;
+    persistCustomGradientPresetRecord(record, options);
+    return true;
 }
 
 export function hasAutoSyncSettingsPayload(record) {
@@ -286,6 +367,7 @@ export function applyAutoSyncRecord(record, { force = false } = {}) {
     const matchesPending = doAutoSyncMarkersMatch(normalized, autoSyncPendingRecord);
     const shouldAcceptRecord = force || matchesPending || isIncomingAutoSyncRecordNewer(normalized);
     const previousAutoSyncEnabled = autoSyncEnabled;
+    const colorSnapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
 
     if (!shouldAcceptRecord) {
         updateAutoSyncUI();
@@ -295,6 +377,7 @@ export function applyAutoSyncRecord(record, { force = false } = {}) {
 
     persistModuleStore(normalized, { debounce: false });
     setAutoSyncEnabled(normalized.autoSyncEnabled);
+    refreshGradientPresetControls();
 
     if (force) applyStoredSettingsSnapshot(normalized.globalSettings);
 
@@ -308,7 +391,10 @@ export function applyAutoSyncRecord(record, { force = false } = {}) {
         }
         normalizeToggleSettings();
         if (changed) {
-            saveData({ skipAutoSync: true });
+            invalidateThemeCache();
+            syncAllEffectiveColors();
+            applyLiveColorChangesFromSnapshot(colorSnapshot, Object.keys(characterColors), { saveImmediately: true });
+            saveData({ skipAutoSync: true, preserveEffectiveColors: true });
         } else {
             saveGlobalSettingsSnapshot();
         }
@@ -317,7 +403,7 @@ export function applyAutoSyncRecord(record, { force = false } = {}) {
         injectPrompt();
     }
 
-    confirmAutoSyncRecord(normalized);
+    confirmAutoSyncRecord(getAutoSyncRecord(true));
 
     if (autoSyncEnabled !== previousAutoSyncEnabled) {
         syncAutoSyncPolling();
@@ -349,11 +435,14 @@ export async function fetchAutoSyncRecordFromServer() {
 
     const record = parsedSettings?.extension_settings?.[MODULE_NAME];
     if (!record || typeof record !== 'object' || Array.isArray(record)) return null;
-    return buildAutoSyncRecord(record);
+    const normalized = buildAutoSyncRecord(record);
+    if (!Object.prototype.hasOwnProperty.call(record, 'customGradientPresets')) delete normalized.customGradientPresets;
+    return normalized;
 }
 
 export function saveGlobalSettingsSnapshot(options = {}) {
     const record = getAutoSyncRecord(true);
+    record.version = COLOR_SCHEMA_VERSION;
     record.globalSettings = buildFullSettingsSnapshot();
     record.settings = buildSettingsSubset(GLOBAL_SETTINGS_V2_KEYS);
     persistModuleStore(record, options);
@@ -498,7 +587,7 @@ export function saveData(options = {}) {
     normalizeToggleSettings();
     setCharacterColors(normalizeCharacterColors(characterColors));
     settings.colorSchemaVersion = COLOR_SCHEMA_VERSION;
-    syncAllEffectiveColors();
+    if (!options.preserveEffectiveColors) syncAllEffectiveColors();
     try {
         setStoredColorData(getStorageKey(), characterColors, settings, { debounce: false });
         saveGlobalSettingsSnapshot(options.immediate === false ? {} : { immediate: true });
@@ -514,12 +603,12 @@ export function saveData(options = {}) {
 
 export function migrateColorSchemaIfNeeded() {
     const currentVersion = Number(settings.colorSchemaVersion);
-    const needsMigration = !Number.isFinite(currentVersion) || currentVersion < COLOR_SCHEMA_VERSION;
+    const needsBaseColorMigration = !Number.isFinite(currentVersion) || currentVersion < 4;
     let changed = false;
     for (const entry of Object.values(characterColors)) {
         if (!entry) continue;
         const normalizedColor = normalizeHexColor(entry.color, null);
-        if (needsMigration) {
+        if (needsBaseColorMigration) {
             if (normalizedColor) {
                 entry.color = normalizedColor;
                 entry.baseColor = deriveBaseColorFromEffectiveColor(normalizedColor);
@@ -537,12 +626,15 @@ export function migrateColorSchemaIfNeeded() {
             if (normalizedColor) {
                 if (normalizeHexColor(entry.color) !== normalizedColor) changed = true;
                 entry.color = normalizedColor;
-                continue;
+            } else {
+                const effective = applyThemeReadabilityAndBrightness(getBaseColor(entry));
+                if (normalizeHexColor(entry.color) !== effective) changed = true;
+                entry.color = effective;
             }
         }
-        const effective = applyThemeReadabilityAndBrightness(getBaseColor(entry));
-        if (normalizeHexColor(entry.color) !== effective) changed = true;
-        entry.color = effective;
+        const serializedGradient = JSON.stringify(entry.gradient ?? null);
+        entry.gradient = normalizeGradient(entry.gradient);
+        if (serializedGradient !== JSON.stringify(entry.gradient)) changed = true;
     }
     if (settings.colorSchemaVersion !== COLOR_SCHEMA_VERSION) {
         settings.colorSchemaVersion = COLOR_SCHEMA_VERSION;
@@ -591,14 +683,16 @@ export function loadData() {
     applyStoredSettingsSnapshot(record.globalSettings, { includeColorSchemaVersion: false });
     normalizeToggleSettings();
     if (migrateColorSchemaIfNeeded()) {
-        saveData();
+        saveData({ preserveEffectiveColors: true });
     }
     setColorHistory([JSON.stringify(characterColors)]); setHistoryIndex(0);
     setLastProcessedMessageSignature('');
 }
 
 export function exportColors() {
-    const blob = new Blob([JSON.stringify({ colors: characterColors, settings }, null, 2)], { type: 'application/json' });
+    const colors = normalizeCharacterColors(characterColors);
+    const customGradientPresets = getCustomGradientPresets();
+    const blob = new Blob([JSON.stringify({ colors, settings, customGradientPresets }, null, 2)], { type: 'application/json' });
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `dialogue-colors-${Date.now()}.json`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
@@ -614,6 +708,13 @@ export function importColors(file) {
                 if (d.settings.colorSchemaVersion === undefined) settings.colorSchemaVersion = 0;
             } else if (d.colors) {
                 settings.colorSchemaVersion = 0;
+            }
+            if (Object.prototype.hasOwnProperty.call(d, 'customGradientPresets')) {
+                const record = getAutoSyncRecord(true);
+                record.version = COLOR_SCHEMA_VERSION;
+                record.customGradientPresets = normalizeGradientPresets(d.customGradientPresets);
+                persistModuleStore(record, { debounce: false });
+                refreshGradientPresetControls();
             }
             normalizeToggleSettings();
             invalidateThemeCache();
@@ -637,7 +738,8 @@ export function exportSettings() {
     const exportObj = {
         version: COLOR_SCHEMA_VERSION,
         timestamp: new Date().toISOString(),
-        settings: settingsData
+        settings: settingsData,
+        customGradientPresets: getCustomGradientPresets(),
     };
     const blob = new Blob([JSON.stringify(exportObj, null, 2)], { type: 'application/json' });
     const a = document.createElement('a');
@@ -663,6 +765,13 @@ export function importSettings(file) {
                     settings[key] = d.settings[key];
                 }
             });
+            if (Object.prototype.hasOwnProperty.call(d, 'customGradientPresets')) {
+                const record = getAutoSyncRecord(true);
+                record.version = COLOR_SCHEMA_VERSION;
+                record.customGradientPresets = normalizeGradientPresets(d.customGradientPresets);
+                persistModuleStore(record, { debounce: false });
+                refreshGradientPresetControls();
+            }
             normalizeToggleSettings();
             const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
             invalidateThemeCache();

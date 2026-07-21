@@ -268,13 +268,13 @@ export function applyLiveColorChangesFromSnapshot(snapshot, keys = Object.keys(s
         scheduleCustomFontRefresh(options.saveImmediately ? 0 : 120);
         return 0;
     }
+    scheduleCustomFontRefresh(options.saveImmediately ? 0 : 120);
     if (!settings.autoRecolor && !options.force) return 0;
     const list = Array.isArray(keys) ? keys : [keys];
     const changedCount = applyLiveColorReplacements(buildColorReplacementsFromSnapshot(snapshot, list), {
         nameToNewColor: buildNameToCurrentColorForKeys(list),
         saveImmediately: options.saveImmediately,
     });
-    scheduleCustomFontRefresh(options.saveImmediately ? 0 : 120);
     return changedCount;
 }
 

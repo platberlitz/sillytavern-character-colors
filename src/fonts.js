@@ -1,5 +1,6 @@
 // fonts.js - extracted from index.js (mechanical split)
-import { buildColorFontLookup, resolveCharacterKeyByNameOrAlias } from './color-blocks.js';
+import { buildColorFontLookup, buildColorRenderingLookup, resolveCharacterKeyByNameOrAlias } from './color-blocks.js';
+import { applyGradientText, clearGradientText } from './gradient-rendering.js';
 import { getEntryEffectiveColor } from './palettes.js';
 import { getContext } from './st-api.js';
 import { characterColors, loadedGoogleFonts, settings } from './state.js';
@@ -29,7 +30,7 @@ export function loadGoogleFont(fontName) {
 
 export let customFontRefreshTimer = null;
 
-export function clearCustomFontTag(fontEl) {
+function clearCustomFontOnly(fontEl) {
     if (!fontEl?.hasAttribute?.('data-dc-font')) return false;
     fontEl.style.fontFamily = '';
     if (!fontEl.getAttribute('style')) fontEl.removeAttribute('style');
@@ -37,9 +38,16 @@ export function clearCustomFontTag(fontEl) {
     return true;
 }
 
+export function clearCustomFontTag(fontEl) {
+    if (!fontEl) return false;
+    let changed = clearGradientText(fontEl);
+    if (clearCustomFontOnly(fontEl)) changed = true;
+    return changed;
+}
+
 export function clearCustomFontsFromFontTags(root = document) {
     let changed = false;
-    root?.querySelectorAll?.('font[data-dc-font]').forEach(fontEl => {
+    root?.querySelectorAll?.('font[data-dc-font], font[data-dc-gradient]').forEach(fontEl => {
         if (clearCustomFontTag(fontEl)) changed = true;
     });
     return changed;
@@ -49,10 +57,12 @@ export function applyCustomFontsToFontTags(mesText, rawText = '') {
     const fontTags = Array.from(mesText?.querySelectorAll?.('font[color]') || []);
     if (!fontTags.length) return false;
     const fontByColor = buildColorFontLookup(rawText);
+    const renderingByColor = buildColorRenderingLookup(rawText);
     let changed = false;
     for (const fontEl of fontTags) {
         const color = normalizeHexColor(fontEl.getAttribute('color'), null);
-        const font = color ? fontByColor.get(color) : '';
+        const rendering = color ? renderingByColor.get(color) : null;
+        const font = color ? fontByColor.get(color) || '' : '';
         const family = getGoogleFontFamily(font);
         if (family) {
             loadGoogleFont(font);
@@ -64,9 +74,11 @@ export function applyCustomFontsToFontTags(mesText, rawText = '') {
                 fontEl.setAttribute('data-dc-font', '1');
                 changed = true;
             }
-        } else if (clearCustomFontTag(fontEl)) {
+        } else if (clearCustomFontOnly(fontEl)) {
             changed = true;
         }
+        const gradientResult = applyGradientText(fontEl, rendering?.entry);
+        if (gradientResult.changed) changed = true;
     }
     return changed;
 }
@@ -110,6 +122,7 @@ export function clearSingleCharacterCardStyles(card) {
     if (card.hasAttribute('data-dc-card-styled')) {
         const nameEl = card.querySelector('.ch_name');
         if (nameEl) {
+            clearGradientText(nameEl);
             nameEl.style.color = '';
             nameEl.style.fontFamily = '';
         }
@@ -145,6 +158,7 @@ export function styleAllCharacterCards() {
             
             // Apply name color
             nameEl.style.color = color;
+            applyGradientText(nameEl, { ...entry, color });
             
             // Apply custom font if set
             if (entry.font) {

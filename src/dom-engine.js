@@ -1,7 +1,8 @@
 // dom-engine.js - extracted from index.js (mechanical split)
 import { attributeDialogueSegments } from './attribution.js';
-import { collectFontColorsFromText } from './color-blocks.js';
+import { collectFontColorsFromText, resolveCharacterKeyByNameOrAlias } from './color-blocks.js';
 import { applyCustomFontsToFontTags, applyCustomFontsToMessageElements, clearCustomFontsFromFontTags, loadGoogleFont, scheduleCardStyle, scheduleCustomFontRefresh } from './fonts.js';
+import { applyGradientText, clearGradientText } from './gradient-rendering.js';
 import { queueColorStateSave } from './live-colors.js';
 import { converter, escapeHtml, eventSource, event_types, getContext } from './st-api.js';
 import { ATTRIBUTION_VERIFIER_VERSION, AUTO_ATTRIBUTION_VERIFY_DELAY_MS, attributionChatGeneration, characterColors, isDomEngine, runtimeState, settings, streamingAttributionOverrides, streamingHeuristicCache } from './state.js';
@@ -645,6 +646,7 @@ export function resolveDomSegmentIndexForElement(segmentEl, mesIndex, msg) {
 }
 
 export function clearSegmentDecoration(el) {
+    clearGradientText(el);
     el.style.color = '';
     el.style.backgroundColor = '';
     el.style.fontFamily = '';
@@ -700,13 +702,20 @@ export function decorateMessageDom(mesElement, msg, mesIndex) {
         el.setAttribute('data-dc-seg', String(seg.index));
         if (!seg.assignment) return;
         el.style.color = seg.assignment.color;
-        const family = getGoogleFontFamily(seg.assignment.font);
+        const entryKey = characterColors[seg.assignment.key]
+            ? seg.assignment.key
+            : resolveCharacterKeyByNameOrAlias(seg.assignment.name || seg.assignment.key);
+        const entry = entryKey ? characterColors[entryKey] : null;
+        const font = entry?.font || seg.assignment.font;
+        const family = getGoogleFontFamily(font);
         if (family) {
-            loadGoogleFont(seg.assignment.font);
+            loadGoogleFont(font);
             el.style.fontFamily = family;
             el.setAttribute('data-dc-font', '1');
         }
-        if (settings.highlightMode) el.style.backgroundColor = `${seg.assignment.color}26`;
+        const highlightColor = settings.highlightMode ? `${seg.assignment.color}26` : '';
+        const gradientResult = applyGradientText(el, entry, { highlightColor });
+        if (settings.highlightMode && !gradientResult.applied) el.style.backgroundColor = highlightColor;
         el.setAttribute('data-dc-colored', '1');
         el.setAttribute('data-dc-speaker', seg.assignment.key);
         decorated = true;
@@ -1247,6 +1256,10 @@ export function setupChatObserver() {
         const delayed = new Set();
         const fontTargets = new Set();
         for (const mutation of mutations) {
+            if (mutation.type === 'attributes' && mutation.attributeName === 'class'
+                && mutation.target?.matches?.('[data-dc-colored], font[data-dc-gradient]')) {
+                continue;
+            }
             for (const mesElement of collectMutatedMessageElements(mutation)) {
                 const mesIndex = Number(mesElement?.getAttribute?.('mesid'));
                 if (suspendMessageDomWorkForEdit(mesElement, mesIndex)) continue;

@@ -3,20 +3,26 @@ import { clearSpeakerRegexCache } from './attribution.js';
 import { scanAllMessages } from './color-blocks.js';
 import { DOM_RETRY_REFRESH_DELAYS, decorateAllMessages, scheduleDomRefreshSeries, scheduleDomSettleRefresh, setupChatObserver, setupChatRootObserver, startDomHealthCheck, stopDomHealthCheck, undecorateAllMessages } from './dom-engine.js';
 import { loadGoogleFont, scheduleCustomFontRefresh } from './fonts.js';
+import { getGradientRenderState } from './gradient-rendering.js';
+import { BUILTIN_GRADIENT_PRESETS, DEFAULT_GRADIENT_ANGLE, DEFAULT_GRADIENT_DURATION, DEFAULT_GRADIENT_POSITION, MAX_GRADIENT_STOPS, buildGradientCss, cloneGradient, getBuiltInGradientPreset, getGradientSignature, normalizeGradient, normalizeGradientPresetName } from './gradients.js';
 import { createRestoreSnapshot, redo, saveHistory, showUndoToast, undo } from './history.js';
 import { applyFastColorUiUpdates, applyLiveColorChangesFromSnapshot, captureEffectiveColorSnapshot, colorizeMessages, commit, flushChatSave, flushColorStateSave, queueColorStateSave, recolorAllMessages, repaintDomAfterCharacterDataChange } from './live-colors.js';
 import { registerKeyboardShortcuts } from './main.js';
-import { autoResolveConflicts, buildCharacterEntry, buildKeepAwareRemovalMessage, collectDuplicateColorKeys, deleteColorPreset, deleteCustomPalette, detectTheme, flipColorsForTheme, generateCustomPaletteFromWords, getBaseColor, getEntryEffectiveColor, getKeptKeys, getNextColor, invalidateThemeCache, keepCharacterKeysOnly, loadColorPreset, refreshPaletteDropdown, refreshPresetDropdown, regenerateAllColors, removeCharacterKeys, saveColorPreset, saveCustomPalette, setEntryFromBaseColor, setEntryFromEffectiveColor, showHarmonyPopup, suggestColorForName, syncAllEffectiveColors } from './palettes.js';
+import { applyGradientPreset, autoResolveConflicts, buildCharacterEntry, buildKeepAwareRemovalMessage, collectDuplicateColorKeys, deleteColorPreset, deleteCustomPalette, detectTheme, flipColorsForTheme, generateCustomPaletteFromWords, getBaseColor, getEntryEffectiveColor, getKeptKeys, getNextColor, invalidateThemeCache, keepCharacterKeysOnly, loadColorPreset, refreshPaletteDropdown, refreshPresetDropdown, regenerateAllColors, removeCharacterKeys, saveColorPreset, saveCustomPalette, setEntryFromBaseColor, setEntryGradient, showHarmonyPopup, suggestColorForName, swapEntryColorData, syncAllEffectiveColors } from './palettes.js';
 import { injectPrompt, updateSystemPromptDisplay } from './prompts.js';
 import { escapeHtml, getContext } from './st-api.js';
 import { autoRecolorHintShown, characterColors, expandedCharacterRows, isDomEngine, legendListeners, searchTerm, setAutoRecolorHintShown, setCharacterColors, setLegendListeners, setSearchTerm, setSwapMode, settings, swapMode } from './state.js';
-import { disableAutoSync, enableAutoSync, exportColors, exportSettings, getLegendPosition, getStorageKey, getStorageLabelForKey, getUserColorDataStore, importColors, importSettings, loadData, loadFromCard, normalizeColorDataEntry, normalizeToggleSettings, removeStoredColorData, restoreAllSettingsToDefaults, saveData, saveLegendPosition, saveToCard, updateAutoSyncUI } from './storage.js';
+import { deleteCustomGradientPreset, disableAutoSync, enableAutoSync, exportColors, exportSettings, getCustomGradientPresets, getLegendPosition, getStorageKey, getStorageLabelForKey, getUserColorDataStore, importColors, importSettings, loadData, loadFromCard, normalizeColorDataEntry, normalizeToggleSettings, removeStoredColorData, renameCustomGradientPreset, restoreAllSettingsToDefaults, saveCustomGradientPreset, saveData, saveLegendPosition, saveToCard, updateAutoSyncUI } from './storage.js';
 import { escapeAttr, getGoogleFontFamily, htmlToNode, normalizeGoogleFontName, normalizeHexColor, normalizeManualColorInput, toast } from './utils.js';
 import { cancelStreamingAttributionVerification, clearAutoAttributionVerificationQueue, queueAutoAttributionVerificationForRenderedMessages, runAttributionVerification, verifyLatestAttributionsWithLLM, verifyVisibleAttributionsWithLLM } from './verify.js';
 
 export const DYNAMIC_CONTROL_HELP_TEXT = Object.freeze({
     '.dc-color-dot': 'Click to open the color picker for this character.',
     '.dc-color-input': 'Pick a color directly. Double-click for harmony suggestions.',
+    '.dc-gradient-toggle': 'Enable or remove this character gradient.',
+    '.dc-gradient-preview': 'Live preview of this character gradient.',
+    '.dc-gradient-add-stop': 'Add another gradient color stop.',
+    '.dc-gradient-apply-preset': 'Apply the selected built-in or custom gradient preset.',
     '.dc-keep': 'Pinned characters survive Clear and bulk delete tools.',
     '.dc-lock': 'Lock this character color so reset/regen tools do not change it.',
     '.dc-more': 'Show less common row tools like alias, group, style, and swap.',
@@ -27,6 +33,149 @@ export const DYNAMIC_CONTROL_HELP_TEXT = Object.freeze({
     '.dc-del': 'Delete this character from the list. Turn off Keep first if pinned.',
     '.dc-alias-remove': 'Remove this alias from the character.'
 });
+
+const GRADIENT_DIRECTIONS = Object.freeze([
+    { value: 0, label: 'Up' },
+    { value: 45, label: 'Up right' },
+    { value: 90, label: 'Right' },
+    { value: 135, label: 'Down right' },
+    { value: 180, label: 'Down' },
+    { value: 225, label: 'Down left' },
+    { value: 270, label: 'Left' },
+    { value: 315, label: 'Up left' },
+]);
+
+// Details state lives outside persisted character data but survives row reconciliation.
+const expandedGradientAdvancedRows = new Set();
+
+function getGradientPresentation(entry) {
+    const gradient = normalizeGradient(entry?.gradient);
+    const state = getGradientRenderState(entry);
+    if (!gradient || !state) return null;
+    return {
+        gradient,
+        ...state,
+        classes: `dc-has-gradient dc-gradient-${gradient.type}${gradient.animation.enabled ? ' dc-gradient-animated' : ''}${gradient.animation.reverse ? ' dc-gradient-reverse' : ''}`,
+        dataAttributes: `data-dc-gradient="${state.type}" data-dc-gradient-animation="${state.animationEnabled ? 'on' : 'off'}" data-dc-gradient-reverse="${state.reverse}" data-gradient="${state.type}" data-gradient-type="${state.type}" data-gradient-animated="${state.animationEnabled}" data-gradient-reverse="${state.reverse}"`,
+    };
+}
+
+function buildGradientSurfaceStyle(entry, { text = false } = {}) {
+    const color = getEntryEffectiveColor(entry);
+    const presentation = getGradientPresentation(entry);
+    if (!presentation) return text ? `color:${color};` : `background-color:${color};`;
+    const animationProperties = `--dc-text-gradient:${presentation.css};--dc-gradient:${presentation.css};--dc-gradient-fallback:${presentation.fallbackColor};--dc-gradient-animation-enabled:${presentation.animationEnabled ? 1 : 0};--dc-gradient-duration:${presentation.durationSeconds}s;--dc-gradient-reverse:${presentation.reverse ? 1 : 0};--dc-gradient-direction:${presentation.reverse ? 'alternate-reverse' : 'alternate'};`;
+    if (text) {
+        return `color:${color};${animationProperties}background-image:${presentation.css};background-clip:text;-webkit-background-clip:text;-webkit-text-fill-color:transparent;`;
+    }
+    return `background-color:${color};${animationProperties}background-image:${presentation.css};`;
+}
+
+function setGradientPresentation(element, entry, { text = false } = {}) {
+    if (!element) return;
+    const color = getEntryEffectiveColor(entry);
+    const presentation = getGradientPresentation(entry);
+    element.classList.toggle('dc-gradient-surface', !!presentation && !text);
+    element.classList.toggle('dc-gradient-text', !!presentation && text);
+    element.classList.toggle('dc-has-gradient', !!presentation);
+    element.classList.toggle('dc-gradient-linear', presentation?.gradient.type === 'linear');
+    element.classList.toggle('dc-gradient-radial', presentation?.gradient.type === 'radial');
+    element.classList.toggle('dc-gradient-animated', !!presentation?.gradient.animation.enabled);
+    element.classList.toggle('dc-gradient-reverse', !!presentation?.gradient.animation.reverse);
+    element.style.color = color;
+    element.style.backgroundColor = text ? '' : color;
+    if (!presentation) {
+        delete element.dataset.gradient;
+        delete element.dataset.gradientType;
+        delete element.dataset.gradientAnimated;
+        delete element.dataset.gradientReverse;
+        element.removeAttribute('data-dc-gradient');
+        element.removeAttribute('data-dc-gradient-animation');
+        element.removeAttribute('data-dc-gradient-reverse');
+        element.style.removeProperty('--dc-text-gradient');
+        element.style.removeProperty('--dc-gradient');
+        element.style.removeProperty('--dc-gradient-fallback');
+        element.style.removeProperty('--dc-gradient-animation-enabled');
+        element.style.removeProperty('--dc-gradient-duration');
+        element.style.removeProperty('--dc-gradient-reverse');
+        element.style.removeProperty('--dc-gradient-direction');
+        element.style.backgroundImage = '';
+        if (text) {
+            element.style.backgroundClip = '';
+            element.style.webkitBackgroundClip = '';
+            element.style.webkitTextFillColor = '';
+        }
+        return;
+    }
+    element.dataset.gradient = presentation.gradient.type;
+    element.dataset.gradientType = presentation.gradient.type;
+    element.dataset.gradientAnimated = String(presentation.gradient.animation.enabled);
+    element.dataset.gradientReverse = String(presentation.gradient.animation.reverse);
+    element.setAttribute('data-dc-gradient', presentation.type);
+    element.setAttribute('data-dc-gradient-animation', presentation.animationEnabled ? 'on' : 'off');
+    element.setAttribute('data-dc-gradient-reverse', String(presentation.reverse));
+    element.style.setProperty('--dc-text-gradient', presentation.css);
+    element.style.setProperty('--dc-gradient', presentation.css);
+    element.style.setProperty('--dc-gradient-fallback', presentation.fallbackColor);
+    element.style.setProperty('--dc-gradient-animation-enabled', presentation.animationEnabled ? '1' : '0');
+    element.style.setProperty('--dc-gradient-duration', `${presentation.durationSeconds}s`);
+    element.style.setProperty('--dc-gradient-reverse', presentation.reverse ? '1' : '0');
+    element.style.setProperty('--dc-gradient-direction', presentation.reverse ? 'alternate-reverse' : 'alternate');
+    element.style.backgroundImage = presentation.css;
+    if (text) {
+        element.style.backgroundClip = 'text';
+        element.style.webkitBackgroundClip = 'text';
+        element.style.webkitTextFillColor = 'transparent';
+    }
+}
+
+function getGradientCanvasStops(entry) {
+    const gradient = normalizeGradient(entry?.gradient);
+    if (!gradient) return null;
+    return {
+        gradient,
+        stops: [
+            { color: getEntryEffectiveColor(entry), position: gradient.primaryPosition },
+            ...gradient.stops.map(stop => ({ color: stop.color, position: stop.position })),
+        ].sort((left, right) => left.position - right.position),
+    };
+}
+
+export function createCanvasGradientFill(ctx, entry, bounds) {
+    const data = getGradientCanvasStops(entry);
+    if (!data || !ctx || !bounds) return getEntryEffectiveColor(entry);
+    const x = Number(bounds.x) || 0;
+    const y = Number(bounds.y) || 0;
+    const width = Math.max(1, Number(bounds.width) || 1);
+    const height = Math.max(1, Number(bounds.height) || 1);
+    let fill;
+    if (data.gradient.type === 'radial') {
+        const originX = x + width * data.gradient.x / 100;
+        const originY = y + height * data.gradient.y / 100;
+        const radius = Math.max(
+            Math.hypot(originX - x, originY - y),
+            Math.hypot(originX - (x + width), originY - y),
+            Math.hypot(originX - x, originY - (y + height)),
+            Math.hypot(originX - (x + width), originY - (y + height))
+        );
+        fill = ctx.createRadialGradient(originX, originY, 0, originX, originY, Math.max(1, radius));
+    } else {
+        const radians = data.gradient.angle * Math.PI / 180;
+        const dx = Math.sin(radians);
+        const dy = -Math.cos(radians);
+        const halfLength = Math.abs(width * dx) / 2 + Math.abs(height * dy) / 2;
+        const centerX = x + width / 2;
+        const centerY = y + height / 2;
+        fill = ctx.createLinearGradient(
+            centerX - dx * halfLength,
+            centerY - dy * halfLength,
+            centerX + dx * halfLength,
+            centerY + dy * halfLength
+        );
+    }
+    data.stops.forEach(stop => fill.addColorStop(Math.max(0, Math.min(1, stop.position / 100)), stop.color));
+    return fill;
+}
 
 // Phase 6B: Group sorting support
 export function getSortedEntries() {
@@ -92,11 +241,13 @@ export function exportLegendPng() {
         const safeColor = getEntryEffectiveColor(v);
         ctx.beginPath();
         ctx.arc(padding + dotSize / 2, y, dotSize / 2, 0, Math.PI * 2);
-        ctx.fillStyle = safeColor;
+        ctx.fillStyle = createCanvasGradientFill(ctx, v, { x: padding, y: y - dotSize / 2, width: dotSize, height: dotSize });
         ctx.fill();
-        ctx.fillStyle = safeColor;
         ctx.font = '14px sans-serif';
-        ctx.fillText(v.name, padding + dotSize + 8, y + 5);
+        const textX = padding + dotSize + 8;
+        const textWidth = Math.max(1, ctx.measureText(v.name).width);
+        ctx.fillStyle = createCanvasGradientFill(ctx, v, { x: textX, y: y - 12, width: textWidth, height: 17 }) || safeColor;
+        ctx.fillText(v.name, textX, y + 5);
     });
     const a = document.createElement('a');
     a.href = canvas.toDataURL('image/png');
@@ -188,11 +339,13 @@ export function updateLegend() {
     if (!entries.length || !settings.showLegend) { legend.style.display = 'none'; return; }
     legend.innerHTML = '<div style="font-weight:bold;margin-bottom:4px;cursor:grab;">⋮⋮ Characters</div>' +
         entries.map(([, v]) => {
-            const safeColor = getEntryEffectiveColor(v);
+            const presentation = getGradientPresentation(v);
             const fontFamily = getGoogleFontFamily(v.font);
             if (fontFamily) loadGoogleFont(v.font);
             const fontStyle = fontFamily ? `font-family:${escapeAttr(fontFamily)};` : '';
-            return `<div style="display:flex;align-items:center;gap:4px;"><span style="width:8px;height:8px;border-radius:50%;background:${safeColor};"></span><span style="color:${safeColor};${fontStyle}">${escapeHtml(v.name)}</span><span style="opacity:0.5;font-size:0.8em;">${v.dialogueCount || 0}</span></div>`;
+            const gradientClasses = presentation ? ` dc-gradient-legend-item ${presentation.classes}` : '';
+            const gradientAttributes = presentation ? ` ${presentation.dataAttributes}` : '';
+            return `<div class="dc-legend-character${gradientClasses}"${gradientAttributes} style="display:flex;align-items:center;gap:4px;"><span class="dc-legend-swatch${presentation ? ' dc-gradient-surface' : ''}"${gradientAttributes} style="width:8px;height:8px;border-radius:50%;${escapeAttr(buildGradientSurfaceStyle(v))}"></span><span class="dc-legend-name${presentation ? ' dc-gradient-text' : ''}"${gradientAttributes} style="${escapeAttr(buildGradientSurfaceStyle(v, { text: true }))}${fontStyle}">${escapeHtml(v.name)}</span><span style="opacity:0.5;font-size:0.8em;">${v.dialogueCount || 0}</span></div>`;
         }).join('');
     legend.style.display = settings.showLegend ? 'block' : 'none';
 }
@@ -200,7 +353,16 @@ export function updateLegend() {
 export function getDialogueStats() {
     const entries = Object.entries(characterColors);
     const total = entries.reduce((s, [, v]) => s + (v.dialogueCount || 0), 0);
-    return entries.map(([, v]) => ({ name: v.name, count: v.dialogueCount || 0, pct: total ? Math.round((v.dialogueCount || 0) / total * 100) : 0, color: getEntryEffectiveColor(v), font: normalizeGoogleFontName(v.font) })).sort((a, b) => b.count - a.count);
+    return entries.map(([, v]) => ({
+        name: v.name,
+        count: v.dialogueCount || 0,
+        pct: total ? Math.round((v.dialogueCount || 0) / total * 100) : 0,
+        color: getEntryEffectiveColor(v),
+        font: normalizeGoogleFontName(v.font),
+        baseColor: getBaseColor(v),
+        gradient: cloneGradient(v.gradient),
+        gradientCss: buildGradientCss(v),
+    })).sort((a, b) => b.count - a.count);
 }
 
 export function showStatsPopup() {
@@ -208,10 +370,14 @@ export function showStatsPopup() {
     if (!stats.length) { toast.info('No dialogue data'); return; }
     const maxCount = Math.max(...stats.map(s => s.count), 1);
     let html = stats.map(s => {
+        const statEntry = { color: s.color, baseColor: s.baseColor, gradient: s.gradient };
         const fontFamily = getGoogleFontFamily(s.font);
         if (fontFamily) loadGoogleFont(s.font);
         const fontStyle = fontFamily ? `font-family:${escapeAttr(fontFamily)};` : '';
-        return `<div style="display:flex;align-items:center;gap:6px;margin:2px 0;"><span style="width:60px;color:${s.color};${fontStyle}">${escapeHtml(s.name)}</span><div style="flex:1;height:12px;background:var(--SmartThemeBlurTintColor);border-radius:3px;overflow:hidden;"><div style="width:${s.count / maxCount * 100}%;height:100%;background:${s.color};"></div></div><span style="width:40px;text-align:right;font-size:0.8em;">${s.count} (${s.pct}%)</span></div>`;
+        const presentation = getGradientPresentation(statEntry);
+        const gradientClasses = presentation ? ` ${presentation.classes}` : '';
+        const gradientAttributes = presentation ? ` ${presentation.dataAttributes}` : '';
+        return `<div class="dc-stats-character${gradientClasses}"${gradientAttributes} style="display:flex;align-items:center;gap:6px;margin:2px 0;"><span class="dc-stats-name${presentation ? ' dc-gradient-text' : ''}"${gradientAttributes} style="width:60px;${escapeAttr(buildGradientSurfaceStyle(statEntry, { text: true }))}${fontStyle}">${escapeHtml(s.name)}</span><div style="flex:1;height:12px;background:var(--SmartThemeBlurTintColor);border-radius:3px;overflow:hidden;"><div class="dc-stats-bar${presentation ? ' dc-gradient-surface' : ''}"${gradientAttributes} style="width:${s.count / maxCount * 100}%;height:100%;${escapeAttr(buildGradientSurfaceStyle(statEntry))}"></div></div><span style="width:40px;text-align:right;font-size:0.8em;">${s.count} (${s.pct}%)</span></div>`;
     }).join('');
     const popup = document.createElement('div');
     popup.id = 'dc-stats-popup';
@@ -391,13 +557,12 @@ export function addCharacter(name, color) {
 }
 
 export function swapColors(key1, key2) {
+    if (!characterColors[key1] || !characterColors[key2]) return;
     const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
-    const color1 = getEntryEffectiveColor(characterColors[key1]);
-    const color2 = getEntryEffectiveColor(characterColors[key2]);
-    setEntryFromEffectiveColor(characterColors[key1], color2);
-    setEntryFromEffectiveColor(characterColors[key2], color1);
+    if (!swapEntryColorData(characterColors[key1], characterColors[key2])) return;
     applyLiveColorChangesFromSnapshot(snapshot, [key1, key2]);
     commit();
+    repaintDomAfterCharacterDataChange(0);
 }
 
 export function toggleCharacterRowExpansion(key) {
@@ -420,6 +585,7 @@ export function applyCharacterBaseColor(key, color, options = {}) {
     keys.slice(1).forEach(aliasKey => setEntryFromBaseColor(characterColors[aliasKey], nextColor));
     applyLiveColorChangesFromSnapshot(snapshot, keys, { saveImmediately: options.saveImmediately === true });
     applyFastColorUiUpdates(keys);
+    refreshGradientVisualSurfaces(keys);
     return true;
 }
 
@@ -441,12 +607,205 @@ export function applyThemeOrBrightnessChange(mutator, options = {}) {
     syncAllEffectiveColors();
     applyLiveColorChangesFromSnapshot(snapshot, keys, { saveImmediately: options.saveImmediately });
     applyFastColorUiUpdates(keys);
+    refreshGradientVisualSurfaces(keys);
+}
+
+function formatGradientPresetName(name) {
+    return String(name || '').replace(/[-_]+/g, ' ').replace(/\b\w/g, letter => letter.toUpperCase());
+}
+
+function buildGradientPresetOptionsHtml({ customOnly = false } = {}) {
+    const customPresets = getCustomGradientPresets();
+    const customNames = Object.keys(customPresets).sort((left, right) => left.localeCompare(right));
+    let html = '<option value="">-- Select gradient --</option>';
+    if (!customOnly) {
+        const builtInOptions = Object.keys(BUILTIN_GRADIENT_PRESETS).map(name =>
+            `<option value="builtin:${escapeAttr(name)}">${escapeHtml(formatGradientPresetName(name))}</option>`
+        ).join('');
+        if (builtInOptions) html += `<optgroup label="Built-in">${builtInOptions}</optgroup>`;
+    }
+    if (customNames.length) {
+        html += `<optgroup label="Custom">${customNames.map(name => `<option value="custom:${escapeAttr(name)}">${escapeHtml(name)}</option>`).join('')}</optgroup>`;
+    }
+    return html;
+}
+
+function buildGradientDirectionOptions(angle) {
+    const selectedDirection = GRADIENT_DIRECTIONS.find(direction => direction.value === angle);
+    const customOption = selectedDirection ? '' : `<option value="" selected>Custom (${Number(angle.toFixed(1))}°)</option>`;
+    return customOption + GRADIENT_DIRECTIONS.map(direction =>
+        `<option value="${direction.value}"${selectedDirection?.value === direction.value ? ' selected' : ''}>${direction.label}</option>`
+    ).join('');
+}
+
+function buildGradientEditorHtml(key, entry) {
+    const safeKey = escapeAttr(key);
+    const safeName = escapeAttr(entry.name);
+    const gradient = normalizeGradient(entry.gradient);
+    const presentation = getGradientPresentation(entry);
+    const previewClasses = presentation ? ` ${presentation.classes}` : '';
+    const previewAttributes = presentation ? ` ${presentation.dataAttributes}` : '';
+    const presetOptions = buildGradientPresetOptionsHtml();
+    const presetControls = `
+        <div class="dc-gradient-presets dc-gradient-compact-presets">
+            <label>Preset
+                <select class="dc-gradient-preset-picker text_pole" data-key="${safeKey}" aria-label="Gradient preset for ${safeName}">${presetOptions}</select>
+            </label>
+            <button type="button" class="dc-gradient-apply-preset menu_button" data-key="${safeKey}">Apply</button>
+        </div>`;
+    if (!gradient) {
+        return `
+            <section class="dc-gradient-editor" data-key="${safeKey}" data-gradient-enabled="false">
+                <div class="dc-gradient-compact">
+                    <button type="button" class="dc-gradient-toggle menu_button" data-key="${safeKey}">Enable Gradient</button>
+                    <div class="dc-gradient-preview" role="img" aria-label="Solid color preview for ${safeName}" style="${escapeAttr(buildGradientSurfaceStyle(entry))}"></div>
+                    ${presetControls}
+                </div>
+            </section>`;
+    }
+
+    const primaryBaseColor = getBaseColor(entry);
+    const secondStop = gradient.stops[0];
+    const stopRows = [
+        `<div class="dc-gradient-stop dc-gradient-stop-primary" data-stop-index="0" data-gradient-primary="true">
+            <span class="dc-gradient-stop-label">Stop 1 (primary)</span>
+            <label>Color <input type="color" class="dc-gradient-primary-color" data-key="${safeKey}" value="${primaryBaseColor}" aria-label="Primary gradient color for ${safeName}"></label>
+            <label>Position <input type="number" class="dc-gradient-primary-position text_pole" data-key="${safeKey}" min="0" max="100" step="0.1" value="${gradient.primaryPosition}" aria-label="Primary gradient position for ${safeName}">%</label>
+        </div>`,
+        ...gradient.stops.map((stop, index) => `
+        <div class="dc-gradient-stop" data-stop-index="${index + 1}" data-gradient-secondary="true">
+            <span class="dc-gradient-stop-label">Stop ${index + 2}</span>
+            <label>Color <input type="color" class="dc-gradient-stop-color" data-key="${safeKey}" value="${stop.baseColor}" aria-label="Gradient stop ${index + 2} color for ${safeName}"></label>
+            <label>Position <input type="number" class="dc-gradient-stop-position text_pole" data-key="${safeKey}" min="0" max="100" step="0.1" value="${stop.position}" aria-label="Gradient stop ${index + 2} position for ${safeName}">%</label>
+            <button type="button" class="dc-gradient-remove-stop menu_button dc-danger-button" data-key="${safeKey}" aria-label="Remove gradient stop ${index + 2}"${gradient.stops.length === 1 ? ' disabled' : ''}>Remove</button>
+        </div>`),
+    ].join('');
+    const geometryControls = gradient.type === 'linear'
+        ? `<div class="dc-gradient-geometry dc-gradient-linear-controls">
+                <label>Exact angle <input type="number" class="dc-gradient-angle text_pole" data-key="${safeKey}" min="0" max="360" step="0.1" value="${gradient.angle}" aria-label="Exact linear gradient angle for ${safeName}">°</label>
+            </div>`
+        : `<div class="dc-gradient-geometry dc-gradient-radial-controls">
+                <label>Origin X <input type="number" class="dc-gradient-origin-x text_pole" data-key="${safeKey}" min="0" max="100" step="0.1" value="${gradient.x}" aria-label="Radial gradient horizontal origin for ${safeName}">%</label>
+                <label>Origin Y <input type="number" class="dc-gradient-origin-y text_pole" data-key="${safeKey}" min="0" max="100" step="0.1" value="${gradient.y}" aria-label="Radial gradient vertical origin for ${safeName}">%</label>
+            </div>`;
+    const customPresetOptions = buildGradientPresetOptionsHtml({ customOnly: true });
+    return `
+        <section class="dc-gradient-editor ${presentation.classes}" data-key="${safeKey}" data-gradient-enabled="true" ${presentation.dataAttributes}>
+            <div class="dc-gradient-compact">
+                <button type="button" class="dc-gradient-toggle menu_button dc-danger-button" data-key="${safeKey}">Remove Gradient</button>
+                <div class="dc-gradient-compact-colors">
+                    <label>Primary <input type="color" class="dc-gradient-primary-color" data-key="${safeKey}" value="${primaryBaseColor}" aria-label="Primary gradient color for ${safeName}"></label>
+                    <label>Second <input type="color" class="dc-gradient-secondary-color" data-key="${safeKey}" value="${secondStop.baseColor}" aria-label="Second gradient color for ${safeName}"></label>
+                </div>
+                <label>Type
+                    <select class="dc-gradient-type text_pole" data-key="${safeKey}" aria-label="Gradient type for ${safeName}">
+                        <option value="linear"${gradient.type === 'linear' ? ' selected' : ''}>Linear</option>
+                        <option value="radial"${gradient.type === 'radial' ? ' selected' : ''}>Radial</option>
+                    </select>
+                </label>
+                ${gradient.type === 'linear' ? `<label>Direction <select class="dc-gradient-direction text_pole" data-key="${safeKey}" aria-label="Linear gradient direction for ${safeName}">${buildGradientDirectionOptions(gradient.angle)}</select></label>` : ''}
+                <label class="checkbox_label"><input type="checkbox" class="dc-gradient-animation-enabled" data-key="${safeKey}"${gradient.animation.enabled ? ' checked' : ''}><span>Animate</span></label>
+                <div class="dc-gradient-preview dc-gradient-surface${previewClasses}" role="img" aria-label="Live gradient preview for ${safeName}"${previewAttributes} style="${escapeAttr(buildGradientSurfaceStyle(entry))}"></div>
+                ${presetControls}
+            </div>
+            <details class="dc-gradient-advanced" data-key="${safeKey}"${expandedGradientAdvancedRows.has(key) ? ' open' : ''}>
+                <summary>Advanced Gradient</summary>
+                <div class="dc-gradient-stops-advanced">
+                    ${stopRows}
+                    <button type="button" class="dc-gradient-add-stop menu_button" data-key="${safeKey}"${gradient.stops.length + 1 >= MAX_GRADIENT_STOPS ? ' disabled' : ''}>Add Stop (${gradient.stops.length + 1}/${MAX_GRADIENT_STOPS})</button>
+                </div>
+                ${geometryControls}
+                <div class="dc-gradient-animation-controls">
+                    <label>Animation duration <input type="number" class="dc-gradient-animation-duration text_pole" data-key="${safeKey}" min="0.5" max="120" step="0.5" value="${gradient.animation.duration}" aria-label="Gradient animation duration for ${safeName}"> seconds</label>
+                    <label class="checkbox_label"><input type="checkbox" class="dc-gradient-animation-reverse" data-key="${safeKey}"${gradient.animation.reverse ? ' checked' : ''}><span>Reverse animation</span></label>
+                </div>
+                <div class="dc-gradient-custom-presets">
+                    <label>Preset name <input type="text" class="dc-gradient-preset-name text_pole" data-key="${safeKey}" maxlength="80" placeholder="Gradient preset name" aria-label="New custom gradient preset name for ${safeName}"></label>
+                    <button type="button" class="dc-gradient-save-custom-preset menu_button" data-key="${safeKey}">Save Current</button>
+                    <label>Custom preset <select class="dc-gradient-custom-preset text_pole" data-key="${safeKey}" aria-label="Custom gradient preset for ${safeName}">${customPresetOptions}</select></label>
+                    <button type="button" class="dc-gradient-apply-custom-preset menu_button" data-key="${safeKey}">Apply Custom</button>
+                    <label>New name <input type="text" class="dc-gradient-preset-rename text_pole" data-key="${safeKey}" maxlength="80" placeholder="Rename selected preset" aria-label="New custom gradient preset name for ${safeName}"></label>
+                    <button type="button" class="dc-gradient-rename-custom-preset menu_button" data-key="${safeKey}">Rename</button>
+                    <button type="button" class="dc-gradient-delete-custom-preset menu_button dc-danger-button" data-key="${safeKey}">Delete</button>
+                </div>
+            </details>
+        </section>`;
+}
+
+function refreshGradientVisualSurfaces(keys = Object.keys(characterColors)) {
+    const list = document.getElementById('dc-char-list');
+    const keyList = Array.isArray(keys) ? keys : [keys];
+    keyList.forEach(key => {
+        const entry = characterColors[key];
+        if (!entry || !list) return;
+        const row = list.querySelector(`.dc-char[data-key="${CSS.escape(key)}"]`);
+        if (!row) return;
+        const presentation = getGradientPresentation(entry);
+        row.classList.toggle('dc-has-gradient', !!presentation);
+        row.classList.toggle('dc-gradient-linear', presentation?.gradient.type === 'linear');
+        row.classList.toggle('dc-gradient-radial', presentation?.gradient.type === 'radial');
+        row.classList.toggle('dc-gradient-animated', !!presentation?.gradient.animation.enabled);
+        row.classList.toggle('dc-gradient-reverse', !!presentation?.gradient.animation.reverse);
+        if (presentation) {
+            row.dataset.gradient = presentation.gradient.type;
+            row.dataset.gradientType = presentation.gradient.type;
+            row.dataset.gradientAnimated = String(presentation.gradient.animation.enabled);
+            row.dataset.gradientReverse = String(presentation.gradient.animation.reverse);
+            row.setAttribute('data-dc-gradient', presentation.type);
+            row.setAttribute('data-dc-gradient-animation', presentation.animationEnabled ? 'on' : 'off');
+            row.setAttribute('data-dc-gradient-reverse', String(presentation.reverse));
+        } else {
+            delete row.dataset.gradient;
+            delete row.dataset.gradientType;
+            delete row.dataset.gradientAnimated;
+            delete row.dataset.gradientReverse;
+            row.removeAttribute('data-dc-gradient');
+            row.removeAttribute('data-dc-gradient-animation');
+            row.removeAttribute('data-dc-gradient-reverse');
+        }
+        setGradientPresentation(row.querySelector('.dc-color-dot'), entry);
+        setGradientPresentation(row.querySelector('.dc-char-name'), entry, { text: true });
+        setGradientPresentation(row.querySelector('.dc-gradient-preview'), entry);
+        row.querySelectorAll('.dc-gradient-primary-color').forEach(input => {
+            const baseColor = getBaseColor(entry);
+            if (input.value !== baseColor) input.value = baseColor;
+        });
+        const editor = row.querySelector('.dc-gradient-editor');
+        if (editor) {
+            editor.dataset.gradientEnabled = String(!!presentation);
+            editor.classList.toggle('dc-has-gradient', !!presentation);
+            editor.classList.toggle('dc-gradient-animated', !!presentation?.gradient.animation.enabled);
+            editor.classList.toggle('dc-gradient-reverse', !!presentation?.gradient.animation.reverse);
+            if (presentation) {
+                editor.dataset.gradient = presentation.gradient.type;
+                editor.dataset.gradientType = presentation.gradient.type;
+                editor.dataset.gradientAnimated = String(presentation.gradient.animation.enabled);
+                editor.dataset.gradientReverse = String(presentation.gradient.animation.reverse);
+                editor.setAttribute('data-dc-gradient', presentation.type);
+                editor.setAttribute('data-dc-gradient-animation', presentation.animationEnabled ? 'on' : 'off');
+                editor.setAttribute('data-dc-gradient-reverse', String(presentation.reverse));
+            } else {
+                delete editor.dataset.gradient;
+                delete editor.dataset.gradientType;
+                delete editor.dataset.gradientAnimated;
+                delete editor.dataset.gradientReverse;
+                editor.removeAttribute('data-dc-gradient');
+                editor.removeAttribute('data-dc-gradient-animation');
+                editor.removeAttribute('data-dc-gradient-reverse');
+            }
+        }
+        row.setAttribute('data-dc-sig', buildCharRowSignature(key, entry));
+    });
+    updateLegend();
 }
 
 export function buildCharRowHtml(k, v) {
     const safeKey = escapeAttr(k);
     const safeColor = getEntryEffectiveColor(v);
     const pickerColor = getBaseColor(v, safeColor);
+    const gradientPresentation = getGradientPresentation(v);
+    const gradientClasses = gradientPresentation ? ` ${gradientPresentation.classes}` : '';
+    const gradientAttributes = gradientPresentation ? ` ${gradientPresentation.dataAttributes}` : '';
     const rowExpanded = expandedCharacterRows.has(k);
     const styleLabel = v.style || 'Normal';
     const fontName = normalizeGoogleFontName(v.font);
@@ -465,15 +824,15 @@ export function buildCharRowHtml(k, v) {
         `<span class="dc-alias-chip">${escapeHtml(a)}<span class="dc-alias-remove" data-key="${safeKey}" data-alias="${escapeAttr(a)}" title="Remove alias">&times;</span></span>`
     ).join('');
     return `
-        <div class="dc-char ${swapMode === k ? 'dc-swap-selected' : ''} ${v.keep ? 'dc-char-kept' : ''}" data-key="${safeKey}">
+        <div class="dc-char ${swapMode === k ? 'dc-swap-selected' : ''} ${v.keep ? 'dc-char-kept' : ''}${gradientClasses}" data-key="${safeKey}"${gradientAttributes}>
             <div class="dc-char-main">
                 <span class="dc-color-swatch">
-                    <span class="dc-color-dot" style="background:${safeColor};"></span>
+                    <span class="dc-color-dot${gradientPresentation ? ' dc-gradient-surface' : ''}"${gradientPresentation ? ` ${gradientPresentation.dataAttributes}` : ''} style="${escapeAttr(buildGradientSurfaceStyle(v))}"></span>
                     <input type="color" value="${pickerColor}" data-key="${safeKey}" class="dc-color-input">
                 </span>
                 <input type="text" value="${escapeAttr(pickerColor)}" data-key="${safeKey}" class="dc-color-hex text_pole" inputmode="text" autocapitalize="none" autocomplete="off" spellcheck="false" maxlength="7" aria-label="Hex color for ${escapeAttr(v.name)}" title="Enter a hex color like #ff66cc">
                 <div class="dc-char-name-wrap" title="Dialogues: ${v.dialogueCount || 0}${v.aliases?.length ? '\nAliases: ' + escapeHtml(v.aliases.join(', ')) : ''}${v.group ? '\nGroup: ' + escapeHtml(v.group) : ''}${fontName ? '\nFont: ' + escapeHtml(fontName) : ''}">
-                    <div class="dc-char-name" style="color:${safeColor};${fontStyle}">${escapeHtml(v.name)}</div>
+                    <div class="dc-char-name${gradientPresentation ? ' dc-gradient-text' : ''}"${gradientPresentation ? ` ${gradientPresentation.dataAttributes}` : ''} style="${escapeAttr(buildGradientSurfaceStyle(v, { text: true }))}${fontStyle}">${escapeHtml(v.name)}</div>
                     <div class="dc-char-meta">
                         <span class="dc-char-count">${v.dialogueCount || 0} lines</span>
                         ${statusBadges}
@@ -494,6 +853,7 @@ export function buildCharRowHtml(k, v) {
                     <button class="dc-alias menu_button" data-key="${safeKey}" title="Add alias">Add Alias</button>
                     <button class="dc-group menu_button" data-key="${safeKey}" title="Assign group">${v.group ? 'Edit Group' : 'Set Group'}</button>
                 </div>
+                ${buildGradientEditorHtml(k, v)}
             </div>` : ''}
         </div>`;
 }
@@ -511,6 +871,7 @@ export function buildCharRowSignature(k, v) {
         normalizeGoogleFontName(v.font),
         v.dialogueCount || 0,
         swapMode === k ? 1 : 0,
+        getGradientSignature(v),
         (v.aliases || []).join('\u0001'),
         v.name || ''
     ].join('\u0002');
@@ -520,7 +881,8 @@ export function applyColorInputForElement(i, options = {}) {
     const c = characterColors[i.dataset.key];
     if (!c) return false;
     if (applyCharacterBaseColor(i.dataset.key, normalizeHexColor(i.value, getBaseColor(c)), options)) {
-        queueColorStateSave();
+        queueColorStateSave({ updateList: !c.gradient });
+        if (c.gradient) refreshGradientVisualSurfaces([i.dataset.key]);
         return true;
     }
     return false;
@@ -538,7 +900,10 @@ export function applyHexInputForElement(i, options = {}) {
         toast.warning('Enter a hex color like #ff66cc.');
         return false;
     }
-    if (applyCharacterBaseColor(i.dataset.key, nextColor, options)) queueColorStateSave();
+    if (applyCharacterBaseColor(i.dataset.key, nextColor, options)) {
+        queueColorStateSave({ updateList: !c.gradient });
+        if (c.gradient) refreshGradientVisualSurfaces([i.dataset.key]);
+    }
     return true;
 }
 
@@ -596,7 +961,11 @@ function handleLockClick(lockBtn) {
 function handleSwapClick(swapBtn) {
     if (!swapMode) { setSwapMode(swapBtn.dataset.key); updateCharList(); toast.info('Click another character to swap'); }
     else if (swapMode === swapBtn.dataset.key) { setSwapMode(null); updateCharList(); }
-    else { swapColors(swapMode, swapBtn.dataset.key); setSwapMode(null); }
+    else {
+        const firstKey = swapMode;
+        setSwapMode(null);
+        swapColors(firstKey, swapBtn.dataset.key);
+    }
 }
 
 function handleStyleClick(styleBtn) {
@@ -710,12 +1079,329 @@ function handleGroupClick(groupBtn) {
     inp.onkeydown = ev => { if (ev.key === 'Enter') submit(); if (ev.key === 'Escape') inputRow.remove(); };
 }
 
+function getGradientEditorContext(control) {
+    const editor = control?.closest?.('.dc-gradient-editor');
+    const key = control?.dataset?.key || editor?.dataset?.key;
+    const entry = key ? characterColors[key] : null;
+    return { editor, key, entry };
+}
+
+function readGradientNumber(editor, selector, fallback) {
+    const rawValue = editor?.querySelector(selector)?.value;
+    if (rawValue === '' || rawValue === undefined) return fallback;
+    const value = Number(rawValue);
+    return Number.isFinite(value) ? value : fallback;
+}
+
+function synchronizeGradientColorControls(control, editor) {
+    if (control.classList.contains('dc-gradient-secondary-color')) {
+        const advancedSecond = editor.querySelector('.dc-gradient-stop[data-stop-index="1"] .dc-gradient-stop-color');
+        if (advancedSecond) advancedSecond.value = control.value;
+    } else if (control.classList.contains('dc-gradient-stop-color') && control.closest('.dc-gradient-stop')?.dataset.stopIndex === '1') {
+        const compactSecond = editor.querySelector('.dc-gradient-secondary-color');
+        if (compactSecond) compactSecond.value = control.value;
+    }
+}
+
+function readGradientFromEditor(editor, entry) {
+    const current = cloneGradient(entry?.gradient);
+    if (!editor || !current) return null;
+    const type = editor.querySelector('.dc-gradient-type')?.value === 'radial' ? 'radial' : 'linear';
+    const stops = [...editor.querySelectorAll('.dc-gradient-stop[data-gradient-secondary="true"]')].map((row, index) => {
+        const fallback = current.stops[index] || current.stops[current.stops.length - 1];
+        const baseColor = normalizeHexColor(row.querySelector('.dc-gradient-stop-color')?.value, fallback?.baseColor || getBaseColor(entry));
+        return {
+            baseColor,
+            color: baseColor,
+            position: readGradientNumber(row, '.dc-gradient-stop-position', fallback?.position ?? DEFAULT_GRADIENT_POSITION),
+        };
+    });
+    return {
+        ...current,
+        type,
+        angle: readGradientNumber(editor, '.dc-gradient-angle', current.angle),
+        x: readGradientNumber(editor, '.dc-gradient-origin-x', current.x),
+        y: readGradientNumber(editor, '.dc-gradient-origin-y', current.y),
+        primaryPosition: readGradientNumber(editor, '.dc-gradient-primary-position', current.primaryPosition),
+        stops,
+        animation: {
+            enabled: !!editor.querySelector('.dc-gradient-animation-enabled')?.checked,
+            duration: readGradientNumber(editor, '.dc-gradient-animation-duration', current.animation.duration),
+            reverse: !!editor.querySelector('.dc-gradient-animation-reverse')?.checked,
+        },
+    };
+}
+
+function synchronizeGradientEditorFromEntry(editor, entry) {
+    const gradient = normalizeGradient(entry?.gradient);
+    if (!editor || !gradient) return;
+    const primaryPosition = editor.querySelector('.dc-gradient-primary-position');
+    if (primaryPosition) primaryPosition.value = String(gradient.primaryPosition);
+    const secondaryRows = [...editor.querySelectorAll('.dc-gradient-stop[data-gradient-secondary="true"]')];
+    secondaryRows.forEach((row, index) => {
+        const stop = gradient.stops[index];
+        if (!stop) return;
+        const colorInput = row.querySelector('.dc-gradient-stop-color');
+        const positionInput = row.querySelector('.dc-gradient-stop-position');
+        if (colorInput) colorInput.value = stop.baseColor;
+        if (positionInput) positionInput.value = String(stop.position);
+    });
+    const compactSecond = editor.querySelector('.dc-gradient-secondary-color');
+    if (compactSecond && gradient.stops[0]) compactSecond.value = gradient.stops[0].baseColor;
+    const angleInput = editor.querySelector('.dc-gradient-angle');
+    if (angleInput) angleInput.value = String(gradient.angle);
+    const directionSelect = editor.querySelector('.dc-gradient-direction');
+    if (directionSelect) {
+        const isFriendlyDirection = GRADIENT_DIRECTIONS.some(direction => direction.value === gradient.angle);
+        const customOption = [...directionSelect.options].find(option => option.value === '');
+        if (customOption) customOption.textContent = `Custom (${Number(gradient.angle.toFixed(1))}°)`;
+        directionSelect.value = isFriendlyDirection ? String(gradient.angle) : '';
+    }
+    const originX = editor.querySelector('.dc-gradient-origin-x');
+    const originY = editor.querySelector('.dc-gradient-origin-y');
+    if (originX) originX.value = String(gradient.x);
+    if (originY) originY.value = String(gradient.y);
+    const duration = editor.querySelector('.dc-gradient-animation-duration');
+    if (duration) duration.value = String(gradient.animation.duration);
+}
+
+function applyGradientValue(key, gradient, { commitImmediately = false, saveImmediately = false } = {}) {
+    const entry = characterColors[key];
+    if (!entry) return false;
+    const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
+    setEntryGradient(entry, gradient);
+    applyLiveColorChangesFromSnapshot(snapshot, [key], { saveImmediately });
+    repaintDomAfterCharacterDataChange(0);
+    if (commitImmediately) commit();
+    else queueColorStateSave({ updateList: false });
+    refreshGradientVisualSurfaces([key]);
+    return true;
+}
+
+function handleGradientPrimaryInput(control, final = false) {
+    const { editor, key, entry } = getGradientEditorContext(control);
+    if (!editor || !entry) return;
+    const nextColor = normalizeHexColor(control.value, getBaseColor(entry));
+    if (!applyCharacterBaseColor(key, nextColor, { saveImmediately: final })) return;
+    editor.querySelectorAll('.dc-gradient-primary-color').forEach(input => { input.value = getBaseColor(characterColors[key]); });
+    queueColorStateSave({ updateList: false });
+    refreshGradientVisualSurfaces([key]);
+    if (final) {
+        flushColorStateSave();
+        maybeAutoRecolorAfterColorChange();
+    }
+}
+
+function handleGradientEditorMutation(control, { commitImmediately = false, final = false } = {}) {
+    const { editor, key, entry } = getGradientEditorContext(control);
+    if (!editor || !entry?.gradient) return;
+    if (control.type === 'number' && control.value !== '') {
+        const value = Number(control.value);
+        const minimum = Number(control.min);
+        const maximum = Number(control.max);
+        if (Number.isFinite(value)) control.value = String(Math.max(minimum, Math.min(maximum, value)));
+    }
+    synchronizeGradientColorControls(control, editor);
+    if (control.classList.contains('dc-gradient-direction') && control.value !== '') {
+        const angleInput = editor.querySelector('.dc-gradient-angle');
+        if (angleInput) angleInput.value = control.value;
+    } else if (control.classList.contains('dc-gradient-angle')) {
+        const directionSelect = editor.querySelector('.dc-gradient-direction');
+        if (directionSelect) {
+            const angle = Number(control.value);
+            directionSelect.value = GRADIENT_DIRECTIONS.some(direction => direction.value === angle) ? String(angle) : '';
+        }
+    }
+    const gradient = readGradientFromEditor(editor, entry);
+    if (!gradient) return;
+    applyGradientValue(key, gradient, { commitImmediately, saveImmediately: final });
+    if (final && !commitImmediately) synchronizeGradientEditorFromEntry(editor, characterColors[key]);
+    if (final && !commitImmediately) flushColorStateSave();
+}
+
+function createDefaultGradient(entry) {
+    const secondaryBaseColor = normalizeHexColor(getNextColor(), getBaseColor(entry));
+    return {
+        type: 'linear',
+        angle: DEFAULT_GRADIENT_ANGLE,
+        x: DEFAULT_GRADIENT_POSITION,
+        y: DEFAULT_GRADIENT_POSITION,
+        primaryPosition: 0,
+        stops: [{ baseColor: secondaryBaseColor, color: secondaryBaseColor, position: 100 }],
+        animation: { enabled: false, duration: DEFAULT_GRADIENT_DURATION, reverse: false },
+    };
+}
+
+function handleGradientToggle(toggleButton) {
+    const key = toggleButton.dataset.key;
+    const entry = characterColors[key];
+    if (!entry) return;
+    applyGradientValue(key, entry.gradient ? null : createDefaultGradient(entry), { commitImmediately: true, saveImmediately: true });
+}
+
+function getNewGradientStopPosition(gradient) {
+    const positions = [0, gradient.primaryPosition, ...gradient.stops.map(stop => stop.position), 100]
+        .sort((left, right) => left - right);
+    let bestStart = positions[0];
+    let bestEnd = positions[1];
+    for (let index = 1; index < positions.length - 1; index++) {
+        if (positions[index + 1] - positions[index] > bestEnd - bestStart) {
+            bestStart = positions[index];
+            bestEnd = positions[index + 1];
+        }
+    }
+    return Number(((bestStart + bestEnd) / 2).toFixed(1));
+}
+
+function handleGradientAddStop(button) {
+    const { editor, key, entry } = getGradientEditorContext(button);
+    const gradient = readGradientFromEditor(editor, entry);
+    if (!gradient || gradient.stops.length + 1 >= MAX_GRADIENT_STOPS) return;
+    const baseColor = normalizeHexColor(getNextColor(), getBaseColor(entry));
+    gradient.stops.push({ baseColor, color: baseColor, position: getNewGradientStopPosition(gradient) });
+    applyGradientValue(key, gradient, { commitImmediately: true, saveImmediately: true });
+}
+
+function handleGradientRemoveStop(button) {
+    const { editor, key, entry } = getGradientEditorContext(button);
+    const gradient = readGradientFromEditor(editor, entry);
+    const stopIndex = Number(button.closest('.dc-gradient-stop')?.dataset.stopIndex) - 1;
+    if (!gradient || gradient.stops.length <= 1 || !Number.isInteger(stopIndex) || stopIndex < 0) return;
+    gradient.stops.splice(stopIndex, 1);
+    applyGradientValue(key, gradient, { commitImmediately: true, saveImmediately: true });
+}
+
+function resolveGradientPreset(value) {
+    if (value?.startsWith('builtin:')) return getBuiltInGradientPreset(value.slice(8));
+    if (value?.startsWith('custom:')) return getCustomGradientPresets()[value.slice(7)] || null;
+    return null;
+}
+
+function applySelectedGradientPreset(key, value) {
+    const entry = characterColors[key];
+    const preset = resolveGradientPreset(value);
+    if (!entry || !preset) {
+        toast.warning('Select a gradient preset first');
+        return false;
+    }
+    const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
+    if (!applyGradientPreset(entry, preset)) {
+        toast.error('Gradient preset is invalid');
+        return false;
+    }
+    setEntryGradient(entry, entry.gradient);
+    applyLiveColorChangesFromSnapshot(snapshot, [key], { saveImmediately: true });
+    applyFastColorUiUpdates([key]);
+    commit();
+    refreshGradientVisualSurfaces([key]);
+    repaintDomAfterCharacterDataChange(0);
+    maybeAutoRecolorAfterColorChange();
+    toast.success('Gradient preset applied');
+    return true;
+}
+
+function handleGradientPresetApply(button) {
+    const { editor, key } = getGradientEditorContext(button);
+    applySelectedGradientPreset(key, editor?.querySelector('.dc-gradient-preset-picker')?.value);
+}
+
+function handleCustomGradientPresetApply(button) {
+    const { editor, key } = getGradientEditorContext(button);
+    applySelectedGradientPreset(key, editor?.querySelector('.dc-gradient-custom-preset')?.value);
+}
+
+export function refreshGradientPresetControls(preferredCustomName = '') {
+    const generalOptions = buildGradientPresetOptionsHtml();
+    const customOptions = buildGradientPresetOptionsHtml({ customOnly: true });
+    document.querySelectorAll('.dc-gradient-preset-picker').forEach(select => {
+        const previous = preferredCustomName ? `custom:${preferredCustomName}` : select.value;
+        select.innerHTML = generalOptions;
+        if ([...select.options].some(option => option.value === previous)) select.value = previous;
+    });
+    document.querySelectorAll('.dc-gradient-custom-preset').forEach(select => {
+        const previous = preferredCustomName ? `custom:${preferredCustomName}` : select.value;
+        select.innerHTML = customOptions;
+        if ([...select.options].some(option => option.value === previous)) select.value = previous;
+    });
+}
+
+function handleSaveCustomGradientPreset(button) {
+    const { editor, entry } = getGradientEditorContext(button);
+    const nameInput = editor?.querySelector('.dc-gradient-preset-name');
+    const name = normalizeGradientPresetName(nameInput?.value);
+    if (!entry?.gradient || !name) {
+        toast.warning('Enter a preset name first');
+        return;
+    }
+    const overwrite = Object.prototype.hasOwnProperty.call(getCustomGradientPresets(), name);
+    if (overwrite && !confirm(`Replace gradient preset "${name}"?`)) return;
+    if (!saveCustomGradientPreset(name, entry, { immediate: true, overwrite })) {
+        toast.error('Could not save gradient preset');
+        return;
+    }
+    nameInput.value = '';
+    refreshGradientPresetControls(name);
+    toast.success(`Gradient preset "${escapeHtml(name)}" saved`);
+}
+
+function handleRenameCustomGradientPreset(button) {
+    const { editor } = getGradientEditorContext(button);
+    const selected = editor?.querySelector('.dc-gradient-custom-preset')?.value || '';
+    const currentName = selected.startsWith('custom:') ? selected.slice(7) : '';
+    const nextInput = editor?.querySelector('.dc-gradient-preset-rename');
+    const nextName = normalizeGradientPresetName(nextInput?.value);
+    if (!currentName || !nextName) {
+        toast.warning('Select a custom preset and enter its new name');
+        return;
+    }
+    if (!renameCustomGradientPreset(currentName, nextName, { immediate: true })) {
+        toast.warning('That preset could not be renamed. The new name may already exist.');
+        return;
+    }
+    nextInput.value = '';
+    refreshGradientPresetControls(nextName);
+    toast.success(`Gradient preset renamed to "${escapeHtml(nextName)}"`);
+}
+
+function handleDeleteCustomGradientPreset(button) {
+    const { editor } = getGradientEditorContext(button);
+    const selected = editor?.querySelector('.dc-gradient-custom-preset')?.value || '';
+    const name = selected.startsWith('custom:') ? selected.slice(7) : '';
+    if (!name) {
+        toast.warning('Select a custom gradient preset first');
+        return;
+    }
+    if (!confirm(`Delete gradient preset "${name}"?`)) return;
+    if (!deleteCustomGradientPreset(name, { immediate: true })) {
+        toast.error('Could not delete gradient preset');
+        return;
+    }
+    refreshGradientPresetControls();
+    toast.success(`Gradient preset "${escapeHtml(name)}" deleted`);
+}
+
 function handleCharListClick(e) {
     const t = e.target;
     if (!t || !t.closest) return;
 
     const dotEl = t.closest('.dc-color-dot');
     if (dotEl) { handleColorDotClick(dotEl); return; }
+    const gradientToggle = t.closest('.dc-gradient-toggle');
+    if (gradientToggle) { handleGradientToggle(gradientToggle); return; }
+    const gradientAddStop = t.closest('.dc-gradient-add-stop');
+    if (gradientAddStop) { handleGradientAddStop(gradientAddStop); return; }
+    const gradientRemoveStop = t.closest('.dc-gradient-remove-stop');
+    if (gradientRemoveStop) { handleGradientRemoveStop(gradientRemoveStop); return; }
+    const gradientPresetApply = t.closest('.dc-gradient-apply-preset');
+    if (gradientPresetApply) { handleGradientPresetApply(gradientPresetApply); return; }
+    const customGradientPresetApply = t.closest('.dc-gradient-apply-custom-preset');
+    if (customGradientPresetApply) { handleCustomGradientPresetApply(customGradientPresetApply); return; }
+    const saveCustomGradientPresetButton = t.closest('.dc-gradient-save-custom-preset');
+    if (saveCustomGradientPresetButton) { handleSaveCustomGradientPreset(saveCustomGradientPresetButton); return; }
+    const renameCustomGradientPresetButton = t.closest('.dc-gradient-rename-custom-preset');
+    if (renameCustomGradientPresetButton) { handleRenameCustomGradientPreset(renameCustomGradientPresetButton); return; }
+    const deleteCustomGradientPresetButton = t.closest('.dc-gradient-delete-custom-preset');
+    if (deleteCustomGradientPresetButton) { handleDeleteCustomGradientPreset(deleteCustomGradientPresetButton); return; }
     const moreBtn = t.closest('.dc-more');
     if (moreBtn) { handleMoreClick(moreBtn); return; }
     const delBtn = t.closest('.dc-del');
@@ -750,7 +1436,21 @@ export function installCharListDelegation(list) {
 
     list.addEventListener('input', (e) => {
         const t = e.target;
-        if (t.classList && t.classList.contains('dc-color-input')) {
+        if (!t.classList) return;
+        if (t.classList.contains('dc-gradient-primary-color')) {
+            handleGradientPrimaryInput(t);
+        } else if (
+            t.classList.contains('dc-gradient-secondary-color') ||
+            t.classList.contains('dc-gradient-stop-color') ||
+            t.classList.contains('dc-gradient-primary-position') ||
+            t.classList.contains('dc-gradient-stop-position') ||
+            t.classList.contains('dc-gradient-angle') ||
+            t.classList.contains('dc-gradient-origin-x') ||
+            t.classList.contains('dc-gradient-origin-y') ||
+            t.classList.contains('dc-gradient-animation-duration')
+        ) {
+            handleGradientEditorMutation(t);
+        } else if (t.classList.contains('dc-color-input')) {
             applyColorInputForElement(t);
         }
     });
@@ -758,7 +1458,25 @@ export function installCharListDelegation(list) {
     list.addEventListener('change', (e) => {
         const t = e.target;
         if (!t.classList) return;
-        if (t.classList.contains('dc-color-input')) {
+        if (t.classList.contains('dc-gradient-type')) {
+            handleGradientEditorMutation(t, { commitImmediately: true, final: true });
+        } else if (t.classList.contains('dc-gradient-primary-color')) {
+            handleGradientPrimaryInput(t, true);
+        } else if (
+            t.classList.contains('dc-gradient-secondary-color') ||
+            t.classList.contains('dc-gradient-stop-color') ||
+            t.classList.contains('dc-gradient-primary-position') ||
+            t.classList.contains('dc-gradient-stop-position') ||
+            t.classList.contains('dc-gradient-angle') ||
+            t.classList.contains('dc-gradient-origin-x') ||
+            t.classList.contains('dc-gradient-origin-y') ||
+            t.classList.contains('dc-gradient-animation-duration') ||
+            t.classList.contains('dc-gradient-direction') ||
+            t.classList.contains('dc-gradient-animation-enabled') ||
+            t.classList.contains('dc-gradient-animation-reverse')
+        ) {
+            handleGradientEditorMutation(t, { final: true });
+        } else if (t.classList.contains('dc-color-input')) {
             applyColorInputForElement(t, { saveImmediately: true });
             maybeAutoRecolorAfterColorChange();
         } else if (t.classList.contains('dc-color-hex')) {
@@ -772,6 +1490,12 @@ export function installCharListDelegation(list) {
             e.preventDefault();
             if (applyHexInputForElement(t, { saveImmediately: true })) maybeAutoRecolorAfterColorChange();
             t.blur();
+        } else if (t.classList?.contains('dc-gradient-preset-name') && e.key === 'Enter') {
+            e.preventDefault();
+            t.closest('.dc-gradient-editor')?.querySelector('.dc-gradient-save-custom-preset')?.click();
+        } else if (t.classList?.contains('dc-gradient-preset-rename') && e.key === 'Enter') {
+            e.preventDefault();
+            t.closest('.dc-gradient-editor')?.querySelector('.dc-gradient-rename-custom-preset')?.click();
         }
     });
 
@@ -784,6 +1508,12 @@ export function installCharListDelegation(list) {
     });
 
     list.addEventListener('click', handleCharListClick);
+    list.addEventListener('toggle', (e) => {
+        const details = e.target;
+        if (!details.classList?.contains('dc-gradient-advanced')) return;
+        if (details.open) expandedGradientAdvancedRows.add(details.dataset.key);
+        else expandedGradientAdvancedRows.delete(details.dataset.key);
+    }, true);
 }
 
 // Phase 5B: Alias chips, Phase 6B: Group headers, Phase 5D: Harmony on dblclick

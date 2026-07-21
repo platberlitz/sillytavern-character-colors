@@ -1,5 +1,6 @@
 // utils.js - extracted from index.js (mechanical split)
 import { pruneReducibleCompositeEntries } from './color-blocks.js';
+import { cloneGradient, normalizeGradient } from './gradients.js';
 import { escapeHtml } from './st-api.js';
 import { settings } from './state.js';
 
@@ -67,7 +68,8 @@ export function normalizeCharacterEntry(entry, fallbackName = '') {
         style: VALID_STYLES.has(entry?.style) ? entry.style : '',
         dialogueCount: Number.isFinite(entry?.dialogueCount) && entry.dialogueCount > 0 ? Math.floor(entry.dialogueCount) : 0,
         group: String(entry?.group ?? '').trim(),
-        font: normalizeGoogleFontName(entry?.font)
+        font: normalizeGoogleFontName(entry?.font),
+        gradient: normalizeGradient(entry?.gradient),
     };
 }
 
@@ -90,6 +92,7 @@ export function normalizeCharacterColors(rawColors, options = {}) {
         if (!existing.group && normalizedEntry.group) existing.group = normalizedEntry.group;
         if (!existing.style && normalizedEntry.style) existing.style = normalizedEntry.style;
         if (!existing.font && normalizedEntry.font) existing.font = normalizedEntry.font;
+        if (!existing.gradient && normalizedEntry.gradient) existing.gradient = cloneGradient(normalizedEntry.gradient);
         if (existing.baseColor === '#888888' && normalizedEntry.baseColor !== '#888888') existing.baseColor = normalizedEntry.baseColor;
         if (existing.color === '#888888' && normalizedEntry.color !== '#888888') existing.color = normalizedEntry.color;
     }

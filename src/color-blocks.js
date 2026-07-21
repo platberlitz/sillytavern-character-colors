@@ -471,3 +471,42 @@ export function buildColorFontLookup(rawText = '') {
     }
     return colorToFont;
 }
+
+export function buildColorRenderingLookup(rawText = '') {
+    const colorToRendering = new Map();
+    const ambiguousColors = new Set();
+    const lockedColors = new Set();
+    const parsed = parseColorAssignmentsFromText(rawText);
+
+    for (const [color, names] of Object.entries(parsed.namesByColor || {})) {
+        const normalizedColor = normalizeHexColor(color, null);
+        if (!normalizedColor) continue;
+        lockedColors.add(normalizedColor);
+        if (!names || names.size !== 1) {
+            colorToRendering.delete(normalizedColor);
+            continue;
+        }
+        const [nameKey] = Array.from(names);
+        const key = resolveCharacterKeyByNameOrAlias(nameKey);
+        const entry = key ? characterColors[key] : null;
+        if (entry) colorToRendering.set(normalizedColor, { key, entry });
+        else colorToRendering.delete(normalizedColor);
+    }
+
+    for (const [key, entry] of Object.entries(characterColors)) {
+        const color = normalizeHexColor(getEntryEffectiveColor(entry), null);
+        if (!color || lockedColors.has(color) || ambiguousColors.has(color)) continue;
+        const existing = colorToRendering.get(color);
+        if (existing && existing.key !== key) {
+            colorToRendering.delete(color);
+            ambiguousColors.add(color);
+            continue;
+        }
+        colorToRendering.set(color, { key, entry });
+    }
+
+    for (const color of ambiguousColors) {
+        if (!lockedColors.has(color)) colorToRendering.delete(color);
+    }
+    return colorToRendering;
+}

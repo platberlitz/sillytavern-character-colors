@@ -473,6 +473,146 @@
     gap: 8px;
 }
 
+#dc-ext .dc-gradient-editor {
+    margin-top: 8px;
+    border: 1px solid color-mix(in srgb, var(--dc-border) 82%, transparent);
+    border-radius: 9px;
+    background: color-mix(in srgb, var(--dc-surface-soft) 68%, transparent);
+    overflow: hidden;
+}
+
+#dc-ext .dc-gradient-compact {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 8px;
+}
+
+#dc-ext .dc-gradient-compact > label,
+#dc-ext .dc-gradient-stop label,
+#dc-ext .dc-gradient-geometry label,
+#dc-ext .dc-gradient-animation-controls > label,
+#dc-ext .dc-gradient-custom-presets > label,
+#dc-ext .dc-gradient-presets > label {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    margin: 0;
+    font-size: 0.82em;
+}
+
+#dc-ext .dc-gradient-compact-colors,
+#dc-ext .dc-gradient-presets,
+#dc-ext .dc-gradient-geometry,
+#dc-ext .dc-gradient-animation-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+
+#dc-ext .dc-gradient-preview {
+    flex: 1 1 130px;
+    min-width: 100px;
+    height: 30px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 7px;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2);
+}
+
+#dc-ext .dc-gradient-editor input[type="color"] {
+    width: 34px;
+    min-width: 34px;
+    height: 28px;
+    padding: 1px;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+#dc-ext .dc-gradient-editor input[type="number"] {
+    width: 66px !important;
+    min-width: 58px;
+}
+
+#dc-ext .dc-gradient-editor select {
+    min-width: 96px;
+}
+
+#dc-ext .dc-gradient-advanced {
+    border-top: 1px solid color-mix(in srgb, var(--dc-border) 82%, transparent);
+}
+
+#dc-ext .dc-gradient-advanced > summary {
+    padding: 7px 9px;
+    font-size: 0.82em;
+    font-weight: 700;
+    cursor: pointer;
+    user-select: none;
+}
+
+#dc-ext .dc-gradient-advanced[open] > summary {
+    background: color-mix(in srgb, var(--dc-accent) 7%, transparent);
+}
+
+#dc-ext .dc-gradient-stops-advanced,
+#dc-ext .dc-gradient-animation-controls,
+#dc-ext .dc-gradient-geometry,
+#dc-ext .dc-gradient-custom-presets {
+    margin: 0 8px 8px;
+}
+
+#dc-ext .dc-gradient-stops-advanced {
+    display: grid;
+    gap: 5px;
+}
+
+#dc-ext .dc-gradient-stop {
+    display: grid;
+    grid-template-columns: minmax(92px, 1fr) auto auto auto;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 7px;
+    border: 1px solid color-mix(in srgb, var(--dc-border) 70%, transparent);
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--dc-surface-strong) 62%, transparent);
+}
+
+#dc-ext .dc-gradient-stop-label {
+    min-width: 0;
+    font-size: 0.8em;
+    font-weight: 700;
+}
+
+#dc-ext .dc-gradient-add-stop {
+    justify-self: start;
+}
+
+#dc-ext .dc-gradient-custom-presets {
+    display: grid;
+    grid-template-columns: minmax(150px, 1fr) auto minmax(150px, 1fr) auto;
+    align-items: end;
+    gap: 7px;
+    padding-top: 8px;
+    border-top: 1px dashed color-mix(in srgb, var(--dc-border) 75%, transparent);
+}
+
+#dc-ext .dc-gradient-custom-presets > label {
+    min-width: 0;
+    flex-direction: column;
+    align-items: stretch;
+}
+
+#dc-ext .dc-gradient-custom-presets .text_pole {
+    width: 100% !important;
+    min-width: 0;
+}
+
+#dc-ext .dc-gradient-editor :is(button, input, select, summary):focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--dc-accent) 80%, white);
+    outline-offset: 2px;
+}
+
 #dc-ext .dc-inline-input {
     display: flex;
     gap: 6px;
@@ -506,6 +646,112 @@
     to {
         outline: 2px solid color-mix(in srgb, var(--dc-accent) 75%, transparent);
         outline-offset: 2px;
+    }
+}
+
+.dc-gradient-text {
+    color: var(--dc-gradient-fallback, currentColor);
+    background-color: transparent;
+    background-image: var(--dc-gradient, var(--dc-text-gradient));
+    background-repeat: no-repeat;
+    background-position: 0% 50%;
+    background-size: 100% 100%;
+    background-clip: text;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    box-decoration-break: clone;
+    -webkit-box-decoration-break: clone;
+}
+
+.dc-gradient-surface {
+    background-color: var(--dc-gradient-fallback, currentColor);
+    background-image: var(--dc-gradient, var(--dc-text-gradient));
+    background-repeat: no-repeat;
+    background-position: 0% 50%;
+    background-size: 100% 100%;
+}
+
+.dc-gradient-text.dc-gradient-highlight {
+    padding: 0.04em 0.12em;
+    border-radius: 0.18em;
+    background-image:
+        linear-gradient(var(--dc-gradient-highlight), var(--dc-gradient-highlight)),
+        var(--dc-gradient);
+    background-size: 100% 100%, 100% 100%;
+    background-position: 0 0, 0% 50%;
+    background-clip: padding-box, text;
+    -webkit-background-clip: padding-box, text;
+}
+
+.dc-gradient-text.dc-gradient-animated,
+.dc-gradient-surface.dc-gradient-animated {
+    background-size: 220% 220%;
+    animation: dc-gradient-drift var(--dc-gradient-duration, 8s) ease-in-out infinite;
+    animation-direction: var(--dc-gradient-direction, alternate);
+}
+
+.dc-gradient-text.dc-gradient-highlight.dc-gradient-animated {
+    background-size: 100% 100%, 220% 220%;
+    animation-name: dc-gradient-highlight-drift;
+}
+
+@keyframes dc-gradient-drift {
+    from { background-position: 0% 50%; }
+    to { background-position: 100% 50%; }
+}
+
+@keyframes dc-gradient-highlight-drift {
+    from { background-position: 0 0, 0% 50%; }
+    to { background-position: 0 0, 100% 50%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .dc-gradient-text.dc-gradient-animated,
+    .dc-gradient-surface.dc-gradient-animated {
+        animation: none !important;
+        background-position: 50% 50%;
+    }
+
+    .dc-gradient-text.dc-gradient-highlight.dc-gradient-animated {
+        background-position: 0 0, 50% 50%;
+    }
+}
+
+@media (forced-colors: active) {
+    .dc-gradient-text {
+        color: CanvasText !important;
+        background: none !important;
+        -webkit-text-fill-color: currentColor !important;
+    }
+
+    .dc-gradient-text.dc-gradient-highlight {
+        outline: 1px solid CanvasText;
+    }
+
+    .dc-gradient-surface {
+        background: Highlight !important;
+        border-color: CanvasText !important;
+    }
+}
+
+@supports not ((background-clip: text) or (-webkit-background-clip: text)) {
+    .dc-gradient-text {
+        color: var(--dc-gradient-fallback, currentColor) !important;
+        background: none !important;
+        -webkit-text-fill-color: currentColor !important;
+    }
+}
+
+@media print {
+    .dc-gradient-text {
+        color: var(--dc-gradient-fallback, currentColor) !important;
+        background: none !important;
+        -webkit-text-fill-color: currentColor !important;
+    }
+
+    .dc-gradient-surface {
+        background-color: var(--dc-gradient-fallback, currentColor) !important;
+        background-image: none !important;
     }
 }
 
@@ -647,6 +893,41 @@
     #dc-ext .dc-char-advanced,
     #dc-ext .dc-inline-input {
         margin-left: 0;
+    }
+
+    #dc-ext .dc-gradient-compact {
+        align-items: stretch;
+    }
+
+    #dc-ext .dc-gradient-compact > .dc-gradient-toggle,
+    #dc-ext .dc-gradient-compact > .dc-gradient-preview,
+    #dc-ext .dc-gradient-compact > .dc-gradient-presets {
+        flex: 1 1 100%;
+    }
+
+    #dc-ext .dc-gradient-presets > label {
+        flex: 1 1 150px;
+    }
+
+    #dc-ext .dc-gradient-presets select {
+        width: 100%;
+    }
+
+    #dc-ext .dc-gradient-stop {
+        grid-template-columns: 1fr auto;
+    }
+
+    #dc-ext .dc-gradient-stop-label {
+        grid-column: 1 / -1;
+    }
+
+    #dc-ext .dc-gradient-stop .dc-gradient-remove-stop {
+        grid-column: 1 / -1;
+        justify-self: start;
+    }
+
+    #dc-ext .dc-gradient-custom-presets {
+        grid-template-columns: 1fr auto;
     }
 
     #dc-ext .dc-color-swatch {

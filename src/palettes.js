@@ -1,5 +1,6 @@
 // palettes.js - extracted from index.js (mechanical split)
 import { clearSpeakerRegexCache } from './attribution.js';
+import { applyGradientPresetToEntry, cloneGradient, mapGradientStops, normalizeGradient, serializeGradient, synchronizeGradientEffectiveColors } from './gradients.js';
 import { createRestoreSnapshot, showUndoToast } from './history.js';
 import { applyLiveColorChangesFromSnapshot, captureEffectiveColorSnapshot, commit, repaintDomAfterCharacterDataChange } from './live-colors.js';
 import { callLLMWithProfile } from './llm.js';
@@ -263,11 +264,17 @@ export function flipColorsForTheme() {
     const entries = Object.entries(characterColors);
     if (!entries.length) { toast.info('No characters to flip'); return; }
     const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
+    const flipEffectiveColor = color => {
+        const [h, s, l] = hexToHsl(color);
+        return hslToHex(h, s, Math.max(25, Math.min(85, 100 - l)));
+    };
     for (const [, char] of entries) {
-        const [h, s, l] = hexToHsl(getEntryEffectiveColor(char));
-        const newL = 100 - l;
-        const clampedL = Math.max(25, Math.min(85, newL));
-        setEntryFromEffectiveColor(char, hslToHex(h, s, clampedL));
+        const flippedGradient = mapGradientStops(char.gradient, stop => {
+            const color = flipEffectiveColor(stop.color);
+            return { ...stop, baseColor: deriveBaseColorFromEffectiveColor(color), color };
+        });
+        setEntryFromEffectiveColor(char, flipEffectiveColor(getEntryEffectiveColor(char)));
+        char.gradient = flippedGradient;
     }
     applyLiveColorChangesFromSnapshot(snapshot, entries.map(([key]) => key));
     commit();
@@ -289,7 +296,8 @@ export function saveColorPreset() {
         aliases: normalizeAliases(v.aliases),
         group: String(v.group ?? '').trim(),
         locked: !!v.locked,
-        keep: !!v.keep
+        keep: !!v.keep,
+        gradient: serializeGradient(v.gradient),
     }));
     if (!persistPresets(presets)) return;
     nameInput.value = '';
@@ -854,6 +862,7 @@ export function setEntryFromBaseColor(entry, baseColor) {
     if (!entry) return '#888888';
     entry.baseColor = normalizeHexColor(baseColor, getBaseColor(entry));
     entry.color = applyThemeReadabilityAndBrightness(getBaseColor(entry));
+    entry.gradient = synchronizeGradientEffectiveColors(entry.gradient, applyThemeReadabilityAndBrightness);
     return entry.color;
 }
 
@@ -862,7 +871,40 @@ export function setEntryFromEffectiveColor(entry, effectiveColor) {
     const normalizedEffective = normalizeHexColor(effectiveColor, getEntryEffectiveColor(entry));
     entry.baseColor = deriveBaseColorFromEffectiveColor(normalizedEffective);
     entry.color = normalizedEffective;
+    entry.gradient = synchronizeGradientEffectiveColors(entry.gradient, applyThemeReadabilityAndBrightness);
     return entry.color;
+}
+
+export function setEntryGradient(entry, gradient) {
+    if (!entry) return null;
+    entry.gradient = synchronizeGradientEffectiveColors(normalizeGradient(gradient), applyThemeReadabilityAndBrightness);
+    return entry.gradient;
+}
+
+export function applyGradientPreset(entry, preset) {
+    const applied = applyGradientPresetToEntry(entry, preset, applyThemeReadabilityAndBrightness);
+    if (!applied) return null;
+    entry.baseColor = applied.baseColor;
+    entry.color = applied.color;
+    entry.gradient = applied.gradient;
+    return entry.gradient;
+}
+
+export function swapEntryColorData(firstEntry, secondEntry) {
+    if (!firstEntry || !secondEntry) return false;
+    const first = {
+        baseColor: getBaseColor(firstEntry),
+        color: getEntryEffectiveColor(firstEntry),
+        gradient: cloneGradient(firstEntry.gradient),
+    };
+    const second = {
+        baseColor: getBaseColor(secondEntry),
+        color: getEntryEffectiveColor(secondEntry),
+        gradient: cloneGradient(secondEntry.gradient),
+    };
+    Object.assign(firstEntry, second);
+    Object.assign(secondEntry, first);
+    return true;
 }
 
 export function syncAllEffectiveColors() {
@@ -966,6 +1008,7 @@ export function buildCharacterEntry(name, options = {}) {
     const baseColor = colorMode === 'base' && normalizedSourceColor && !remapped
         ? normalizedSourceColor
         : deriveBaseColorFromEffectiveColor(assignedColor);
+    const gradient = synchronizeGradientEffectiveColors(normalizeGradient(options.gradient), applyThemeReadabilityAndBrightness);
 
     return {
         key,
@@ -980,7 +1023,8 @@ export function buildCharacterEntry(name, options = {}) {
             style: VALID_STYLES.has(options.style) ? options.style : '',
             dialogueCount: Number.isFinite(options.dialogueCount) && options.dialogueCount > 0 ? Math.floor(options.dialogueCount) : 0,
             group: String(options.group ?? '').trim(),
-            font: normalizeGoogleFontName(options.font)
+            font: normalizeGoogleFontName(options.font),
+            gradient,
         }
     };
 }
