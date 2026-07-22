@@ -482,7 +482,8 @@
 }
 
 #dc-ext .dc-advanced-add > summary,
-#dc-ext .dc-bulk-style-fields > summary {
+#dc-ext .dc-bulk-style-fields > summary,
+#dc-ext .dc-gradient-advanced > summary {
     display: flex;
     align-items: center;
     gap: 6px;
@@ -494,7 +495,8 @@
 }
 
 #dc-ext .dc-advanced-add > summary::before,
-#dc-ext .dc-bulk-style-fields > summary::before {
+#dc-ext .dc-bulk-style-fields > summary::before,
+#dc-ext .dc-gradient-advanced > summary::before {
     content: '▶';
     font-size: 0.72em;
     opacity: 0.8;
@@ -502,7 +504,8 @@
 }
 
 #dc-ext .dc-advanced-add[open] > summary::before,
-#dc-ext .dc-bulk-style-fields[open] > summary::before {
+#dc-ext .dc-bulk-style-fields[open] > summary::before,
+#dc-ext .dc-gradient-advanced[open] > summary::before {
     transform: rotate(90deg);
 }
 
@@ -853,9 +856,6 @@
 
 #dc-ext .dc-gradient-advanced > summary {
     padding: 7px 9px;
-    font-size: 0.82em;
-    font-weight: 700;
-    cursor: pointer;
     user-select: none;
 }
 

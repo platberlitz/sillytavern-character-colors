@@ -2080,9 +2080,41 @@ function bindNarratorEditorControls(host) {
     });
 }
 
+function captureScrollPositions(container) {
+    const positions = [];
+    let current = container;
+    while (current) {
+        if (current.scrollTop !== undefined && (current.scrollTop > 0 || current.scrollHeight > current.clientHeight || current.scrollLeft > 0)) {
+            positions.push({ element: current, top: current.scrollTop, left: current.scrollLeft });
+        }
+        current = current.parentElement;
+    }
+    if (document.documentElement) {
+        positions.push({ element: document.documentElement, top: document.documentElement.scrollTop, left: document.documentElement.scrollLeft });
+    }
+    if (document.body) {
+        positions.push({ element: document.body, top: document.body.scrollTop, left: document.body.scrollLeft });
+    }
+    positions.push({ element: window, top: window.scrollY || window.pageYOffset || 0, left: window.scrollX || window.pageXOffset || 0 });
+    return positions;
+}
+
+function restoreScrollPositions(positions) {
+    if (!positions || !positions.length) return;
+    for (const pos of positions) {
+        if (pos.element === window) {
+            window.scrollTo(pos.left, pos.top);
+        } else if (pos.element && pos.element.isConnected) {
+            pos.element.scrollTop = pos.top;
+            pos.element.scrollLeft = pos.left;
+        }
+    }
+}
+
 function renderNarratorEditor() {
     const host = document.getElementById('dc-narrator-editor');
     if (!host) return;
+    const scrollPositions = captureScrollPositions(host);
     const style = normalizeNarratorStyle(settings.narratorStyle, { legacy: settings });
     const visual = getNarratorPreviewVisual(style);
     const gradient = normalizeGradient(style.gradient);
@@ -2106,6 +2138,8 @@ function renderNarratorEditor() {
         ${gradient ? `<div class="dc-narrator-gradient-controls"><label>Type <select id="dc-narrator-gradient-type" class="text_pole"${disabled}><option value="linear"${gradient.type === 'linear' ? ' selected' : ''}>Linear</option><option value="radial"${gradient.type === 'radial' ? ' selected' : ''}>Radial</option></select></label>${geometry}<label>Primary position <input id="dc-narrator-gradient-primary-position" type="number" class="text_pole" min="0" max="100" step="0.1" value="${gradient.primaryPosition}"${disabled}>%</label><label class="checkbox_label"><input type="checkbox" id="dc-narrator-gradient-animation"${gradient.animation.enabled ? ' checked' : ''}${disabled}><span>Drift colors</span></label><span class="dc-gradient-generator-status">${escapeHtml(generatorStatus)}</span></div><div class="dc-narrator-stops">${stopRows}<button type="button" id="dc-narrator-gradient-add-stop" class="menu_button"${disabled}${gradient.stops.length + 1 >= MAX_GRADIENT_STOPS ? ' disabled' : ''}>Add stop (${gradient.stops.length + 1}/${MAX_GRADIENT_STOPS})</button></div>` : ''}`;
     setGradientPresentation(host.querySelector('#dc-narrator-preview'), visual);
     bindNarratorEditorControls(host);
+    restoreScrollPositions(scrollPositions);
+    requestAnimationFrame(() => restoreScrollPositions(scrollPositions));
 }
 
 function handleGradientToggle(toggleButton) {
@@ -2825,6 +2859,7 @@ function updateBulkToolbar(visibleEntries = getSortedEntries()) {
 
 export function updateCharList() {
     const list = document.getElementById('dc-char-list'); if (!list) return;
+    const scrollPositions = captureScrollPositions(list);
     const masterSeedInput = document.getElementById('dc-gradient-master-seed');
     if (masterSeedInput) masterSeedInput.value = settings.gradientRandomMasterSeed || 'Generated on first randomization';
     installCharListDelegation(list);
@@ -2916,6 +2951,8 @@ export function updateCharList() {
     if (focusState?.key && focusState.id) {
         list.querySelector(`.dc-char[data-key="${CSS.escape(focusState.key)}"] [data-focus-id="${CSS.escape(focusState.id)}"]`)?.focus({ preventScroll: true });
     }
+    restoreScrollPositions(scrollPositions);
+    requestAnimationFrame(() => restoreScrollPositions(scrollPositions));
 }
 
 export function setControlHelp(element, text) {
