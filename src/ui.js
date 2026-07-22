@@ -3531,8 +3531,17 @@ function buildSettingsPanelHtml() {
                 <p class="dc-section-note">Use row checkboxes for bulk actions. Keep pins important entries; Edit reveals color, lock, type, aliases, and gradients.</p>
                 <div class="dc-stack">
                     <div class="dc-field-row dc-field-row-wrap"><label class="dc-visually-hidden" for="dc-search">Search characters</label><input type="search" id="dc-search" placeholder="Search names, aliases, groups…" class="text_pole"><select id="dc-sort" class="text_pole" aria-label="Character sort"><option value="name">Sort: Name</option><option value="count">Sort: Dialogue activity</option><option value="group">Sort: Group</option></select></div>
-                    <div class="dc-field-row dc-field-row-wrap"><label class="dc-visually-hidden" for="dc-add-name">New character name</label><input type="text" id="dc-add-name" placeholder="Character name" class="text_pole" aria-describedby="dc-add-error"><label class="dc-visually-hidden" for="dc-add-group">Initial group</label><input type="text" id="dc-add-group" placeholder="Initial group (optional)" class="text_pole" list="dc-group-profile-labels" maxlength="80"><button id="dc-add-btn" class="menu_button">Add</button><button id="dc-card" class="menu_button">Add current card</button><button id="dc-avatar-color" class="menu_button">Avatar color</button><span id="dc-add-error" class="dc-field-error" aria-live="polite"></span></div>
+                    <div class="dc-field-row dc-field-row-wrap"><label class="dc-visually-hidden" for="dc-add-name">New character name</label><input type="text" id="dc-add-name" placeholder="Character name" class="text_pole" aria-describedby="dc-add-error"><button id="dc-add-btn" class="menu_button">Add</button><span id="dc-add-error" class="dc-field-error" aria-live="polite"></span></div>
+                    <details class="dc-advanced-add">
+                        <summary>Advanced</summary>
+                        <div class="dc-field-row dc-field-row-wrap" style="margin-top: 6px;">
+                            <label class="dc-visually-hidden" for="dc-add-group">Initial group</label><input type="text" id="dc-add-group" placeholder="Initial group (optional)" class="text_pole" list="dc-group-profile-labels" maxlength="80">
+                            <button id="dc-card" class="menu_button">Add current card</button>
+                            <button id="dc-avatar-color" class="menu_button">Avatar color</button>
+                        </div>
+                    </details>
                     <small><span id="dc-count">0</span> tracked characters</small>
+                    <div id="dc-char-list" class="dc-char-list"></div>
                     <section id="dc-bulk-toolbar" class="dc-bulk-toolbar" aria-label="Selected character actions" hidden>
                         <div class="dc-bulk-toolbar-head">
                             <output id="dc-selection-count" role="status" aria-live="polite">0 selected</output>
@@ -3546,7 +3555,6 @@ function buildSettingsPanelHtml() {
                         </div>
                         <details class="dc-bulk-style-fields"><summary>Style fields for copy/paste</summary><div class="dc-bulk-style-options"><label class="checkbox_label"><input type="checkbox" id="dc-bulk-style-primary"><span>Primary color</span></label><label class="checkbox_label"><input type="checkbox" id="dc-bulk-style-gradient" checked><span>Gradient</span></label><label class="checkbox_label"><input type="checkbox" id="dc-bulk-style-font" checked><span>Font</span></label><label class="checkbox_label"><input type="checkbox" id="dc-bulk-style-text" checked><span>Text style</span></label></div></details>
                     </section>
-                    <div id="dc-char-list" class="dc-char-list"></div>
                 </div>
             </details>
             <details class="dc-section">

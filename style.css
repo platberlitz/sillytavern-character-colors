@@ -481,6 +481,7 @@
     border-top: 1px solid color-mix(in srgb, var(--dc-border) 76%, transparent);
 }
 
+#dc-ext .dc-advanced-add > summary,
 #dc-ext .dc-bulk-style-fields > summary {
     display: flex;
     align-items: center;
@@ -492,6 +493,7 @@
     font-weight: 700;
 }
 
+#dc-ext .dc-advanced-add > summary::before,
 #dc-ext .dc-bulk-style-fields > summary::before {
     content: '▶';
     font-size: 0.72em;
@@ -499,6 +501,7 @@
     transition: transform 0.15s ease;
 }
 
+#dc-ext .dc-advanced-add[open] > summary::before,
 #dc-ext .dc-bulk-style-fields[open] > summary::before {
     transform: rotate(90deg);
 }
