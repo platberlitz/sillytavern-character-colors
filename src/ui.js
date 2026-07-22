@@ -2625,6 +2625,19 @@ export function refreshGroupProfileControls() {
         .map(name => `<option value="${escapeAttr(name)}"></option>`)
         .join('');
 
+    const bulkGroupSelect = document.getElementById('dc-bulk-group-select');
+    if (bulkGroupSelect) {
+        const previousBulkGroup = bulkGroupSelect.value;
+        const groupOptions = [...labels.values()]
+            .sort((left, right) => left.localeCompare(right));
+        bulkGroupSelect.innerHTML = '<option value="">Group selected…</option>' + groupOptions
+            .map(name => `<option value="${escapeAttr(name)}">${escapeHtml(name)}</option>`)
+            .join('');
+        if (previousBulkGroup && labels.has(normalizeGroupKey(previousBulkGroup))) {
+            bulkGroupSelect.value = previousBulkGroup;
+        }
+    }
+
     const previousSource = sourceSelect.value;
     sourceSelect.innerHTML = '<option value="">Keep saved style</option>' + Object.entries(characterColors)
         .sort((left, right) => left[1].name.localeCompare(right[1].name))
@@ -3526,7 +3539,7 @@ function buildSettingsPanelHtml() {
                             <button type="button" id="dc-bulk-lock" class="menu_button" data-dc-selection-required>Lock</button><button type="button" id="dc-bulk-unlock" class="menu_button" data-dc-selection-required>Unlock</button><button type="button" id="dc-bulk-keep" class="menu_button" data-dc-selection-required>Keep</button><button type="button" id="dc-bulk-unkeep" class="menu_button" data-dc-selection-required>Unkeep</button><button type="button" id="dc-bulk-randomize" class="menu_button" data-dc-selection-required>Randomize colors</button><button type="button" id="dc-bulk-delete" class="menu_button dc-danger-button" data-dc-selection-required>Delete</button>
                         </div>
                         <div class="dc-bulk-group-actions" role="group" aria-label="Bulk group actions">
-                            <label class="dc-visually-hidden" for="dc-bulk-group-name">Group for selected characters</label><input type="text" id="dc-bulk-group-name" class="text_pole" maxlength="80" placeholder="Group selected…" data-dc-selection-required><button type="button" id="dc-bulk-set-group" class="menu_button" data-dc-selection-required>Set group</button><button type="button" id="dc-bulk-clear-group" class="menu_button" data-dc-selection-required>Clear group</button>
+                            <label class="dc-visually-hidden" for="dc-bulk-group-select">Group for selected characters</label><select id="dc-bulk-group-select" class="text_pole" data-dc-selection-required><option value="">Group selected…</option></select><button type="button" id="dc-bulk-set-group" class="menu_button" data-dc-selection-required>Set group</button><button type="button" id="dc-bulk-clear-group" class="menu_button" data-dc-selection-required>Clear group</button>
                         </div>
                         <div class="dc-bulk-style-actions">
                             <div class="dc-bulk-style-buttons" role="group" aria-label="Style copy and paste"><button type="button" id="dc-copy-character-style" class="menu_button" disabled>Copy style</button><button type="button" id="dc-paste-character-style" class="menu_button" disabled>Paste style</button><span id="dc-style-clipboard-status" class="dc-status-text" role="status" aria-live="polite">No style copied</span></div>
@@ -3814,8 +3827,8 @@ function bindSettingsPanelControls($) {
     });
     $('dc-bulk-delete').onclick = e => { deleteSelectedCharacters(e.currentTarget); };
     const setSelectedGroup = () => {
-        const group = $('dc-bulk-group-name').value.trim();
-        if (!group) { toast.info('Enter a group name, or use Clear group.'); return; }
+        const group = $('dc-bulk-group-select')?.value?.trim();
+        if (!group) { toast.info('Choose a group label, or use Clear group.'); return; }
         runSelectedCharacterMutation(keys => setCharacterGroup(keys, group), {
             noChangeMessage: 'All selected characters already use that group.',
             successMessage: result => `Set group for ${result.changedKeys.length} character${result.changedKeys.length === 1 ? '' : 's'}${result.profileAppliedKeys.length ? `; applied its profile to ${result.profileAppliedKeys.length}` : ''}.`,
@@ -3826,11 +3839,6 @@ function bindSettingsPanelControls($) {
         noChangeMessage: 'The selected characters do not have a group.',
         successMessage: result => `Cleared group for ${result.changedKeys.length} character${result.changedKeys.length === 1 ? '' : 's'}.`,
     });
-    $('dc-bulk-group-name').onkeydown = e => {
-        if (e.key !== 'Enter') return;
-        e.preventDefault();
-        setSelectedGroup();
-    };
     $('dc-copy-character-style').onclick = () => {
         const selectedKeys = getSelectedCharacterKeys();
         if (selectedKeys.length !== 1) { toast.info('Select exactly one character to copy a style.'); return; }
