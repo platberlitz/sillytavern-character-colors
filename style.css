@@ -430,11 +430,12 @@
 
 #dc-ext .dc-action-block {
     display: flex;
-    align-items: center;
+    flex-direction: column;
     justify-content: space-between;
+    align-items: stretch;
     gap: 10px;
     min-width: 0;
-    padding: 10px 12px;
+    padding: 12px;
     border: 1px solid color-mix(in srgb, var(--dc-border) 85%, transparent);
     border-radius: 10px;
     background: var(--dc-surface-soft);
@@ -447,9 +448,11 @@
 }
 
 #dc-ext .dc-action-block > span {
-    display: grid;
+    display: flex;
+    flex-direction: column;
     min-width: 0;
     line-height: 1.3;
+    flex: 1 1 auto;
 }
 
 #dc-ext .dc-action-block strong {
@@ -463,11 +466,46 @@
     line-height: 1.35;
 }
 
+#dc-ext .dc-action-block > .menu_button {
+    width: 100%;
+    margin-top: auto;
+    box-sizing: border-box;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    overflow: hidden;
+    height: 32px;
+    line-height: 30px;
+    padding: 0 10px;
+    text-align: center;
+    justify-content: center;
+}
+
 #dc-ext .dc-action-control {
     display: flex;
     align-items: center;
     gap: 6px;
-    flex: 0 1 auto;
+    width: 100%;
+    margin-top: auto;
+}
+
+#dc-ext .dc-action-control > .menu_button,
+#dc-ext .dc-action-control > select.text_pole {
+    flex: 1 1 0px;
+    min-width: 0;
+    box-sizing: border-box;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    overflow: hidden;
+    height: 32px;
+    line-height: 30px;
+    padding: 0 8px;
+    text-align: center;
+    justify-content: center;
+}
+
+#dc-ext .dc-action-control > select.text_pole {
+    line-height: normal;
+    padding: 0 6px;
 }
 
 #dc-ext .dc-macro-text {
@@ -2085,8 +2123,8 @@
     }
 
     #dc-ext .dc-action-block {
-        gap: 6px;
-        padding: 6px 7px;
+        gap: 8px;
+        padding: 8px 10px;
     }
 
     #dc-ext .dc-char {
@@ -2155,15 +2193,7 @@
     }
 
     #dc-ext .dc-action-control {
-        flex-direction: column;
-        align-items: stretch;
         width: 100%;
-    }
-
-    #dc-ext .dc-action-block > .menu_button,
-    #dc-ext .dc-action-control > :is(.menu_button, .text_pole) {
-        width: 100%;
-        white-space: normal;
     }
 
     #dc-ext .dc-alias-list,
