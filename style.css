@@ -457,13 +457,14 @@
     font-weight: 700;
 }
 
-#dc-ext .dc-bulk-actions > .menu_button {
-    flex: 1 1 auto;
-}
-
+#dc-ext .dc-bulk-actions > .text_pole,
 #dc-ext .dc-bulk-group-actions > .text_pole {
     flex: 1 1 150px;
     min-width: 0;
+}
+
+#dc-ext .dc-bulk-actions > .menu_button {
+    flex: 0 0 auto;
 }
 
 #dc-ext .dc-bulk-style-actions {
@@ -2078,8 +2079,7 @@
     }
 
     #dc-ext .dc-bulk-actions > .menu_button {
-        flex-basis: calc(50% - 4px);
-        white-space: normal;
+        flex: 0 0 auto;
     }
 
     #dc-ext .dc-gradient-gallery-apply,

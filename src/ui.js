@@ -1477,7 +1477,7 @@ export function buildCharRowHtml(k, v) {
                 <div class="dc-char-name-wrap" title="Dialogues: ${v.dialogueCount || 0}${v.aliases?.length ? '\nAliases: ' + escapeHtml(v.aliases.join(', ')) : ''}${v.group ? '\nGroup: ' + escapeHtml(v.group) : ''}${fontName ? '\nFont: ' + escapeHtml(fontName) : ''}">
                     <div class="dc-char-name${gradientPresentation ? ' dc-gradient-text' : ''}"${gradientPresentation ? ` ${gradientPresentation.dataAttributes}` : ''} style="${escapeAttr(buildGradientSurfaceStyle(v, { text: true }))}${fontStyle}">${escapeHtml(v.name)}</div>
                     <div class="dc-char-meta">
-                        <span class="dc-char-count">${v.dialogueCount || 0} dialogue segment${v.dialogueCount === 1 ? '' : 's'}</span>
+                        <span class="dc-char-count">${v.dialogueCount || 0} line${v.dialogueCount === 1 ? '' : 's'}</span>
                         ${statusBadges}
                     </div>
                 </div>
@@ -2777,11 +2777,14 @@ function updateBulkToolbar(visibleEntries = getSortedEntries()) {
     toolbar.querySelectorAll('[data-dc-selection-required]').forEach(control => {
         control.disabled = selectedKeys.length === 0;
     });
-    const copyButton = toolbar.querySelector('#dc-copy-character-style');
-    const pasteButton = toolbar.querySelector('#dc-paste-character-style');
-    const styleFieldMask = getBulkStyleFieldMask();
-    if (copyButton) copyButton.disabled = selectedKeys.length !== 1 || styleFieldMask === 0;
-    if (pasteButton) pasteButton.disabled = !selectedKeys.length || !clipboard || styleFieldMask === 0;
+    const actionSelect = toolbar.querySelector('#dc-bulk-action-select');
+    if (actionSelect) {
+        const copyOpt = actionSelect.querySelector('option[value="copy"]');
+        const pasteOpt = actionSelect.querySelector('option[value="paste"]');
+        const styleFieldMask = getBulkStyleFieldMask();
+        if (copyOpt) copyOpt.disabled = selectedKeys.length !== 1 || styleFieldMask === 0;
+        if (pasteOpt) pasteOpt.disabled = !selectedKeys.length || !clipboard || styleFieldMask === 0;
+    }
     if (clipboardStatus) clipboardStatus.textContent = clipboard
         ? `Style copied from ${clipboard.sourceName}`
         : 'No style copied';
@@ -3536,15 +3539,12 @@ function buildSettingsPanelHtml() {
                             <div class="dc-bulk-selection-actions"><button type="button" id="dc-select-visible" class="menu_button" aria-controls="dc-char-list">Select visible (0)</button><button type="button" id="dc-clear-selection" class="menu_button" aria-controls="dc-char-list" disabled>Clear selection</button></div>
                         </div>
                         <div class="dc-bulk-actions" role="group" aria-label="Bulk state actions">
-                            <button type="button" id="dc-bulk-lock" class="menu_button" data-dc-selection-required>Lock</button><button type="button" id="dc-bulk-unlock" class="menu_button" data-dc-selection-required>Unlock</button><button type="button" id="dc-bulk-keep" class="menu_button" data-dc-selection-required>Keep</button><button type="button" id="dc-bulk-unkeep" class="menu_button" data-dc-selection-required>Unkeep</button><button type="button" id="dc-bulk-randomize" class="menu_button" data-dc-selection-required>Randomize colors</button><button type="button" id="dc-bulk-delete" class="menu_button dc-danger-button" data-dc-selection-required>Delete</button>
+                            <label class="dc-visually-hidden" for="dc-bulk-action-select">Bulk action</label><select id="dc-bulk-action-select" class="text_pole" data-dc-selection-required><option value="">Bulk action…</option><option value="lock">Lock</option><option value="unlock">Unlock</option><option value="keep">Keep</option><option value="unkeep">Unkeep</option><option value="randomize">Randomize colors</option><option value="copy">Copy style</option><option value="paste">Paste style</option><option value="delete">Delete</option></select><button type="button" id="dc-bulk-apply-action" class="menu_button" data-dc-selection-required>Apply</button><span id="dc-style-clipboard-status" class="dc-status-text" role="status" aria-live="polite">No style copied</span>
                         </div>
                         <div class="dc-bulk-group-actions" role="group" aria-label="Bulk group actions">
                             <label class="dc-visually-hidden" for="dc-bulk-group-select">Group for selected characters</label><select id="dc-bulk-group-select" class="text_pole" data-dc-selection-required><option value="">Group selected…</option></select><button type="button" id="dc-bulk-set-group" class="menu_button" data-dc-selection-required>Set group</button><button type="button" id="dc-bulk-clear-group" class="menu_button" data-dc-selection-required>Clear group</button>
                         </div>
-                        <div class="dc-bulk-style-actions">
-                            <div class="dc-bulk-style-buttons" role="group" aria-label="Style copy and paste"><button type="button" id="dc-copy-character-style" class="menu_button" disabled>Copy style</button><button type="button" id="dc-paste-character-style" class="menu_button" disabled>Paste style</button><span id="dc-style-clipboard-status" class="dc-status-text" role="status" aria-live="polite">No style copied</span></div>
-                            <details class="dc-bulk-style-fields"><summary>Style fields</summary><div class="dc-bulk-style-options"><label class="checkbox_label"><input type="checkbox" id="dc-bulk-style-primary"><span>Primary color</span></label><label class="checkbox_label"><input type="checkbox" id="dc-bulk-style-gradient" checked><span>Gradient</span></label><label class="checkbox_label"><input type="checkbox" id="dc-bulk-style-font" checked><span>Font</span></label><label class="checkbox_label"><input type="checkbox" id="dc-bulk-style-text" checked><span>Text style</span></label></div></details>
-                        </div>
+                        <details class="dc-bulk-style-fields"><summary>Style fields for copy/paste</summary><div class="dc-bulk-style-options"><label class="checkbox_label"><input type="checkbox" id="dc-bulk-style-primary"><span>Primary color</span></label><label class="checkbox_label"><input type="checkbox" id="dc-bulk-style-gradient" checked><span>Gradient</span></label><label class="checkbox_label"><input type="checkbox" id="dc-bulk-style-font" checked><span>Font</span></label><label class="checkbox_label"><input type="checkbox" id="dc-bulk-style-text" checked><span>Text style</span></label></div></details>
                     </section>
                     <div id="dc-char-list" class="dc-char-list"></div>
                 </div>
@@ -3618,7 +3618,7 @@ function buildSettingsPanelHtml() {
                 <div class="dc-stack">
                     <div class="dc-button-row"><button id="dc-lock-all" class="menu_button">Lock all</button><button id="dc-unlock-all" class="menu_button">Unlock all</button><button id="dc-reset" class="menu_button dc-danger-button">Reset unlocked colors</button></div>
                     <div class="dc-button-row"><button id="dc-del-locked" class="menu_button dc-danger-button">Delete locked</button><button id="dc-del-unlocked" class="menu_button dc-danger-button">Delete unlocked</button></div>
-                    <div class="dc-field-row dc-field-row-wrap"><label for="dc-del-least-threshold">Minimum dialogue segments to keep</label><input type="number" id="dc-del-least-threshold" min="0" value="3" class="text_pole"><button id="dc-del-least" class="menu_button dc-danger-button">Delete below threshold</button></div>
+                    <div class="dc-field-row dc-field-row-wrap"><label for="dc-del-least-threshold">Minimum lines to keep</label><input type="number" id="dc-del-least-threshold" min="0" value="3" class="text_pole"><button id="dc-del-least" class="menu_button dc-danger-button">Delete below threshold</button></div>
                     <button id="dc-del-dupes" class="menu_button dc-danger-button">Delete duplicate colors</button>
                 </div>
             </details>
@@ -3805,27 +3805,73 @@ function bindSettingsPanelControls($) {
         updateCharList();
         $('dc-select-visible').focus({ preventScroll: true });
     };
-    $('dc-bulk-lock').onclick = () => runSelectedCharacterMutation(keys => setCharacterLock(keys, true), {
-        noChangeMessage: 'All selected characters are already locked.',
-        successMessage: result => `Locked ${result.changedKeys.length} character${result.changedKeys.length === 1 ? '' : 's'}.`,
-    });
-    $('dc-bulk-unlock').onclick = () => runSelectedCharacterMutation(keys => setCharacterLock(keys, false), {
-        noChangeMessage: 'All selected characters are already unlocked.',
-        successMessage: result => `Unlocked ${result.changedKeys.length} character${result.changedKeys.length === 1 ? '' : 's'}.`,
-    });
-    $('dc-bulk-keep').onclick = () => runSelectedCharacterMutation(keys => setCharacterKeep(keys, true), {
-        noChangeMessage: 'All selected characters are already kept.',
-        successMessage: result => `Kept ${result.changedKeys.length} character${result.changedKeys.length === 1 ? '' : 's'}.`,
-    });
-    $('dc-bulk-unkeep').onclick = () => runSelectedCharacterMutation(keys => setCharacterKeep(keys, false), {
-        noChangeMessage: 'All selected characters are already unkept.',
-        successMessage: result => `Unkept ${result.changedKeys.length} character${result.changedKeys.length === 1 ? '' : 's'}.`,
-    });
-    $('dc-bulk-randomize').onclick = () => runSelectedCharacterMutation(randomizeCharacterColors, {
-        noChangeMessage: 'No selected colors changed. Locked characters were skipped.',
-        successMessage: result => `Randomized ${result.changedKeys.length} unlocked color${result.changedKeys.length === 1 ? '' : 's'}${result.skippedLockedKeys.length ? `; skipped ${result.skippedLockedKeys.length} locked` : ''}.`,
-    });
-    $('dc-bulk-delete').onclick = e => { deleteSelectedCharacters(e.currentTarget); };
+    $('dc-bulk-apply-action').onclick = e => {
+        const action = $('dc-bulk-action-select')?.value;
+        if (!action) {
+            toast.info('Choose a bulk action first.');
+            return;
+        }
+        if (action === 'lock') {
+            runSelectedCharacterMutation(keys => setCharacterLock(keys, true), {
+                noChangeMessage: 'All selected characters are already locked.',
+                successMessage: result => `Locked ${result.changedKeys.length} character${result.changedKeys.length === 1 ? '' : 's'}.`,
+            });
+        } else if (action === 'unlock') {
+            runSelectedCharacterMutation(keys => setCharacterLock(keys, false), {
+                noChangeMessage: 'All selected characters are already unlocked.',
+                successMessage: result => `Unlocked ${result.changedKeys.length} character${result.changedKeys.length === 1 ? '' : 's'}.`,
+            });
+        } else if (action === 'keep') {
+            runSelectedCharacterMutation(keys => setCharacterKeep(keys, true), {
+                noChangeMessage: 'All selected characters are already kept.',
+                successMessage: result => `Kept ${result.changedKeys.length} character${result.changedKeys.length === 1 ? '' : 's'}.`,
+            });
+        } else if (action === 'unkeep') {
+            runSelectedCharacterMutation(keys => setCharacterKeep(keys, false), {
+                noChangeMessage: 'All selected characters are already unkept.',
+                successMessage: result => `Unkept ${result.changedKeys.length} character${result.changedKeys.length === 1 ? '' : 's'}.`,
+            });
+        } else if (action === 'randomize') {
+            runSelectedCharacterMutation(randomizeCharacterColors, {
+                noChangeMessage: 'No selected colors changed. Locked characters were skipped.',
+                successMessage: result => `Randomized ${result.changedKeys.length} unlocked color${result.changedKeys.length === 1 ? '' : 's'}${result.skippedLockedKeys.length ? `; skipped ${result.skippedLockedKeys.length} locked` : ''}.`,
+            });
+        } else if (action === 'delete') {
+            deleteSelectedCharacters(e.currentTarget);
+        } else if (action === 'copy') {
+            const selectedKeys = getSelectedCharacterKeys();
+            if (selectedKeys.length !== 1) { toast.info('Select exactly one character to copy a style.'); return; }
+            const fieldMask = getBulkStyleFieldMask();
+            if (!fieldMask) { toast.info('Choose at least one style field.'); return; }
+            const copied = copyCharacterStyle(selectedKeys[0], fieldMask);
+            if (!copied) return;
+            copiedGradientGenerator = fieldMask & CHARACTER_STYLE_FIELD_MASKS.GRADIENT
+                ? normalizeEntryGradientGenerator(characterColors[selectedKeys[0]]?.gradientGenerator, characterColors[selectedKeys[0]]?.gradient)
+                : null;
+            updateBulkToolbar();
+            toast.success(`Copied style from ${escapeHtml(copied.sourceName)}.`);
+        } else if (action === 'paste') {
+            const fieldMask = getBulkStyleFieldMask();
+            if (!fieldMask) { toast.info('Choose at least one paste field.'); return; }
+            runSelectedCharacterMutation(keys => {
+                const result = pasteCharacterStyle(keys, fieldMask);
+                if (!(fieldMask & CHARACTER_STYLE_FIELD_MASKS.GRADIENT)) return result;
+                const changedKeys = new Set(result.changedKeys || []);
+                keys.forEach(key => {
+                    const entry = characterColors[key];
+                    if (!entry) return;
+                    const nextGenerator = copiedGradientGenerator ? { ...copiedGradientGenerator } : null;
+                    if (JSON.stringify(entry.gradientGenerator ?? null) === JSON.stringify(nextGenerator)) return;
+                    entry.gradientGenerator = nextGenerator;
+                    changedKeys.add(key);
+                });
+                return { ...result, changedKeys: [...changedKeys] };
+            }, {
+                noChangeMessage: 'The selected characters already match the copied style fields.',
+                successMessage: result => `Pasted style to ${result.changedKeys.length} character${result.changedKeys.length === 1 ? '' : 's'}.`,
+            });
+        }
+    };
     const setSelectedGroup = () => {
         const group = $('dc-bulk-group-select')?.value?.trim();
         if (!group) { toast.info('Choose a group label, or use Clear group.'); return; }
@@ -3839,40 +3885,6 @@ function bindSettingsPanelControls($) {
         noChangeMessage: 'The selected characters do not have a group.',
         successMessage: result => `Cleared group for ${result.changedKeys.length} character${result.changedKeys.length === 1 ? '' : 's'}.`,
     });
-    $('dc-copy-character-style').onclick = () => {
-        const selectedKeys = getSelectedCharacterKeys();
-        if (selectedKeys.length !== 1) { toast.info('Select exactly one character to copy a style.'); return; }
-        const fieldMask = getBulkStyleFieldMask();
-        if (!fieldMask) { toast.info('Choose at least one style field.'); return; }
-        const copied = copyCharacterStyle(selectedKeys[0], fieldMask);
-        if (!copied) return;
-        copiedGradientGenerator = fieldMask & CHARACTER_STYLE_FIELD_MASKS.GRADIENT
-            ? normalizeEntryGradientGenerator(characterColors[selectedKeys[0]]?.gradientGenerator, characterColors[selectedKeys[0]]?.gradient)
-            : null;
-        updateBulkToolbar();
-        toast.success(`Copied style from ${escapeHtml(copied.sourceName)}.`);
-    };
-    $('dc-paste-character-style').onclick = () => {
-        const fieldMask = getBulkStyleFieldMask();
-        if (!fieldMask) { toast.info('Choose at least one paste field.'); return; }
-        runSelectedCharacterMutation(keys => {
-            const result = pasteCharacterStyle(keys, fieldMask);
-            if (!(fieldMask & CHARACTER_STYLE_FIELD_MASKS.GRADIENT)) return result;
-            const changedKeys = new Set(result.changedKeys || []);
-            keys.forEach(key => {
-                const entry = characterColors[key];
-                if (!entry) return;
-                const nextGenerator = copiedGradientGenerator ? { ...copiedGradientGenerator } : null;
-                if (JSON.stringify(entry.gradientGenerator ?? null) === JSON.stringify(nextGenerator)) return;
-                entry.gradientGenerator = nextGenerator;
-                changedKeys.add(key);
-            });
-            return { ...result, changedKeys: [...changedKeys] };
-        }, {
-            noChangeMessage: 'The selected characters already match the copied style fields.',
-            successMessage: result => `Pasted style to ${result.changedKeys.length} character${result.changedKeys.length === 1 ? '' : 's'}.`,
-        });
-    };
     ['dc-bulk-style-primary', 'dc-bulk-style-gradient', 'dc-bulk-style-font', 'dc-bulk-style-text'].forEach(id => {
         $(id).onchange = () => updateBulkToolbar();
     });
@@ -4070,7 +4082,7 @@ function bindSettingsPanelControls($) {
         const min = parseInt($('dc-del-least-threshold')?.value || '3', 10);
         if (isNaN(min) || min < 0) { toast.warning('Invalid threshold'); return; }
         confirmCharacterRemoval(Object.keys(characterColors).filter(k => (characterColors[k]?.dialogueCount || 0) < min), {
-            title: `Delete characters below ${min} dialogue segments?`,
+            title: `Delete characters below ${min} lines?`,
             actionLabel: 'Deleted',
             itemLabel: 'low-dialogue character',
             emptyMessage: `No characters below ${min} dialogues`,
