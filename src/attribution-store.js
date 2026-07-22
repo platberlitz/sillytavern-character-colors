@@ -645,10 +645,20 @@ export function setAttributionOverrideRecord(overrideMap, review, options = {}) 
     const text = message === undefined ? '' : String(message?.mes ?? message?.text ?? message);
     if (message !== undefined) entry.textLength = text.length;
     const verificationStatus = boundedString(options.verificationStatus, 32).toLowerCase();
-    if (VERIFICATION_STATUS_SET.has(verificationStatus)) entry.verificationStatus = verificationStatus;
-    delete entry.verifiedHash;
-    delete entry.verifiedAt;
-    delete entry.verifiedVersion;
+    if (VERIFICATION_STATUS_SET.has(verificationStatus)) {
+        entry.verificationStatus = verificationStatus;
+    } else if (!entry.verificationStatus) {
+        entry.verificationStatus = ATTRIBUTION_VERIFICATION_STATUS.CLEAN;
+    }
+    if (options.markUnverified === true) {
+        delete entry.verifiedHash;
+        delete entry.verifiedAt;
+        delete entry.verifiedVersion;
+    } else if (expectedHash) {
+        entry.verifiedHash = expectedHash;
+        entry.verifiedAt = Date.now();
+        entry.verifiedVersion = Number(options.verifiedVersion) || 1;
+    }
     if (options.extended === true || isPlainObject(options.recordMap)) {
         const records = isPlainObject(options.recordMap)
             ? options.recordMap

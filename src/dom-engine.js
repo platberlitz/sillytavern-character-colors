@@ -579,10 +579,20 @@ export function setMessageQuoteOverride(mesIndex, msg, segmentIndex, speakerName
         entry.verificationStatus = options.verificationStatus;
     }
     streamingHeuristicCache.clear();
-    // A manual override means the LLM-verified state is no longer authoritative.
-    delete entry.verifiedHash;
-    delete entry.verifiedAt;
-    delete entry.verifiedVersion;
+    if (options.markUnverified === true) {
+        delete entry.verifiedHash;
+        delete entry.verifiedAt;
+        delete entry.verifiedVersion;
+    } else {
+        entry.verifiedHash = hashMessageText(msg?.mes);
+        entry.verifiedAt = Date.now();
+        entry.verifiedVersion = ATTRIBUTION_VERIFIER_VERSION;
+        if (!Object.values(ATTRIBUTION_VERIFICATION_STATUS).includes(entry.verificationStatus)) {
+            entry.verificationStatus = options.source === ATTRIBUTION_SOURCE.LLM
+                ? ATTRIBUTION_VERIFICATION_STATUS.AUTO_APPLIED
+                : ATTRIBUTION_VERIFICATION_STATUS.CLEAN;
+        }
+    }
     saveChatMetadata();
     return true;
 }

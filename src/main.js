@@ -141,16 +141,8 @@ export function registerEventHandlers() {
             cancelStreamingAttributionVerification();
             scheduleDomRefreshSeries(0);
             scheduleCustomFontRefresh(0);
-            // Run post-generation verification sweeps to make absolutely sure everything is verified.
-            queueAutoAttributionVerificationForRenderedMessages({ force: true, delay: 300 });
-            setTimeout(() => {
-                if (isStreamingGenerationActive) return;
-                queueAutoAttributionVerificationForRenderedMessages({ force: true, delay: 0 });
-            }, 1000);
-            setTimeout(() => {
-                if (isStreamingGenerationActive) return;
-                queueAutoAttributionVerificationForRenderedMessages({ force: true, delay: 0 });
-            }, 2500);
+            // Run post-generation verification sweep for unverified rendered messages.
+            queueAutoAttributionVerificationForRenderedMessages({ delay: 300 });
         },
         chatCreated: resetDialogueCountsForNewChat,
         chatChanged: handleChatChanged,
