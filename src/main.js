@@ -7,18 +7,29 @@ import { scheduleCustomFontRefresh } from './fonts.js';
 import { redo, undo } from './history.js';
 import { commit, onNewMessage } from './live-colors.js';
 import { populateProfileDropdown } from './llm.js';
+import { detectTheme, getReadableSurfaceSignature, invalidateThemeCache } from './palettes.js';
 import { buildMinimalPromptInstruction, injectPrompt } from './prompts.js';
 import { eventSource, event_types, getContext } from './st-api.js';
 import { attributionChatGeneration, autoSyncPendingRecord, characterColors, expandedCharacterRows, isDomEngine, isStreamingGenerationActive, lastCharKey, lastProcessedMessageSignature, pendingAttributionVerifications, runtimeState, setAttributionChatGeneration, setIsStreamingGenerationActive, setLastCharKey, setLastProcessedMessageSignature, setPendingAttributionVerifications, setSwapMode, settings, streamingHeuristicCache, swapMode } from './state.js';
-import { confirmAutoSyncRecord, doAutoSyncMarkersMatch, ensureRegexScript, getAutoSyncRecord, getCharKey, initAutoSync, loadData, migrateLegacyLocalStorageIfNeeded, tryLoadFromCard, updateAutoSyncUI } from './storage.js';
-import { clearAutoColorizeIndicators, createUI, syncUIWithSettings, updateCharList } from './ui.js';
+import { confirmAutoSyncRecord, doAutoSyncMarkersMatch, ensureRegexScript, getAutoSyncRecord, getCharKey, getStorageKey, initAutoSync, loadData, migrateLegacyLocalStorageIfNeeded, migrateRenamedCharacterStorage, tryLoadFromCard, updateAutoSyncUI } from './storage.js';
+import { applyThemeOrBrightnessChange, clearAutoColorizeIndicators, createUI, syncUIWithSettings, updateCharList } from './ui.js';
 import { cancelStreamingAttributionVerification, clearAutoAttributionVerificationQueue, queueAutoAttributionVerificationForRenderedMessages, scheduleStreamingAttributionVerification } from './verify.js';
+
+let lastAppliedAutoTheme = null;
+let lastAppliedAutoSurface = null;
+let themeRefreshTimer = null;
 
 export function registerKeyboardShortcuts() {
     if (runtimeState.keyboardSetup) return;
     document.addEventListener('keydown', e => {
-        if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey && document.activeElement?.closest('#dc-ext')) { e.preventDefault(); undo(); }
-        if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey)) && document.activeElement?.closest('#dc-ext')) { e.preventDefault(); redo(); }
+        const eventTarget = e.target?.closest ? e.target : e.target?.parentElement;
+        const isEditing = eventTarget?.isContentEditable
+            || eventTarget?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false" i])');
+        if (isEditing) return;
+
+        const key = e.key.toLowerCase();
+        if ((e.ctrlKey || e.metaKey) && key === 'z' && !e.shiftKey && document.activeElement?.closest('#dc-ext')) { e.preventDefault(); undo(); }
+        if ((e.ctrlKey || e.metaKey) && (key === 'y' || (key === 'z' && e.shiftKey)) && document.activeElement?.closest('#dc-ext')) { e.preventDefault(); redo(); }
     });
     runtimeState.keyboardSetup = true;
 }
@@ -76,8 +87,15 @@ export function handleChatChanged() {
         scheduleCustomFontRefresh(0);
     });
     setTimeout(() => { setupChatObserver(); startDomHealthCheck(); scheduleDomSettleRefresh(DOM_RETRY_REFRESH_DELAYS); scheduleCustomFontRefresh(0); }, 250);
-    if (settings.autoScanOnLoad !== false && !Object.keys(characterColors).length) {
+    const shouldInitialScan = settings.enabled
+        && settings.autoScanOnLoad !== false
+        && !Object.keys(characterColors).length;
+    const scanGeneration = attributionChatGeneration;
+    const scanStorageKey = getStorageKey();
+    if (shouldInitialScan) {
         setTimeout(() => {
+            if (!settings.enabled || settings.autoScanOnLoad === false) return;
+            if (scanGeneration !== attributionChatGeneration || scanStorageKey !== getStorageKey()) return;
             if (document.querySelectorAll('.mes').length) scanAllMessages();
             stripColorBlocksFromDisplay();
             setupChatObserver();
@@ -135,7 +153,26 @@ export function registerEventHandlers() {
         },
         chatCreated: resetDialogueCountsForNewChat,
         chatChanged: handleChatChanged,
+        characterRenamed: (oldValue, newValue) => {
+            void migrateRenamedCharacterStorage(oldValue, newValue)
+                .then(result => {
+                    if (!result?.ok) console.warn('[Dialogue Colors] Character storage rename migration was not persisted.', result);
+                })
+                .catch(error => console.warn('[Dialogue Colors] Character storage rename migration failed.', error));
+        },
         settingsUpdated: () => {
+            clearTimeout(themeRefreshTimer);
+            themeRefreshTimer = setTimeout(() => {
+                invalidateThemeCache();
+                const currentTheme = settings.themeMode === 'auto' ? detectTheme() : null;
+                const currentSurface = settings.themeMode === 'auto' ? getReadableSurfaceSignature() : null;
+                const themeChanged = lastAppliedAutoTheme && currentTheme && (
+                    currentTheme !== lastAppliedAutoTheme || currentSurface !== lastAppliedAutoSurface
+                );
+                lastAppliedAutoTheme = currentTheme;
+                lastAppliedAutoSurface = currentSurface;
+                if (themeChanged) applyThemeOrBrightnessChange(() => {}, { saveImmediately: true });
+            }, 80);
             const record = getAutoSyncRecord(false);
             if (!record) return;
             if (!autoSyncPendingRecord || doAutoSyncMarkersMatch(record, autoSyncPendingRecord)) {
@@ -143,6 +180,7 @@ export function registerEventHandlers() {
             }
         },
     };
+    lastAppliedAutoTheme = null;
     eventSource.on(event_types.GENERATION_AFTER_COMMANDS, runtimeState.eventHandlers.generationAfterCommands);
     eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, runtimeState.eventHandlers.characterMessageRendered);
     if (event_types.USER_MESSAGE_RENDERED) eventSource.on(event_types.USER_MESSAGE_RENDERED, runtimeState.eventHandlers.messageRendered);
@@ -154,6 +192,7 @@ export function registerEventHandlers() {
     if (event_types.CHAT_CREATED) eventSource.on(event_types.CHAT_CREATED, runtimeState.eventHandlers.chatCreated);
     if (event_types.GROUP_CHAT_CREATED) eventSource.on(event_types.GROUP_CHAT_CREATED, runtimeState.eventHandlers.chatCreated);
     eventSource.on(event_types.CHAT_CHANGED, runtimeState.eventHandlers.chatChanged);
+    if (event_types.CHARACTER_RENAMED) eventSource.on(event_types.CHARACTER_RENAMED, runtimeState.eventHandlers.characterRenamed);
     eventSource.on(event_types.SETTINGS_UPDATED, runtimeState.eventHandlers.settingsUpdated);
     eventSource.on(event_types.CHAT_CHANGED, () => populateProfileDropdown());
     runtimeState.eventsRegistered = true;
@@ -181,44 +220,14 @@ export function registerDialogueColorsMacro() {
 export function init() {
     migrateLegacyLocalStorageIfNeeded();
     loadData();
+    invalidateThemeCache();
+    lastAppliedAutoTheme = settings.themeMode === 'auto' ? detectTheme() : null;
+    lastAppliedAutoSurface = settings.themeMode === 'auto' ? getReadableSurfaceSignature() : null;
+    if (lastAppliedAutoTheme) applyThemeOrBrightnessChange(() => {}, { saveImmediately: true });
     initAutoSync();
     setTimeout(() => ensureRegexScript(), 1000);
     setupContextMenu();
     registerDialogueColorsMacro();
-
-    // Phase 6C: Inject mobile CSS for larger touch targets
-    let mobileStyle = document.getElementById('dc-mobile-style');
-    if (!mobileStyle) {
-        mobileStyle = document.createElement('style');
-        mobileStyle.id = 'dc-mobile-style';
-        mobileStyle.textContent = `
-        .dc-auto-colorize-indicator {
-            position: absolute;
-            top: 4px;
-            right: 8px;
-            font-size: 0.75em;
-            color: var(--SmartThemeQuoteColor, #888);
-            opacity: 0.8;
-            animation: dc-pulse 1.2s ease-in-out infinite;
-            pointer-events: none;
-            z-index: 1;
-        }
-        @keyframes dc-pulse {
-            0%, 100% { opacity: 0.4; }
-            50% { opacity: 1; }
-        }
-        @media (max-width: 768px) {
-            #dc-ext .menu_button { min-height: 36px; min-width: 36px; font-size: 0.85em; }
-            #dc-ext input[type="checkbox"] { width: 18px; height: 18px; }
-            #dc-ext .dc-char .menu_button { min-height: 30px; min-width: 30px; }
-            #dc-ext input[type="color"] { width: 28px !important; height: 28px !important; }
-            #dc-ext details summary { padding: 8px 4px; }
-            #dc-harmony-popup { flex-wrap: wrap; max-width: 200px; }
-            #dc-harmony-popup .dc-harmony-swatch { width: 32px !important; height: 32px !important; }
-        }
-    `;
-        document.head.appendChild(mobileStyle);
-    }
 
     let waitAttempts = 0;
     const waitUI = setInterval(() => {

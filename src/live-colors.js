@@ -9,9 +9,11 @@ import { applyThemeReadabilityAndBrightness, getBaseColor, getEntryEffectiveColo
 import { buildColorMetadataPromptLines, buildLLMColorizeRules, buildThoughtSymbolColorPromptRule, formatColorBlockPair, getThoughtDelimiterSymbols, injectPrompt } from './prompts.js';
 import { generateQuietPrompt, getContext } from './st-api.js';
 import { COLOR_STATE_SAVE_DELAY_MS, LIVE_CHAT_SAVE_DELAY_MS, characterColors, colorStateSaveTimer, isAutoColorizing, isColorizing, isDomEngine, isRecoloring, lastProcessedMessageSignature, liveChatSaveTimer, pendingColorStateHistory, pendingColorStateInjectPrompt, pendingColorStateSaveData, pendingColorStateUpdateList, pendingLiveChatSave, setColorStateSaveTimer, setIsAutoColorizing, setIsColorizing, setIsRecoloring, setLastProcessedMessageSignature, setLiveChatSaveTimer, setPendingColorStateHistory, setPendingColorStateInjectPrompt, setPendingColorStateSaveData, setPendingColorStateUpdateList, setPendingLiveChatSave, settings } from './state.js';
-import { saveData } from './storage.js';
-import { clearAutoColorizeIndicators, hideAutoColorizeIndicator, setColorizeButtonBusy, setRecolorButtonBusy, showAutoColorizeIndicator, updateCharList, updateLegend } from './ui.js';
+import { getStorageKey, saveData } from './storage.js';
+import { clearAutoColorizeIndicators, hideAutoColorizeIndicator, setColorizeButtonBusy, setRecolorButtonBusy, showAutoColorizeIndicator, updateCharList, updateLegend, updateStorageScopeStatus } from './ui.js';
 import { isCompositeSpeakerLabel, normalizeHexColor, stripColorBlocks, stripFontTags, toast, unwrapCodeFence } from './utils.js';
+
+let pendingAutoColorizeRetry = false;
 
 export function normalizeColorReplacementMap(replacements) {
     const normalized = {};
@@ -311,10 +313,13 @@ export function flushColorStateSave() {
     setPendingColorStateUpdateList(false);
     setPendingColorStateInjectPrompt(false);
     if (shouldSaveHistory) saveHistory();
-    if (shouldSaveData) saveData();
+    if (shouldSaveData) {
+        saveData();
+        updateStorageScopeStatus();
+    }
     if (shouldInjectPrompt) injectPrompt();
     if (shouldUpdateList) updateCharList();
-    updateLegend();
+    if (!shouldUpdateList || !document.getElementById('dc-char-list')) updateLegend();
 }
 
 // Synchronous commit of a character/color mutation. Replaces the repeated
@@ -322,10 +327,14 @@ export function flushColorStateSave() {
 // Pass `false` for any step to opt out (e.g. commit({ history: false })).
 export function commit(options = {}) {
     if (options.history !== false) saveHistory();
-    if (options.data !== false) saveData();
+    if (options.data !== false) {
+        saveData();
+        updateStorageScopeStatus();
+    }
     if (options.inject !== false) injectPrompt();
-    if (options.updateList !== false) updateCharList();
-    if (options.legend !== false) updateLegend();
+    const shouldUpdateList = options.updateList !== false;
+    if (shouldUpdateList) updateCharList();
+    if (options.legend !== false && (!shouldUpdateList || !document.getElementById('dc-char-list'))) updateLegend();
 }
 
 export function normalizeColorizedTextForComparison(text) {
@@ -797,8 +806,13 @@ export async function colorizeMessages(targetMode = 'all') {
 
 export function onNewMessage() {
     if (!settings.enabled || !settings.autoScanNewMessages) return;
+    const scheduledContext = getContext();
+    const scheduledChat = scheduledContext?.chat;
+    const scheduledStorageKey = getStorageKey();
     setTimeout(async () => {
         const ctx = getContext();
+        if (!settings.enabled || !settings.autoScanNewMessages
+            || ctx?.chat !== scheduledChat || getStorageKey() !== scheduledStorageKey) return;
         const chat = ctx?.chat || [];
         if (!chat.length) return;
         const lastMsg = chat[chat.length - 1];
@@ -808,6 +822,11 @@ export function onNewMessage() {
         if (signature === lastProcessedMessageSignature) {
             stripColorBlockFromElement(document.querySelector('.mes:last-child .mes_text'));
             scheduleDomRefreshSeries();
+            return;
+        }
+        if (settings.autoColorize && !lastMsg.is_user && isAutoColorizing && !/\[COLORS?:[^\]]*\]/i.test(text)) {
+            pendingAutoColorizeRetry = true;
+            setLastProcessedMessageSignature('');
             return;
         }
         setLastProcessedMessageSignature(signature);
@@ -869,7 +888,12 @@ export function onNewMessage() {
         }
 
         // Auto-colorize fallback: if model produced no color output at all
-        if (!foundColorBlock && settings.autoColorize && !lastMsg.is_user && !isAutoColorizing) {
+        if (!foundColorBlock && settings.autoColorize && !lastMsg.is_user && isAutoColorizing) {
+            pendingAutoColorizeRetry = true;
+            setLastProcessedMessageSignature('');
+            return;
+        }
+        if (!foundColorBlock && settings.autoColorize && !lastMsg.is_user) {
             const hasExistingColors = collectFontColorsFromText(text).size > 0;
             if (!hasExistingColors) {
                 setIsAutoColorizing(true);
@@ -926,6 +950,10 @@ export function onNewMessage() {
                     setIsAutoColorizing(false);
                     hideAutoColorizeIndicator(lastMesEl);
                     clearAutoColorizeIndicators();
+                    if (pendingAutoColorizeRetry) {
+                        pendingAutoColorizeRetry = false;
+                        onNewMessage();
+                    }
                 }
             }
         }

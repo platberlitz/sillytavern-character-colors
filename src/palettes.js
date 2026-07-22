@@ -35,6 +35,10 @@ export let cachedTheme = null;
 export let cachedThemeBackground = null;
 
 export let cachedIsDark = null;
+let cachedThemeCheckedAt = 0;
+let cachedContrastSurface = null;
+let cachedContrastSurfaceCheckedAt = 0;
+let closeActiveHarmonyPopup = null;
 
 export function getPresets() {
     const presets = getAutoSyncRecord(true).presets;
@@ -665,7 +669,7 @@ export async function generateCustomPaletteFromWords(inputName = '', inputNotes 
     const notes = String(inputNotes || inlineInputs.notes || '');
     const customs = getCustomPalettes();
     if (customs[name] && !shouldOverwritePalette()) {
-        toast.warning(`Custom palette "${escapeHtml(name)}" exists. Enable "Overwrite existing" to replace it.`);
+        toast.warning(`Custom palette "${escapeHtml(name)}" exists. Enable "Allow replacing an existing palette" to replace it.`);
         return;
     }
 
@@ -700,7 +704,7 @@ export function saveCustomPalette() {
     if (!colors.length) { toast.warning('No characters to save palette from'); return; }
     const customs = getCustomPalettes();
     if (customs[name] && !shouldOverwritePalette()) {
-        toast.warning(`Custom palette "${escapeHtml(name)}" exists. Enable "Overwrite existing" to replace it.`);
+        toast.warning(`Custom palette "${escapeHtml(name)}" exists. Enable "Allow replacing an existing palette" to replace it.`);
         return;
     }
     customs[name] = colors;
@@ -780,45 +784,79 @@ export function getHarmonySuggestions(hex) {
 // Phase 6B: Group sorting support
 
 export function showHarmonyPopup(key, anchorEl) {
-    const existing = document.getElementById('dc-harmony-popup');
-    if (existing) existing.remove();
+    closeActiveHarmonyPopup?.({ restoreFocus: false });
     const char = characterColors[key];
     if (!char) return;
     const suggestions = getHarmonySuggestions(getBaseColor(char));
     const popup = document.createElement('div');
     popup.id = 'dc-harmony-popup';
+    popup.className = 'dc-harmony-popup';
+    popup.setAttribute('role', 'dialog');
+    popup.setAttribute('aria-modal', 'false');
+    popup.setAttribute('aria-label', `Color harmony suggestions for ${char.name}`);
     const rect = anchorEl.getBoundingClientRect();
-    popup.style.cssText = `position:fixed;left:${rect.left}px;top:${rect.bottom + 4}px;background:var(--SmartThemeBlurTintColor, #1a1a2e);border:1px solid var(--SmartThemeBorderColor, #4a4a6a);border-radius:6px;padding:8px;z-index:10001;display:flex;gap:6px;align-items:center;box-shadow:0 4px 12px rgba(0,0,0,0.5);`;
-    popup.innerHTML = suggestions.map(s => `<div class="dc-harmony-swatch" data-color="${s.color}" title="${s.label}: ${s.color}" style="width:24px;height:24px;border-radius:4px;background:${s.color};cursor:pointer;border:2px solid transparent;transition:border-color 0.15s;"></div>`).join('');
+    popup.style.left = `${rect.left}px`;
+    popup.style.top = `${rect.bottom + 4}px`;
+    popup.innerHTML = suggestions.map(s => `<button type="button" class="dc-harmony-swatch" data-color="${s.color}" aria-label="Use ${s.label} color ${s.color}" title="${s.label}: ${s.color}" style="--dc-harmony-color:${s.color};"><span>${s.label}</span></button>`).join('');
     document.body.appendChild(popup);
     const popupRect = popup.getBoundingClientRect();
     if (popupRect.right > window.innerWidth) popup.style.left = (window.innerWidth - popupRect.width - 8) + 'px';
     if (popupRect.bottom > window.innerHeight) popup.style.top = (window.innerHeight - popupRect.height - 8) + 'px';
+    let closed = false;
+    const close = ({ restoreFocus = true } = {}) => {
+        if (closed) return;
+        closed = true;
+        document.removeEventListener('pointerdown', onOutsidePointer, true);
+        document.removeEventListener('keydown', onKeyDown, true);
+        document.removeEventListener('focusin', onFocusIn, true);
+        popup.remove();
+        if (closeActiveHarmonyPopup === close) closeActiveHarmonyPopup = null;
+        if (restoreFocus && anchorEl?.isConnected) anchorEl.focus({ preventScroll: true });
+    };
+    closeActiveHarmonyPopup = close;
+    const onOutsidePointer = event => { if (!popup.contains(event.target) && event.target !== anchorEl) close({ restoreFocus: false }); };
+    const onFocusIn = event => { if (!popup.contains(event.target) && event.target !== anchorEl) close({ restoreFocus: false }); };
+    const onKeyDown = event => {
+        if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(); }
+    };
     popup.querySelectorAll('.dc-harmony-swatch').forEach(swatch => {
-        swatch.onmouseenter = () => { swatch.style.borderColor = '#fff'; };
-        swatch.onmouseleave = () => { swatch.style.borderColor = 'transparent'; };
         swatch.onclick = () => {
+            const nextColor = swatch.dataset.color;
+            close();
             const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
-            setEntryFromBaseColor(char, swatch.dataset.color);
+            setEntryFromBaseColor(char, nextColor);
             applyLiveColorChangesFromSnapshot(snapshot, [key]);
             commit();
-            popup.remove();
         };
     });
-    const closePopup = e => { if (!popup.contains(e.target)) { popup.remove(); document.removeEventListener('mousedown', closePopup); } };
-    setTimeout(() => document.addEventListener('mousedown', closePopup), 10);
+    setTimeout(() => {
+        document.addEventListener('pointerdown', onOutsidePointer, true);
+        document.addEventListener('keydown', onKeyDown, true);
+        document.addEventListener('focusin', onFocusIn, true);
+    }, 0);
+    popup.querySelector('.dc-harmony-swatch')?.focus({ preventScroll: true });
 }
 
 export function detectTheme() {
+    const now = Date.now();
+    if (cachedTheme && now - cachedThemeCheckedAt < 250) return cachedTheme;
     const background = getComputedStyle(document.body).backgroundColor || '';
-    if (cachedTheme && cachedThemeBackground === background) return cachedTheme;
+    cachedThemeCheckedAt = now;
+    if (cachedTheme && background === cachedThemeBackground) return cachedTheme;
     const m = background.match(/\d+/g);
     cachedTheme = m && m.length >= 3 && (parseInt(m[0]) * 299 + parseInt(m[1]) * 587 + parseInt(m[2]) * 114) / 1000 < 128 ? 'dark' : 'light';
     cachedThemeBackground = background;
     return cachedTheme;
 }
 
-export function invalidateThemeCache() { cachedTheme = null; cachedThemeBackground = null; cachedIsDark = null; }
+export function invalidateThemeCache() {
+    cachedTheme = null;
+    cachedThemeBackground = null;
+    cachedThemeCheckedAt = 0;
+    cachedContrastSurface = null;
+    cachedContrastSurfaceCheckedAt = 0;
+    cachedIsDark = null;
+}
 
 export function getThemeLightnessBounds() {
     const mode = settings.themeMode === 'auto' ? detectTheme() : settings.themeMode;
@@ -832,13 +870,101 @@ export function getBrightnessOffset() {
     return Number.isFinite(brightness) ? Math.max(-100, Math.min(100, brightness)) : 0;
 }
 
+function parseCssColor(value) {
+    const normalizedHex = normalizeHexColor(value, null);
+    if (normalizedHex) {
+        return {
+            r: parseInt(normalizedHex.slice(1, 3), 16),
+            g: parseInt(normalizedHex.slice(3, 5), 16),
+            b: parseInt(normalizedHex.slice(5, 7), 16),
+            a: 1,
+        };
+    }
+    const match = String(value || '').match(/^rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:\s*[,/]\s*([\d.]+%?))?\s*\)$/i);
+    if (!match) return null;
+    const alpha = match[4]?.endsWith('%') ? Number(match[4].slice(0, -1)) / 100 : Number(match[4] ?? 1);
+    return {
+        r: Math.max(0, Math.min(255, Number(match[1]))),
+        g: Math.max(0, Math.min(255, Number(match[2]))),
+        b: Math.max(0, Math.min(255, Number(match[3]))),
+        a: Number.isFinite(alpha) ? Math.max(0, Math.min(1, alpha)) : 1,
+    };
+}
+
+function rgbToHex({ r, g, b }) {
+    const channel = value => Math.round(value).toString(16).padStart(2, '0');
+    return `#${channel(r)}${channel(g)}${channel(b)}`;
+}
+
+function getContrastSurfaceColor() {
+    if (typeof document === 'undefined') return settings.themeMode === 'dark' ? '#202328' : '#f5f5f5';
+    const now = Date.now();
+    if (cachedContrastSurface && now - cachedContrastSurfaceCheckedAt < 250) return cachedContrastSurface;
+    const fallback = detectTheme() === 'dark'
+        ? { r: 32, g: 35, b: 40, a: 1 }
+        : { r: 245, g: 245, b: 245, a: 1 };
+    const target = document.querySelector('#chat .mes_text, .mes_text') || document.body;
+    const ancestors = [];
+    for (let element = target; element; element = element.parentElement) ancestors.push(element);
+    let surface = fallback;
+    for (const element of ancestors.reverse()) {
+        const layer = parseCssColor(getComputedStyle(element).backgroundColor);
+        if (!layer || layer.a <= 0) continue;
+        surface = {
+            r: layer.r * layer.a + surface.r * (1 - layer.a),
+            g: layer.g * layer.a + surface.g * (1 - layer.a),
+            b: layer.b * layer.a + surface.b * (1 - layer.a),
+            a: 1,
+        };
+    }
+    cachedContrastSurface = rgbToHex(surface);
+    cachedContrastSurfaceCheckedAt = now;
+    return cachedContrastSurface;
+}
+
+function relativeLuminance(hexColor) {
+    const color = parseCssColor(hexColor) || { r: 0, g: 0, b: 0 };
+    const linear = channel => {
+        const value = channel / 255;
+        return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+    };
+    return linear(color.r) * 0.2126 + linear(color.g) * 0.7152 + linear(color.b) * 0.0722;
+}
+
+export function getContrastRatio(foreground, background) {
+    const first = relativeLuminance(normalizeHexColor(foreground));
+    const second = relativeLuminance(normalizeHexColor(background));
+    const lighter = Math.max(first, second);
+    const darker = Math.min(first, second);
+    return (lighter + 0.05) / (darker + 0.05);
+}
+
+export function ensureReadableContrast(hexColor, surfaceColor = null, minimumRatio = 4.5) {
+    const normalized = normalizeHexColor(hexColor);
+    const surface = normalizeHexColor(surfaceColor, null) || getContrastSurfaceColor();
+    if (getContrastRatio(normalized, surface) >= minimumRatio) return normalized;
+    const [hue, saturation, lightness] = hexToHsl(normalized);
+    const towardLight = getContrastRatio('#ffffff', surface) >= getContrastRatio('#000000', surface);
+    const end = towardLight ? 100 : 0;
+    const direction = towardLight ? 1 : -1;
+    for (let nextLightness = lightness + direction; towardLight ? nextLightness <= end : nextLightness >= end; nextLightness += direction) {
+        const candidate = hslToHex(hue, saturation, nextLightness);
+        if (getContrastRatio(candidate, surface) >= minimumRatio) return candidate;
+    }
+    return towardLight ? '#ffffff' : '#000000';
+}
+
+export function getReadableSurfaceSignature() {
+    return getContrastSurfaceColor();
+}
+
 export function applyThemeReadabilityAndBrightness(hexColor) {
     const normalized = normalizeHexColor(hexColor);
     const [h, s, l] = hexToHsl(normalized);
     const offset = getBrightnessOffset();
     const { minLightness, maxLightness } = getThemeLightnessBounds();
     const adjustedL = Math.max(minLightness, Math.min(maxLightness, l + offset));
-    return hslToHex(h, s, adjustedL);
+    return ensureReadableContrast(hslToHex(h, s, adjustedL));
 }
 
 export function deriveBaseColorFromEffectiveColor(hexColor) {
@@ -868,7 +994,7 @@ export function setEntryFromBaseColor(entry, baseColor) {
 
 export function setEntryFromEffectiveColor(entry, effectiveColor) {
     if (!entry) return '#888888';
-    const normalizedEffective = normalizeHexColor(effectiveColor, getEntryEffectiveColor(entry));
+    const normalizedEffective = ensureReadableContrast(normalizeHexColor(effectiveColor, getEntryEffectiveColor(entry)));
     entry.baseColor = deriveBaseColorFromEffectiveColor(normalizedEffective);
     entry.color = normalizedEffective;
     entry.gradient = synchronizeGradientEffectiveColors(entry.gradient, applyThemeReadabilityAndBrightness);
@@ -980,7 +1106,6 @@ export function swapEntryColorData(firstEntry, secondEntry) {
 export function syncAllEffectiveColors() {
     for (const entry of Object.values(characterColors)) {
         if (!entry) continue;
-        if (entry.locked) continue;
         const baseColor = getBaseColor(entry);
         if (baseColor) {
             setEntryFromBaseColor(entry, baseColor);
@@ -1048,7 +1173,7 @@ export function resolveUniqueAssignedColor(preferredColor, excludeKeys = []) {
     }
 
     for (const candidate of candidates) {
-        const normalizedCandidate = normalizeHexColor(candidate, null);
+        const normalizedCandidate = ensureReadableContrast(normalizeHexColor(candidate, null));
         if (!normalizedCandidate) continue;
         if (!isAssignedColorConflict(normalizedCandidate, reservedColors)) {
             return { color: normalizedCandidate, remapped: true };

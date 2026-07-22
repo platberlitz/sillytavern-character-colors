@@ -376,6 +376,14 @@ export const UPDATE_MESSAGE_BLOCK_TIMEOUT_MS = 1500;
 
 export let pendingDeferredMutations = false;
 
+let pendingDomSettleRefreshKey = '';
+
+let pendingDomSettleRefreshCount = 0;
+
+let domHealthCheckCursor = 0;
+
+let decoratedWatcherHealthIterator = null;
+
 export const MESSAGE_EDIT_TEXTAREA_SELECTOR = '#curEditTextarea, .edit_textarea, .reasoning_edit_textarea';
 
 export function getEditingMessageElement(mesElement, mesIndex) {
@@ -531,6 +539,17 @@ export function setMessageQuoteOverride(mesIndex, msg, segmentIndex, speakerName
     return true;
 }
 
+export function restoreMessageQuoteOverrideEntry(mesIndex, snapshot) {
+    const map = getQuoteOverridesMap(true);
+    if (!map) return false;
+    const key = String(mesIndex);
+    if (snapshot && isPlainObject(snapshot)) map[key] = JSON.parse(JSON.stringify(snapshot));
+    else delete map[key];
+    streamingHeuristicCache.clear();
+    saveChatMetadata();
+    return true;
+}
+
 export function markMessageAttributionVerified(mesIndex, msg) {
     const entry = getMessageQuoteOverrideEntry(mesIndex, msg, true);
     if (!entry) return false;
@@ -653,8 +672,13 @@ export function clearSegmentDecoration(el) {
     if (!el.getAttribute('style')) el.removeAttribute('style');
     el.removeAttribute('data-dc-colored');
     el.removeAttribute('data-dc-speaker');
+    el.removeAttribute('data-dc-speaker-name');
     el.removeAttribute('data-dc-font');
     el.removeAttribute('data-dc-seg');
+    if (el.hasAttribute('data-dc-aria-label')) {
+        el.removeAttribute('aria-label');
+        el.removeAttribute('data-dc-aria-label');
+    }
 }
 
 export function undecorateMessageDom(mesElement, options = {}) {
@@ -718,6 +742,12 @@ export function decorateMessageDom(mesElement, msg, mesIndex) {
         if (settings.highlightMode && !gradientResult.applied) el.style.backgroundColor = highlightColor;
         el.setAttribute('data-dc-colored', '1');
         el.setAttribute('data-dc-speaker', seg.assignment.key);
+        const speakerName = entry?.name || seg.assignment.name || seg.assignment.key;
+        el.setAttribute('data-dc-speaker-name', speakerName);
+        if (!el.hasAttribute('aria-label')) {
+            el.setAttribute('aria-label', `${speakerName}: ${el.textContent.trim()}`);
+            el.setAttribute('data-dc-aria-label', '1');
+        }
         decorated = true;
     };
 
@@ -759,6 +789,8 @@ export function clearDomSettleRefreshes() {
         clearTimeout(fallbackTimer);
         runtimeState.messageSettleObservers.delete(key);
     }
+    pendingDomSettleRefreshKey = '';
+    pendingDomSettleRefreshCount = 0;
 }
 
 // Disconnect the long-lived decorated watcher for a single .mes element.
@@ -770,6 +802,7 @@ export function clearDecoratedWatchers() {
         try { observer.disconnect(); } catch (_) { /* ignored */ }
     }
     runtimeState.decoratedWatchers.clear();
+    decoratedWatcherHealthIterator = null;
 }
 
 // Tear down per-element observers (both the settle observer and the
@@ -929,20 +962,68 @@ export function watchDecoratedMessage(mesElement, mesIndex) {
 }
 
 export function collectDomHealthCheckMessages() {
-    const messages = Array.from(document.querySelectorAll('#chat .mes[mesid]'));
-    if (messages.length <= DOM_HEALTH_CHECK_VISIBLE_LIMIT) return messages;
-
-    const selected = new Set(messages.slice(-Math.ceil(DOM_HEALTH_CHECK_VISIBLE_LIMIT / 2)));
-    const viewportHeight = window.innerHeight || document.documentElement?.clientHeight || 800;
-    const minTop = -viewportHeight;
-    const maxBottom = viewportHeight * 2;
-    for (const mesElement of messages) {
-        const rect = mesElement.getBoundingClientRect?.();
-        if (!rect) continue;
-        if (rect.bottom >= minTop && rect.top <= maxBottom) selected.add(mesElement);
-        if (selected.size >= DOM_HEALTH_CHECK_VISIBLE_LIMIT) break;
+    const chatRoot = document.getElementById('chat');
+    if (!chatRoot) return [];
+    const children = chatRoot.children;
+    if (children.length <= DOM_HEALTH_CHECK_VISIBLE_LIMIT) {
+        domHealthCheckCursor = 0;
+        return [...children].filter(element => element.matches?.('.mes[mesid]'));
     }
-    return Array.from(selected).slice(0, DOM_HEALTH_CHECK_VISIBLE_LIMIT);
+
+    // Sample the rendered chat viewport without reading every message's geometry,
+    // then keep recent messages hot and rotate through the remainder.
+    const selected = new Set();
+    const sampledVisible = new Set();
+    const chatRect = chatRoot?.getBoundingClientRect?.();
+    if (chatRoot && chatRect) {
+        const top = Math.max(0, chatRect.top);
+        const bottom = Math.min(window.innerHeight, chatRect.bottom);
+        const x = Math.max(0, Math.min(window.innerWidth - 1, chatRect.left + chatRect.width / 2));
+        if (bottom > top) {
+            const sampleCount = Math.min(10, DOM_HEALTH_CHECK_VISIBLE_LIMIT);
+            for (let index = 0; index < sampleCount; index++) {
+                const y = top + ((bottom - top) * (index + 0.5) / sampleCount);
+                const elementsAtPoint = typeof document.elementsFromPoint === 'function' ? document.elementsFromPoint(x, y) : [];
+                const message = elementsAtPoint
+                    .map(element => element.closest?.('.mes[mesid]'))
+                    .find(element => element && chatRoot.contains(element));
+                if (message) sampledVisible.add(message);
+            }
+        }
+    }
+    const visibleMessages = [...sampledVisible].sort((left, right) => {
+        if (left === right) return 0;
+        return left.compareDocumentPosition(right) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
+    });
+    if (visibleMessages.length) {
+        let message = visibleMessages[0];
+        const lastVisible = visibleMessages[visibleMessages.length - 1];
+        while (message && selected.size < DOM_HEALTH_CHECK_VISIBLE_LIMIT) {
+            if (message.matches?.('.mes[mesid]')) selected.add(message);
+            if (message === lastVisible) break;
+            message = message.nextElementSibling;
+        }
+    }
+    const tailCount = Math.max(4, Math.floor(DOM_HEALTH_CHECK_VISIBLE_LIMIT / 3));
+    let tail = chatRoot.lastElementChild;
+    let tailScanned = 0;
+    while (tail && tailScanned < tailCount && selected.size < DOM_HEALTH_CHECK_VISIBLE_LIMIT) {
+        const message = tail;
+        tail = tail.previousElementSibling;
+        if (!message.matches?.('.mes[mesid]')) continue;
+        if (selected.size >= DOM_HEALTH_CHECK_VISIBLE_LIMIT) break;
+        selected.add(message);
+        tailScanned++;
+    }
+    let scanned = 0;
+    const scanLimit = Math.min(children.length, DOM_HEALTH_CHECK_VISIBLE_LIMIT * 3);
+    while (selected.size < DOM_HEALTH_CHECK_VISIBLE_LIMIT && scanned < scanLimit) {
+        const message = children[(domHealthCheckCursor + scanned) % children.length];
+        if (message?.matches?.('.mes[mesid]')) selected.add(message);
+        scanned++;
+    }
+    domHealthCheckCursor = (domHealthCheckCursor + Math.max(1, scanned)) % children.length;
+    return Array.from(selected);
 }
 
 // Consecutive health-check 'refresh' attempts per message+text. Caps the
@@ -973,7 +1054,14 @@ export function runDomHealthCheck() {
 
     const chat = getContext()?.chat || [];
     const decorateTargets = new Set();
-    for (const [mesElement, watcher] of runtimeState.decoratedWatchers.entries()) {
+    if (!decoratedWatcherHealthIterator) decoratedWatcherHealthIterator = runtimeState.decoratedWatchers.entries();
+    for (let checked = 0; checked < DOM_HEALTH_CHECK_VISIBLE_LIMIT; checked++) {
+        let next = decoratedWatcherHealthIterator.next();
+        if (next.done) {
+            decoratedWatcherHealthIterator = null;
+            break;
+        }
+        const [mesElement, watcher] = next.value;
         const currentMesText = mesElement?.querySelector?.('.mes_text');
         if (!mesElement?.isConnected || !currentMesText?.isConnected) {
             clearDecoratedWatcher(mesElement);
@@ -990,6 +1078,7 @@ export function runDomHealthCheck() {
     for (const mesElement of collectDomHealthCheckMessages()) {
         const mesIndex = Number(mesElement.getAttribute('mesid'));
         if (!Number.isFinite(mesIndex) || mesIndex < 0) continue;
+        if (runtimeState.messageDomRepairTimers.has(mesIndex)) continue;
         const msg = chat[mesIndex];
         if (suspendMessageDomWorkForEdit(mesElement, mesIndex)) continue;
         const repairType = getMessageDomHealthRepairType(mesElement, msg, mesIndex);
@@ -1041,19 +1130,34 @@ export function stopDomHealthCheck() {
  * from requiring a full chat reload when the live DOM is briefly stale.
  */
 
-export function scheduleDomSettleRefresh(delays = DOM_RETRY_REFRESH_DELAYS) {
+export function scheduleDomSettleRefresh(delays = DOM_RETRY_REFRESH_DELAYS, reason = 'settle') {
     if (!isDomEngine()) return;
     startDomHealthCheck();
-    clearDomSettleRefreshes();
     const refreshDelays = Array.isArray(delays) && delays.length ? delays : [400];
-    refreshDelays.forEach((delay, index) => {
+    const chatGeneration = attributionChatGeneration;
+    const reasonKey = String(reason || 'settle');
+    const normalizedDelays = refreshDelays.map(delay => Math.max(0, Number(delay) || 0));
+    const requestKey = `${chatGeneration}:${reasonKey}:${normalizedDelays.join(',')}`;
+    // Restart the bounded fallbacks relative to the latest render trigger.
+    clearDomSettleRefreshes();
+    pendingDomSettleRefreshKey = requestKey;
+    pendingDomSettleRefreshCount = normalizedDelays.length;
+    normalizedDelays.forEach((normalizedDelay, index) => {
         const key = `__settle_fallback_${index}__`;
         const timer = setTimeout(() => {
             runtimeState.messageSettleObservers.delete(key);
+            if (pendingDomSettleRefreshKey === requestKey) {
+                pendingDomSettleRefreshCount--;
+                if (pendingDomSettleRefreshCount <= 0) {
+                    pendingDomSettleRefreshKey = '';
+                    pendingDomSettleRefreshCount = 0;
+                }
+            }
             if (!settings.enabled || !isDomEngine()) return;
+            if (chatGeneration !== attributionChatGeneration) return;
             setupChatObserver();
             decorateAllMessages();
-        }, Math.max(0, Number(delay) || 0));
+        }, normalizedDelay);
         runtimeState.messageSettleObservers.set(key, {
             observer: { disconnect: () => {} },
             fallbackTimer: timer,
@@ -1227,15 +1331,20 @@ export function shouldDecorateObservedMessageImmediately(mesElement) {
 
 export function collectMutatedMessageElements(mutation) {
     const elements = [];
-    const pushMessage = node => {
+    const pushClosestMessage = node => {
         if (!node) return;
         const element = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
         const direct = element?.matches?.('.mes[mesid]') ? element : element?.closest?.('.mes[mesid]');
         if (direct) elements.push(direct);
+    };
+    const pushAddedMessages = node => {
+        if (!node) return;
+        const element = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+        pushClosestMessage(element);
         element?.querySelectorAll?.('.mes[mesid]')?.forEach(mesElement => elements.push(mesElement));
     };
-    pushMessage(mutation.target);
-    mutation.addedNodes?.forEach(pushMessage);
+    pushClosestMessage(mutation.target);
+    mutation.addedNodes?.forEach(pushAddedMessages);
     return elements;
 }
 
@@ -1304,6 +1413,11 @@ export function setupChatRootObserver() {
             runtimeState.chatRootObserverTimer = null;
             const chatEl = document.getElementById('chat');
             if (!chatEl || runtimeState.chatObserverTarget === chatEl) return;
+            for (const key of [...runtimeState.messageSettleObservers.keys()]) {
+                if (key instanceof Element) clearMessageObservers(key);
+            }
+            clearDomSettleRefreshes();
+            clearDecoratedWatchers();
             setupChatObserver();
             scheduleDomSettleRefresh(DOM_RETRY_REFRESH_DELAYS);
             scheduleCustomFontRefresh(80);

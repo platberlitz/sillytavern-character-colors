@@ -6,6 +6,7 @@ import { power_user } from '/scripts/power-user.js';
 import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
 const { extension_settings, getContext } = await import('../../../../extensions.js');
+const scriptApi = await import('../../../../../script.js');
 const {
     eventSource,
     event_types,
@@ -19,7 +20,22 @@ const {
     generateQuietPrompt,
     registerMacro,
     getRequestHeaders,
-} = await import('../../../../../script.js');
+} = scriptApi;
+
+function saveMetadata(...args) {
+    if (typeof scriptApi.saveMetadata === 'function') return scriptApi.saveMetadata(...args);
+    const context = getContext?.();
+    if (typeof context?.saveMetadata === 'function') return context.saveMetadata(...args);
+    if (typeof scriptApi.saveMetadataDebounced === 'function') return scriptApi.saveMetadataDebounced(...args);
+    if (typeof context?.saveMetadataDebounced === 'function') return context.saveMetadataDebounced(...args);
+}
+
+function saveMetadataDebounced(...args) {
+    if (typeof scriptApi.saveMetadataDebounced === 'function') return scriptApi.saveMetadataDebounced(...args);
+    const context = getContext?.();
+    if (typeof context?.saveMetadataDebounced === 'function') return context.saveMetadataDebounced(...args);
+    return saveMetadata(...args);
+}
 
 export {
     converter,
@@ -40,4 +56,6 @@ export {
     generateQuietPrompt,
     registerMacro,
     getRequestHeaders,
+    saveMetadata,
+    saveMetadataDebounced,
 };

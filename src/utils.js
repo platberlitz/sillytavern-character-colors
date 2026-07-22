@@ -140,7 +140,7 @@ export function hexToHsl(hex) {
 export const toast = {
     info:    (...a) => !settings.disableToasts && toastr?.info?.(...a),
     success: (...a) => !settings.disableToasts && toastr?.success?.(...a),
-    warning: (...a) => !settings.disableToasts && toastr?.warning?.(...a),
+    warning: (...a) => toastr?.warning?.(...a),
     error:   (...a) => toastr?.error?.(...a),
 };
 

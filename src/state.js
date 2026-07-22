@@ -36,6 +36,10 @@ export const MODULE_NAME = 'dialogue-colors';
 
 export const COLOR_SCHEMA_VERSION = 5;
 
+export const COLOR_STORAGE_SCOPES = Object.freeze(['chat', 'card', 'global']);
+
+export const DEFAULT_COLOR_STORAGE_SCOPE = 'card';
+
 export const LEGACY_GLOBAL_SETTINGS_KEY = 'dc_global_settings';
 
 export const GLOBAL_SETTINGS_V2_KEY = 'dc_global_settings_v2';
@@ -58,7 +62,7 @@ export let searchTerm = '';
 
 export let expandedCharacterRows = new Set();
 
-export let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, thoughtSymbols: '*', disableNarration: true, shareColorsGlobally: false, cssEffects: false, autoScanNewMessages: true, autoLockDetected: true, autoRandomNpcGradients: false, enableRightClick: false, promptDepth: 1, autoRecolor: true, autoColorize: false, llmAttributionCheck: false, llmAttributionParallel: false, attributionConservativeOnly: false, attributionMaxTokens: 4096, domStealthColors: true, disableToasts: false, llmConnectionProfile: null, attributionConnectionProfile: null, colorSchemaVersion: COLOR_SCHEMA_VERSION, promptMode: 'inject', promptRole: 'system', sortMode: 'name', coloringEngine: 'llm' };
+export let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, thoughtSymbols: '*', disableNarration: true, colorStorageScope: DEFAULT_COLOR_STORAGE_SCOPE, autoScanNewMessages: true, autoLockDetected: true, autoRandomNpcGradients: false, enableRightClick: false, promptDepth: 1, autoRecolor: true, autoColorize: false, llmAttributionCheck: false, llmAttributionParallel: false, attributionConservativeOnly: false, attributionMaxTokens: 4096, domStealthColors: true, disableToasts: false, llmConnectionProfile: null, attributionConnectionProfile: null, colorSchemaVersion: COLOR_SCHEMA_VERSION, promptMode: 'inject', promptRole: 'system', sortMode: 'name', coloringEngine: 'llm' };
 
 export const TOGGLE_SETTING_DEFAULTS = Object.freeze({
     enabled: true,
@@ -66,8 +70,6 @@ export const TOGGLE_SETTING_DEFAULTS = Object.freeze({
     autoScanOnLoad: true,
     showLegend: false,
     disableNarration: true,
-    shareColorsGlobally: false,
-    cssEffects: false,
     autoScanNewMessages: true,
     autoLockDetected: true,
     autoRandomNpcGradients: false,
@@ -85,7 +87,7 @@ export const GLOBAL_TOGGLE_KEYS = Object.freeze(Object.keys(TOGGLE_SETTING_DEFAU
 
 export const GLOBAL_VISUAL_KEYS = Object.freeze(['thoughtSymbols', 'themeMode', 'colorTheme', 'brightness', 'promptDepth', 'promptRole', 'promptMode', 'coloringEngine']);
 
-export const GLOBAL_SETTINGS_V2_KEYS = Object.freeze([...new Set([...GLOBAL_VISUAL_KEYS, ...GLOBAL_TOGGLE_KEYS])]);
+export const GLOBAL_SETTINGS_V2_KEYS = Object.freeze([...new Set([...GLOBAL_VISUAL_KEYS, ...GLOBAL_TOGGLE_KEYS, 'colorStorageScope'])]);
 
 export const ACTIVE_SETTING_KEYS = Object.freeze([...new Set([...GLOBAL_SETTINGS_V2_KEYS, 'narratorColor', 'llmConnectionProfile', 'attributionConnectionProfile', 'attributionConservativeOnly', 'attributionMaxTokens', 'colorSchemaVersion', 'sortMode'])]);
 

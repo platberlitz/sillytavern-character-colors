@@ -1,22 +1,136 @@
 // context-menu.js - extracted from index.js (mechanical split)
 import { attributeDialogueSegments } from './attribution.js';
 import { resolveCharacterKeyByNameOrAlias } from './color-blocks.js';
-import { cancelMessageDomFollowupRepairs, clearMessageDomRepairTimer, clearStreamingAttributionOverrides, decorateMessageDomFromCurrentRender, getMessageIndexFromElement, markMessageAttributionVerified, matchSegmentsToElements, refreshMessageDom, resolveDomSegmentIndexForElement, scheduleMessageDomFollowupRepair, setMessageQuoteOverride } from './dom-engine.js';
+import { cancelMessageDomFollowupRepairs, clearMessageDomRepairTimer, clearStreamingAttributionOverrides, decorateMessageDomFromCurrentRender, getMessageIndexFromElement, getMessageQuoteOverrideEntry, markMessageAttributionVerified, matchSegmentsToElements, refreshMessageDom, resolveDomSegmentIndexForElement, restoreMessageQuoteOverrideEntry, scheduleMessageDomFollowupRepair, setMessageQuoteOverride } from './dom-engine.js';
+import { scheduleCustomFontRefresh } from './fonts.js';
 import { applyLiveColorChangesFromSnapshot, captureEffectiveColorSnapshot, commit, flushChatSave, queueChatSave, updateTextColorReferences, updateVisibleMessageColors } from './live-colors.js';
 import { buildCharacterEntry, getEntryEffectiveColor, setEntryFromEffectiveColor } from './palettes.js';
-import { escapeHtml, getContext, power_user } from './st-api.js';
+import { escapeHtml, eventSource, event_types, getContext, power_user } from './st-api.js';
 import { characterColors, isDomEngine, runtimeState, settings } from './state.js';
 import { getSortedEntries, updateLegend } from './ui.js';
 import { escapeAttr, normalizeHexColor, normalizeSegmentText, toast } from './utils.js';
 
+const INVALID_CHARACTER_NAME_RE = /[\r\n\t\[\]=,()]/;
+const CONTEXT_FOCUS_ATTRIBUTE = 'data-dc-context-focus';
+let closeActiveAssignmentSurface = null;
+
+function readCharacterName(nameInput) {
+    const name = nameInput.value.trim();
+    if (!name) return '';
+    if (INVALID_CHARACTER_NAME_RE.test(name)) {
+        nameInput.setAttribute('aria-invalid', 'true');
+        nameInput.focus({ preventScroll: true });
+        toast.error('Character names cannot contain brackets, commas, equals signs, parentheses, or line breaks.');
+        return null;
+    }
+    nameInput.removeAttribute('aria-invalid');
+    return name;
+}
+
+function getMenuPosition(e, targetEl) {
+    if (e?.type !== 'keydown') {
+        const point = e?.touches?.[0] || e?.changedTouches?.[0] || e;
+        if (Number.isFinite(point?.clientX) && Number.isFinite(point?.clientY)) {
+            return { x: point.clientX, y: point.clientY };
+        }
+    }
+
+    const rect = targetEl?.getBoundingClientRect?.();
+    return rect
+        ? { x: rect.left, y: rect.bottom }
+        : { x: 100, y: 100 };
+}
+
+function mountAssignmentSurface(menu, opener) {
+    if (closeActiveAssignmentSurface) closeActiveAssignmentSurface({ restoreFocus: false });
+    const openerMessage = opener?.closest?.('.mes[mesid]');
+    const openerMessageId = openerMessage?.getAttribute('mesid') || '';
+    const openerSegmentIndex = openerMessage
+        ? [...openerMessage.querySelectorAll(getManagedDialogueSelector())].indexOf(opener)
+        : -1;
+    document.body.appendChild(menu);
+    const inertSiblings = [...document.body.children]
+        .filter(element => element !== menu && !element.inert)
+        .map(element => { element.inert = true; return element; });
+
+    const clampToVisualViewport = () => {
+        const viewport = window.visualViewport;
+        const leftEdge = viewport?.offsetLeft || 0;
+        const topEdge = viewport?.offsetTop || 0;
+        const rightEdge = leftEdge + (viewport?.width || window.innerWidth);
+        const bottomEdge = topEdge + (viewport?.height || window.innerHeight);
+        const rect = menu.getBoundingClientRect();
+        const currentLeft = Number.parseFloat(menu.style.left) || rect.left;
+        const currentTop = Number.parseFloat(menu.style.top) || rect.top;
+        menu.style.left = `${Math.max(leftEdge + 8, Math.min(currentLeft, rightEdge - rect.width - 8))}px`;
+        menu.style.top = `${Math.max(topEdge + 8, Math.min(currentTop, bottomEdge - rect.height - 8))}px`;
+    };
+    clampToVisualViewport();
+
+    let closed = false;
+    const close = ({ restoreFocus = true } = {}) => {
+        if (closed) return;
+        closed = true;
+        document.removeEventListener('pointerdown', handleOutsidePointer, true);
+        document.removeEventListener('keydown', handleKeyDown, true);
+        window.visualViewport?.removeEventListener('resize', clampToVisualViewport);
+        window.visualViewport?.removeEventListener('scroll', clampToVisualViewport);
+        inertSiblings.forEach(element => { element.inert = false; });
+        menu.remove();
+        if (closeActiveAssignmentSurface === close) closeActiveAssignmentSurface = null;
+        if (restoreFocus) {
+            const focusTarget = opener?.isConnected
+                ? opener
+                : openerMessageId
+                    ? [...document.querySelectorAll(`#chat .mes[mesid="${CSS.escape(openerMessageId)}"] ${getManagedDialogueSelector()}`)]
+                        .filter(element => element.hasAttribute(CONTEXT_FOCUS_ATTRIBUTE))[Math.max(0, openerSegmentIndex)]
+                        || document.querySelector(`#chat .mes[mesid="${CSS.escape(openerMessageId)}"] [${CONTEXT_FOCUS_ATTRIBUTE}][tabindex="0"]`)
+                    : null;
+            if (typeof focusTarget?.focus === 'function') focusTarget.focus({ preventScroll: true });
+        }
+    };
+    const handleOutsidePointer = e => {
+        if (!menu.contains(e.target)) close();
+    };
+    const handleKeyDown = e => {
+        if (e.key === 'Escape') {
+            e.preventDefault();
+            e.stopPropagation();
+            close();
+            return;
+        }
+        if (e.key !== 'Tab') return;
+        const focusable = [...menu.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')]
+            .filter(element => element.getClientRects().length > 0);
+        if (!focusable.length) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+            e.preventDefault();
+            last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+            e.preventDefault();
+            first.focus();
+        }
+    };
+
+    closeActiveAssignmentSurface = close;
+    document.addEventListener('pointerdown', handleOutsidePointer, true);
+    document.addEventListener('keydown', handleKeyDown, true);
+    window.visualViewport?.addEventListener('resize', clampToVisualViewport);
+    window.visualViewport?.addEventListener('scroll', clampToVisualViewport);
+    menu.querySelector('#dc-ctx-name')?.focus({ preventScroll: true });
+    setTimeout(clampToVisualViewport, 0);
+    return close;
+}
+
 // Right-click and long-press context menu for messages
 function showMenu(e, fontTag, qElement = null) {
-    e.preventDefault();
-    const existingMenu = document.getElementById('dc-context-menu');
-    if (existingMenu) existingMenu.remove();
+    e.preventDefault?.();
     const isDomSegment = isDomEngine() && !fontTag && !!qElement;
     const isBareQuote = !isDomSegment && !fontTag && !!qElement;
     const targetEl = (isDomSegment || isBareQuote) ? qElement : fontTag;
+    const opener = e.type === 'keydown' ? targetEl : document.activeElement;
     const domSpeakerKey = isDomSegment ? targetEl.getAttribute('data-dc-speaker') : '';
     const domSpeakerColor = domSpeakerKey && characterColors[domSpeakerKey] ? getEntryEffectiveColor(characterColors[domSpeakerKey]) : null;
     const quoteFallbackColor = normalizeHexColor(power_user.quote_text_color, '#888888');
@@ -32,25 +146,26 @@ function showMenu(e, fontTag, qElement = null) {
 
     const menu = document.createElement('div');
     menu.id = 'dc-context-menu';
-    const x = e.clientX ?? e.touches?.[0]?.clientX ?? 100;
-    const y = e.clientY ?? e.touches?.[0]?.clientY ?? 100;
+    menu.setAttribute('role', 'dialog');
+    menu.setAttribute('aria-modal', 'true');
+    menu.setAttribute('aria-labelledby', 'dc-ctx-title');
+    menu.setAttribute('aria-describedby', 'dc-ctx-preview');
+    const { x, y } = getMenuPosition(e, targetEl);
     menu.style.cssText = `position:fixed;left:${x}px;top:${y}px;background:var(--SmartThemeBlurTintColor);border:1px solid var(--SmartThemeBorderColor);border-radius:6px;padding:8px;z-index:10001;min-width:180px;color:var(--SmartThemeTextColor);box-shadow:0 4px 12px rgba(0,0,0,0.5);`;
     menu.innerHTML = `
-        <div style="font-size:0.8em;opacity:0.7;margin-bottom:6px;">${isDomSegment ? '<em style="font-size:0.9em;">(DOM override)</em><br>' : isBareQuote ? '<em style="font-size:0.9em;">(uncolored quote)</em><br>' : ''}"${escapeHtml(text)}"</div>
+        <div id="dc-ctx-title" style="font-weight:600;margin-bottom:4px;">Assign dialogue</div>
+        <div id="dc-ctx-preview" style="font-size:0.8em;opacity:0.7;margin-bottom:6px;">${isDomSegment ? '<em style="font-size:0.9em;">(DOM override)</em><br>' : isBareQuote ? '<em style="font-size:0.9em;">(uncolored quote)</em><br>' : ''}"${escapeHtml(text)}"</div>
         <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
-            <span style="width:12px;height:12px;border-radius:50%;background:${color};"></span>
-            <input type="color" id="dc-ctx-color" value="${color}" style="width:24px;height:20px;border:none;">
-            <input type="text" id="dc-ctx-name" list="dc-ctx-chars" placeholder="Character name (type to search)" class="text_pole" style="flex:1;padding:3px;font-size:0.85em;" autocomplete="off">
+            <span aria-hidden="true" style="width:12px;height:12px;border-radius:50%;background:${color};"></span>
+            <input type="color" id="dc-ctx-color" value="${color}" aria-label="Character color" style="width:24px;height:20px;border:none;">
+            <input type="text" id="dc-ctx-name" list="dc-ctx-chars" aria-label="Character name" placeholder="Character name (type to search)" class="text_pole" style="flex:1;padding:3px;font-size:0.85em;" autocomplete="off">
             <datalist id="dc-ctx-chars">${datalistOptions}</datalist>
         </div>
         <button id="dc-ctx-assign" class="menu_button" style="width:100%;margin-bottom:4px;">Assign to Character</button>
         <button id="dc-ctx-close" class="menu_button" style="width:100%;">Cancel</button>
     `;
-    document.body.appendChild(menu);
-    const menuRect = menu.getBoundingClientRect();
-    if (menuRect.right > window.innerWidth) menu.style.left = (window.innerWidth - menuRect.width - 8) + 'px';
-    if (menuRect.bottom > window.innerHeight) menu.style.top = (window.innerHeight - menuRect.height - 8) + 'px';
-    menu.querySelector('#dc-ctx-close').onclick = () => menu.remove();
+    const closeMenu = mountAssignmentSurface(menu, opener);
+    menu.querySelector('#dc-ctx-close').onclick = () => closeMenu();
 
     const nameInput = menu.querySelector('#dc-ctx-name');
     const colorInput = menu.querySelector('#dc-ctx-color');
@@ -59,6 +174,7 @@ function showMenu(e, fontTag, qElement = null) {
     }
 
     nameInput.addEventListener('input', () => {
+        nameInput.removeAttribute('aria-invalid');
         const name = nameInput.value.trim();
         const key = resolveCharacterKeyByNameOrAlias(name) || name.toLowerCase();
         if (characterColors[key]) {
@@ -68,29 +184,43 @@ function showMenu(e, fontTag, qElement = null) {
     });
 
     menu.querySelector('#dc-ctx-assign').onclick = async () => {
-        const nameInput = menu.querySelector('#dc-ctx-name');
-        const colorInput = menu.querySelector('#dc-ctx-color');
-        const name = nameInput.value.trim();
-        const pickerColor = normalizeHexColor(colorInput.value, color);
-        if (name) {
+        const assignButton = menu.querySelector('#dc-ctx-assign');
+        const targetMesIndex = getMessageIndexFromElement(targetEl);
+        const targetMessage = getContext()?.chat?.[targetMesIndex];
+        const originalMessageText = targetMessage?.mes;
+        let installedKey = null;
+        let previousEntry = null;
+        let overrideRollback = null;
+        assignButton.disabled = true;
+        try {
+            const nameInput = menu.querySelector('#dc-ctx-name');
+            const colorInput = menu.querySelector('#dc-ctx-color');
+            const name = readCharacterName(nameInput);
+            if (name === null) return;
+            const pickerColor = normalizeHexColor(colorInput.value, color);
+            if (name) {
             const key = resolveCharacterKeyByNameOrAlias(name) || name.toLowerCase();
             let finalColor = pickerColor;
             let textUpdated = false;
+            let assignmentSucceeded = false;
             let existingColorChanged = false;
-            const existingSnapshot = characterColors[key]
+            const existingEntry = characterColors[key];
+            const existingSnapshot = existingEntry
                 ? captureEffectiveColorSnapshot(Object.keys(characterColors))
                 : null;
             const originalFontColor = fontTag
                 ? normalizeHexColor(fontTag.getAttribute('color'), null)
                 : null;
 
-            if (characterColors[key]) {
-                const existingColor = getEntryEffectiveColor(characterColors[key]);
+            let nextEntry = null;
+            if (existingEntry) {
+                nextEntry = JSON.parse(JSON.stringify(existingEntry));
+                const existingColor = getEntryEffectiveColor(nextEntry);
                 if (normalizeHexColor(pickerColor) !== normalizeHexColor(existingColor)) {
-                    setEntryFromEffectiveColor(characterColors[key], pickerColor);
+                    setEntryFromEffectiveColor(nextEntry, pickerColor);
                     existingColorChanged = true;
                 }
-                finalColor = getEntryEffectiveColor(characterColors[key]);
+                finalColor = getEntryEffectiveColor(nextEntry);
             } else {
                 const built = buildCharacterEntry(name, {
                     color: pickerColor,
@@ -98,12 +228,8 @@ function showMenu(e, fontTag, qElement = null) {
                     locked: false,
                     dialogueCount: 1
                 });
-                if (!built.entry) return;
-                characterColors[key] = built.entry;
-            }
-
-            if (existingColorChanged) {
-                applyLiveColorChangesFromSnapshot(existingSnapshot, [key], { saveImmediately: true });
+                if (!built.entry) { closeMenu(); return; }
+                nextEntry = built.entry;
             }
 
             if (isDomSegment) {
@@ -113,18 +239,23 @@ function showMenu(e, fontTag, qElement = null) {
                 const segmentIndex = resolveDomSegmentIndexForElement(targetEl, mesIndex, msg);
                 if (!msg || !Number.isFinite(segmentIndex)) {
                     toast.error('Could not map this dialogue segment.');
-                    menu.remove();
+                    closeMenu();
                     return;
                 }
+                overrideRollback = {
+                    mesIndex,
+                    snapshot: JSON.parse(JSON.stringify(getMessageQuoteOverrideEntry(mesIndex, msg, false) || null)),
+                };
                 if (!setMessageQuoteOverride(mesIndex, msg, segmentIndex, name, { source: 'manual' })) {
                     toast.error('Could not save quote override.');
-                    menu.remove();
+                    closeMenu();
                     return;
                 }
                 clearMessageDomRepairTimer(mesIndex);
                 cancelMessageDomFollowupRepairs(mesIndex);
                 markMessageAttributionVerified(mesIndex, msg);
                 clearStreamingAttributionOverrides(mesIndex);
+                assignmentSucceeded = true;
                 // Override-only change: the visible DOM is already rendered by
                 // SillyTavern, so decorate in place without an innerHTML fallback
                 // write (which would trigger an observer re-decoration cascade).
@@ -132,17 +263,34 @@ function showMenu(e, fontTag, qElement = null) {
                 scheduleMessageDomFollowupRepair(mesIndex, repainted);
             } else if (isBareQuote) {
                 textUpdated = wrapQElementWithFontTag(qElement, finalColor);
+                assignmentSucceeded = textUpdated;
             } else {
-                fontTag.setAttribute('color', finalColor);
+                const mesIndex = getMessageIndexFromElement(fontTag);
                 textUpdated = updateMessageTextForFontTag(fontTag, originalFontColor, finalColor);
                 if (textUpdated) {
+                    fontTag.setAttribute('color', finalColor);
                     // updateTextColorReferences rewrites every same-colored span in
                     // msg.mes; sync the rest of the rendered DOM to match right away.
                     updateVisibleMessageColors(mesIndex, { [originalFontColor]: finalColor });
                 }
+                assignmentSucceeded = textUpdated;
+            }
+
+            if (!assignmentSucceeded) {
+                toast.error('Could not map this dialogue to the saved message; nothing was changed.');
+                closeMenu();
+                return;
+            }
+
+            installedKey = key;
+            previousEntry = existingEntry ? JSON.parse(JSON.stringify(existingEntry)) : null;
+            characterColors[key] = nextEntry;
+            if (existingColorChanged) {
+                applyLiveColorChangesFromSnapshot(existingSnapshot, [key], { saveImmediately: true });
             }
 
             commit();
+            scheduleCustomFontRefresh(0);
 
             if (isDomSegment) {
                 updateLegend();
@@ -152,17 +300,27 @@ function showMenu(e, fontTag, qElement = null) {
             }
 
             toast.success(`Assigned to ${escapeHtml(name)}`);
+            }
+        } catch (error) {
+            if (installedKey) {
+                if (previousEntry) characterColors[installedKey] = previousEntry;
+                else delete characterColors[installedKey];
+            }
+            if (overrideRollback) restoreMessageQuoteOverrideEntry(overrideRollback.mesIndex, overrideRollback.snapshot);
+            if (targetMessage && originalMessageText !== undefined) targetMessage.mes = originalMessageText;
+            scheduleCustomFontRefresh(0);
+            toast.error('The dialogue assignment failed and was rolled back.');
+            console.error('[Dialogue Colors] Failed to assign dialogue:', error);
+        } finally {
+            closeMenu();
         }
-        menu.remove();
     };
-    const closeMenu = e2 => { if (!menu.contains(e2.target)) { menu.remove(); document.removeEventListener('click', closeMenu); document.removeEventListener('touchstart', closeMenu); } };
-    setTimeout(() => { document.addEventListener('click', closeMenu); document.addEventListener('touchstart', closeMenu); }, 10);
 }
 
 function showSelectionMenu(e, selection, range, selectedText, mesEl) {
-    e.preventDefault();
-    const existingMenu = document.getElementById('dc-context-menu');
-    if (existingMenu) existingMenu.remove();
+    e.preventDefault?.();
+    const opener = document.activeElement;
+    if (closeActiveAssignmentSurface) closeActiveAssignmentSurface({ restoreFocus: false });
 
     const msgIndex = getMessageIndexFromElement(mesEl);
     if (msgIndex === -1) return;
@@ -180,25 +338,26 @@ function showSelectionMenu(e, selection, range, selectedText, mesEl) {
 
     const menu = document.createElement('div');
     menu.id = 'dc-context-menu';
-    const x = e.clientX ?? e.touches?.[0]?.clientX ?? 100;
-    const y = e.clientY ?? e.touches?.[0]?.clientY ?? 100;
+    menu.setAttribute('role', 'dialog');
+    menu.setAttribute('aria-modal', 'true');
+    menu.setAttribute('aria-labelledby', 'dc-ctx-title');
+    menu.setAttribute('aria-describedby', 'dc-ctx-preview');
+    const { x, y } = getMenuPosition(e, mesEl);
     menu.style.cssText = `position:fixed;left:${x}px;top:${y}px;background:var(--SmartThemeBlurTintColor);border:1px solid var(--SmartThemeBorderColor);border-radius:6px;padding:8px;z-index:10001;min-width:180px;color:var(--SmartThemeTextColor);box-shadow:0 4px 12px rgba(0,0,0,0.5);`;
     menu.innerHTML = `
-        <div style="font-size:0.8em;opacity:0.7;margin-bottom:6px;"><em style="font-size:0.9em;">(selected text)</em><br>"${escapeHtml(preview)}"</div>
+        <div id="dc-ctx-title" style="font-weight:600;margin-bottom:4px;">Assign selected dialogue</div>
+        <div id="dc-ctx-preview" style="font-size:0.8em;opacity:0.7;margin-bottom:6px;"><em style="font-size:0.9em;">(selected text)</em><br>"${escapeHtml(preview)}"</div>
         <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
-            <span id="dc-ctx-color-dot" style="width:12px;height:12px;border-radius:50%;background:#888888;"></span>
-            <input type="color" id="dc-ctx-color" value="#888888" style="width:24px;height:20px;border:none;">
-            <input type="text" id="dc-ctx-name" list="dc-ctx-chars" placeholder="Character name (type to search)" class="text_pole" style="flex:1;padding:3px;font-size:0.85em;" autocomplete="off">
+            <span id="dc-ctx-color-dot" aria-hidden="true" style="width:12px;height:12px;border-radius:50%;background:#888888;"></span>
+            <input type="color" id="dc-ctx-color" value="#888888" aria-label="Character color" style="width:24px;height:20px;border:none;">
+            <input type="text" id="dc-ctx-name" list="dc-ctx-chars" aria-label="Character name" placeholder="Character name (type to search)" class="text_pole" style="flex:1;padding:3px;font-size:0.85em;" autocomplete="off">
             <datalist id="dc-ctx-chars">${datalistOptions}</datalist>
         </div>
         <button id="dc-ctx-assign" class="menu_button" style="width:100%;margin-bottom:4px;">Assign to Character</button>
         <button id="dc-ctx-close" class="menu_button" style="width:100%;">Cancel</button>
     `;
-    document.body.appendChild(menu);
-    const menuRect = menu.getBoundingClientRect();
-    if (menuRect.right > window.innerWidth) menu.style.left = (window.innerWidth - menuRect.width - 8) + 'px';
-    if (menuRect.bottom > window.innerHeight) menu.style.top = (window.innerHeight - menuRect.height - 8) + 'px';
-    menu.querySelector('#dc-ctx-close').onclick = () => menu.remove();
+    const closeMenu = mountAssignmentSurface(menu, opener);
+    menu.querySelector('#dc-ctx-close').onclick = () => closeMenu();
 
     const nameInput = menu.querySelector('#dc-ctx-name');
     const colorInput = menu.querySelector('#dc-ctx-color');
@@ -207,6 +366,7 @@ function showSelectionMenu(e, selection, range, selectedText, mesEl) {
     colorInput.addEventListener('input', () => { colorDot.style.background = colorInput.value; });
 
     nameInput.addEventListener('input', () => {
+        nameInput.removeAttribute('aria-invalid');
         const name = nameInput.value.trim();
         const key = resolveCharacterKeyByNameOrAlias(name) || name.toLowerCase();
         if (characterColors[key]) {
@@ -217,9 +377,23 @@ function showSelectionMenu(e, selection, range, selectedText, mesEl) {
     });
 
     menu.querySelector('#dc-ctx-assign').onclick = () => {
-        const name = nameInput.value.trim();
+        const name = readCharacterName(nameInput);
+        if (name === null) return;
         const pickerColor = normalizeHexColor(colorInput.value, '#888888');
-        if (!name) { menu.remove(); return; }
+        if (!name) { closeMenu(); return; }
+
+        // Validate and measure the saved range before changing character state.
+        // Streaming can replace the message while this dialog is open.
+        const mesTextEl = mesEl.querySelector('.mes_text');
+        if (!range.startContainer?.isConnected
+            || !mesTextEl?.contains(range.startContainer)
+            || !mesTextEl?.contains(range.endContainer)) {
+            toast.error('Selection is no longer valid — the message was re-rendered. Please re-select the text.');
+            closeMenu();
+            return;
+        }
+        const renderedCharOffset = getRenderedCharOffset(mesTextEl, range);
+        const renderedLen = mesTextEl.textContent.length;
 
         const key = resolveCharacterKeyByNameOrAlias(name) || name.toLowerCase();
         let finalColor = pickerColor;
@@ -229,13 +403,15 @@ function showSelectionMenu(e, selection, range, selectedText, mesEl) {
             : null;
 
         let existingColorChanged = false;
+        let nextEntry = null;
         if (characterColors[key]) {
-            const existingColor = getEntryEffectiveColor(characterColors[key]);
+            nextEntry = JSON.parse(JSON.stringify(characterColors[key]));
+            const existingColor = getEntryEffectiveColor(nextEntry);
             if (normalizeHexColor(pickerColor) !== normalizeHexColor(existingColor)) {
-                setEntryFromEffectiveColor(characterColors[key], pickerColor);
+                setEntryFromEffectiveColor(nextEntry, pickerColor);
                 existingColorChanged = true;
             }
-            finalColor = getEntryEffectiveColor(characterColors[key]);
+            finalColor = getEntryEffectiveColor(nextEntry);
         } else {
             const built = buildCharacterEntry(name, {
                 color: pickerColor,
@@ -243,28 +419,9 @@ function showSelectionMenu(e, selection, range, selectedText, mesEl) {
                 locked: false,
                 dialogueCount: 1
             });
-            if (!built.entry) { menu.remove(); return; }
-            characterColors[key] = built.entry;
+            if (!built.entry) { closeMenu(); return; }
+            nextEntry = built.entry;
         }
-
-        if (existingColorChanged) {
-            applyLiveColorChangesFromSnapshot(existingSnapshot, [key], { saveImmediately: true });
-        }
-
-        // Capture rendered offsets BEFORE mutating the DOM with surroundContents.
-        const mesTextEl = mesEl.querySelector('.mes_text');
-        // The message may have re-rendered (streaming, MESSAGE_UPDATED, another
-        // agent) since the menu opened. A detached or out-of-message range would
-        // produce garbage offsets and wrap the wrong occurrence in msg.mes.
-        if (!range.startContainer?.isConnected
-            || !mesTextEl?.contains(range.startContainer)
-            || !mesTextEl?.contains(range.endContainer)) {
-            toast.error('Selection is no longer valid — the message was re-rendered. Please re-select the text.');
-            menu.remove();
-            return;
-        }
-        const renderedCharOffset = getRenderedCharOffset(mesTextEl, range);
-        const renderedLen = mesTextEl ? mesTextEl.textContent.length : 0;
 
         try {
             const fontNode = document.createElement('font');
@@ -279,7 +436,7 @@ function showSelectionMenu(e, selection, range, selectedText, mesEl) {
                 range.insertNode(fontNode);
             } catch (fallbackErr) {
                 toast.error('Could not wrap selection');
-                menu.remove();
+                closeMenu();
                 return;
             }
         }
@@ -288,6 +445,10 @@ function showSelectionMenu(e, selection, range, selectedText, mesEl) {
 
         const textUpdated = replaceMessageSelectionWithFontTag(msg, selectedText, finalColor, renderedCharOffset, renderedLen);
         if (textUpdated) {
+            characterColors[key] = nextEntry;
+            if (existingColorChanged) {
+                applyLiveColorChangesFromSnapshot(existingSnapshot, [key], { saveImmediately: true });
+            }
             queueChatSave();
             flushChatSave();
             commit();
@@ -296,33 +457,217 @@ function showSelectionMenu(e, selection, range, selectedText, mesEl) {
             // The rendered selection was not found verbatim in msg.mes (markdown
             // constructs consumed). Re-render to undo the visual wrap rather than
             // report a success that would silently vanish on the next render.
-            commit();
             toast.error('Could not locate the selection in the message source — nothing was colored.');
             refreshMessageDom(msgIndex, msg);
         }
-        menu.remove();
+        closeMenu();
     };
+}
 
-    const closeMenu = e2 => { if (!menu.contains(e2.target)) { menu.remove(); document.removeEventListener('click', closeMenu); document.removeEventListener('touchstart', closeMenu); } };
-    setTimeout(() => { document.addEventListener('click', closeMenu); document.addEventListener('touchstart', closeMenu); }, 10);
+function getEventElement(target) {
+    return target?.closest ? target : target?.parentElement;
+}
+
+function getManagedDialogueSelector() {
+    return isDomEngine()
+        ? '.mes_text [data-dc-seg], .mes_text q, .mes_text em'
+        : '.mes_text font[color], .mes_text q';
+}
+
+function clearManagedTabStop(element) {
+    if (element.getAttribute(CONTEXT_FOCUS_ATTRIBUTE) !== 'tabindex') return;
+    element.removeAttribute('tabindex');
+    element.removeAttribute('aria-keyshortcuts');
+    element.removeAttribute(CONTEXT_FOCUS_ATTRIBUTE);
+}
+
+function getMessageDialogueTargets(mesText) {
+    if (!mesText) return [];
+    const selector = isDomEngine() ? '[data-dc-seg], q, em' : 'font[color], q';
+    return [...mesText.querySelectorAll(selector)].filter(element => resolveDialogueAssignmentTarget(element)?.targetEl === element);
+}
+
+function syncManagedDialogueTabStops(messageRoots = null) {
+    const roots = messageRoots
+        ? [...messageRoots].filter(root => root?.isConnected)
+        : [...document.querySelectorAll('#chat .mes_text')];
+    const managed = messageRoots
+        ? roots.flatMap(root => [...root.querySelectorAll(`[${CONTEXT_FOCUS_ATTRIBUTE}]`)])
+        : [...document.querySelectorAll(`[${CONTEXT_FOCUS_ATTRIBUTE}]`)];
+    if (!settings.enableRightClick) {
+        managed.forEach(clearManagedTabStop);
+        if (closeActiveAssignmentSurface) closeActiveAssignmentSurface();
+        return;
+    }
+
+    const selector = getManagedDialogueSelector();
+    managed.forEach(element => {
+        if (!element.matches(selector) || resolveDialogueAssignmentTarget(element)?.targetEl !== element) clearManagedTabStop(element);
+    });
+    roots.forEach(mesText => {
+        const targets = getMessageDialogueTargets(mesText);
+        const activeTarget = targets.includes(document.activeElement) ? document.activeElement : null;
+        const existingTarget = targets.find(element => element.getAttribute(CONTEXT_FOCUS_ATTRIBUTE) === 'tabindex' && element.getAttribute('tabindex') === '0');
+        const tabTarget = activeTarget || existingTarget || targets[0];
+        targets.forEach(element => {
+            if (element.hasAttribute('tabindex') && element.getAttribute(CONTEXT_FOCUS_ATTRIBUTE) !== 'tabindex') return;
+            element.setAttribute('tabindex', element === tabTarget ? '0' : '-1');
+            element.setAttribute('aria-keyshortcuts', 'Shift+F10');
+            element.setAttribute(CONTEXT_FOCUS_ATTRIBUTE, 'tabindex');
+        });
+    });
+}
+
+function resolveDialogueAssignmentTarget(source) {
+    const target = getEventElement(source);
+    const mesText = target?.closest('.mes_text');
+    if (!mesText) return null;
+
+    if (isDomEngine()) {
+        const segmentEl = target.closest('[data-dc-seg], q, em');
+        if (!segmentEl || !mesText.contains(segmentEl) || segmentEl.closest('font[color]')) return null;
+        return { targetEl: segmentEl, fontTag: null, qElement: segmentEl };
+    }
+
+    const fontTag = target.closest('font[color]');
+    if (fontTag && mesText.contains(fontTag)) {
+        return { targetEl: fontTag, fontTag, qElement: null };
+    }
+    const qElement = target.closest('q');
+    if (qElement && mesText.contains(qElement) && !qElement.closest('font[color]')) {
+        return { targetEl: qElement, fontTag: null, qElement };
+    }
+    return null;
 }
 
 export function setupContextMenu() {
     if (runtimeState.contextMenuSetup) return;
     runtimeState.contextMenuSetup = true;
-    let longPressTimer = null;
-    let longPressTarget = null;
+    let longPressState = null;
+    let consumeTouchEnd = false;
+    let suppressedContextTarget = null;
+    let suppressContextUntil = 0;
+    let focusSyncQueued = false;
+    let forceFullFocusSync = false;
+    const pendingFocusRoots = new Set();
 
+    const cancelLongPress = () => {
+        if (!longPressState) return;
+        longPressState.cancelled = true;
+        clearTimeout(longPressState.timer);
+        longPressState = null;
+    };
+
+    const queueFocusSync = mutations => {
+        if (!Array.isArray(mutations)) {
+            forceFullFocusSync = true;
+        } else {
+            const collectClosestRoot = node => {
+                if (!(node instanceof Element)) return;
+                const closest = node.matches('.mes_text') ? node : node.closest('.mes_text');
+                if (closest) pendingFocusRoots.add(closest);
+            };
+            const collectAddedRoots = node => {
+                if (!(node instanceof Element)) return;
+                collectClosestRoot(node);
+                node.querySelectorAll?.('.mes_text').forEach(root => pendingFocusRoots.add(root));
+            };
+            mutations.forEach(mutation => {
+                collectClosestRoot(mutation.target);
+                mutation.addedNodes.forEach(collectAddedRoots);
+            });
+        }
+        if (focusSyncQueued) return;
+        focusSyncQueued = true;
+        queueMicrotask(() => {
+            focusSyncQueued = false;
+            const roots = forceFullFocusSync ? null : new Set(pendingFocusRoots);
+            forceFullFocusSync = false;
+            pendingFocusRoots.clear();
+            syncManagedDialogueTabStops(roots);
+        });
+    };
+
+    syncManagedDialogueTabStops();
+    const focusObserver = new MutationObserver(queueFocusSync);
+    let observedChatRoot = null;
+    const observeChatRoot = () => {
+        const chatRoot = document.getElementById('chat');
+        if (chatRoot === observedChatRoot) return;
+        focusObserver.disconnect();
+        observedChatRoot = chatRoot;
+        if (chatRoot) {
+            focusObserver.observe(chatRoot, {
+                subtree: true,
+                childList: true,
+                attributes: true,
+                attributeFilter: ['data-dc-seg', 'color'],
+            });
+        }
+        queueFocusSync();
+    };
+    const rootObserver = new MutationObserver(observeChatRoot);
+    if (document.body) rootObserver.observe(document.body, { childList: true, subtree: true });
+    observeChatRoot();
+
+    document.addEventListener('change', e => {
+        if (getEventElement(e.target)?.id === 'dc-right-click') syncManagedDialogueTabStops();
+    });
+    let previousFocusMode = `${settings.enableRightClick}:${isDomEngine()}`;
+    eventSource.on(event_types.SETTINGS_UPDATED, () => {
+        const nextFocusMode = `${settings.enableRightClick}:${isDomEngine()}`;
+        if (nextFocusMode === previousFocusMode) return;
+        previousFocusMode = nextFocusMode;
+        queueFocusSync();
+    });
+    eventSource.on(event_types.CHAT_CHANGED, () => setTimeout(observeChatRoot, 0));
+
+    document.addEventListener('keydown', e => {
+        const focusedTarget = getEventElement(e.target);
+        if (settings.enableRightClick && focusedTarget?.getAttribute?.(CONTEXT_FOCUS_ATTRIBUTE) === 'tabindex'
+            && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) {
+            const targets = getMessageDialogueTargets(focusedTarget.closest('.mes_text'));
+            const currentIndex = targets.indexOf(focusedTarget);
+            if (currentIndex >= 0 && targets.length > 1) {
+                e.preventDefault();
+                const offset = e.key === 'ArrowLeft' || e.key === 'ArrowUp' ? -1 : 1;
+                const nextTarget = targets[(currentIndex + offset + targets.length) % targets.length];
+                targets.forEach(element => {
+                    if (element.getAttribute(CONTEXT_FOCUS_ATTRIBUTE) === 'tabindex') element.setAttribute('tabindex', element === nextTarget ? '0' : '-1');
+                });
+                nextTarget.focus({ preventScroll: true });
+                return;
+            }
+        }
+        const opensContextMenu = e.key === 'ContextMenu'
+            || e.code === 'ContextMenu'
+            || (e.shiftKey && e.key === 'F10');
+        if (!opensContextMenu || e.repeat || !settings.enableRightClick) return;
+
+        syncManagedDialogueTabStops();
+        const assignmentTarget = resolveDialogueAssignmentTarget(e.target);
+        if (!assignmentTarget) return;
+        showMenu(e, assignmentTarget.fontTag, assignmentTarget.qElement);
+    });
 
     document.addEventListener('contextmenu', e => {
         if (!settings.enableRightClick) return;
-        const mesText = e.target.closest('.mes_text');
+        const eventElement = getEventElement(e.target);
+        if (suppressedContextTarget && Date.now() <= suppressContextUntil
+            && (suppressedContextTarget === eventElement || suppressedContextTarget.contains(eventElement))) {
+            e.preventDefault();
+            suppressedContextTarget = null;
+            suppressContextUntil = 0;
+            return;
+        }
+        suppressedContextTarget = null;
+        suppressContextUntil = 0;
+
+        const mesText = eventElement?.closest('.mes_text');
         if (!mesText) return;
         if (isDomEngine()) {
-            const segmentEl = e.target.closest('[data-dc-seg], q, em');
-            if (segmentEl && mesText.contains(segmentEl) && !segmentEl.closest('font[color]')) {
-                showMenu(e, null, segmentEl);
-            }
+            const assignmentTarget = resolveDialogueAssignmentTarget(eventElement);
+            if (assignmentTarget) showMenu(e, assignmentTarget.fontTag, assignmentTarget.qElement);
             return;
         }
         const sel = window.getSelection();
@@ -334,39 +679,53 @@ export function setupContextMenu() {
                 return;
             }
         }
-        const fontTag = e.target.closest('font[color]');
-        if (fontTag) { showMenu(e, fontTag, null); return; }
-        const qEl = e.target.closest('q');
-        if (qEl && !qEl.closest('font[color]')) { showMenu(e, null, qEl); return; }
+        const assignmentTarget = resolveDialogueAssignmentTarget(eventElement);
+        if (assignmentTarget) showMenu(e, assignmentTarget.fontTag, assignmentTarget.qElement);
     });
 
     document.addEventListener('touchstart', e => {
+        cancelLongPress();
+        consumeTouchEnd = false;
         if (!settings.enableRightClick) return;
-        const mesText = e.target.closest('.mes_text');
-        if (!mesText) return;
-        if (isDomEngine()) {
-            const segmentEl = e.target.closest('[data-dc-seg], q, em');
-            if (segmentEl && mesText.contains(segmentEl) && !segmentEl.closest('font[color]')) {
-                longPressTarget = segmentEl;
-                longPressTimer = setTimeout(() => showMenu(e, null, segmentEl), 500);
-            }
-            return;
-        }
-        const fontTag = e.target.closest('font[color]');
-        if (fontTag) {
-            longPressTarget = fontTag;
-            longPressTimer = setTimeout(() => showMenu(e, fontTag, null), 500);
-            return;
-        }
-        const qEl = e.target.closest('q');
-        if (qEl && !qEl.closest('font[color]')) {
-            longPressTarget = qEl;
-            longPressTimer = setTimeout(() => showMenu(e, null, qEl), 500);
-        }
+        if (e.touches.length !== 1) return;
+        const assignmentTarget = resolveDialogueAssignmentTarget(e.target);
+        if (!assignmentTarget) return;
+
+        const touch = e.touches[0];
+        const press = {
+            ...assignmentTarget,
+            clientX: touch.clientX,
+            clientY: touch.clientY,
+            startX: touch.clientX,
+            startY: touch.clientY,
+            cancelled: false,
+            timer: null,
+        };
+        press.timer = setTimeout(() => {
+            if (longPressState !== press || press.cancelled || !press.targetEl.isConnected || !settings.enableRightClick) return;
+            consumeTouchEnd = true;
+            suppressedContextTarget = press.targetEl;
+            suppressContextUntil = Date.now() + 1200;
+            showMenu({ type: 'longpress', clientX: press.clientX, clientY: press.clientY }, press.fontTag, press.qElement);
+        }, 500);
+        longPressState = press;
     }, { passive: true });
 
-    document.addEventListener('touchend', () => { clearTimeout(longPressTimer); longPressTimer = null; });
-    document.addEventListener('touchmove', () => { clearTimeout(longPressTimer); longPressTimer = null; });
+    document.addEventListener('touchmove', e => {
+        if (consumeTouchEnd) e.preventDefault();
+        if (!longPressState || e.touches.length !== 1) { cancelLongPress(); return; }
+        const touch = e.touches[0];
+        if (Math.hypot(touch.clientX - longPressState.startX, touch.clientY - longPressState.startY) > 10) cancelLongPress();
+    }, { passive: false });
+    document.addEventListener('touchend', e => {
+        if (consumeTouchEnd) e.preventDefault();
+        cancelLongPress();
+        consumeTouchEnd = false;
+    }, { passive: false });
+    document.addEventListener('touchcancel', () => {
+        cancelLongPress();
+        consumeTouchEnd = false;
+    });
 }
 
 /**

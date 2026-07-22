@@ -5,12 +5,13 @@ import { saveHistory, showUndoToast } from './history.js';
 import { applyLiveColorChangesFromSnapshot, captureEffectiveColorSnapshot, commit } from './live-colors.js';
 import { CUSTOM_PALETTE_KEY, CUSTOM_PALETTE_META_KEY, applyThemeReadabilityAndBrightness, deriveBaseColorFromEffectiveColor, getBaseColor, invalidateThemeCache, normalizeCustomPalettes, syncAllEffectiveColors } from './palettes.js';
 import { injectPrompt } from './prompts.js';
-import { extension_settings, getCharacters, getContext, getRequestHeaders, saveCharacterDebounced, saveSettings, saveSettingsDebounced } from './st-api.js';
-import { ACTIVE_SETTING_KEYS, AUTO_SYNC_SAVE_TIMEOUT_MS, COLOR_SCHEMA_VERSION, GLOBAL_SETTINGS_V2_KEY, GLOBAL_SETTINGS_V2_KEYS, GLOBAL_VISUAL_KEYS, LEGACY_AUTO_SYNC_ENABLED_KEY, LEGACY_GLOBAL_SETTINGS_KEY, LEGEND_POSITION_KEY, MODULE_NAME, PRESETS_KEY, TOGGLE_SETTING_DEFAULTS, autoSyncEnabled, autoSyncInterval, autoSyncLastTimestamp, autoSyncPendingRecord, autoSyncSaveTimeout, autoSyncSequence, autoSyncStatusError, characterColors, colorHistory, historyIndex, immediateSettingsSaveInFlight, immediateSettingsSaveQueued, lastProcessedMessageSignature, setAutoSyncEnabled, setAutoSyncInterval, setAutoSyncLastTimestamp, setAutoSyncPendingRecord, setAutoSyncSaveTimeout, setAutoSyncSequence, setAutoSyncStatusError, setCharacterColors, setColorHistory, setHistoryIndex, setImmediateSettingsSaveInFlight, setImmediateSettingsSaveQueued, setLastProcessedMessageSignature, settings } from './state.js';
+import { extension_settings, getCharacters, getContext, getRequestHeaders, saveCharacterDebounced, saveMetadata, saveSettings, saveSettingsDebounced } from './st-api.js';
+import { ACTIVE_SETTING_KEYS, AUTO_SYNC_SAVE_TIMEOUT_MS, COLOR_SCHEMA_VERSION, COLOR_STORAGE_SCOPES, DEFAULT_COLOR_STORAGE_SCOPE, GLOBAL_SETTINGS_V2_KEY, GLOBAL_SETTINGS_V2_KEYS, GLOBAL_VISUAL_KEYS, LEGACY_AUTO_SYNC_ENABLED_KEY, LEGACY_GLOBAL_SETTINGS_KEY, LEGEND_POSITION_KEY, MODULE_NAME, PRESETS_KEY, TOGGLE_SETTING_DEFAULTS, autoSyncEnabled, autoSyncInterval, autoSyncLastTimestamp, autoSyncPendingRecord, autoSyncSaveTimeout, autoSyncSequence, autoSyncStatusError, characterColors, colorHistory, historyIndex, lastCharKey, lastProcessedMessageSignature, setAutoSyncEnabled, setAutoSyncInterval, setAutoSyncLastTimestamp, setAutoSyncPendingRecord, setAutoSyncSaveTimeout, setAutoSyncSequence, setAutoSyncStatusError, setCharacterColors, setColorHistory, setHistoryIndex, setLastCharKey, setLastProcessedMessageSignature, settings } from './state.js';
 import { refreshGradientPresetControls, syncUIWithSettings, updateCharList } from './ui.js';
 import { normalizeBoolean, normalizeCharacterColors, normalizeHexColor, toast } from './utils.js';
 
 export function normalizeToggleSettings() {
+    normalizeCurrentColorStorageScope();
     pruneInactiveSettings();
     for (const [key, fallback] of Object.entries(TOGGLE_SETTING_DEFAULTS)) {
         settings[key] = normalizeBoolean(settings[key], fallback);
@@ -18,8 +19,34 @@ export function normalizeToggleSettings() {
     settings.coloringEngine = settings.coloringEngine === 'dom' ? 'dom' : 'llm';
 }
 
+export function normalizeColorStorageScope(value, legacyShareColorsGlobally = false) {
+    return COLOR_STORAGE_SCOPES.includes(value)
+        ? value
+        : legacyShareColorsGlobally === true ? 'global' : DEFAULT_COLOR_STORAGE_SCOPE;
+}
+
+export function normalizeCurrentColorStorageScope() {
+    const scope = normalizeColorStorageScope(settings.colorStorageScope, settings.shareColorsGlobally);
+    settings.colorStorageScope = scope;
+    delete settings.shareColorsGlobally;
+    return scope;
+}
+
+export function getCurrentStorageScope() {
+    return normalizeCurrentColorStorageScope();
+}
+
 export function isPlainObject(value) {
     return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function cloneJsonValue(value) {
+    if (value === undefined) return undefined;
+    return JSON.parse(JSON.stringify(value));
+}
+
+function recordsEqual(left, right) {
+    return JSON.stringify(buildAutoSyncRecord(left)) === JSON.stringify(buildAutoSyncRecord(right));
 }
 
 export function parseStorageObject(key) {
@@ -44,9 +71,14 @@ export function applySettingsSubset(source, keys) {
     for (const key of keys) {
         if (source[key] !== undefined) settings[key] = source[key];
     }
+    if (keys.includes('colorStorageScope') && source.colorStorageScope === undefined && source.shareColorsGlobally !== undefined) {
+        settings.colorStorageScope = normalizeColorStorageScope(undefined, source.shareColorsGlobally);
+    }
+    delete settings.shareColorsGlobally;
 }
 
 export function buildSettingsSubset(keys) {
+    normalizeCurrentColorStorageScope();
     const subset = {};
     for (const key of keys) subset[key] = settings[key];
     return subset;
@@ -60,6 +92,7 @@ export function pruneInactiveSettings() {
 }
 
 export function buildFullSettingsSnapshot() {
+    normalizeCurrentColorStorageScope();
     const snapshot = {};
     for (const key of ACTIVE_SETTING_KEYS) {
         if (settings[key] !== undefined) snapshot[key] = settings[key];
@@ -75,6 +108,7 @@ export function normalizeStoredSettings(source) {
         if (source[key] !== undefined) normalized[key] = source[key];
     }
     if (source.colorSchemaVersion !== undefined) normalized.colorSchemaVersion = source.colorSchemaVersion;
+    normalized.colorStorageScope = normalizeColorStorageScope(source.colorStorageScope, source.shareColorsGlobally);
     return normalized;
 }
 
@@ -90,8 +124,9 @@ export function applyStoredSettingsSnapshot(source, { includeColorSchemaVersion 
 export function buildSettingsSubsetFromSource(source, keys) {
     const subset = {};
     if (!isPlainObject(source)) return subset;
+    const normalizedSource = keys.includes('colorStorageScope') ? normalizeStoredSettings(source) : source;
     for (const key of keys) {
-        if (source[key] !== undefined) subset[key] = source[key];
+        if (normalizedSource[key] !== undefined) subset[key] = normalizedSource[key];
     }
     return subset;
 }
@@ -130,8 +165,11 @@ export function cleanupLegacyAutoSyncPreference() {
 }
 
 export function buildAutoSyncRecord(source = {}) {
-    const settingsSource = isPlainObject(source?.settings) ? source.settings : {};
-    const normalizedSettings = buildSettingsSubsetFromSource(settingsSource, GLOBAL_SETTINGS_V2_KEYS);
+    const settingsSource = isPlainObject(source?.settings) ? source.settings : null;
+    const normalizedSettings = settingsSource && Object.keys(settingsSource).length
+        ? buildSettingsSubsetFromSource(settingsSource, GLOBAL_SETTINGS_V2_KEYS)
+        : {};
+    const globalSettingsSource = isPlainObject(source?.globalSettings) ? source.globalSettings : null;
     const parsedVersion = Number(source?.version);
     const parsedSequence = Number(source?.sequence);
     return {
@@ -140,7 +178,9 @@ export function buildAutoSyncRecord(source = {}) {
         sequence: Number.isFinite(parsedSequence) ? parsedSequence : 0,
         autoSyncEnabled: typeof source?.autoSyncEnabled === 'boolean' ? source.autoSyncEnabled : getLegacyAutoSyncEnabledPreference(),
         settings: normalizedSettings,
-        globalSettings: normalizeStoredSettings(source?.globalSettings),
+        globalSettings: globalSettingsSource && Object.keys(globalSettingsSource).length
+            ? normalizeStoredSettings(globalSettingsSource)
+            : {},
         colorData: normalizeStoredColorData(source?.colorData),
         presets: normalizeStoredColorPresets(source?.presets),
         customPalettes: isPlainObject(source?.customPalettes) ? source.customPalettes : {},
@@ -157,50 +197,177 @@ export function mergeIncomingAutoSyncRecord(source) {
     return buildAutoSyncRecord({
         ...current,
         ...incoming,
-        settings: Object.keys(incoming.settings || {}).length ? incoming.settings : current.settings,
-        globalSettings: Object.keys(incoming.globalSettings || {}).length ? incoming.globalSettings : current.globalSettings,
-        colorData: Object.keys(incoming.colorData || {}).length ? incoming.colorData : current.colorData,
-        presets: Object.keys(incoming.presets || {}).length ? incoming.presets : current.presets,
-        customPalettes: Object.keys(incoming.customPalettes || {}).length ? incoming.customPalettes : current.customPalettes,
-        customPaletteMeta: Object.keys(incoming.customPaletteMeta || {}).length ? incoming.customPaletteMeta : current.customPaletteMeta,
+        timestamp: hasOwn(source, 'timestamp') ? incoming.timestamp : current.timestamp,
+        sequence: hasOwn(source, 'sequence') ? incoming.sequence : current.sequence,
+        autoSyncEnabled: hasOwn(source, 'autoSyncEnabled') ? incoming.autoSyncEnabled : current.autoSyncEnabled,
+        settings: hasOwn(source, 'settings') ? incoming.settings : current.settings,
+        globalSettings: hasOwn(source, 'globalSettings') ? incoming.globalSettings : current.globalSettings,
+        colorData: hasOwn(source, 'colorData') ? incoming.colorData : current.colorData,
+        presets: hasOwn(source, 'presets') ? incoming.presets : current.presets,
+        customPalettes: hasOwn(source, 'customPalettes') ? incoming.customPalettes : current.customPalettes,
+        customPaletteMeta: hasOwn(source, 'customPaletteMeta') ? incoming.customPaletteMeta : current.customPaletteMeta,
         customGradientPresets: Object.prototype.hasOwnProperty.call(source || {}, 'customGradientPresets')
             ? incoming.customGradientPresets
             : current.customGradientPresets,
-        ui: Object.keys(incoming.ui || {}).length ? incoming.ui : current.ui,
+        ui: hasOwn(source, 'ui') ? incoming.ui : current.ui,
         legacyLocalStorageMigrated: current.legacyLocalStorageMigrated || incoming.legacyLocalStorageMigrated,
     });
 }
 
-export function queueImmediateSettingsSave() {
-    if (typeof saveSettings !== 'function') {
-        saveSettingsDebounced?.();
-        return;
-    }
-    setImmediateSettingsSaveQueued(true);
-    if (immediateSettingsSaveInFlight) return;
+let moduleSettingsPersistenceBarrier = Promise.resolve();
+let moduleSettingsPersistenceActive = false;
+let moduleSettingsPersistenceQueued = 0;
+let ordinaryModuleSaveQueued = false;
+let ordinaryModuleSaveExpected = null;
+let ordinaryModuleSaveExpectedRegex = null;
+let ordinaryModuleSaveRetryCount = 0;
+let moduleSettingsDebounceTimer = null;
+let storageOperationBarrier = Promise.resolve();
+let storageOperationActive = false;
+let deferredAutoSyncApplication = null;
+let metadataPersistenceSuppression = 0;
+let autoSyncPendingExpectedRecord = null;
 
-    const run = () => {
-        if (!immediateSettingsSaveQueued) return;
-        setImmediateSettingsSaveQueued(false);
-        setImmediateSettingsSaveInFlight(true);
-        saveSettings()
-            .catch(err => {
-                console.warn('[Dialogue Colors] Immediate settings save failed; falling back to debounced save:', err);
+function enqueueModuleSettingsPersistence(task) {
+    moduleSettingsPersistenceQueued++;
+    const result = moduleSettingsPersistenceBarrier
+        .catch(() => undefined)
+        .then(async () => {
+            moduleSettingsPersistenceActive = true;
+            try {
+                return await task();
+            } finally {
+                moduleSettingsPersistenceActive = false;
+                moduleSettingsPersistenceQueued = Math.max(0, moduleSettingsPersistenceQueued - 1);
+                if (moduleSettingsPersistenceQueued === 0) applyDeferredAutoSyncRecord();
+            }
+        });
+    moduleSettingsPersistenceBarrier = result.catch(() => undefined);
+    return result;
+}
+
+function applyDeferredAutoSyncRecord() {
+    if (storageOperationActive || moduleSettingsPersistenceActive || moduleSettingsPersistenceQueued > 0
+        || moduleSettingsDebounceTimer || !deferredAutoSyncApplication) return;
+    const deferred = deferredAutoSyncApplication;
+    deferredAutoSyncApplication = null;
+    applyAutoSyncRecord(deferred.record, deferred.options);
+}
+
+function shouldReplaceDeferredAutoSync(record, options = {}) {
+    if (!deferredAutoSyncApplication) return true;
+    const candidate = buildAutoSyncRecord(record);
+    const current = buildAutoSyncRecord(deferredAutoSyncApplication.record);
+    if (candidate.timestamp !== current.timestamp) return candidate.timestamp > current.timestamp;
+    if (candidate.sequence !== current.sequence) return candidate.sequence > current.sequence;
+    if (options.force && !deferredAutoSyncApplication.options?.force) return true;
+    return options.serverVerified === true && deferredAutoSyncApplication.options?.serverVerified !== true;
+}
+
+function clearModuleSettingsDebounce() {
+    if (!moduleSettingsDebounceTimer) return;
+    clearTimeout(moduleSettingsDebounceTimer);
+    moduleSettingsDebounceTimer = null;
+}
+
+function getModuleRecordSnapshot(source = getAutoSyncRecord(true)) {
+    return buildAutoSyncRecord(cloneJsonValue(source));
+}
+
+function moduleRecordMatchesSnapshot(expected) {
+    return recordsEqual(extension_settings[MODULE_NAME], expected);
+}
+
+function queueDebouncedModuleSettingsSave(expectedSource = getAutoSyncRecord(true), options = {}) {
+    clearModuleSettingsDebounce();
+    const expected = getModuleRecordSnapshot(expectedSource);
+    const expectedRegex = cloneJsonValue(extension_settings.regex);
+    const delay = Number.isFinite(options.delay) ? options.delay : 250;
+    moduleSettingsDebounceTimer = setTimeout(() => {
+        moduleSettingsDebounceTimer = null;
+        queueImmediateSettingsSave(expected, { retry: options.retry === true, expectedRegex });
+    }, delay);
+}
+
+export function queueImmediateSettingsSave(expectedSource = getAutoSyncRecord(true), options = {}) {
+    clearModuleSettingsDebounce();
+    if (!options.retry) ordinaryModuleSaveRetryCount = 0;
+    ordinaryModuleSaveExpected = getModuleRecordSnapshot(expectedSource);
+    ordinaryModuleSaveExpectedRegex = cloneJsonValue(options.expectedRegex ?? extension_settings.regex);
+    if (ordinaryModuleSaveQueued) return;
+    ordinaryModuleSaveQueued = true;
+    void enqueueModuleSettingsPersistence(async () => {
+        ordinaryModuleSaveQueued = false;
+        const expected = ordinaryModuleSaveExpected;
+        const expectedRegex = ordinaryModuleSaveExpectedRegex;
+        ordinaryModuleSaveExpected = null;
+        ordinaryModuleSaveExpectedRegex = null;
+        if (!expected || !moduleRecordMatchesSnapshot(expected)) return false;
+        if (typeof saveSettings !== 'function') {
+            saveSettingsDebounced?.();
+            return false;
+        }
+        try {
+            await saveSettings();
+            const storedSettings = await fetchExtensionSettingsFromServer();
+            const stored = storedSettings?.[MODULE_NAME];
+            const moduleMatches = !!stored && recordsEqual(buildAutoSyncRecord(stored), expected);
+            const regexMatches = JSON.stringify(storedSettings?.regex ?? null) === JSON.stringify(expectedRegex ?? null);
+            const matches = moduleMatches && regexMatches;
+            if (matches) {
+                ordinaryModuleSaveRetryCount = 0;
+                confirmAutoSyncRecord(stored, { serverVerified: true });
+            } else if (ordinaryModuleSaveRetryCount < 3 && moduleRecordMatchesSnapshot(expected)) {
+                ordinaryModuleSaveRetryCount++;
+                queueDebouncedModuleSettingsSave(expected, {
+                    retry: true,
+                    expectedRegex,
+                    delay: 250 * (2 ** (ordinaryModuleSaveRetryCount - 1)),
+                });
+            } else {
+                setAutoSyncError('Save could not be verified');
                 saveSettingsDebounced?.();
-            })
-            .finally(() => {
-                setImmediateSettingsSaveInFlight(false);
-                if (immediateSettingsSaveQueued) run();
-            });
-    };
-    run();
+            }
+            return matches;
+        } catch (error) {
+            console.warn('[Dialogue Colors] Immediate settings save failed; falling back to a later save:', error);
+            if (ordinaryModuleSaveRetryCount < 3 && moduleRecordMatchesSnapshot(expected)) {
+                ordinaryModuleSaveRetryCount++;
+                queueDebouncedModuleSettingsSave(expected, {
+                    retry: true,
+                    expectedRegex,
+                    delay: 250 * (2 ** (ordinaryModuleSaveRetryCount - 1)),
+                });
+            } else {
+                setAutoSyncError('Save could not be verified');
+                saveSettingsDebounced?.();
+            }
+            return false;
+        }
+    });
+}
+
+function runStorageOperation(operation) {
+    const result = storageOperationBarrier
+        .catch(() => undefined)
+        .then(async () => {
+            storageOperationActive = true;
+            try {
+                return await operation();
+            } finally {
+                storageOperationActive = false;
+                applyDeferredAutoSyncRecord();
+            }
+        });
+    storageOperationBarrier = result.catch(() => undefined);
+    return result;
 }
 
 export function persistModuleStore(record, { debounce = true, immediate = false } = {}) {
     const normalized = buildAutoSyncRecord(record || getAutoSyncRecord(true));
     extension_settings[MODULE_NAME] = normalized;
-    if (immediate) queueImmediateSettingsSave();
-    else if (debounce) saveSettingsDebounced?.();
+    if (immediate) queueImmediateSettingsSave(normalized);
+    else if (debounce) queueDebouncedModuleSettingsSave(normalized);
     return normalized;
 }
 
@@ -227,8 +394,8 @@ function persistCustomGradientPresetRecord(record, options = {}) {
         return;
     }
     persistModuleStore(record, { debounce: false });
-    saveSettingsToStore({ force: true });
-    if (options.immediate) queueImmediateSettingsSave();
+    if (autoSyncEnabled) saveSettingsToStore({ force: true });
+    queueImmediateSettingsSave();
 }
 
 export function saveCustomGradientPreset(name, source, options = {}) {
@@ -323,12 +490,14 @@ export function clearAutoSyncError() {
 export function clearAutoSyncPending({ timedOut = false } = {}) {
     clearAutoSyncSaveTimeout();
     setAutoSyncPendingRecord(null);
+    autoSyncPendingExpectedRecord = null;
     if (timedOut) setAutoSyncStatusError('Save failed');
     updateAutoSyncUI();
 }
 
 export function markAutoSyncPending(record) {
     setAutoSyncStatusError('');
+    autoSyncPendingExpectedRecord = getModuleRecordSnapshot(record);
     setAutoSyncPendingRecord({
         timestamp: record?.timestamp || '',
         sequence: record?.sequence || 0,
@@ -341,13 +510,33 @@ export function markAutoSyncPending(record) {
     updateAutoSyncUI();
 }
 
-export function confirmAutoSyncRecord(record) {
-    const normalized = mergeIncomingAutoSyncRecord(record);
+export function confirmAutoSyncRecord(record, { serverVerified = false } = {}) {
+    const normalized = buildAutoSyncRecord(cloneJsonValue(record));
+    if (!serverVerified) {
+        updateAutoSyncUI();
+        return normalized;
+    }
+    if (autoSyncPendingRecord
+        && doAutoSyncMarkersMatch(normalized, autoSyncPendingRecord)
+        && autoSyncPendingExpectedRecord
+        && !recordsEqual(normalized, autoSyncPendingExpectedRecord)) {
+        updateAutoSyncUI();
+        return normalized;
+    }
+    if (autoSyncPendingRecord && !doAutoSyncMarkersMatch(normalized, autoSyncPendingRecord)) {
+        const isNewerThanPending = normalized.timestamp > (autoSyncPendingRecord.timestamp || '')
+            || (normalized.timestamp === (autoSyncPendingRecord.timestamp || '')
+                && normalized.sequence > (autoSyncPendingRecord.sequence || 0));
+        if (!isNewerThanPending) {
+            updateAutoSyncUI();
+            return normalized;
+        }
+    }
     setAutoSyncLastTimestamp(normalized.timestamp || null);
     setAutoSyncSequence(Number.isFinite(normalized.sequence) ? normalized.sequence : 0);
     setAutoSyncEnabled(normalized.autoSyncEnabled);
-    persistModuleStore(normalized, { debounce: false });
     setAutoSyncPendingRecord(null);
+    autoSyncPendingExpectedRecord = null;
     setAutoSyncStatusError('');
     clearAutoSyncSaveTimeout();
     updateAutoSyncUI();
@@ -362,12 +551,23 @@ export function syncAutoSyncPolling() {
     }
 }
 
-export function applyAutoSyncRecord(record, { force = false } = {}) {
-    const normalized = mergeIncomingAutoSyncRecord(record);
-    const matchesPending = doAutoSyncMarkersMatch(normalized, autoSyncPendingRecord);
-    const shouldAcceptRecord = force || matchesPending || isIncomingAutoSyncRecordNewer(normalized);
+export function applyAutoSyncRecord(record, { force = false, serverVerified = false } = {}) {
+    if (storageOperationActive || moduleSettingsPersistenceActive) {
+        const options = { force, serverVerified };
+        if (shouldReplaceDeferredAutoSync(record, options)) {
+            deferredAutoSyncApplication = { record: cloneJsonValue(record), options };
+        }
+        return;
+    }
+    const hasIncomingColorData = hasOwn(record, 'colorData');
+    const ownsIncomingMarker = hasOwn(record, 'timestamp') && hasOwn(record, 'sequence');
+    const incoming = buildAutoSyncRecord(cloneJsonValue(record));
+    const normalized = mergeIncomingAutoSyncRecord(cloneJsonValue(record));
+    const matchesPending = ownsIncomingMarker && doAutoSyncMarkersMatch(normalized, autoSyncPendingRecord)
+        && (!autoSyncPendingExpectedRecord || recordsEqual(normalized, autoSyncPendingExpectedRecord));
+    const shouldAcceptRecord = force || matchesPending || isIncomingAutoSyncRecordNewer(incoming);
     const previousAutoSyncEnabled = autoSyncEnabled;
-    const colorSnapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
+    const previousScope = activeStorageScope || getCurrentStorageScope();
 
     if (!shouldAcceptRecord) {
         updateAutoSyncUI();
@@ -375,43 +575,64 @@ export function applyAutoSyncRecord(record, { force = false } = {}) {
         return;
     }
 
-    persistModuleStore(normalized, { debounce: false });
-    setAutoSyncEnabled(normalized.autoSyncEnabled);
-    refreshGradientPresetControls();
+    metadataPersistenceSuppression++;
+    try {
+        const colorSnapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
+        extension_settings[MODULE_NAME] = normalized;
+        setAutoSyncEnabled(normalized.autoSyncEnabled);
+        refreshGradientPresetControls();
 
-    if (force) applyStoredSettingsSnapshot(normalized.globalSettings);
+        if (force) applyStoredSettingsSnapshot(normalized.globalSettings);
 
-    if (hasAutoSyncSettingsPayload(normalized)) {
+        const hasSettingsPayload = hasAutoSyncSettingsPayload(normalized);
         let changed = false;
-        for (const key of GLOBAL_SETTINGS_V2_KEYS) {
-            if (normalized.settings[key] !== undefined && settings[key] !== normalized.settings[key]) {
-                settings[key] = normalized.settings[key];
-                changed = true;
+        if (hasSettingsPayload) {
+            for (const key of GLOBAL_SETTINGS_V2_KEYS) {
+                if (normalized.settings[key] !== undefined && settings[key] !== normalized.settings[key]) {
+                    settings[key] = normalized.settings[key];
+                    changed = true;
+                }
             }
         }
         normalizeToggleSettings();
-        if (changed) {
-            invalidateThemeCache();
-            syncAllEffectiveColors();
-            applyLiveColorChangesFromSnapshot(colorSnapshot, Object.keys(characterColors), { saveImmediately: true });
-            saveData({ skipAutoSync: true, preserveEffectiveColors: true });
-        } else {
-            saveGlobalSettingsSnapshot();
+        const scopeChanged = getCurrentStorageScope() !== previousScope;
+        const tableReloaded = scopeChanged || hasIncomingColorData;
+        if (tableReloaded) {
+            loadData({
+                persistPrevious: false,
+                allowLegacyFallback: !hasIncomingColorData,
+                persistMigrations: false,
+                allowMetadataPersistence: false,
+            });
+            changed = true;
         }
-        syncUIWithSettings();
-        updateCharList();
-        injectPrompt();
-    }
+        if (hasSettingsPayload || tableReloaded) {
+            if (changed) {
+                invalidateThemeCache();
+                syncAllEffectiveColors();
+                applyLiveColorChangesFromSnapshot(
+                    colorSnapshot,
+                    [...new Set([...Object.keys(colorSnapshot), ...Object.keys(characterColors)])],
+                    { saveImmediately: true },
+                );
+            }
+            syncUIWithSettings();
+            updateCharList();
+            injectPrompt();
+        }
 
-    confirmAutoSyncRecord(getAutoSyncRecord(true));
+        confirmAutoSyncRecord(normalized, { serverVerified: serverVerified && ownsIncomingMarker });
 
-    if (autoSyncEnabled !== previousAutoSyncEnabled) {
-        syncAutoSyncPolling();
+        if (autoSyncEnabled !== previousAutoSyncEnabled) {
+            syncAutoSyncPolling();
+        }
+        cleanupLegacyAutoSyncPreference();
+    } finally {
+        metadataPersistenceSuppression--;
     }
-    cleanupLegacyAutoSyncPreference();
 }
 
-export async function fetchAutoSyncRecordFromServer() {
+async function fetchExtensionSettingsFromServer() {
     const response = await fetch('/api/settings/get', {
         method: 'POST',
         headers: getRequestHeaders(),
@@ -433,11 +654,18 @@ export async function fetchAutoSyncRecordFromServer() {
         throw new Error('Invalid settings payload');
     }
 
-    const record = parsedSettings?.extension_settings?.[MODULE_NAME];
+    return parsedSettings?.extension_settings || null;
+}
+
+async function fetchModuleRecordFromServer() {
+    const extensionSettings = await fetchExtensionSettingsFromServer();
+    const record = extensionSettings?.[MODULE_NAME];
     if (!record || typeof record !== 'object' || Array.isArray(record)) return null;
-    const normalized = buildAutoSyncRecord(record);
-    if (!Object.prototype.hasOwnProperty.call(record, 'customGradientPresets')) delete normalized.customGradientPresets;
-    return normalized;
+    return record;
+}
+
+export async function fetchAutoSyncRecordFromServer() {
+    return fetchModuleRecordFromServer();
 }
 
 export function saveGlobalSettingsSnapshot(options = {}) {
@@ -448,18 +676,39 @@ export function saveGlobalSettingsSnapshot(options = {}) {
     persistModuleStore(record, options);
 }
 
-// Phase 2B: Legacy key for migration (old behavior: avatar || characterId)
+export const CHAT_SCOPE_METADATA_KEY = 'dialogue_colors_chat_scope_id';
 
-// Phase 2B: Prefer characterId over avatar, use ?? for 0-safety
-export function getCharKey() {
+let activeStorageKey = null;
+let activeStorageScope = null;
+const pendingChatScopeFallbacks = new WeakMap();
+const chatScopeMetadataPersistence = new WeakMap();
+const transientChatScopes = new WeakMap();
+const runtimeContextTokens = new WeakMap();
+let nextRuntimeContextToken = 1;
+
+function rememberChatScopeFallback(metadataId, hostStorageKey) {
+    if (!metadataId || !hostStorageKey) return;
+    const record = getAutoSyncRecord(true);
+    record.ui = isPlainObject(record.ui) ? record.ui : {};
+    record.ui.chatScopeFallbacks = isPlainObject(record.ui.chatScopeFallbacks) ? record.ui.chatScopeFallbacks : {};
+    record.ui.chatScopeFallbacks[metadataId] = hostStorageKey;
+    persistModuleStore(record);
+}
+
+function getCardIdentity(context = getContext()) {
     try {
-        const ctx = getContext();
-        const char = ctx?.characters?.[ctx?.characterId];
-        return char?.characterId ?? char?.avatar ?? ctx?.characterId ?? null;
+        const groupId = getStringOrNumberId(context?.groupId) ?? getStringOrNumberId(context?.group_id);
+        if (groupId !== null) return `group_${groupId}`;
+        const char = context?.characters?.[context?.characterId];
+        return char?.characterId ?? char?.avatar ?? context?.characterId ?? null;
     } catch { return null; }
 }
 
-// Phase 2B: Legacy key for migration (old behavior: avatar || characterId)
+export function getCharKey() {
+    if (getCurrentStorageScope() === 'chat') return getStorageKeyForScope('chat');
+    return getCardIdentity();
+}
+
 export function getLegacyCharKey() {
     try {
         const ctx = getContext();
@@ -467,12 +716,251 @@ export function getLegacyCharKey() {
     } catch { return null; }
 }
 
-export function getStorageKey() { return settings.shareColorsGlobally ? 'dc_global' : `dc_char_${getCharKey() || 'default'}`; }
+function hashStorageKeyComponent(value) {
+    let hash = 2166136261;
+    for (let index = 0; index < value.length; index++) {
+        hash ^= value.charCodeAt(index);
+        hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(36);
+}
 
-export function getLegacyStorageKey() { return settings.shareColorsGlobally ? 'dc_global' : `dc_char_${getLegacyCharKey() || 'default'}`; }
+export function sanitizeStorageKeyComponent(value, fallback = 'default') {
+    const safeFallback = String(fallback || 'default').replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^[_\.]+|[_\.]+$/g, '') || 'default';
+    const raw = String(value ?? '').trim();
+    if (!raw) return safeFallback;
+    let sanitized = raw.normalize('NFKC').replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^[_\.]+|[_\.]+$/g, '');
+    if (!sanitized) sanitized = safeFallback;
+    if (sanitized === raw && sanitized.length <= 96) return sanitized;
+    return `${sanitized.slice(0, 80)}_${hashStorageKeyComponent(raw)}`;
+}
+
+function getStringOrNumberId(value) {
+    if (typeof value === 'string') return value.trim() || null;
+    if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+    return null;
+}
+
+export function getHostProvidedChatId(context = getContext()) {
+    return getStringOrNumberId(context?.chatId) ?? getStringOrNumberId(context?.chat_id);
+}
+
+function createChatScopeId() {
+    if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID();
+    const randomPart = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+    return `${Date.now().toString(36)}-${randomPart}`;
+}
+
+function persistGeneratedChatScopeId(metadata) {
+    try {
+        const result = saveMetadata?.();
+        if (result && typeof result.catch === 'function') {
+            const promise = Promise.resolve(result)
+                .then(() => {
+                    chatScopeMetadataPersistence.set(metadata, { status: 'completed_unverified', promise: null });
+                    return true;
+                })
+                .catch(error => {
+                    chatScopeMetadataPersistence.set(metadata, { status: 'failed', promise: null });
+                    console.warn('[Dialogue Colors] Failed to persist chat scope metadata:', error);
+                    return false;
+                });
+            chatScopeMetadataPersistence.set(metadata, { status: 'pending', promise });
+        } else {
+            // A void host API may save synchronously or may only queue a save. Treat it as unverified.
+            chatScopeMetadataPersistence.set(metadata, { status: 'unverified', promise: null });
+        }
+    } catch (error) {
+        chatScopeMetadataPersistence.set(metadata, { status: 'failed', promise: null });
+        console.warn('[Dialogue Colors] Failed to persist chat scope metadata:', error);
+    }
+}
+
+async function ensureChatScopeMetadataSafety(context = getContext()) {
+    const metadata = context?.chatMetadata || context?.chat_metadata;
+    if (!metadata || typeof metadata !== 'object') {
+        return { safe: getHostProvidedChatId(context) !== null, status: 'unavailable' };
+    }
+    const persistence = chatScopeMetadataPersistence.get(metadata);
+    if (persistence?.promise) await persistence.promise;
+    const finalStatus = chatScopeMetadataPersistence.get(metadata)?.status;
+    const hasFallback = getHostProvidedChatId(context) !== null;
+    const hasStoredId = getStringOrNumberId(metadata[CHAT_SCOPE_METADATA_KEY]) !== null;
+    return {
+        safe: hasFallback || (hasStoredId && !persistence),
+        status: finalStatus || persistence?.status || 'existing',
+    };
+}
+
+export function getCurrentChatScopeId(context = getContext(), { persist = true } = {}) {
+    const metadata = context?.chatMetadata || context?.chat_metadata;
+    const storedId = metadata && typeof metadata === 'object'
+        ? getStringOrNumberId(metadata[CHAT_SCOPE_METADATA_KEY])
+        : null;
+    if (storedId !== null) {
+        const pendingFallback = metadata && pendingChatScopeFallbacks.get(metadata);
+        if (pendingFallback) return pendingFallback;
+        return `meta_${sanitizeStorageKeyComponent(storedId)}`;
+    }
+
+    const hostId = getHostProvidedChatId(context);
+    if (!metadata || typeof metadata !== 'object') {
+        if (hostId !== null) return `host_${sanitizeStorageKeyComponent(hostId)}`;
+    }
+
+    const transientOwner = metadata && typeof metadata === 'object'
+        ? metadata
+        : context?.chat && typeof context.chat === 'object' ? context.chat : null;
+    const existingTransient = transientOwner ? transientChatScopes.get(transientOwner) : null;
+    const generatedId = existingTransient?.id || createChatScopeId();
+    const fallbackComponent = hostId !== null
+        ? `host_${sanitizeStorageKeyComponent(hostId)}`
+        : `meta_${sanitizeStorageKeyComponent(generatedId)}`;
+    if (transientOwner && !existingTransient) {
+        transientChatScopes.set(transientOwner, { id: generatedId, component: fallbackComponent });
+    }
+    if (!persist) return existingTransient?.component || fallbackComponent;
+
+    if (metadata && typeof metadata === 'object') {
+        try {
+            metadata[CHAT_SCOPE_METADATA_KEY] = generatedId;
+            pendingChatScopeFallbacks.set(metadata, fallbackComponent);
+            if (hostId !== null) {
+                const metadataComponent = `meta_${sanitizeStorageKeyComponent(generatedId)}`;
+                const hostStorageKey = `dc_chat_${getChatOwnerStorageComponent(context)}_${fallbackComponent}`;
+                rememberChatScopeFallback(metadataComponent, hostStorageKey);
+            }
+            persistGeneratedChatScopeId(metadata);
+        } catch (error) {
+            chatScopeMetadataPersistence.set(metadata, { status: 'failed', promise: null });
+            console.warn('[Dialogue Colors] Could not write the chat scope ID to chat metadata:', error);
+            return fallbackComponent;
+        }
+    }
+    return metadata && pendingChatScopeFallbacks.get(metadata)
+        ? pendingChatScopeFallbacks.get(metadata)
+        : `meta_${sanitizeStorageKeyComponent(generatedId)}`;
+}
+
+function getChatOwnerStorageComponent(context = getContext()) {
+    const groupId = getStringOrNumberId(context?.groupId) ?? getStringOrNumberId(context?.group_id);
+    if (groupId !== null) return `group_${sanitizeStorageKeyComponent(groupId)}`;
+    return `card_${sanitizeStorageKeyComponent(getCardIdentity(context))}`;
+}
+
+export function getStorageKeyForScope(scope, options = {}) {
+    const normalizedScope = normalizeColorStorageScope(scope);
+    if (normalizedScope === 'global') return 'dc_global';
+    if (normalizedScope === 'chat') {
+        const context = getContext();
+        const persistMetadata = options.persistMetadata !== false && metadataPersistenceSuppression === 0;
+        return `dc_chat_${getChatOwnerStorageComponent(context)}_${getCurrentChatScopeId(context, { persist: persistMetadata })}`;
+    }
+    return `dc_char_${sanitizeStorageKeyComponent(getCardIdentity())}`;
+}
+
+export function getStorageKey() {
+    return getStorageKeyForScope(getCurrentStorageScope());
+}
+
+function getRuntimeContextToken(value) {
+    if (!value || (typeof value !== 'object' && typeof value !== 'function')) return '';
+    if (!runtimeContextTokens.has(value)) runtimeContextTokens.set(value, nextRuntimeContextToken++);
+    return runtimeContextTokens.get(value);
+}
+
+function captureRuntimeContext() {
+    const context = getContext();
+    return {
+        cardIdentity: getCardIdentity(context),
+        characterId: context?.characterId ?? null,
+        groupId: getStringOrNumberId(context?.groupId) ?? getStringOrNumberId(context?.group_id),
+        hostChatId: getHostProvidedChatId(context),
+        chatToken: getRuntimeContextToken(context?.chat),
+        metadataToken: getRuntimeContextToken(context?.chatMetadata || context?.chat_metadata),
+    };
+}
+
+function isRuntimeContextCurrent(captured) {
+    if (!captured) return false;
+    const current = captureRuntimeContext();
+    return current.cardIdentity === captured.cardIdentity
+        && current.characterId === captured.characterId
+        && current.groupId === captured.groupId
+        && current.hostChatId === captured.hostChatId
+        && current.chatToken === captured.chatToken
+        && current.metadataToken === captured.metadataToken;
+}
+
+function captureActiveStorageBinding() {
+    const scope = activeStorageScope || getCurrentStorageScope();
+    const contextKey = getStorageKeyForScope(scope);
+    return {
+        scope,
+        key: activeStorageKey || contextKey,
+        contextKey,
+        aligned: !activeStorageKey || activeStorageKey === contextKey,
+        context: captureRuntimeContext(),
+    };
+}
+
+function isActiveStorageBindingCurrent(binding) {
+    if (!binding) return false;
+    const currentScope = activeStorageScope || getCurrentStorageScope();
+    const currentKey = activeStorageKey || getStorageKeyForScope(currentScope);
+    const freshContextKey = getStorageKeyForScope(currentScope);
+    return binding.aligned === true
+        && binding.key === binding.contextKey
+        && currentScope === binding.scope
+        && currentKey === binding.key
+        && currentKey === freshContextKey
+        && freshContextKey === binding.contextKey
+        && isRuntimeContextCurrent(binding.context);
+}
+
+function areScopeStorageKeysCurrent(bindings) {
+    return Object.entries(bindings || {}).every(([scope, key]) => getStorageKeyForScope(scope) === key);
+}
+
+function contextChangedError(message = 'The active chat or card changed before the operation completed.') {
+    return { ok: false, error: 'context_changed', message };
+}
+
+function getLegacyCardStorageKeys() {
+    const context = getContext();
+    const isGroup = getStringOrNumberId(context?.groupId) !== null || getStringOrNumberId(context?.group_id) !== null;
+    return [...new Set([getCardIdentity(), getLegacyCharKey(), ...(isGroup ? ['default'] : [])]
+        .filter(value => value !== null && value !== undefined && String(value).length)
+        .map(value => `dc_char_${String(value)}`))];
+}
+
+function getLegacyChatStorageKeys() {
+    const hostId = getHostProvidedChatId();
+    const metadata = getContext()?.chatMetadata || getContext()?.chat_metadata;
+    const storedId = metadata && typeof metadata === 'object'
+        ? getStringOrNumberId(metadata[CHAT_SCOPE_METADATA_KEY])
+        : null;
+    const metadataComponent = storedId !== null ? `meta_${sanitizeStorageKeyComponent(storedId)}` : '';
+    const mappedFallback = metadataComponent
+        ? getAutoSyncRecord(true).ui?.chatScopeFallbacks?.[metadataComponent]
+        : null;
+    return [...new Set([
+        mappedFallback,
+        hostId !== null ? `dc_chat_${getChatOwnerStorageComponent()}_host_${sanitizeStorageKeyComponent(hostId)}` : null,
+    ].filter(Boolean))];
+}
+
+export function getLegacyStorageKey() {
+    if (getCurrentStorageScope() !== 'card') return null;
+    return getLegacyCardStorageKeys().find(key => key !== getStorageKeyForScope('card')) || null;
+}
 
 export function getStorageLabelForKey(key) {
-    return key === 'dc_global' ? 'Global shared colors' : String(key || '').replace(/^dc_char_/, '');
+    const value = String(key || '');
+    if (value === 'dc_global') return 'Global shared colors';
+    if (value.startsWith('dc_chat_')) return `Chat colors (${value.slice('dc_chat_'.length)})`;
+    if (value.startsWith('dc_char_')) return `Card colors (${value.slice('dc_char_'.length)})`;
+    return `Stored colors (${value || 'unknown'})`;
 }
 
 export function normalizeColorDataEntry(source) {
@@ -496,6 +984,134 @@ export function getStoredColorData(key) {
     return normalizeColorDataEntry(getUserColorDataStore()[key]);
 }
 
+function findColorDataForScope(scope, primaryKey = getStorageKeyForScope(scope), options = {}) {
+    const store = getUserColorDataStore();
+    const primaryExists = Object.prototype.hasOwnProperty.call(store, primaryKey);
+    const primaryEntry = normalizeColorDataEntry(store[primaryKey]);
+    if (primaryEntry) return { entry: primaryEntry, exists: true, sourceKey: primaryKey, legacy: false };
+    if (primaryExists) return { entry: null, exists: true, sourceKey: primaryKey, legacy: false };
+
+    if (options.allowLegacyFallback === false || (scope !== 'card' && scope !== 'chat')) {
+        return { entry: null, exists: primaryExists, sourceKey: primaryKey, legacy: false };
+    }
+
+    const candidates = [...new Set([
+        primaryKey,
+        ...(scope === 'card' ? getLegacyCardStorageKeys() : getLegacyChatStorageKeys()),
+    ])];
+    for (const key of candidates) {
+        if (key === primaryKey) continue;
+        const entry = normalizeColorDataEntry(store[key]);
+        if (entry) return { entry, exists: true, sourceKey: key, legacy: true };
+    }
+    for (const key of candidates) {
+        const entry = normalizeColorDataEntry(parseStorageObject(key));
+        if (entry) return { entry, exists: true, sourceKey: key, legacy: true };
+    }
+    return { entry: null, exists: primaryExists, sourceKey: primaryKey, legacy: false };
+}
+
+export function getStorageScopeDescriptor(scope = getCurrentStorageScope()) {
+    const normalizedScope = normalizeColorStorageScope(scope);
+    const key = getStorageKeyForScope(normalizedScope);
+    const located = findColorDataForScope(normalizedScope, key);
+    const colors = located.entry?.colors || {};
+    return {
+        scope: normalizedScope,
+        key,
+        exists: located.exists,
+        characterCount: Object.keys(colors).length,
+        updatedAt: located.entry?.updatedAt || '',
+        label: getStorageLabelForKey(key),
+        sourceKey: located.sourceKey,
+        usesLegacyFallback: located.legacy,
+    };
+}
+
+export function inspectStorageScopes() {
+    return COLOR_STORAGE_SCOPES.map(scope => getStorageScopeDescriptor(scope));
+}
+
+function collectRenamedCharacterIds(value) {
+    if (typeof value === 'string' || typeof value === 'number') return [String(value)];
+    if (!isPlainObject(value)) return [];
+    return [value.oldAvatar, value.old_avatar, value.avatar, value.characterId, value.character_id]
+        .map(getStringOrNumberId)
+        .filter(Boolean);
+}
+
+export function migrateRenamedCharacterStorage(oldValue, newValue) {
+    const oldIds = [...new Set(collectRenamedCharacterIds(oldValue))];
+    const newIds = [...new Set(collectRenamedCharacterIds(newValue))];
+    if (!oldIds.length || !newIds.length) return Promise.resolve({ ok: true, migrated: 0 });
+    return runStorageOperation(async () => {
+        const baseRecord = getModuleRecordSnapshot();
+        const record = getAutoSyncRecord(true);
+        record.colorData = isPlainObject(record.colorData) ? record.colorData : {};
+        const newCardKey = `dc_char_${sanitizeStorageKeyComponent(newIds[0])}`;
+        const oldCardKeys = [...new Set(oldIds.flatMap(id => [
+            `dc_char_${sanitizeStorageKeyComponent(id)}`,
+            `dc_char_${id}`,
+        ]))];
+        const activeWasOld = oldCardKeys.includes(activeStorageKey)
+            || oldIds.some(id => String(activeStorageKey || '').startsWith(`dc_chat_card_${sanitizeStorageKeyComponent(id)}_`));
+        let migrated = 0;
+        let fallbackChanged = false;
+        if (!hasOwn(record.colorData, newCardKey)) {
+            const sourceKey = oldCardKeys.find(key => hasOwn(record.colorData, key));
+            if (sourceKey && sourceKey !== newCardKey) {
+                record.colorData[newCardKey] = cloneJsonValue(record.colorData[sourceKey]);
+                migrated++;
+            }
+        }
+
+        const newChatPrefix = `dc_chat_card_${sanitizeStorageKeyComponent(newIds[0])}_`;
+        const oldChatPrefixes = oldIds.map(id => `dc_chat_card_${sanitizeStorageKeyComponent(id)}_`);
+        for (const [key, value] of Object.entries(record.colorData)) {
+            const oldPrefix = oldChatPrefixes.find(prefix => key.startsWith(prefix));
+            if (!oldPrefix) continue;
+            const destinationKey = `${newChatPrefix}${key.slice(oldPrefix.length)}`;
+            if (destinationKey === key || hasOwn(record.colorData, destinationKey)) continue;
+            record.colorData[destinationKey] = cloneJsonValue(value);
+            migrated++;
+        }
+
+        const fallbacks = record.ui?.chatScopeFallbacks;
+        if (isPlainObject(fallbacks)) {
+            for (const [metadataId, key] of Object.entries(fallbacks)) {
+                const oldPrefix = oldChatPrefixes.find(prefix => String(key).startsWith(prefix));
+                if (oldPrefix) {
+                    fallbacks[metadataId] = `${newChatPrefix}${String(key).slice(oldPrefix.length)}`;
+                    fallbackChanged = true;
+                }
+            }
+        }
+        if (!migrated && !fallbackChanged) {
+            if (activeWasOld) {
+                activeStorageKey = null;
+                activeStorageScope = null;
+                reloadCurrentStorageWithoutPersistence();
+            }
+            return { ok: true, migrated: 0 };
+        }
+
+        persistModuleStore(record, { debounce: false });
+        const expected = prepareExpectedModuleRecord();
+        const persisted = await persistSettingsImmediately(expected);
+        if (!persisted) {
+            const rollbackPersisted = await rollbackModuleRecord(baseRecord, expected);
+            return { ok: false, error: 'rename_migration_persist_failed', migrated: 0, rollbackPersisted };
+        }
+
+        if (activeWasOld) {
+            activeStorageKey = null;
+            activeStorageScope = null;
+            reloadCurrentStorageWithoutPersistence();
+        }
+        return { ok: true, migrated };
+    });
+}
+
 export function setStoredColorData(key, colors, storedSettings = settings, options = {}) {
     const record = getAutoSyncRecord(true);
     if (!isPlainObject(record.colorData)) record.colorData = {};
@@ -513,6 +1129,239 @@ export function removeStoredColorData(key) {
     delete record.colorData[key];
     persistModuleStore(record);
     return true;
+}
+
+function prepareExpectedModuleRecord({ refreshAutoSyncSettings = true } = {}) {
+    if (autoSyncEnabled) {
+        if (refreshAutoSyncSettings) {
+            saveSettingsToStore({ force: true, schedule: false });
+        } else {
+            const current = getAutoSyncRecord(true);
+            const next = buildAutoSyncRecord({
+                ...current,
+                timestamp: new Date().toISOString(),
+                sequence: (Number.isFinite(current.sequence) ? current.sequence : 0) + 1,
+                autoSyncEnabled,
+            });
+            persistModuleStore(next, { debounce: false });
+            markAutoSyncPending(next);
+        }
+    }
+    return getModuleRecordSnapshot();
+}
+
+function reloadCurrentStorageWithoutPersistence() {
+    loadData({
+        persistPrevious: false,
+        persistMigrations: false,
+        allowMetadataPersistence: false,
+    });
+    invalidateThemeCache();
+    syncAllEffectiveColors();
+    syncUIWithSettings();
+    updateCharList();
+    injectPrompt();
+}
+
+function jsonValuesEqual(left, right) {
+    return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function restoreAppliedObjectChanges(base, applied, current) {
+    const baseObject = isPlainObject(base) ? base : {};
+    const appliedObject = isPlainObject(applied) ? applied : {};
+    const currentObject = isPlainObject(current) ? current : {};
+    const restored = cloneJsonValue(currentObject);
+    const keys = new Set([...Object.keys(baseObject), ...Object.keys(appliedObject)]);
+
+    for (const key of keys) {
+        const baseHas = hasOwn(baseObject, key);
+        const appliedHas = hasOwn(appliedObject, key);
+        const currentHas = hasOwn(currentObject, key);
+        const baseValue = baseObject[key];
+        const appliedValue = appliedObject[key];
+        const currentValue = currentObject[key];
+        const baseMatchesApplied = baseHas === appliedHas
+            && (!baseHas || jsonValuesEqual(baseValue, appliedValue));
+        if (baseMatchesApplied) continue;
+
+        const currentMatchesApplied = currentHas === appliedHas
+            && (!currentHas || jsonValuesEqual(currentValue, appliedValue));
+        if (currentMatchesApplied) {
+            if (baseHas) restored[key] = cloneJsonValue(baseValue);
+            else delete restored[key];
+            continue;
+        }
+
+        if (appliedHas && currentHas && isPlainObject(appliedValue) && isPlainObject(currentValue)
+            && (!baseHas || isPlainObject(baseValue))) {
+            restored[key] = restoreAppliedObjectChanges(baseValue, appliedValue, currentValue);
+        }
+    }
+    return restored;
+}
+
+function restoreModuleRecord(baseRecord, appliedRecord) {
+    const currentRecord = getModuleRecordSnapshot();
+    const restoredRecord = restoreAppliedObjectChanges(baseRecord, appliedRecord, currentRecord);
+    restoredRecord.sequence = Math.max(
+        Number(restoredRecord.sequence) || 0,
+        Number(currentRecord.sequence) || 0,
+    );
+    persistModuleStore(restoredRecord, { debounce: false });
+    return restoredRecord;
+}
+
+async function rollbackModuleRecord(baseRecord, appliedRecord) {
+    try {
+        restoreModuleRecord(baseRecord, appliedRecord);
+        const rollbackExpected = prepareExpectedModuleRecord({ refreshAutoSyncSettings: false });
+        return await persistSettingsImmediately(rollbackExpected);
+    } catch (error) {
+        console.error('[Dialogue Colors] Failed to roll back module settings:', error);
+        return false;
+    }
+}
+
+export function archiveStoredColorData(keys) {
+    const binding = captureActiveStorageBinding();
+    return runStorageOperation(() => archiveStoredColorDataInternal(keys, binding));
+}
+
+async function archiveStoredColorDataInternal(keys, binding) {
+    if (!isActiveStorageBindingCurrent(binding)) {
+        return { ...contextChangedError(), count: 0 };
+    }
+    const baseRecord = getModuleRecordSnapshot();
+    let appliedRecord = baseRecord;
+    try {
+        const record = getAutoSyncRecord(true);
+        if (!isPlainObject(record.colorData)) record.colorData = {};
+        const entries = {};
+        const currentKey = binding.key;
+        for (const key of [...new Set(Array.isArray(keys) ? keys : [])]) {
+            if (key === currentKey) continue;
+            if (!Object.prototype.hasOwnProperty.call(record.colorData, key)) continue;
+            entries[key] = cloneJsonValue(record.colorData[key]);
+            delete record.colorData[key];
+        }
+        const archivedKeys = Object.keys(entries);
+        if (!archivedKeys.length) return { ok: false, count: 0 };
+        const deletedAt = new Date().toISOString();
+        record.ui = {
+            ...(isPlainObject(record.ui) ? record.ui : {}),
+            storageTrash: { entries, deletedAt },
+        };
+        persistModuleStore(record, { debounce: false });
+        const expected = prepareExpectedModuleRecord();
+        appliedRecord = expected;
+        const persisted = await persistSettingsImmediately(expected);
+        const contextCurrent = isActiveStorageBindingCurrent(binding);
+        if (!persisted || !contextCurrent) {
+            const rollbackPersisted = await rollbackModuleRecord(baseRecord, expected);
+            const currentBinding = captureActiveStorageBinding();
+            if (!contextCurrent && archivedKeys.includes(currentBinding.key)) {
+                reloadCurrentStorageWithoutPersistence();
+            }
+            return {
+                ...(contextCurrent
+                    ? { ok: false, error: 'archive_persist_failed' }
+                    : contextChangedError()),
+                count: 0,
+                rollbackPersisted,
+            };
+        }
+        return { ok: true, count: archivedKeys.length, keys: archivedKeys };
+    } catch (error) {
+        console.error('[Dialogue Colors] Failed to archive stored color data:', error);
+        const contextCurrent = isActiveStorageBindingCurrent(binding);
+        const rollbackPersisted = await rollbackModuleRecord(baseRecord, appliedRecord);
+        if (!contextCurrent) reloadCurrentStorageWithoutPersistence();
+        return {
+            ...(contextCurrent
+                ? { ok: false, error: 'archive_failed' }
+                : contextChangedError()),
+            count: 0,
+            rollbackPersisted,
+        };
+    }
+}
+
+export function getArchivedColorData() {
+    const trash = getUiState().storageTrash;
+    if (!isPlainObject(trash) || !isPlainObject(trash.entries)) return null;
+    const keys = Object.keys(trash.entries);
+    return keys.length ? { keys, count: keys.length, deletedAt: trash.deletedAt || '' } : null;
+}
+
+export function restoreArchivedColorData() {
+    const binding = captureActiveStorageBinding();
+    return runStorageOperation(() => restoreArchivedColorDataInternal(binding));
+}
+
+async function restoreArchivedColorDataInternal(binding) {
+    if (!isActiveStorageBindingCurrent(binding)) {
+        return { ...contextChangedError(), count: 0, skipped: 0 };
+    }
+    const baseRecord = getModuleRecordSnapshot();
+    let appliedRecord = baseRecord;
+    try {
+        const record = getAutoSyncRecord(true);
+        const trash = cloneJsonValue(record.ui?.storageTrash);
+        if (!isPlainObject(trash) || !isPlainObject(trash.entries)) return { ok: false, count: 0 };
+        if (!isPlainObject(record.colorData)) record.colorData = {};
+        let restored = 0;
+        let skipped = 0;
+        const restoredKeys = [];
+        const remainingEntries = {};
+        for (const [key, value] of Object.entries(trash.entries)) {
+            if (key === binding.key || Object.prototype.hasOwnProperty.call(record.colorData, key)) {
+                remainingEntries[key] = value;
+                skipped++;
+                continue;
+            }
+            record.colorData[key] = value;
+            restoredKeys.push(key);
+            restored++;
+        }
+        if (!restored) return { ok: false, count: 0, skipped };
+        if (Object.keys(remainingEntries).length) record.ui.storageTrash = { ...trash, entries: remainingEntries };
+        else delete record.ui.storageTrash;
+        persistModuleStore(record, { debounce: false });
+        const expected = prepareExpectedModuleRecord();
+        appliedRecord = expected;
+        const persisted = await persistSettingsImmediately(expected);
+        const contextCurrent = isActiveStorageBindingCurrent(binding);
+        if (!persisted || !contextCurrent) {
+            const rollbackPersisted = await rollbackModuleRecord(baseRecord, expected);
+            const currentBinding = captureActiveStorageBinding();
+            if (!contextCurrent && restoredKeys.includes(currentBinding.key)) {
+                reloadCurrentStorageWithoutPersistence();
+            }
+            return {
+                ...(contextCurrent
+                    ? { ok: false, error: 'restore_persist_failed' }
+                    : contextChangedError()),
+                count: 0,
+                skipped,
+                rollbackPersisted,
+            };
+        }
+        return { ok: restored > 0, count: restored, skipped };
+    } catch (error) {
+        console.error('[Dialogue Colors] Failed to restore archived color data:', error);
+        const contextCurrent = isActiveStorageBindingCurrent(binding);
+        const rollbackPersisted = await rollbackModuleRecord(baseRecord, appliedRecord);
+        if (!contextCurrent) reloadCurrentStorageWithoutPersistence();
+        return {
+            ...(contextCurrent
+                ? { ok: false, error: 'restore_failed' }
+                : contextChangedError()),
+            count: 0,
+            skipped: 0,
+            rollbackPersisted,
+        };
+    }
 }
 
 export function getUiState() {
@@ -583,13 +1432,31 @@ export function migrateLegacyLocalStorageIfNeeded() {
     persistModuleStore(record);
 }
 
+function persistActiveStorageData(options = {}) {
+    if (!activeStorageKey || !activeStorageScope) return false;
+    setStoredColorData(activeStorageKey, characterColors, {
+        ...settings,
+        colorStorageScope: activeStorageScope,
+    }, options);
+    return true;
+}
+
 export function saveData(options = {}) {
     normalizeToggleSettings();
     setCharacterColors(normalizeCharacterColors(characterColors));
     settings.colorSchemaVersion = COLOR_SCHEMA_VERSION;
     if (!options.preserveEffectiveColors) syncAllEffectiveColors();
     try {
-        setStoredColorData(getStorageKey(), characterColors, settings, { debounce: false });
+        let storageKey = getStorageKey();
+        if (activeStorageKey && storageKey !== activeStorageKey) {
+            persistActiveStorageData({ debounce: false });
+            console.warn('[Dialogue Colors] Ignored an unsafe direct storage scope change; use switchColorStorageScope().');
+            settings.colorStorageScope = activeStorageScope;
+            storageKey = activeStorageKey;
+        }
+        setStoredColorData(storageKey, characterColors, settings, { debounce: false });
+        activeStorageKey = storageKey;
+        activeStorageScope = getCurrentStorageScope();
         saveGlobalSettingsSnapshot(options.immediate === false ? {} : { immediate: true });
         // Trigger auto-sync if enabled
         if (autoSyncEnabled && !options.skipAutoSync) {
@@ -658,79 +1525,841 @@ export function applyStoredColorData(data) {
 }
 
 // Legacy localStorage fallback is intentionally read-only and only seeds user settings.
-export function loadData() {
-    setCharacterColors({});
-    clearSpeakerRegexCache();
+export function loadData(options = {}) {
     const record = getAutoSyncRecord(true);
     applyStoredSettingsSnapshot(record.globalSettings, { includeColorSchemaVersion: false });
-    const primaryKey = getStorageKey();
-    let loaded = false;
-
-    loaded = applyStoredColorData(getStoredColorData(primaryKey));
-    if (!loaded) {
-        const legacyData = parseStorageObject(primaryKey);
-        if (legacyData) loaded = applyStoredColorData(normalizeColorDataEntry(legacyData));
-        if (loaded) setStoredColorData(primaryKey, characterColors, settings);
+    const scope = getCurrentStorageScope();
+    const primaryKey = getStorageKeyForScope(scope, { persistMetadata: options.allowMetadataPersistence !== false });
+    if (options.persistPrevious !== false && activeStorageKey && activeStorageKey !== primaryKey) {
+        persistActiveStorageData();
     }
-    if (!loaded) {
-        const legacyKey = getLegacyStorageKey();
-        if (legacyKey !== primaryKey) {
-            const legacyData = parseStorageObject(legacyKey);
-            if (legacyData) loaded = applyStoredColorData(normalizeColorDataEntry(legacyData));
-            if (loaded) setStoredColorData(primaryKey, characterColors, settings);
-        }
+    setCharacterColors({});
+    clearSpeakerRegexCache();
+    const located = findColorDataForScope(scope, primaryKey, options);
+    const loaded = applyStoredColorData(located.entry);
+    if (loaded && located.sourceKey !== primaryKey && options.persistMigrations !== false) {
+        setStoredColorData(primaryKey, characterColors, { ...settings, colorStorageScope: scope });
     }
     applyStoredSettingsSnapshot(record.globalSettings, { includeColorSchemaVersion: false });
+    settings.colorStorageScope = scope;
     normalizeToggleSettings();
-    if (migrateColorSchemaIfNeeded()) {
+    activeStorageKey = primaryKey;
+    activeStorageScope = scope;
+    setLastCharKey(scope === 'chat' ? primaryKey : getCardIdentity());
+    if (migrateColorSchemaIfNeeded() && options.persistMigrations !== false) {
         saveData({ preserveEffectiveColors: true });
     }
     setColorHistory([JSON.stringify(characterColors)]); setHistoryIndex(0);
     setLastProcessedMessageSignature('');
+    return {
+        scope,
+        key: primaryKey,
+        loaded,
+        sourceKey: located.sourceKey,
+        usedLegacyFallback: located.legacy,
+        characterCount: Object.keys(characterColors).length,
+    };
+}
+
+function captureStorageTransaction(binding = captureActiveStorageBinding()) {
+    return {
+        record: getModuleRecordSnapshot(),
+        colors: cloneJsonValue(characterColors),
+        settings: cloneJsonValue(settings),
+        history: [...colorHistory],
+        historyIndex,
+        lastCharKey,
+        lastProcessedMessageSignature,
+        binding,
+    };
+}
+
+function captureStorageRuntimeState() {
+    return {
+        colors: cloneJsonValue(characterColors),
+        settings: cloneJsonValue(settings),
+        history: [...colorHistory],
+        historyIndex,
+        lastCharKey,
+        lastProcessedMessageSignature,
+        activeStorageKey,
+        activeStorageScope,
+    };
+}
+
+function restoreRuntimeValue(baseValue, appliedValue, currentValue) {
+    if (jsonValuesEqual(currentValue, appliedValue)) return cloneJsonValue(baseValue);
+    if (isPlainObject(appliedValue) && isPlainObject(currentValue)
+        && (!baseValue || isPlainObject(baseValue))) {
+        return restoreAppliedObjectChanges(baseValue, appliedValue, currentValue);
+    }
+    return cloneJsonValue(currentValue);
+}
+
+function restoreSettingsState(snapshot) {
+    for (const key of Object.keys(settings)) delete settings[key];
+    Object.assign(settings, cloneJsonValue(snapshot));
+}
+
+async function rollbackStorageTransaction(transaction, appliedRecord, appliedRuntime, failedSnapshot, contextCurrent) {
+    try {
+        restoreModuleRecord(transaction.record, appliedRecord || getModuleRecordSnapshot());
+        const canRestoreCapturedRuntime = contextCurrent && isRuntimeContextCurrent(transaction.binding.context);
+        if (canRestoreCapturedRuntime) {
+            const currentRuntime = captureStorageRuntimeState();
+            const baseRuntime = {
+                colors: transaction.colors,
+                settings: transaction.settings,
+                history: transaction.history,
+                historyIndex: transaction.historyIndex,
+                lastCharKey: transaction.lastCharKey,
+                lastProcessedMessageSignature: transaction.lastProcessedMessageSignature,
+                activeStorageKey: transaction.binding.key,
+                activeStorageScope: transaction.binding.scope,
+            };
+            const applied = appliedRuntime || currentRuntime;
+            restoreSettingsState(restoreRuntimeValue(baseRuntime.settings, applied.settings, currentRuntime.settings));
+            activeStorageKey = restoreRuntimeValue(baseRuntime.activeStorageKey, applied.activeStorageKey, currentRuntime.activeStorageKey);
+            activeStorageScope = restoreRuntimeValue(baseRuntime.activeStorageScope, applied.activeStorageScope, currentRuntime.activeStorageScope);
+            const restoredColors = restoreRuntimeValue(baseRuntime.colors, applied.colors, currentRuntime.colors);
+            setCharacterColors(restoredColors);
+            if (jsonValuesEqual(currentRuntime.history, applied.history)
+                && currentRuntime.historyIndex === applied.historyIndex) {
+                setColorHistory([...baseRuntime.history]);
+                setHistoryIndex(baseRuntime.historyIndex);
+            } else {
+                const appliedHistory = Array.isArray(applied.history) ? applied.history : [];
+                const currentHistory = Array.isArray(currentRuntime.history) ? currentRuntime.history : [];
+                const hasAppliedPrefix = appliedHistory.every((snapshot, index) => currentHistory[index] === snapshot);
+                const concurrentSuffix = hasAppliedPrefix ? currentHistory.slice(appliedHistory.length) : [];
+                const transformedSuffix = concurrentSuffix.map(snapshot => {
+                    try {
+                        const parsed = JSON.parse(snapshot);
+                        return JSON.stringify(restoreAppliedObjectChanges(baseRuntime.colors, applied.colors, parsed));
+                    } catch {
+                        return null;
+                    }
+                }).filter(Boolean);
+                const nextHistory = [
+                    ...baseRuntime.history,
+                    ...transformedSuffix,
+                    ...(transformedSuffix.length ? [] : [JSON.stringify(restoredColors)]),
+                ].slice(-20);
+                setColorHistory(nextHistory);
+                setHistoryIndex(nextHistory.length - 1);
+            }
+            setLastCharKey(restoreRuntimeValue(baseRuntime.lastCharKey, applied.lastCharKey, currentRuntime.lastCharKey));
+            setLastProcessedMessageSignature(restoreRuntimeValue(baseRuntime.lastProcessedMessageSignature, applied.lastProcessedMessageSignature, currentRuntime.lastProcessedMessageSignature));
+            clearSpeakerRegexCache();
+            invalidateThemeCache();
+            syncAllEffectiveColors();
+            applyLiveColorChangesFromSnapshot(
+                failedSnapshot,
+                [...new Set([...Object.keys(failedSnapshot || {}), ...Object.keys(characterColors)])],
+                { saveImmediately: true },
+            );
+            refreshGradientPresetControls();
+            syncUIWithSettings();
+            updateCharList();
+            injectPrompt();
+        } else {
+            activeStorageKey = null;
+            activeStorageScope = null;
+            reloadCurrentStorageWithoutPersistence();
+            refreshGradientPresetControls();
+        }
+        const rollbackExpected = prepareExpectedModuleRecord({ refreshAutoSyncSettings: false });
+        return await persistSettingsImmediately(rollbackExpected);
+    } catch (error) {
+        console.error('[Dialogue Colors] Failed to roll back storage transaction:', error);
+        return false;
+    }
+}
+
+async function persistSettingsImmediately(expectedSource = getAutoSyncRecord(true)) {
+    const expected = getModuleRecordSnapshot(expectedSource);
+    const expectedJson = JSON.stringify(expected);
+    clearModuleSettingsDebounce();
+    return enqueueModuleSettingsPersistence(async () => {
+        if (!moduleRecordMatchesSnapshot(expected)) return false;
+        if (typeof saveSettings !== 'function') {
+            saveSettingsDebounced?.();
+            return false;
+        }
+        try {
+            await saveSettings();
+            const stored = await fetchModuleRecordFromServer();
+            const matches = !!stored && JSON.stringify(buildAutoSyncRecord(stored)) === expectedJson;
+            if (matches) confirmAutoSyncRecord(stored, { serverVerified: true });
+            return matches;
+        } catch (error) {
+            console.warn('[Dialogue Colors] Failed to persist storage scope state:', error);
+            return false;
+        }
+    });
+}
+
+export async function switchColorStorageScope(scope, strategy = 'switch') {
+    if (!COLOR_STORAGE_SCOPES.includes(scope)) {
+        return { ok: false, error: 'invalid_scope', message: `Unknown color storage scope: ${String(scope)}` };
+    }
+    if (!['switch', 'copy', 'replace', 'merge', 'empty'].includes(strategy)) {
+        return { ok: false, error: 'invalid_strategy', message: `Unknown scope switch strategy: ${String(strategy)}` };
+    }
+    const binding = captureActiveStorageBinding();
+    const targetKey = getStorageKeyForScope(scope);
+    return runStorageOperation(() => switchColorStorageScopeInternal(scope, strategy, binding, targetKey));
+}
+
+async function switchColorStorageScopeInternal(
+    scope,
+    strategy = 'switch',
+    binding = captureActiveStorageBinding(),
+    targetKey = getStorageKeyForScope(scope),
+) {
+    const previousScope = binding.scope;
+    const previousKey = binding.key;
+    const scopeKeyBindings = { [previousScope]: previousKey, [scope]: targetKey };
+    if (!isActiveStorageBindingCurrent(binding) || !areScopeStorageKeysCurrent(scopeKeyBindings)) {
+        return { ...contextChangedError(), previousScope, previousKey };
+    }
+    if (previousScope === 'chat' || scope === 'chat') {
+        const metadataSafety = await ensureChatScopeMetadataSafety();
+        if (!isActiveStorageBindingCurrent(binding) || !areScopeStorageKeysCurrent(scopeKeyBindings)) {
+            return { ...contextChangedError(), previousScope, previousKey };
+        }
+        if (!metadataSafety.safe) {
+            return {
+                ok: false,
+                error: 'chat_metadata_persist_failed',
+                message: 'The per-chat identifier could not be saved and no stable host chat identifier is available.',
+                previousScope,
+                previousKey,
+            };
+        }
+    }
+
+    let transaction = captureStorageTransaction(binding);
+    let appliedRecord = transaction.record;
+    let appliedRuntime = captureStorageRuntimeState();
+    try {
+        const sourceColors = normalizeCharacterColors(characterColors);
+        settings.colorStorageScope = previousScope;
+        normalizeToggleSettings();
+        setStoredColorData(previousKey, sourceColors, { ...settings, colorStorageScope: previousScope }, { debounce: false });
+        const sourceExpected = prepareExpectedModuleRecord();
+        appliedRecord = sourceExpected;
+        appliedRuntime = captureStorageRuntimeState();
+        const sourcePersisted = await persistSettingsImmediately(sourceExpected);
+        const sourceContextCurrent = areScopeStorageKeysCurrent(scopeKeyBindings)
+            && isActiveStorageBindingCurrent(binding);
+        if (!sourcePersisted || !sourceContextCurrent) {
+            const rollbackPersisted = await rollbackModuleRecord(transaction.record, sourceExpected);
+            if (!sourceContextCurrent) reloadCurrentStorageWithoutPersistence();
+            return {
+                ok: false,
+                error: sourceContextCurrent ? 'source_persist_failed' : 'context_changed',
+                message: sourceContextCurrent
+                    ? 'The current color table could not be persisted, so the scope was not changed.'
+                    : 'The active chat or card changed before the scope switch completed.',
+                previousScope,
+                previousKey,
+                rollbackPersisted,
+            };
+        }
+
+        // Source persistence is a preflight boundary. Preserve edits made while
+        // it was in flight before mutating the destination/runtime scope.
+        const latestSourceColors = normalizeCharacterColors(characterColors);
+        setStoredColorData(previousKey, latestSourceColors, { ...settings, colorStorageScope: previousScope }, { debounce: false });
+        transaction = captureStorageTransaction(binding);
+        appliedRecord = transaction.record;
+        appliedRuntime = captureStorageRuntimeState();
+
+        const target = findColorDataForScope(scope, targetKey);
+        const targetExisted = target.exists;
+        let destinationWritten = false;
+        let nextColors = target.entry?.colors || {};
+
+        if (strategy === 'copy' || strategy === 'replace') {
+            nextColors = latestSourceColors;
+            destinationWritten = true;
+        } else if (strategy === 'merge') {
+            nextColors = normalizeCharacterColors({ ...(target.entry?.colors || {}), ...latestSourceColors });
+            destinationWritten = true;
+        } else if (strategy === 'empty') {
+            nextColors = {};
+            destinationWritten = true;
+        }
+
+        if (destinationWritten) {
+            setStoredColorData(targetKey, nextColors, { ...settings, colorStorageScope: scope }, { debounce: false });
+        }
+
+        const colorSnapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
+        settings.colorStorageScope = scope;
+        saveGlobalSettingsSnapshot({ debounce: false });
+        const loadResult = loadData({ persistPrevious: false });
+        invalidateThemeCache();
+        syncAllEffectiveColors();
+        applyLiveColorChangesFromSnapshot(
+            colorSnapshot,
+            [...new Set([...Object.keys(colorSnapshot), ...Object.keys(characterColors)])],
+            { saveImmediately: true },
+        );
+        syncUIWithSettings();
+        updateCharList();
+        injectPrompt();
+
+        const expected = prepareExpectedModuleRecord();
+        appliedRecord = expected;
+        appliedRuntime = captureStorageRuntimeState();
+        const persisted = await persistSettingsImmediately(expected);
+        const contextCurrent = areScopeStorageKeysCurrent(scopeKeyBindings)
+            && isRuntimeContextCurrent(binding.context)
+            && activeStorageScope === scope
+            && activeStorageKey === targetKey;
+        if (!persisted || !contextCurrent) {
+            const failedSnapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
+            const rollbackPersisted = await rollbackStorageTransaction(
+                transaction,
+                expected,
+                appliedRuntime,
+                failedSnapshot,
+                contextCurrent,
+            );
+            return {
+                ok: false,
+                persisted: false,
+                error: contextCurrent ? 'destination_persist_failed' : 'context_changed',
+                message: contextCurrent
+                    ? rollbackPersisted
+                        ? 'The new storage scope could not be saved. The previous scope has been restored.'
+                        : 'The scope change and its recovery could not be saved reliably. Export your colors before reloading.'
+                    : 'The active chat or card changed before the scope switch completed. The scope change was rolled back.',
+                previousScope,
+                previousKey,
+                rollbackPersisted,
+            };
+        }
+        const descriptor = getStorageScopeDescriptor(scope);
+        return {
+            ok: true,
+            persisted,
+            strategy,
+            previousScope,
+            previousKey,
+            scope,
+            key: targetKey,
+            targetExisted,
+            destinationWritten,
+            loaded: loadResult.loaded,
+            characterCount: descriptor.characterCount,
+            descriptor,
+            message: descriptor.exists
+                ? `${descriptor.label} is active with ${descriptor.characterCount} character${descriptor.characterCount === 1 ? '' : 's'}.`
+                : `${descriptor.label} is active with an empty color table.`,
+            refresh: { characterState: true, history: true, theme: true, ui: true, prompt: true, render: true, fonts: true },
+            rollbackTransaction: transaction,
+        };
+    } catch (error) {
+        console.error('[Dialogue Colors] Failed to switch color storage scope:', error);
+        const failedSnapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
+        const contextCurrent = isRuntimeContextCurrent(binding.context)
+            && areScopeStorageKeysCurrent(scopeKeyBindings);
+        const rollbackPersisted = await rollbackStorageTransaction(
+            transaction,
+            appliedRecord,
+            appliedRuntime,
+            failedSnapshot,
+            contextCurrent,
+        );
+        return {
+            ok: false,
+            error: contextCurrent ? 'scope_apply_failed' : 'context_changed',
+            message: rollbackPersisted
+                ? 'The storage scope could not be changed. The previous state was restored.'
+                : 'The scope change and its recovery could not be saved reliably. Export your colors before reloading.',
+            previousScope,
+            previousKey,
+            rollbackPersisted,
+        };
+    }
+}
+
+function hasOwn(source, key) {
+    return Object.prototype.hasOwnProperty.call(source || {}, key);
+}
+
+function importError(error, message) {
+    return { ok: false, error, message };
+}
+
+async function parseImportSource(source) {
+    const isFileLike = typeof source?.text === 'function'
+        || (typeof source?.name === 'string' && typeof source?.size === 'number' && typeof source?.slice === 'function');
+    if (typeof source !== 'string' && !isFileLike) {
+        return { ok: true, value: source };
+    }
+
+    let text;
+    try {
+        if (typeof source === 'string') {
+            text = source;
+        } else if (typeof source.text === 'function') {
+            text = await source.text();
+        } else if (typeof FileReader === 'function') {
+            text = await new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = event => resolve(event.target?.result);
+                reader.onerror = () => reject(reader.error || new Error('File read failed'));
+                reader.readAsText(source);
+            });
+        } else {
+            return importError('read_failed', 'The selected file could not be read.');
+        }
+    } catch {
+        return importError('read_failed', 'The selected file could not be read.');
+    }
+
+    try {
+        return { ok: true, value: JSON.parse(text) };
+    } catch {
+        return importError('invalid_json', 'The source is not valid JSON.');
+    }
+}
+
+function normalizeImportSettings(source, keys) {
+    const normalized = normalizeStoredSettings(source);
+    if (!hasOwn(source, 'colorStorageScope') && !hasOwn(source, 'shareColorsGlobally')) delete normalized.colorStorageScope;
+    for (const key of Object.keys(normalized)) {
+        if (!keys.includes(key)) delete normalized[key];
+    }
+    return normalized;
+}
+
+function getExplicitImportScope(source) {
+    if (!hasOwn(source, 'colorStorageScope')) {
+        if (hasOwn(source, 'shareColorsGlobally')) {
+            return { ok: true, requestedStorageScope: source.shareColorsGlobally === true ? 'global' : 'card' };
+        }
+        return { ok: true };
+    }
+    if (!COLOR_STORAGE_SCOPES.includes(source.colorStorageScope)) {
+        return importError('invalid_storage_scope', `Unknown color storage scope: ${String(source.colorStorageScope)}`);
+    }
+    return { ok: true, requestedStorageScope: source.colorStorageScope };
+}
+
+function buildImportPreview(colors, importedSettings, customGradientPresets, requestedStorageScope) {
+    const preview = {
+        characterCount: Object.keys(colors || {}).length,
+        settingsPresent: importedSettings !== null,
+        settingsCount: Object.keys(importedSettings || {}).length,
+        customGradientPresetCount: Object.keys(customGradientPresets || {}).length,
+    };
+    if (requestedStorageScope !== undefined) preview.requestedStorageScope = requestedStorageScope;
+    return preview;
+}
+
+function analyzeColorPayload(source, kind = 'colors') {
+    if (!isPlainObject(source) || !hasOwn(source, 'colors') || !isPlainObject(source.colors)) {
+        return importError('unrecognized_payload', 'The source does not contain a recognized color payload.');
+    }
+    if (hasOwn(source, 'settings') && !isPlainObject(source.settings)) {
+        return importError('invalid_settings', 'The color payload has invalid settings data.');
+    }
+    if (hasOwn(source, 'customGradientPresets') && !isPlainObject(source.customGradientPresets)) {
+        return importError('invalid_gradient_presets', 'The color payload has invalid custom gradient presets.');
+    }
+
+    const settingsPresent = hasOwn(source, 'settings');
+    const importedSettings = settingsPresent ? normalizeImportSettings(source.settings, ACTIVE_SETTING_KEYS) : null;
+    const scopeResult = getExplicitImportScope(source.settings);
+    if (!scopeResult.ok) return scopeResult;
+    const presetsPresent = hasOwn(source, 'customGradientPresets');
+    const customGradientPresets = presetsPresent ? normalizeGradientPresets(source.customGradientPresets) : null;
+    const colors = normalizeCharacterColors(source.colors);
+    const payload = {
+        kind,
+        colors,
+        ...(settingsPresent ? { settings: importedSettings } : {}),
+        ...(presetsPresent ? { customGradientPresets } : {}),
+        ...(scopeResult.requestedStorageScope !== undefined
+            ? { requestedStorageScope: scopeResult.requestedStorageScope }
+            : {}),
+    };
+    return {
+        ok: true,
+        kind,
+        payload,
+        preview: buildImportPreview(colors, importedSettings, customGradientPresets, scopeResult.requestedStorageScope),
+    };
+}
+
+function analyzeSettingsPayload(source) {
+    if (!isPlainObject(source) || !hasOwn(source, 'settings') || !isPlainObject(source.settings)) {
+        return importError('unrecognized_payload', 'The source does not contain a recognized settings payload.');
+    }
+    if (hasOwn(source, 'customGradientPresets') && !isPlainObject(source.customGradientPresets)) {
+        return importError('invalid_gradient_presets', 'The settings payload has invalid custom gradient presets.');
+    }
+
+    const importedSettings = normalizeImportSettings(source.settings, GLOBAL_SETTINGS_V2_KEYS);
+    const scopeResult = getExplicitImportScope(source.settings);
+    if (!scopeResult.ok) return scopeResult;
+    const presetsPresent = hasOwn(source, 'customGradientPresets');
+    const customGradientPresets = presetsPresent ? normalizeGradientPresets(source.customGradientPresets) : null;
+    if (!Object.keys(importedSettings).length && !Object.keys(customGradientPresets || {}).length) {
+        return importError('unrecognized_payload', 'The source contains no recognized settings or custom gradient presets.');
+    }
+
+    const payload = {
+        kind: 'settings',
+        settings: importedSettings,
+        ...(presetsPresent ? { customGradientPresets } : {}),
+        ...(scopeResult.requestedStorageScope !== undefined
+            ? { requestedStorageScope: scopeResult.requestedStorageScope }
+            : {}),
+    };
+    return {
+        ok: true,
+        kind: 'settings',
+        payload,
+        preview: buildImportPreview({}, importedSettings, customGradientPresets, scopeResult.requestedStorageScope),
+    };
+}
+
+function attachImportReviewContext(analysis, binding = captureActiveStorageBinding()) {
+    if (!analysis?.ok || !isPlainObject(analysis.payload)) return analysis;
+    analysis.payload.reviewedContext = {
+        scope: binding.scope,
+        key: binding.key,
+        cardKey: getStorageKeyForScope('card'),
+        context: binding.context,
+    };
+    return analysis;
+}
+
+export async function analyzeColorImport(source) {
+    const binding = captureActiveStorageBinding();
+    const parsed = await parseImportSource(source);
+    if (!isActiveStorageBindingCurrent(binding)) return contextChangedError('The active import target changed while the file was read.');
+    return parsed.ok ? attachImportReviewContext(analyzeColorPayload(parsed.value), binding) : parsed;
+}
+
+export async function analyzeSettingsImport(source) {
+    const binding = captureActiveStorageBinding();
+    const parsed = await parseImportSource(source);
+    if (!isActiveStorageBindingCurrent(binding)) return contextChangedError('The active import target changed while the file was read.');
+    return parsed.ok ? attachImportReviewContext(analyzeSettingsPayload(parsed.value), binding) : parsed;
+}
+
+export async function analyzeCardData(source) {
+    const binding = captureActiveStorageBinding();
+    const parsed = await parseImportSource(source);
+    if (!isActiveStorageBindingCurrent(binding)) return contextChangedError('The active import target changed while the card data was read.');
+    return parsed.ok ? attachImportReviewContext(analyzeColorPayload(parsed.value, 'card'), binding) : parsed;
+}
+
+export async function readCardData({ refresh = true } = {}) {
+    const binding = captureActiveStorageBinding();
+    if (refresh) {
+        try {
+            await getCharacters?.();
+        } catch {
+            return importError('card_read_failed', 'The character card could not be reloaded.');
+        }
+    }
+    if (!isActiveStorageBindingCurrent(binding)) {
+        return contextChangedError('The active character changed while the card was reloaded.');
+    }
+    try {
+        const context = getContext();
+        const characterId = context?.characterId;
+        if (characterId === undefined || characterId === null) {
+            return importError('no_character', 'No character is loaded.');
+        }
+        const data = context?.characters?.[characterId]?.data?.extensions?.dialogueColors;
+        if (!data) return importError('no_card_data', 'The character card has no saved color data.');
+        return await analyzeCardData(data);
+    } catch {
+        return importError('card_read_failed', 'The character card data could not be read.');
+    }
+}
+
+function normalizeReviewedPayload(payload, kind) {
+    if (!isPlainObject(payload) || payload.kind !== kind) {
+        return importError('invalid_reviewed_payload', `Expected a reviewed ${kind} payload.`);
+    }
+    if (kind === 'settings') return analyzeSettingsPayload(payload);
+    return analyzeColorPayload(payload, kind);
+}
+
+function applyImportedSettings(importedSettings, activeScope) {
+    for (const [key, value] of Object.entries(importedSettings || {})) {
+        if (key === 'colorStorageScope' || key === 'colorSchemaVersion') continue;
+        settings[key] = value;
+    }
+    settings.colorStorageScope = activeScope;
+}
+
+function normalizeImportedColorsForApply(colors, colorSchemaVersion) {
+    const normalized = normalizeCharacterColors(colors);
+    const parsedVersion = Number(colorSchemaVersion);
+    if (!Number.isFinite(parsedVersion) || parsedVersion < 4) {
+        for (const entry of Object.values(normalized)) {
+            const effectiveColor = normalizeHexColor(entry.color, null);
+            if (effectiveColor) entry.baseColor = deriveBaseColorFromEffectiveColor(effectiveColor);
+        }
+    }
+    return normalized;
+}
+
+function applyImportedGradientPresets(payload) {
+    if (!hasOwn(payload, 'customGradientPresets')) return false;
+    const incoming = normalizeGradientPresets(payload.customGradientPresets);
+    const nextPresets = { ...incoming, ...getCustomGradientPresets() };
+    const record = getAutoSyncRecord(true);
+    record.version = COLOR_SCHEMA_VERSION;
+    record.customGradientPresets = nextPresets;
+    persistModuleStore(record, { debounce: false });
+    return true;
+}
+
+function importReviewContextMatches(reviewedContext) {
+    if (!isPlainObject(reviewedContext)) return true;
+    const binding = captureActiveStorageBinding();
+    if (reviewedContext.scope !== binding.scope || reviewedContext.key !== binding.key) return false;
+    if (reviewedContext.context && !isRuntimeContextCurrent(reviewedContext.context)) return false;
+    return !reviewedContext.cardKey || reviewedContext.cardKey === getStorageKeyForScope('card');
+}
+
+async function applyReviewedImport(payload, kind, options = {}) {
+    const { mode, applyScope = false } = options || {};
+    if (!['merge', 'replace'].includes(mode)) {
+        return importError('invalid_mode', 'Import mode must be either merge or replace.');
+    }
+    const reviewed = normalizeReviewedPayload(payload, kind);
+    if (!reviewed.ok) return reviewed;
+    const operationBinding = captureActiveStorageBinding();
+    const requestedScopeIncluded = hasOwn(reviewed.payload, 'requestedStorageScope');
+    const requestedTargetKey = applyScope === true && requestedScopeIncluded
+        ? getStorageKeyForScope(reviewed.payload.requestedStorageScope)
+        : null;
+    return runStorageOperation(() => applyReviewedImportInternal(
+        reviewed,
+        payload.reviewedContext,
+        kind,
+        { mode, applyScope },
+        operationBinding,
+        requestedTargetKey,
+    ));
+}
+
+async function applyReviewedImportInternal(
+    reviewed,
+    reviewedContext,
+    kind,
+    options,
+    operationBinding,
+    requestedTargetKey,
+) {
+    const { mode, applyScope } = options;
+    const normalized = reviewed.payload;
+    const requestedScopeIncluded = hasOwn(normalized, 'requestedStorageScope');
+    const contextBindings = { [operationBinding.scope]: operationBinding.contextKey };
+    if (applyScope === true && requestedScopeIncluded) {
+        contextBindings[normalized.requestedStorageScope] = requestedTargetKey;
+    }
+    let transaction = null;
+    let importBinding = operationBinding;
+    let mutationStarted = false;
+    let appliedRecord = null;
+    let appliedRuntime = null;
+
+    try {
+        if (!isActiveStorageBindingCurrent(operationBinding) || !importReviewContextMatches(reviewedContext)) {
+            return contextChangedError('The active import target changed after review.');
+        }
+        transaction = captureStorageTransaction(operationBinding);
+        appliedRecord = transaction.record;
+        appliedRuntime = captureStorageRuntimeState();
+        if (applyScope === true && requestedScopeIncluded && normalized.requestedStorageScope !== getCurrentStorageScope()) {
+            mutationStarted = true;
+            const switchResult = await switchColorStorageScopeInternal(
+                normalized.requestedStorageScope,
+                'switch',
+                operationBinding,
+                requestedTargetKey,
+            );
+            if (!switchResult.ok) return switchResult;
+            transaction = switchResult.rollbackTransaction || transaction;
+            appliedRecord = getModuleRecordSnapshot();
+            appliedRuntime = captureStorageRuntimeState();
+        }
+        if (!isRuntimeContextCurrent(operationBinding.context) || !areScopeStorageKeysCurrent(contextBindings)) {
+            const failedSnapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
+            const rollbackPersisted = mutationStarted
+                ? await rollbackStorageTransaction(transaction, appliedRecord, appliedRuntime, failedSnapshot, false)
+                : true;
+            return { ...contextChangedError(), rollbackPersisted };
+        }
+
+        const activeScope = getCurrentStorageScope();
+        importBinding = captureActiveStorageBinding();
+        if (activeScope === 'chat') {
+            appliedRecord = mutationStarted ? getModuleRecordSnapshot() : appliedRecord;
+            const metadataSafety = await ensureChatScopeMetadataSafety();
+            if (!isActiveStorageBindingCurrent(importBinding) || !areScopeStorageKeysCurrent(contextBindings)) {
+                const failedSnapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
+                const rollbackPersisted = mutationStarted
+                    ? await rollbackStorageTransaction(transaction, appliedRecord, appliedRuntime, failedSnapshot, false)
+                    : true;
+                return { ...contextChangedError(), rollbackPersisted };
+            }
+            if (!metadataSafety.safe) {
+                const failedSnapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
+                const rollbackPersisted = mutationStarted
+                    ? await rollbackStorageTransaction(transaction, appliedRecord, appliedRuntime, failedSnapshot, true)
+                    : true;
+                return {
+                    ...importError('chat_metadata_persist_failed', 'The per-chat identifier could not be saved safely.'),
+                    rollbackPersisted,
+                };
+            }
+        }
+
+        if (!mutationStarted) {
+            transaction = captureStorageTransaction(importBinding);
+            appliedRecord = transaction.record;
+            appliedRuntime = captureStorageRuntimeState();
+        }
+
+        const colorSnapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
+        mutationStarted = true;
+        applyImportedSettings(normalized.settings, activeScope);
+        normalizeToggleSettings();
+        invalidateThemeCache();
+
+        const hasColors = kind !== 'settings';
+        if (hasColors) {
+            const incomingColors = normalizeImportedColorsForApply(normalized.colors, normalized.settings?.colorSchemaVersion);
+            setCharacterColors(mode === 'merge'
+                ? normalizeCharacterColors({ ...incomingColors, ...characterColors })
+                : incomingColors);
+            clearSpeakerRegexCache();
+            setLastProcessedMessageSignature('');
+        }
+
+        settings.colorSchemaVersion = COLOR_SCHEMA_VERSION;
+        migrateColorSchemaIfNeeded();
+        syncAllEffectiveColors();
+        const renderKeys = [...new Set([...Object.keys(colorSnapshot), ...Object.keys(characterColors)])];
+        applyLiveColorChangesFromSnapshot(colorSnapshot, renderKeys, { saveImmediately: true });
+        const gradientPresetsChanged = applyImportedGradientPresets(normalized);
+        commit({ history: false });
+        if (gradientPresetsChanged) refreshGradientPresetControls();
+        syncUIWithSettings();
+
+        const expected = getModuleRecordSnapshot();
+        appliedRecord = expected;
+        appliedRuntime = captureStorageRuntimeState();
+        const persisted = await persistSettingsImmediately(expected);
+        const contextCurrent = isActiveStorageBindingCurrent(importBinding)
+            && areScopeStorageKeysCurrent(contextBindings);
+        if (!persisted || !contextCurrent) {
+            const failedSnapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
+            const rollbackPersisted = await rollbackStorageTransaction(
+                transaction,
+                appliedRecord,
+                appliedRuntime,
+                failedSnapshot,
+                contextCurrent,
+            );
+            return {
+                ...importError(
+                    contextCurrent ? 'import_persist_failed' : 'context_changed',
+                    contextCurrent
+                        ? rollbackPersisted
+                            ? 'The imported data could not be saved. The previous data was restored.'
+                            : 'The import and its recovery could not be saved reliably. Export your colors before reloading.'
+                        : 'The active chat or card changed before the import completed. The import was rolled back.',
+                ),
+                rollbackPersisted,
+            };
+        }
+
+        saveHistory();
+        return {
+            ok: true,
+            kind,
+            mode,
+            scope: activeScope,
+            scopeApplied: applyScope === true && requestedScopeIncluded,
+            characterCount: Object.keys(characterColors).length,
+            settingsCount: reviewed.preview.settingsCount,
+            customGradientPresetCount: reviewed.preview.customGradientPresetCount,
+        };
+    } catch (error) {
+        console.error('[Dialogue Colors] Failed to apply reviewed import data:', error);
+        const failedSnapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
+        const contextCurrent = isActiveStorageBindingCurrent(importBinding)
+            && areScopeStorageKeysCurrent(contextBindings);
+        const rollbackPersisted = mutationStarted
+            ? await rollbackStorageTransaction(
+                transaction,
+                appliedRecord,
+                appliedRuntime,
+                failedSnapshot,
+                contextCurrent,
+            )
+            : true;
+        return {
+            ...importError(
+                'apply_failed',
+                rollbackPersisted
+                    ? 'The reviewed data could not be applied. The previous data was restored.'
+                    : 'The import and its recovery could not be saved reliably. Export your colors before reloading.',
+            ),
+            rollbackPersisted,
+        };
+    }
+}
+
+export function applyColorImport(payload, options) {
+    return applyReviewedImport(payload, 'colors', options);
+}
+
+export function applySettingsImport(payload, options) {
+    return applyReviewedImport(payload, 'settings', options);
+}
+
+export function applyCardData(payload, options) {
+    return applyReviewedImport(payload, 'card', options);
 }
 
 export function exportColors() {
     const colors = normalizeCharacterColors(characterColors);
     const customGradientPresets = getCustomGradientPresets();
-    const blob = new Blob([JSON.stringify({ colors, settings, customGradientPresets }, null, 2)], { type: 'application/json' });
+    const blob = new Blob([JSON.stringify({ colors, settings: buildFullSettingsSnapshot(), customGradientPresets }, null, 2)], { type: 'application/json' });
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `dialogue-colors-${Date.now()}.json`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
-export function importColors(file) {
-    const reader = new FileReader();
-    reader.onload = e => {
-        try {
-            const d = JSON.parse(e.target.result);
-            const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
-            if (d.colors) setCharacterColors(normalizeCharacterColors(d.colors));
-            if (d.settings) {
-                applyStoredSettingsSnapshot(d.settings);
-                if (d.settings.colorSchemaVersion === undefined) settings.colorSchemaVersion = 0;
-            } else if (d.colors) {
-                settings.colorSchemaVersion = 0;
-            }
-            if (Object.prototype.hasOwnProperty.call(d, 'customGradientPresets')) {
-                const record = getAutoSyncRecord(true);
-                record.version = COLOR_SCHEMA_VERSION;
-                record.customGradientPresets = normalizeGradientPresets(d.customGradientPresets);
-                persistModuleStore(record, { debounce: false });
-                refreshGradientPresetControls();
-            }
-            normalizeToggleSettings();
-            invalidateThemeCache();
-            migrateColorSchemaIfNeeded();
-            syncAllEffectiveColors();
-            applyLiveColorChangesFromSnapshot(snapshot, Object.keys(characterColors).filter(key => snapshot[key]), { saveImmediately: true });
-            commit();
-            toast.success('Imported!');
-        } catch {
-            toast.error('Invalid file');
-        }
-    };
-    reader.readAsText(file);
+export async function importColors(file) {
+    const analysis = await analyzeColorImport(file);
+    if (!analysis.ok) {
+        toast.error(analysis.message || 'Invalid color file');
+        return analysis;
+    }
+    const result = await applyColorImport(analysis.payload, { mode: 'merge', applyScope: false });
+    if (result.ok) toast.success('Imported!');
+    else toast.error(result.message || 'Could not import colors');
+    return result;
 }
 
 export function exportSettings() {
+    normalizeCurrentColorStorageScope();
     const settingsData = {};
     GLOBAL_SETTINGS_V2_KEYS.forEach(key => {
         if (settings[key] !== undefined) settingsData[key] = settings[key];
@@ -750,43 +2379,16 @@ export function exportSettings() {
     toast.success('Settings exported!');
 }
 
-export function importSettings(file) {
-    const reader = new FileReader();
-    reader.onload = e => {
-        try {
-            const d = JSON.parse(e.target.result);
-            if (!d.settings || typeof d.settings !== 'object') {
-                toast.error('Invalid settings file');
-                return;
-            }
-            // Merge settings
-            Object.keys(d.settings).forEach(key => {
-                if (GLOBAL_SETTINGS_V2_KEYS.includes(key)) {
-                    settings[key] = d.settings[key];
-                }
-            });
-            if (Object.prototype.hasOwnProperty.call(d, 'customGradientPresets')) {
-                const record = getAutoSyncRecord(true);
-                record.version = COLOR_SCHEMA_VERSION;
-                record.customGradientPresets = normalizeGradientPresets(d.customGradientPresets);
-                persistModuleStore(record, { debounce: false });
-                refreshGradientPresetControls();
-            }
-            normalizeToggleSettings();
-            const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
-            invalidateThemeCache();
-            syncAllEffectiveColors();
-            applyLiveColorChangesFromSnapshot(snapshot, Object.keys(characterColors), { saveImmediately: true });
-            saveData();
-            saveGlobalSettingsSnapshot();
-            updateCharList();
-            injectPrompt();
-            toast.success('Settings imported!');
-        } catch {
-            toast.error('Invalid settings file');
-        }
-    };
-    reader.readAsText(file);
+export async function importSettings(file) {
+    const analysis = await analyzeSettingsImport(file);
+    if (!analysis.ok) {
+        toast.error(analysis.message || 'Invalid settings file');
+        return analysis;
+    }
+    const result = await applySettingsImport(analysis.payload, { mode: 'merge', applyScope: false });
+    if (result.ok) toast.success('Settings imported!');
+    else toast.error(result.message || 'Could not import settings');
+    return result;
 }
 
 export function applySettingsSnapshotWithRefresh(snapshot) {
@@ -807,22 +2409,6 @@ export function applySettingsSnapshotWithRefresh(snapshot) {
 // Auto-sync functions
 
 export function restoreAllSettingsToDefaults() {
-    const confirmed = confirm(
-        'Restore all settings to defaults?\n\n' +
-        'This will reset:\n' +
-        '- All toggle settings (auto-scan, auto-lock, etc.)\n' +
-        '- Visual settings (theme, palette, brightness)\n' +
-        '- Narrator color\n' +
-        '- Thought symbols\n' +
-        '- Prompt settings (depth, role, mode)\n' +
-        '- Sort mode\n' +
-        '- LLM profile\n\n' +
-        'Character colors and presets will NOT be affected.\n\n' +
-        'This action can be undone from the undo toast.'
-    );
-
-    if (!confirmed) return;
-
     const previousSettings = buildFullSettingsSnapshot();
 
     Object.entries(TOGGLE_SETTING_DEFAULTS).forEach(([key, defaultValue]) => {
@@ -857,7 +2443,7 @@ export async function loadSettingsFromServer() {
         const record = await fetchAutoSyncRecordFromServer();
         clearAutoSyncError();
         if (!record) return;
-        applyAutoSyncRecord(record);
+        applyAutoSyncRecord(record, { serverVerified: true });
     } catch (e) {
         console.warn('[Dialogue Colors] Auto-sync settings refresh failed:', e);
         setAutoSyncError('Read failed');
@@ -865,7 +2451,7 @@ export async function loadSettingsFromServer() {
 }
 
 export function saveSettingsToStore(options = {}) {
-    const { force = false } = options;
+    const { force = false, schedule = true } = options;
     const currentRecord = getAutoSyncRecord(true);
     const settingsData = buildSettingsSubset(GLOBAL_SETTINGS_V2_KEYS);
     const settingsChanged = !areSettingsSubsetsEqual(currentRecord.settings, settingsData);
@@ -884,7 +2470,7 @@ export function saveSettingsToStore(options = {}) {
 
     persistModuleStore(nextRecord, { debounce: false });
     markAutoSyncPending(nextRecord);
-    saveSettingsDebounced?.();
+    if (schedule) queueImmediateSettingsSave();
     cleanupLegacyAutoSyncPreference();
     return true;
 }
@@ -983,6 +2569,7 @@ export function initAutoSync() {
 // Phase 7: Removed debug console.log statements
 export function ensureRegexScript() {
     try {
+        let changed = false;
         if (!extension_settings || typeof extension_settings !== 'object') return;
         if (!Array.isArray(extension_settings.regex)) extension_settings.regex = [];
 
@@ -1007,7 +2594,7 @@ export function ensureRegexScript() {
                 minDepth: null,
                 maxDepth: null
             });
-            saveSettingsDebounced?.();
+            changed = true;
         }
 
         if (!extension_settings.regex.some(r => r?.scriptName === 'Trim Color Blocks')) {
@@ -1026,7 +2613,7 @@ export function ensureRegexScript() {
                 minDepth: null,
                 maxDepth: null
             });
-            saveSettingsDebounced?.();
+            changed = true;
         }
 
         const cssEffectsTrimRegex = '/<span[^>]*style=["\'][^"\']*(?:transform|skew|rotate|scale|opacity|filter|text-shadow|translate)[^"\']*["\'][^>]*>(.*?)<\\/span>/gi';
@@ -1035,7 +2622,7 @@ export function ensureRegexScript() {
             if (cssEffectsTrim.findRegex !== cssEffectsTrimRegex || cssEffectsTrim.replaceString !== '$1') {
                 cssEffectsTrim.findRegex = cssEffectsTrimRegex;
                 cssEffectsTrim.replaceString = '$1';
-                saveSettingsDebounced?.();
+                changed = true;
             }
         } else {
             extension_settings.regex.push({
@@ -1053,8 +2640,9 @@ export function ensureRegexScript() {
                 minDepth: null,
                 maxDepth: null
             });
-            saveSettingsDebounced?.();
+            changed = true;
         }
+        if (changed) queueImmediateSettingsSave();
     } catch (e) {
         console.error('[Dialogue Colors] Failed to import regex scripts:', e);
     }
@@ -1067,60 +2655,37 @@ export function saveToCard() {
         if (!char) { toast.error('No character loaded'); return; }
         if (!char.data) char.data = {};
         if (!char.data.extensions) char.data.extensions = {};
-        char.data.extensions.dialogueColors = { colors: normalizeCharacterColors(characterColors), settings };
+        char.data.extensions.dialogueColors = { colors: normalizeCharacterColors(characterColors), settings: buildFullSettingsSnapshot() };
         saveData();
         saveCharacterDebounced?.();
-        toast.success('Saved to card');
+        toast.info('Card save queued.');
     } catch { toast.error('Failed to save to card'); }
 }
 
-export function loadFromCard() {
-    try {
-        const ctx = getContext();
-        const charId = ctx?.characterId;
-        if (charId === undefined) { toast.error('No character loaded'); return; }
-
-        getCharacters?.().then(() => {
-            const char = ctx?.characters?.[charId];
-            const data = char?.data?.extensions?.dialogueColors;
-            if (data?.colors) {
-                const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
-                setCharacterColors(normalizeCharacterColors(data.colors));
-                if (data.settings) {
-                    Object.assign(settings, data.settings);
-                    if (data.settings.colorSchemaVersion === undefined) settings.colorSchemaVersion = 0;
-                } else {
-                    settings.colorSchemaVersion = 0;
-                }
-                normalizeToggleSettings();
-                invalidateThemeCache();
-                migrateColorSchemaIfNeeded();
-                syncAllEffectiveColors();
-                applyLiveColorChangesFromSnapshot(snapshot, Object.keys(characterColors).filter(key => snapshot[key]), { saveImmediately: true });
-                commit();
-                toast.success('Loaded from card');
-            } else {
-                toast.info('No saved colors in card');
-            }
-        }).catch(() => toast.error('Failed to reload character'));
-    } catch { toast.error('Failed to load from card'); }
+export async function loadFromCard() {
+    const analysis = await readCardData();
+    if (!analysis.ok) {
+        if (analysis.error === 'no_card_data') toast.info('No saved colors in card');
+        else toast.error(analysis.message || 'Failed to load from card');
+        return analysis;
+    }
+    const result = await applyCardData(analysis.payload, { mode: 'merge', applyScope: false });
+    if (result.ok) toast.success('Loaded from card');
+    else toast.error(result.message || 'Failed to load from card');
+    return result;
 }
 
 export function tryLoadFromCard() {
     try {
+        const currentScope = getCurrentStorageScope();
         const ctx = getContext();
         const char = ctx?.characters?.[ctx?.characterId];
         const data = char?.data?.extensions?.dialogueColors;
         if (data?.colors) {
-            setCharacterColors(normalizeCharacterColors(data.colors));
-            if (data.settings) {
-                Object.assign(settings, data.settings);
-                if (data.settings.colorSchemaVersion === undefined) settings.colorSchemaVersion = 0;
-            } else {
-                settings.colorSchemaVersion = 0;
-            }
+            setCharacterColors(normalizeImportedColorsForApply(data.colors, data.settings?.colorSchemaVersion));
+            settings.colorStorageScope = currentScope;
             normalizeToggleSettings();
-            migrateColorSchemaIfNeeded();
+            settings.colorSchemaVersion = COLOR_SCHEMA_VERSION;
             saveHistory(); saveData();
         }
     } catch { }

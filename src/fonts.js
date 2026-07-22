@@ -6,8 +6,13 @@ import { getContext } from './st-api.js';
 import { characterColors, loadedGoogleFonts, settings } from './state.js';
 import { getGoogleFontFamily, normalizeGoogleFontName, normalizeHexColor } from './utils.js';
 
+const invalidGoogleFontNames = new Set(['']);
+
 export function loadGoogleFont(fontName) {
-    const normalized = normalizeGoogleFontName(fontName);
+    const rawName = String(fontName ?? '');
+    if (invalidGoogleFontNames.has(rawName)) return '';
+    const normalized = normalizeGoogleFontName(rawName);
+    if (!normalized) invalidGoogleFontNames.add(rawName);
     if (!normalized || typeof document === 'undefined' || !document.head) return normalized;
     const key = normalized.toLowerCase();
     if (loadedGoogleFonts.has(key)) return normalized;
@@ -42,12 +47,21 @@ export function clearCustomFontTag(fontEl) {
     if (!fontEl) return false;
     let changed = clearGradientText(fontEl);
     if (clearCustomFontOnly(fontEl)) changed = true;
+    if (fontEl.hasAttribute('data-dc-aria-label')) {
+        fontEl.removeAttribute('aria-label');
+        fontEl.removeAttribute('data-dc-aria-label');
+        changed = true;
+    }
+    if (fontEl.hasAttribute('data-dc-speaker-name')) {
+        fontEl.removeAttribute('data-dc-speaker-name');
+        changed = true;
+    }
     return changed;
 }
 
 export function clearCustomFontsFromFontTags(root = document) {
     let changed = false;
-    root?.querySelectorAll?.('font[data-dc-font], font[data-dc-gradient]').forEach(fontEl => {
+    root?.querySelectorAll?.('font[data-dc-font], font[data-dc-gradient], font[data-dc-aria-label], font[data-dc-speaker-name]').forEach(fontEl => {
         if (clearCustomFontTag(fontEl)) changed = true;
     });
     return changed;
@@ -79,6 +93,29 @@ export function applyCustomFontsToFontTags(mesText, rawText = '') {
         }
         const gradientResult = applyGradientText(fontEl, rendering?.entry);
         if (gradientResult.changed) changed = true;
+        const generatedLabel = rendering?.entry?.name ? `${rendering.entry.name}: ${fontEl.textContent.trim()}` : '';
+        const generatedSpeakerName = rendering?.entry?.name || '';
+        if (generatedSpeakerName) {
+            if (fontEl.getAttribute('data-dc-speaker-name') !== generatedSpeakerName) {
+                fontEl.setAttribute('data-dc-speaker-name', generatedSpeakerName);
+                changed = true;
+            }
+        } else if (fontEl.hasAttribute('data-dc-speaker-name')) {
+            fontEl.removeAttribute('data-dc-speaker-name');
+            changed = true;
+        }
+        const ownsAriaLabel = fontEl.hasAttribute('data-dc-aria-label');
+        if (generatedLabel && (!fontEl.hasAttribute('aria-label') || ownsAriaLabel)) {
+            if (fontEl.getAttribute('aria-label') !== generatedLabel) {
+                fontEl.setAttribute('aria-label', generatedLabel);
+                changed = true;
+            }
+            fontEl.setAttribute('data-dc-aria-label', '1');
+        } else if (!generatedLabel && ownsAriaLabel) {
+            fontEl.removeAttribute('aria-label');
+            fontEl.removeAttribute('data-dc-aria-label');
+            changed = true;
+        }
     }
     return changed;
 }

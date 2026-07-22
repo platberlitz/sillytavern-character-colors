@@ -8,17 +8,17 @@ import { BUILTIN_GRADIENT_PRESETS, DEFAULT_GRADIENT_ANGLE, DEFAULT_GRADIENT_DURA
 import { createRestoreSnapshot, redo, saveHistory, showUndoToast, undo } from './history.js';
 import { applyFastColorUiUpdates, applyLiveColorChangesFromSnapshot, captureEffectiveColorSnapshot, colorizeMessages, commit, flushChatSave, flushColorStateSave, queueColorStateSave, recolorAllMessages, repaintDomAfterCharacterDataChange } from './live-colors.js';
 import { registerKeyboardShortcuts } from './main.js';
-import { applyGradientPreset, autoResolveConflicts, buildCharacterEntry, buildKeepAwareRemovalMessage, collectDuplicateColorKeys, createRandomGradient, deleteColorPreset, deleteCustomPalette, detectTheme, flipColorsForTheme, generateCustomPaletteFromWords, getBaseColor, getEntryEffectiveColor, getKeptKeys, getNextColor, invalidateThemeCache, keepCharacterKeysOnly, loadColorPreset, refreshPaletteDropdown, refreshPresetDropdown, regenerateAllColors, removeCharacterKeys, saveColorPreset, saveCustomPalette, setEntryFromBaseColor, setEntryGradient, showHarmonyPopup, suggestColorForName, swapEntryColorData, syncAllEffectiveColors } from './palettes.js';
+import { applyGradientPreset, autoResolveConflicts, buildCharacterEntry, collectDuplicateColorKeys, createRandomGradient, deleteColorPreset, deleteCustomPalette, detectTheme, flipColorsForTheme, generateCustomPaletteFromWords, getBaseColor, getEntryEffectiveColor, getNextColor, getPresets, invalidateThemeCache, loadColorPreset, refreshPaletteDropdown, refreshPresetDropdown, regenerateAllColors, removeCharacterKeys, saveColorPreset, saveCustomPalette, setEntryFromBaseColor, setEntryGradient, showHarmonyPopup, suggestColorForName, swapEntryColorData, syncAllEffectiveColors } from './palettes.js';
 import { injectPrompt, updateSystemPromptDisplay } from './prompts.js';
 import { escapeHtml, getContext } from './st-api.js';
 import { autoRecolorHintShown, characterColors, expandedCharacterRows, isDomEngine, legendListeners, searchTerm, setAutoRecolorHintShown, setCharacterColors, setLegendListeners, setSearchTerm, setSwapMode, settings, swapMode } from './state.js';
-import { deleteCustomGradientPreset, disableAutoSync, enableAutoSync, exportColors, exportSettings, getCustomGradientPresets, getLegendPosition, getStorageKey, getStorageLabelForKey, getUserColorDataStore, importColors, importSettings, loadData, loadFromCard, normalizeColorDataEntry, normalizeToggleSettings, removeStoredColorData, renameCustomGradientPreset, restoreAllSettingsToDefaults, saveCustomGradientPreset, saveData, saveLegendPosition, saveToCard, updateAutoSyncUI } from './storage.js';
+import { analyzeColorImport, analyzeSettingsImport, applyCardData, applyColorImport, applySettingsImport, archiveStoredColorData, deleteCustomGradientPreset, disableAutoSync, enableAutoSync, exportColors, exportSettings, getArchivedColorData, getCurrentStorageScope, getCustomGradientPresets, getLegendPosition, getStorageKey, getStorageLabelForKey, getStorageScopeDescriptor, getUserColorDataStore, normalizeColorDataEntry, normalizeToggleSettings, readCardData, renameCustomGradientPreset, restoreAllSettingsToDefaults, restoreArchivedColorData, saveCustomGradientPreset, saveData, saveLegendPosition, saveToCard, switchColorStorageScope, updateAutoSyncUI } from './storage.js';
 import { escapeAttr, getGoogleFontFamily, htmlToNode, normalizeGoogleFontName, normalizeHexColor, normalizeManualColorInput, toast } from './utils.js';
 import { cancelStreamingAttributionVerification, clearAutoAttributionVerificationQueue, queueAutoAttributionVerificationForRenderedMessages, runAttributionVerification, verifyLatestAttributionsWithLLM, verifyVisibleAttributionsWithLLM } from './verify.js';
 
 export const DYNAMIC_CONTROL_HELP_TEXT = Object.freeze({
     '.dc-color-dot': 'Click to open the color picker for this character.',
-    '.dc-color-input': 'Pick a color directly. Double-click for harmony suggestions.',
+    '.dc-color-input': 'Pick this character’s primary color.',
     '.dc-gradient-toggle': 'Enable or remove this character gradient.',
     '.dc-gradient-randomize': 'Create a new random gradient while keeping this character’s primary color.',
     '.dc-gradient-animation-enabled': 'Continuously drift the gradient colors across dialogue and labels. Your device’s Reduce Motion setting pauses the effect.',
@@ -27,9 +27,9 @@ export const DYNAMIC_CONTROL_HELP_TEXT = Object.freeze({
     '.dc-gradient-apply-preset': 'Apply the selected built-in or custom gradient preset.',
     '.dc-keep': 'Pinned characters survive Clear and bulk delete tools.',
     '.dc-lock': 'Lock this character color so reset/regen tools do not change it.',
-    '.dc-more': 'Show less common row tools like alias, group, style, and swap.',
+    '.dc-more': 'Open or close this character’s editing controls.',
     '.dc-swap': 'Choose two characters in sequence to swap their colors.',
-    '.dc-style': 'Cycle style: none, bold, italic, then bold italic.',
+    '.dc-harmony': 'Open accessible harmony suggestions for this character color.',
     '.dc-alias': 'Add an alternate name that maps to this character.',
     '.dc-group': 'Assign this character to a group label.',
     '.dc-del': 'Delete this character from the list. Turn off Keep first if pinned.',
@@ -49,6 +49,104 @@ const GRADIENT_DIRECTIONS = Object.freeze([
 
 // Details state lives outside persisted character data but survives row reconciliation.
 const expandedGradientAdvancedRows = new Set();
+let lastLegendSignature = '';
+let closeActiveUiDialog = null;
+
+function getDialogFocusables(dialog) {
+    return [...dialog.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')]
+        .filter(element => !element.hidden && element.getClientRects().length > 0);
+}
+
+function openDecisionDialog({ title, description = '', detailsHtml = '', choices = [], checkbox = null, opener = document.activeElement }) {
+    if (closeActiveUiDialog) closeActiveUiDialog(null, { restoreFocus: false });
+    return new Promise(resolve => {
+        const backdrop = document.createElement('div');
+        backdrop.className = 'dc-dialog-backdrop';
+        const titleId = `dc-dialog-title-${Date.now()}`;
+        const descriptionId = description ? `${titleId}-description` : '';
+        backdrop.innerHTML = `
+            <div class="dc-dialog" role="dialog" aria-modal="true" aria-labelledby="${titleId}"${descriptionId ? ` aria-describedby="${descriptionId}"` : ''}>
+                <h2 id="${titleId}" class="dc-dialog-title">${escapeHtml(title)}</h2>
+                ${description ? `<p id="${descriptionId}" class="dc-dialog-description">${escapeHtml(description)}</p>` : ''}
+                ${detailsHtml ? `<div class="dc-dialog-details">${detailsHtml}</div>` : ''}
+                ${checkbox ? `<label class="checkbox_label dc-dialog-checkbox"><input type="checkbox" class="dc-dialog-checkbox-input"><span>${escapeHtml(checkbox.label)}</span></label>` : ''}
+                <div class="dc-dialog-actions">
+                    ${choices.map(choice => `<button type="button" class="menu_button${choice.primary ? ' dc-primary-button' : ''}${choice.danger ? ' dc-danger-button' : ''}" data-dialog-value="${escapeAttr(choice.value)}"${choice.initial ? ' data-dialog-initial="true"' : ''}>${escapeHtml(choice.label)}</button>`).join('')}
+                </div>
+            </div>`;
+        document.body.appendChild(backdrop);
+        const dialog = backdrop.querySelector('.dc-dialog');
+        const inertSiblings = [...document.body.children]
+            .filter(element => element !== backdrop && !element.inert)
+            .map(element => { element.inert = true; return element; });
+        let closed = false;
+        const close = (value, { restoreFocus = true } = {}) => {
+            if (closed) return;
+            closed = true;
+            const checked = !!dialog.querySelector('.dc-dialog-checkbox-input')?.checked;
+            const selected = [...dialog.querySelectorAll('.dc-dialog-select:checked')].map(input => input.dataset.value);
+            document.removeEventListener('keydown', onKeyDown, true);
+            inertSiblings.forEach(element => { element.inert = false; });
+            backdrop.remove();
+            if (closeActiveUiDialog === close) closeActiveUiDialog = null;
+            if (restoreFocus && opener?.isConnected && typeof opener.focus === 'function') opener.focus({ preventScroll: true });
+            resolve({ value, checked, selected });
+        };
+        const onKeyDown = event => {
+            if (event.key === 'Escape') {
+                event.preventDefault();
+                event.stopPropagation();
+                close(null);
+                return;
+            }
+            if (event.key !== 'Tab') return;
+            const focusables = getDialogFocusables(dialog);
+            if (!focusables.length) { event.preventDefault(); return; }
+            const first = focusables[0];
+            const last = focusables[focusables.length - 1];
+            if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+            else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+        };
+        closeActiveUiDialog = close;
+        document.addEventListener('keydown', onKeyDown, true);
+        backdrop.addEventListener('pointerdown', event => { if (event.target === backdrop) close(null); });
+        dialog.querySelectorAll('[data-dialog-value]').forEach(button => {
+            button.addEventListener('click', () => close(button.dataset.dialogValue));
+        });
+        (dialog.querySelector('[data-dialog-initial]') || dialog.querySelector('.dc-primary-button') || getDialogFocusables(dialog)[0])?.focus({ preventScroll: true });
+    });
+}
+
+async function confirmReviewedAction({ title, description, detailsHtml = '', confirmLabel = 'Continue', danger = false, opener }) {
+    const decision = await openDecisionDialog({
+        title,
+        description,
+        detailsHtml,
+        opener,
+        choices: danger
+            ? [
+                { value: 'cancel', label: 'Cancel', initial: true },
+                { value: 'confirm', label: confirmLabel, danger },
+            ]
+            : [
+                { value: 'confirm', label: confirmLabel, primary: true, initial: true },
+                { value: 'cancel', label: 'Cancel' },
+            ],
+    });
+    return decision.value === 'confirm';
+}
+
+function formatScopeName(scope) {
+    if (scope === 'chat') return 'Per chat';
+    if (scope === 'global') return 'Global';
+    return 'Per card';
+}
+
+function formatDate(value) {
+    if (!value) return 'Not saved yet';
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? 'Unknown date' : date.toLocaleString();
+}
 
 function getGradientPresentation(entry) {
     const gradient = normalizeGradient(entry?.gradient);
@@ -181,7 +279,12 @@ export function createCanvasGradientFill(ctx, entry, bounds) {
 
 // Phase 6B: Group sorting support
 export function getSortedEntries() {
-    const entries = Object.entries(characterColors).filter(([, v]) => !searchTerm || v.name.toLowerCase().includes(searchTerm.toLowerCase()));
+    const needle = searchTerm.trim().toLowerCase();
+    const entries = Object.entries(characterColors).filter(([, entry]) => {
+        if (!needle) return true;
+        return [entry.name, entry.group, entry.font, ...(entry.aliases || []), entry.keep ? 'kept pinned' : '', entry.locked ? 'locked' : '']
+            .some(value => String(value || '').toLowerCase().includes(needle));
+    });
     entries.sort((a, b) => {
         if (!!b[1].keep !== !!a[1].keep) return Number(b[1].keep) - Number(a[1].keep);
         if (settings.sortMode === 'count') return (b[1].dialogueCount || 0) - (a[1].dialogueCount || 0) || a[1].name.localeCompare(b[1].name);
@@ -270,13 +373,13 @@ export function createLegend() {
         const left = Number.isFinite(savedPos.left) ? savedPos.left : undefined;
         const right = Number.isFinite(savedPos.right) ? savedPos.right : 10;
 
-        legend.style.cssText = `position:fixed;top:${top}px;${left !== undefined ? `left:${left}px;` : `right:${right}px;`}background:var(--SmartThemeBlurTintColor);border:1px solid var(--SmartThemeBorderColor);border-radius:8px;padding:8px;z-index:9999;font-size:0.8em;max-width:150px;max-height:60vh;overflow-y:auto;display:none;cursor:move;user-select:none;`;
+        legend.style.cssText = `position:fixed;top:${top}px;${left !== undefined ? `left:${left}px;` : `right:${right}px;`}background:var(--SmartThemeBlurTintColor);border:1px solid var(--SmartThemeBorderColor);border-radius:8px;padding:8px;z-index:9999;font-size:0.8em;max-width:180px;max-height:60vh;overflow-y:auto;display:none;user-select:none;`;
 
         let isDragging = false;
         let startX, startY, startLeft, startTop;
 
         const onMouseDown = (e) => {
-            if (e.target.closest('button') || e.target.closest('input')) return;
+            if (!e.target.closest('.dc-legend-handle') || e.target.closest('button, input')) return;
             isDragging = true;
             const rect = legend.getBoundingClientRect();
             startX = e.clientX ?? e.touches?.[0]?.clientX;
@@ -313,6 +416,51 @@ export function createLegend() {
             }
         };
 
+        const clampPosition = () => {
+            if (legend.style.display === 'none') return;
+            const rect = legend.getBoundingClientRect();
+            const viewportWidth = window.visualViewport?.width || window.innerWidth;
+            const viewportHeight = window.visualViewport?.height || window.innerHeight;
+            const left = Math.max(0, Math.min(viewportWidth - rect.width, rect.left));
+            const top = Math.max(0, Math.min(viewportHeight - rect.height, rect.top));
+            legend.style.right = 'auto';
+            legend.style.left = `${left}px`;
+            legend.style.top = `${top}px`;
+        };
+
+        legend.__dcClampPosition = clampPosition;
+        legend.addEventListener('click', event => {
+            if (event.target.closest('.dc-legend-hide')) {
+                settings.showLegend = false;
+                const checkbox = document.getElementById('dc-legend');
+                if (checkbox) checkbox.checked = false;
+                saveData();
+                legend.style.display = 'none';
+            }
+            if (event.target.closest('.dc-legend-reset')) {
+                legend.style.right = '10px';
+                legend.style.left = 'auto';
+                legend.style.top = '60px';
+                saveLegendPosition({ top: 60, right: 10 });
+            }
+        });
+        legend.addEventListener('keydown', event => {
+            if (!event.target.closest('.dc-legend-handle') || !event.key.startsWith('Arrow')) return;
+            event.preventDefault();
+            const rect = legend.getBoundingClientRect();
+            const step = event.shiftKey ? 20 : 5;
+            const dx = event.key === 'ArrowLeft' ? -step : event.key === 'ArrowRight' ? step : 0;
+            const dy = event.key === 'ArrowUp' ? -step : event.key === 'ArrowDown' ? step : 0;
+            legend.style.right = 'auto';
+            legend.style.left = `${rect.left + dx}px`;
+            legend.style.top = `${rect.top + dy}px`;
+            clampPosition();
+            const nextRect = legend.getBoundingClientRect();
+            saveLegendPosition({ top: nextRect.top, left: nextRect.left });
+        });
+        window.addEventListener('resize', clampPosition);
+        window.visualViewport?.addEventListener('resize', clampPosition);
+
         // Remove old document-level listeners before adding new ones
         if (legendListeners) {
             document.removeEventListener('mousemove', legendListeners.onMouseMove);
@@ -338,8 +486,25 @@ export function createLegend() {
 export function updateLegend() {
     const legend = createLegend();
     const entries = Object.entries(characterColors);
-    if (!entries.length || !settings.showLegend) { legend.style.display = 'none'; return; }
-    legend.innerHTML = '<div style="font-weight:bold;margin-bottom:4px;cursor:grab;">⋮⋮ Characters</div>' +
+    const signature = JSON.stringify({
+        visible: !!settings.showLegend,
+        entries: entries.map(([key, entry]) => [
+            key,
+            entry.name,
+            entry.dialogueCount || 0,
+            getEntryEffectiveColor(entry),
+            normalizeGoogleFontName(entry.font),
+            getGradientSignature(entry),
+        ]),
+    });
+    if (!entries.length || !settings.showLegend) {
+        legend.style.display = 'none';
+        lastLegendSignature = signature;
+        return;
+    }
+    if (signature === lastLegendSignature && legend.style.display === 'block') return;
+    lastLegendSignature = signature;
+    legend.innerHTML = '<div class="dc-legend-handle" tabindex="0" role="toolbar" aria-label="Move character legend with arrow keys"><strong>Characters</strong><span><button type="button" class="dc-legend-reset" aria-label="Reset legend position" title="Reset position">↺</button><button type="button" class="dc-legend-hide" aria-label="Hide character legend" title="Hide legend">×</button></span></div>' +
         entries.map(([, v]) => {
             const presentation = getGradientPresentation(v);
             const fontFamily = getGoogleFontFamily(v.font);
@@ -350,6 +515,7 @@ export function updateLegend() {
             return `<div class="dc-legend-character${gradientClasses}"${gradientAttributes} style="display:flex;align-items:center;gap:4px;"><span class="dc-legend-swatch${presentation ? ' dc-gradient-surface' : ''}"${gradientAttributes} style="width:8px;height:8px;border-radius:50%;${escapeAttr(buildGradientSurfaceStyle(v))}"></span><span class="dc-legend-name${presentation ? ' dc-gradient-text' : ''}"${gradientAttributes} style="${escapeAttr(buildGradientSurfaceStyle(v, { text: true }))}${fontStyle}">${escapeHtml(v.name)}</span><span style="opacity:0.5;font-size:0.8em;">${v.dialogueCount || 0}</span></div>`;
         }).join('');
     legend.style.display = settings.showLegend ? 'block' : 'none';
+    if (settings.showLegend) requestAnimationFrame(() => legend.__dcClampPosition?.());
 }
 
 export function getDialogueStats() {
@@ -367,7 +533,7 @@ export function getDialogueStats() {
     })).sort((a, b) => b.count - a.count);
 }
 
-export function showStatsPopup() {
+export async function showStatsPopup() {
     const stats = getDialogueStats();
     if (!stats.length) { toast.info('No dialogue data'); return; }
     const maxCount = Math.max(...stats.map(s => s.count), 1);
@@ -379,22 +545,22 @@ export function showStatsPopup() {
         const presentation = getGradientPresentation(statEntry);
         const gradientClasses = presentation ? ` ${presentation.classes}` : '';
         const gradientAttributes = presentation ? ` ${presentation.dataAttributes}` : '';
-        return `<div class="dc-stats-character${gradientClasses}"${gradientAttributes} style="display:flex;align-items:center;gap:6px;margin:2px 0;"><span class="dc-stats-name${presentation ? ' dc-gradient-text' : ''}"${gradientAttributes} style="width:60px;${escapeAttr(buildGradientSurfaceStyle(statEntry, { text: true }))}${fontStyle}">${escapeHtml(s.name)}</span><div style="flex:1;height:12px;background:var(--SmartThemeBlurTintColor);border-radius:3px;overflow:hidden;"><div class="dc-stats-bar${presentation ? ' dc-gradient-surface' : ''}"${gradientAttributes} style="width:${s.count / maxCount * 100}%;height:100%;${escapeAttr(buildGradientSurfaceStyle(statEntry))}"></div></div><span style="width:40px;text-align:right;font-size:0.8em;">${s.count} (${s.pct}%)</span></div>`;
+        return `<div class="dc-stats-character${gradientClasses}"${gradientAttributes}><span class="dc-stats-name${presentation ? ' dc-gradient-text' : ''}"${gradientAttributes} style="${escapeAttr(buildGradientSurfaceStyle(statEntry, { text: true }))}${fontStyle}">${escapeHtml(s.name)}</span><div class="dc-stats-track" aria-hidden="true"><div class="dc-stats-bar${presentation ? ' dc-gradient-surface' : ''}"${gradientAttributes} style="width:${s.count / maxCount * 100}%;${escapeAttr(buildGradientSurfaceStyle(statEntry))}"></div></div><span class="dc-stats-value">${s.count} (${s.pct}%)</span></div>`;
     }).join('');
-    const popup = document.createElement('div');
-    popup.id = 'dc-stats-popup';
-    popup.innerHTML = `<div style="font-weight:bold;margin-bottom:8px;">Dialogue Statistics</div>${html}<button class="dc-close-popup menu_button" style="margin-top:10px;width:100%;">Close</button>`;
-    popup.querySelector('.dc-close-popup').onclick = () => popup.remove();
-    document.body.appendChild(popup);
-    const closePopup = e => { if (!popup.contains(e.target)) { popup.remove(); document.removeEventListener('mousedown', closePopup); } };
-    setTimeout(() => document.addEventListener('mousedown', closePopup), 10);
+    await openDecisionDialog({
+        title: 'Dialogue activity',
+        description: 'Counts represent attributed dialogue segments and can differ by coloring engine.',
+        detailsHtml: `<div class="dc-stats-list">${html}</div>`,
+        choices: [{ value: 'close', label: 'Close', primary: true }],
+    });
 }
 
-export function showStorageManager() {
+export async function showStorageManager() {
     const currentKey = getStorageKey();
     const colorData = getUserColorDataStore();
-    const keys = Object.keys(colorData).filter(k => k.startsWith('dc_char_') || k === 'dc_global');
-    if (!keys.length) { toast.info('No stored color data found'); return; }
+    const keys = Object.keys(colorData).filter(k => k.startsWith('dc_char_') || k.startsWith('dc_chat_') || k === 'dc_global');
+    const archived = getArchivedColorData();
+    if (!keys.length && !archived) { toast.info('No stored color data found'); return; }
 
     const entries = keys.map(k => {
         const entry = normalizeColorDataEntry(colorData[k]) || { colors: {} };
@@ -404,68 +570,58 @@ export function showStorageManager() {
         const colorCount = Object.keys(colors).length;
         const names = Object.values(colors).map(v => v.name).filter(Boolean).slice(0, 3);
         const isCurrent = k === currentKey;
-        const label = names.length ? names.join(', ') + (colorCount > 3 ? ` (+${colorCount - 3})` : '') : getStorageLabelForKey(k);
+        const scope = k === 'dc_global' ? 'Global' : k.startsWith('dc_chat_') ? 'Per chat' : 'Per card';
+        const identity = names.length ? names.join(', ') + (colorCount > 3 ? ` (+${colorCount - 3})` : '') : getStorageLabelForKey(k);
+        const label = `${scope}: ${identity}`;
         const sizeStr = size < 1024 ? `${size} B` : `${(size / 1024).toFixed(1)} KB`;
-        return { key: k, label, colorCount, sizeStr, size, isCurrent };
+        return { key: k, label, colorCount, sizeStr, size, isCurrent, updatedAt: entry.updatedAt || '' };
     });
     entries.sort((a, b) => a.isCurrent ? -1 : b.isCurrent ? 1 : a.key.localeCompare(b.key));
 
     const rows = entries.map(e => {
-        const highlight = e.isCurrent ? 'background:rgba(255,255,255,0.06);border-radius:4px;padding:2px 4px;' : 'padding:2px 4px;';
-        const tag = e.isCurrent ? ' <span style="font-size:0.75em;opacity:0.6;">(current)</span>' : '';
-        return `<label style="display:flex;align-items:center;gap:6px;${highlight}cursor:pointer;"><input type="checkbox" class="dc-storage-check" data-key="${escapeHtml(e.key)}" ${e.isCurrent ? '' : 'checked'}><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(e.label)}${tag}</span><span style="font-size:0.75em;opacity:0.6;white-space:nowrap;">${e.colorCount} colors · ${e.sizeStr}</span></label>`;
+        const tag = e.isCurrent ? '<span class="dc-current-badge">Active</span>' : '';
+        return `<label class="dc-storage-row${e.isCurrent ? ' dc-storage-current' : ''}"><input type="checkbox" class="dc-dialog-select" data-value="${escapeAttr(e.key)}"${e.isCurrent ? ' disabled' : ''}><span class="dc-storage-entry"><strong>${escapeHtml(e.label)} ${tag}</strong><small>${e.colorCount} characters, ${escapeHtml(e.sizeStr)}, ${escapeHtml(formatDate(e.updatedAt))}</small></span></label>`;
     }).join('');
+    const decision = await openDecisionDialog({
+        title: 'Storage manager',
+        description: 'Select inactive color tables to archive. The active table is managed from the main panel.',
+        detailsHtml: rows ? `<div class="dc-storage-list">${rows}</div>` : '<p>No active stored tables.</p>',
+        choices: [
+            { value: 'archive', label: 'Archive selected', danger: true },
+            ...(archived ? [{ value: 'restore', label: `Restore last archive (${archived.count})` }] : []),
+            { value: 'close', label: 'Close', primary: true },
+        ],
+    });
+    if (decision.value === 'restore') {
+        const result = await restoreArchivedColorData();
+        if (result.ok) toast.success(`Restored ${result.count} stored color table${result.count === 1 ? '' : 's'}.${result.skipped ? ` Skipped ${result.skipped} key${result.skipped === 1 ? '' : 's'} that now exist.` : ''}`);
+        else if (result.error && result.rollbackPersisted === false) toast.error('Restore failed, and its recovery could not be saved reliably. Export your colors before reloading.');
+        else if (result.error) toast.error('The archived tables could not be restored safely.');
+        else toast.info('No archived color tables could be restored.');
+        return;
+    }
+    if (decision.value !== 'archive') return;
+    const selected = decision.selected.filter(key => key && key !== currentKey);
+    if (!selected.length) { toast.info('Select at least one inactive table.'); return; }
+    const labels = entries.filter(entry => selected.includes(entry.key)).map(entry => entry.label);
+    const confirmed = await confirmReviewedAction({
+        title: `Archive ${selected.length} stored color table${selected.length === 1 ? '' : 's'}?`,
+        description: 'This replaces any previous storage archive. You can restore this batch from Storage Manager until another batch is archived.',
+        detailsHtml: `<p class="dc-review-names">${labels.map(escapeHtml).join('<br>')}</p>`,
+        confirmLabel: 'Archive selected',
+        danger: true,
+    });
+    if (!confirmed) return;
+    const result = await archiveStoredColorData(selected);
+    if (result.ok) toast.success(`Archived ${result.count} stored color table${result.count === 1 ? '' : 's'}.`);
+    else if (result.rollbackPersisted === false) toast.error('Archive failed, and its recovery could not be saved reliably. Export your colors before reloading.');
+    else toast.error('The selected tables could not be archived safely.');
+}
 
-    const popup = document.createElement('div');
-    popup.id = 'dc-storage-popup';
-    popup.innerHTML = `<div style="font-weight:bold;margin-bottom:8px;">Storage Manager</div>${rows}<div style="display:flex;gap:4px;margin-top:10px;flex-wrap:wrap;"><button class="dc-storage-all menu_button" style="flex:1;">Select All</button><button class="dc-storage-none menu_button" style="flex:1;">Deselect All</button></div><div style="display:flex;gap:4px;margin-top:4px;"><button class="dc-storage-clear menu_button" style="flex:1;">Clear Selected</button><button class="dc-storage-close menu_button" style="flex:1;">Close</button></div>`;
-
-    const checks = () => popup.querySelectorAll('.dc-storage-check');
-    popup.querySelector('.dc-storage-all').onclick = () => checks().forEach(c => c.checked = true);
-    popup.querySelector('.dc-storage-none').onclick = () => checks().forEach(c => c.checked = false);
-    popup.querySelector('.dc-storage-close').onclick = () => { popup.remove(); document.removeEventListener('mousedown', closePopup); };
-    popup.querySelector('.dc-storage-clear').onclick = () => {
-        const selected = [...checks()].filter(c => c.checked).map(c => c.dataset.key);
-        if (!selected.length) { toast.info('Nothing selected'); return; }
-        const entryWord = selected.length === 1 ? 'entry' : 'entries';
-        const clearingCurrent = selected.includes(currentKey);
-        const keptCurrentKeys = clearingCurrent ? getKeptKeys() : [];
-        const keptCurrentCount = keptCurrentKeys.length;
-        const confirmMessage = keptCurrentCount
-            ? `Clear ${selected.length} stored color data ${entryWord}? Pinned characters in the current chat will be kept.`
-            : `Clear ${selected.length} stored color data ${entryWord}?`;
-        if (!confirm(confirmMessage)) return;
-
-        selected.forEach(k => {
-            if (k !== currentKey) removeStoredColorData(k);
-        });
-        popup.remove();
-        document.removeEventListener('mousedown', closePopup);
-        if (clearingCurrent) {
-            if (keptCurrentCount) {
-                keepCharacterKeysOnly(keptCurrentKeys);
-                saveHistory();
-                saveData();
-            } else {
-                removeStoredColorData(currentKey);
-                setCharacterColors({});
-                expandedCharacterRows.clear();
-                setSwapMode(null);
-                saveHistory();
-            }
-            updateCharList();
-            injectPrompt();
-        }
-
-        const summary = keptCurrentCount
-            ? `Cleared ${selected.length} ${entryWord}. Current chat kept ${keptCurrentCount} pinned character${keptCurrentCount !== 1 ? 's' : ''}.`
-            : `Cleared ${selected.length} ${entryWord}.`;
-        toast.success(summary);
-    };
-
-    document.body.appendChild(popup);
-    const closePopup = e => { if (!popup.contains(e.target)) { popup.remove(); document.removeEventListener('mousedown', closePopup); } };
-    setTimeout(() => document.addEventListener('mousedown', closePopup), 10);
+function syncProcessControlState() {
+    document.querySelectorAll('#dc-ext .dc-process-grid button, #dc-ext .dc-process-grid select').forEach(control => {
+        control.disabled = !settings.enabled || control.getAttribute('aria-busy') === 'true';
+    });
 }
 
 export function setRecolorButtonBusy(isBusyState) {
@@ -474,11 +630,15 @@ export function setRecolorButtonBusy(isBusyState) {
     if (isBusyState) {
         if (!button.dataset.defaultLabel) button.dataset.defaultLabel = button.textContent || 'Recolor';
         button.disabled = true;
+        button.setAttribute('aria-busy', 'true');
         button.textContent = 'Recoloring...';
         return;
     }
-    button.disabled = false;
-    button.textContent = button.dataset.defaultLabel || 'Recolor';
+    button.removeAttribute('aria-busy');
+    const label = isDomEngine() ? 'Refresh rendered dialogue' : 'Recolor entire chat';
+    button.dataset.defaultLabel = label;
+    button.textContent = label;
+    syncProcessControlState();
 }
 
 export function setColorizeButtonBusy(isBusyState) {
@@ -487,11 +647,13 @@ export function setColorizeButtonBusy(isBusyState) {
     if (isBusyState) {
         if (!button.dataset.defaultLabel) button.dataset.defaultLabel = button.textContent || 'Colorize';
         button.disabled = true;
+        button.setAttribute('aria-busy', 'true');
         button.textContent = 'Colorizing...';
         return;
     }
-    button.disabled = false;
+    button.removeAttribute('aria-busy');
     button.textContent = button.dataset.defaultLabel || 'Colorize';
+    syncProcessControlState();
 }
 
 export function setVerifyAttributionButtonBusy(isBusyState) {
@@ -500,11 +662,13 @@ export function setVerifyAttributionButtonBusy(isBusyState) {
     if (isBusyState) {
         if (!button.dataset.defaultLabel) button.dataset.defaultLabel = button.textContent || 'Verify Colors (LLM)';
         button.disabled = true;
+        button.setAttribute('aria-busy', 'true');
         button.textContent = 'Verifying...';
         return;
     }
-    button.disabled = false;
+    button.removeAttribute('aria-busy');
     button.textContent = button.dataset.defaultLabel || 'Verify Colors (LLM)';
+    syncProcessControlState();
 }
 
 export function showAutoColorizeIndicator(mesElement) {
@@ -513,6 +677,8 @@ export function showAutoColorizeIndicator(mesElement) {
     if (indicator) return;
     indicator = document.createElement('div');
     indicator.className = 'dc-auto-colorize-indicator';
+    indicator.setAttribute('role', 'status');
+    indicator.setAttribute('aria-live', 'polite');
     indicator.textContent = 'Auto-colorizing…';
     mesElement.style.position = mesElement.style.position || 'relative';
     mesElement.appendChild(indicator);
@@ -540,6 +706,20 @@ export function addCharacter(name, color) {
     const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
     let needsDomRepaint = false;
     if (characterColors[key]) {
+        if (color === undefined || color === null || color === '') {
+            setSearchTerm('');
+            const search = document.getElementById('dc-search');
+            if (search) search.value = '';
+            expandedCharacterRows.add(key);
+            updateCharList();
+            requestAnimationFrame(() => {
+                const row = document.querySelector(`.dc-char[data-key="${CSS.escape(key)}"]`);
+                row?.scrollIntoView({ block: 'nearest' });
+                row?.querySelector('.dc-more')?.focus({ preventScroll: true });
+            });
+            toast.info(`${escapeHtml(characterColors[key].name)} is already in the list.`);
+            return { added: false, existing: true, key };
+        }
         setEntryFromBaseColor(characterColors[key], normalizeHexColor(color, suggestColorForName(name) || getNextColor()));
         applyLiveColorChangesFromSnapshot(snapshot, [key]);
     } else {
@@ -556,6 +736,7 @@ export function addCharacter(name, color) {
     }
     commit();
     if (needsDomRepaint) repaintDomAfterCharacterDataChange(0);
+    return { added: true, existing: false, key };
 }
 
 export function swapColors(key1, key2) {
@@ -610,6 +791,7 @@ export function applyThemeOrBrightnessChange(mutator, options = {}) {
     applyLiveColorChangesFromSnapshot(snapshot, keys, { saveImmediately: options.saveImmediately });
     applyFastColorUiUpdates(keys);
     refreshGradientVisualSurfaces(keys);
+    if (options.saveImmediately) saveData({ preserveEffectiveColors: true });
 }
 
 function formatGradientPresetName(name) {
@@ -653,14 +835,14 @@ function buildGradientEditorHtml(key, entry) {
             <label>Preset
                 <select class="dc-gradient-preset-picker text_pole" data-key="${safeKey}" aria-label="Gradient preset for ${safeName}">${presetOptions}</select>
             </label>
-            <button type="button" class="dc-gradient-apply-preset menu_button" data-key="${safeKey}">Apply</button>
-            <button type="button" class="dc-gradient-randomize menu_button" data-key="${safeKey}" aria-label="Randomize gradient for ${safeName}">Randomize</button>
+            <button type="button" class="dc-gradient-apply-preset menu_button" data-key="${safeKey}" data-focus-id="gradient-preset-apply">Apply</button>
+            <button type="button" class="dc-gradient-randomize menu_button" data-key="${safeKey}" data-focus-id="gradient-randomize" aria-label="Randomize gradient for ${safeName}">Randomize</button>
         </div>`;
     if (!gradient) {
         return `
             <section class="dc-gradient-editor" data-key="${safeKey}" data-gradient-enabled="false">
                 <div class="dc-gradient-compact">
-                    <button type="button" class="dc-gradient-toggle menu_button" data-key="${safeKey}">Enable Gradient</button>
+                    <button type="button" class="dc-gradient-toggle menu_button" data-key="${safeKey}" data-focus-id="gradient-toggle">Enable Gradient</button>
                     <div class="dc-gradient-preview" role="img" aria-label="Solid color preview for ${safeName}" style="${escapeAttr(buildGradientSurfaceStyle(entry))}"></div>
                     ${presetControls}
                 </div>
@@ -695,13 +877,13 @@ function buildGradientEditorHtml(key, entry) {
     return `
         <section class="dc-gradient-editor ${presentation.classes}" data-key="${safeKey}" data-gradient-enabled="true" ${presentation.dataAttributes}>
             <div class="dc-gradient-compact">
-                <button type="button" class="dc-gradient-toggle menu_button dc-danger-button" data-key="${safeKey}">Remove Gradient</button>
+                <button type="button" class="dc-gradient-toggle menu_button dc-danger-button" data-key="${safeKey}" data-focus-id="gradient-toggle">Remove Gradient</button>
                 <div class="dc-gradient-compact-colors">
                     <label>Primary <input type="color" class="dc-gradient-primary-color" data-key="${safeKey}" value="${primaryBaseColor}" aria-label="Primary gradient color for ${safeName}"></label>
                     <label>Second <input type="color" class="dc-gradient-secondary-color" data-key="${safeKey}" value="${secondStop.baseColor}" aria-label="Second gradient color for ${safeName}"></label>
                 </div>
                 <label>Type
-                    <select class="dc-gradient-type text_pole" data-key="${safeKey}" aria-label="Gradient type for ${safeName}">
+                    <select class="dc-gradient-type text_pole" data-key="${safeKey}" data-focus-id="gradient-type" aria-label="Gradient type for ${safeName}">
                         <option value="linear"${gradient.type === 'linear' ? ' selected' : ''}>Linear</option>
                         <option value="radial"${gradient.type === 'radial' ? ' selected' : ''}>Radial</option>
                     </select>
@@ -715,7 +897,7 @@ function buildGradientEditorHtml(key, entry) {
                 <summary>Advanced Gradient</summary>
                 <div class="dc-gradient-stops-advanced">
                     ${stopRows}
-                    <button type="button" class="dc-gradient-add-stop menu_button" data-key="${safeKey}"${gradient.stops.length + 1 >= MAX_GRADIENT_STOPS ? ' disabled' : ''}>Add Stop (${gradient.stops.length + 1}/${MAX_GRADIENT_STOPS})</button>
+                    <button type="button" class="dc-gradient-add-stop menu_button" data-key="${safeKey}" data-focus-id="gradient-add-stop"${gradient.stops.length + 1 >= MAX_GRADIENT_STOPS ? ' disabled' : ''}>Add Stop (${gradient.stops.length + 1}/${MAX_GRADIENT_STOPS})</button>
                 </div>
                 ${geometryControls}
                 <div class="dc-gradient-animation-controls">
@@ -797,7 +979,6 @@ function refreshGradientVisualSurfaces(keys = Object.keys(characterColors)) {
                 editor.removeAttribute('data-dc-gradient-reverse');
             }
         }
-        row.setAttribute('data-dc-sig', buildCharRowSignature(key, entry));
     });
     updateLegend();
 }
@@ -824,41 +1005,45 @@ export function buildCharRowHtml(k, v) {
         getBadge(v.dialogueCount || 0) ? `<span class="dc-status-chip">${getBadge(v.dialogueCount || 0)}</span>` : ''
     ].filter(Boolean).join('');
     const aliasChips = (v.aliases || []).map(a =>
-        `<span class="dc-alias-chip">${escapeHtml(a)}<span class="dc-alias-remove" data-key="${safeKey}" data-alias="${escapeAttr(a)}" title="Remove alias">&times;</span></span>`
+        `<span class="dc-alias-chip">${escapeHtml(a)}<button type="button" class="dc-alias-remove" data-key="${safeKey}" data-alias="${escapeAttr(a)}" aria-label="Remove alias ${escapeAttr(a)} from ${escapeAttr(v.name)}">&times;</button></span>`
     ).join('');
     return `
-        <div class="dc-char ${swapMode === k ? 'dc-swap-selected' : ''} ${v.keep ? 'dc-char-kept' : ''}${gradientClasses}" data-key="${safeKey}"${gradientAttributes}>
+        <article class="dc-char ${swapMode === k ? 'dc-swap-selected' : ''} ${v.keep ? 'dc-char-kept' : ''}${gradientClasses}" data-key="${safeKey}" role="listitem" aria-label="${escapeAttr(v.name)}"${gradientAttributes}>
             <div class="dc-char-main">
                 <span class="dc-color-swatch">
                     <span class="dc-color-dot${gradientPresentation ? ' dc-gradient-surface' : ''}"${gradientPresentation ? ` ${gradientPresentation.dataAttributes}` : ''} style="${escapeAttr(buildGradientSurfaceStyle(v))}"></span>
-                    <input type="color" value="${pickerColor}" data-key="${safeKey}" class="dc-color-input">
+                    <input type="color" value="${pickerColor}" data-key="${safeKey}" class="dc-color-input" aria-label="Color for ${escapeAttr(v.name)}">
                 </span>
-                <input type="text" value="${escapeAttr(pickerColor)}" data-key="${safeKey}" class="dc-color-hex text_pole" inputmode="text" autocapitalize="none" autocomplete="off" spellcheck="false" maxlength="7" aria-label="Hex color for ${escapeAttr(v.name)}" title="Enter a hex color like #ff66cc">
                 <div class="dc-char-name-wrap" title="Dialogues: ${v.dialogueCount || 0}${v.aliases?.length ? '\nAliases: ' + escapeHtml(v.aliases.join(', ')) : ''}${v.group ? '\nGroup: ' + escapeHtml(v.group) : ''}${fontName ? '\nFont: ' + escapeHtml(fontName) : ''}">
                     <div class="dc-char-name${gradientPresentation ? ' dc-gradient-text' : ''}"${gradientPresentation ? ` ${gradientPresentation.dataAttributes}` : ''} style="${escapeAttr(buildGradientSurfaceStyle(v, { text: true }))}${fontStyle}">${escapeHtml(v.name)}</div>
                     <div class="dc-char-meta">
-                        <span class="dc-char-count">${v.dialogueCount || 0} lines</span>
+                        <span class="dc-char-count">${v.dialogueCount || 0} dialogue segment${v.dialogueCount === 1 ? '' : 's'}</span>
                         ${statusBadges}
                     </div>
                 </div>
-                <button class="dc-keep menu_button ${v.keep ? 'dc-toggle-active' : ''}" data-key="${safeKey}" title="Keep this character even when clearing or bulk deleting">${v.keep ? 'Kept' : 'Keep'}</button>
-                <button class="dc-lock menu_button ${v.locked ? 'dc-toggle-active' : ''}" data-key="${safeKey}" title="Lock color">${v.locked ? 'Locked' : 'Lock'}</button>
-                <button class="dc-del menu_button dc-danger-button" data-key="${safeKey}" title="Delete character">Delete</button>
-                <button class="dc-more menu_button" data-key="${safeKey}" title="Show more tools">${rowExpanded ? 'Less' : 'More'}</button>
+                <button type="button" class="dc-keep menu_button ${v.keep ? 'dc-toggle-active' : ''}" data-key="${safeKey}" data-focus-id="keep" aria-pressed="${v.keep ? 'true' : 'false'}">${v.keep ? 'Kept' : 'Keep'}</button>
+                <button type="button" class="dc-more menu_button" data-key="${safeKey}" data-focus-id="more" aria-expanded="${rowExpanded ? 'true' : 'false'}">${rowExpanded ? 'Close' : 'Edit'}</button>
             </div>
             ${aliasChips ? `<div class="dc-alias-list">${aliasChips}</div>` : ''}
             ${rowExpanded ? `
             <div class="dc-char-advanced">
+                <div class="dc-field-row dc-character-color-row">
+                    <label class="dc-inline-label" for="dc-color-${safeKey}">Primary color</label>
+                    <input id="dc-color-${safeKey}" type="text" value="${escapeAttr(pickerColor)}" data-key="${safeKey}" class="dc-color-hex text_pole" inputmode="text" autocapitalize="none" autocomplete="off" spellcheck="false" maxlength="7" aria-label="Hex color for ${escapeAttr(v.name)}">
+                    <button type="button" class="dc-harmony menu_button" data-key="${safeKey}" data-focus-id="harmony">Harmony</button>
+                </div>
                 <div class="dc-inline-toolbar">
-                    <button class="dc-swap menu_button" data-key="${safeKey}" title="Swap colors">Swap</button>
-                    <button class="dc-style menu_button" data-key="${safeKey}" title="Cycle text style">Style: ${escapeHtml(styleLabel)}</button>
-                    <button class="dc-font menu_button" data-key="${safeKey}" title="Set Google Font">${fontName ? 'Edit Font' : 'Set Font'}</button>
-                    <button class="dc-alias menu_button" data-key="${safeKey}" title="Add alias">Add Alias</button>
-                    <button class="dc-group menu_button" data-key="${safeKey}" title="Assign group">${v.group ? 'Edit Group' : 'Set Group'}</button>
+                    <button type="button" class="dc-lock menu_button ${v.locked ? 'dc-toggle-active' : ''}" data-key="${safeKey}" data-focus-id="lock" aria-pressed="${v.locked ? 'true' : 'false'}">${v.locked ? 'Locked' : 'Lock'}</button>
+                    <button type="button" class="dc-swap menu_button" data-key="${safeKey}" data-focus-id="swap">Swap</button>
+                    <label class="dc-compact-label">Style <select class="dc-style-select text_pole" data-key="${safeKey}" data-focus-id="style" aria-label="Dialogue style for ${escapeAttr(v.name)}"><option value=""${!v.style ? ' selected' : ''}>Normal</option><option value="bold"${v.style === 'bold' ? ' selected' : ''}>Bold</option><option value="italic"${v.style === 'italic' ? ' selected' : ''}>Italic</option><option value="bold italic"${v.style === 'bold italic' ? ' selected' : ''}>Bold italic</option></select></label>
+                    <button type="button" class="dc-font menu_button" data-key="${safeKey}" data-focus-id="font">${fontName ? 'Edit Font' : 'Set Font'}</button>
+                    <button type="button" class="dc-alias menu_button" data-key="${safeKey}" data-focus-id="alias">Add Alias</button>
+                    <button type="button" class="dc-group menu_button" data-key="${safeKey}" data-focus-id="group">${v.group ? 'Edit Group' : 'Set Group'}</button>
+                    <button type="button" class="dc-del menu_button dc-danger-button" data-key="${safeKey}" data-focus-id="delete">Delete</button>
                 </div>
                 ${buildGradientEditorHtml(k, v)}
             </div>` : ''}
-        </div>`;
+        </article>`;
 }
 
 export function buildCharRowSignature(k, v) {
@@ -889,6 +1074,25 @@ export function applyColorInputForElement(i, options = {}) {
         return true;
     }
     return false;
+}
+
+function previewCharacterSurfaces(key, entry) {
+    const row = document.querySelector(`.dc-char[data-key="${CSS.escape(key)}"]`);
+    if (!row) return;
+    setGradientPresentation(row.querySelector('.dc-color-dot'), entry);
+    setGradientPresentation(row.querySelector('.dc-char-name'), entry, { text: true });
+    setGradientPresentation(row.querySelector('.dc-gradient-preview'), entry);
+}
+
+function previewColorInputForElement(input) {
+    const entry = characterColors[input.dataset.key];
+    if (!entry) return;
+    const nextColor = normalizeHexColor(input.value, getBaseColor(entry));
+    const previewEntry = JSON.parse(JSON.stringify(entry));
+    setEntryFromBaseColor(previewEntry, nextColor);
+    const hexInput = input.closest('.dc-char')?.querySelector('.dc-color-hex');
+    if (hexInput) hexInput.value = nextColor;
+    previewCharacterSurfaces(input.dataset.key, previewEntry);
 }
 
 // Event delegation: handlers are installed once on the list container, so
@@ -924,12 +1128,29 @@ function handleMoreClick(moreBtn) {
     updateCharList();
 }
 
-function handleDeleteClick(delBtn) {
-    removeCharacterKeys([delBtn.dataset.key], {
+function focusCharacterControl(key, focusId) {
+    requestAnimationFrame(() => {
+        document.querySelector(`.dc-char[data-key="${CSS.escape(key)}"] [data-focus-id="${CSS.escape(focusId)}"]`)?.focus({ preventScroll: true });
+    });
+}
+
+async function handleDeleteClick(delBtn) {
+    const key = delBtn.dataset.key;
+    const name = characterColors[key]?.name || 'this character';
+    const rows = [...(delBtn.closest('.dc-char-list')?.querySelectorAll('.dc-char') || [])];
+    const rowIndex = rows.indexOf(delBtn.closest('.dc-char'));
+    const fallbackKey = rows[rowIndex + 1]?.dataset.key || rows[rowIndex - 1]?.dataset.key || '';
+    const result = await confirmCharacterRemoval([key], {
+        title: `Delete ${name}?`,
         actionLabel: 'Deleted',
         emptyMessage: 'Character already removed.',
-        blockedMessage: 'Turn off Keep before deleting this character.'
+        blockedMessage: 'Turn off Keep before deleting this character.',
+        opener: delBtn,
     });
+    if (result?.removed) {
+        if (fallbackKey && characterColors[fallbackKey]) focusCharacterControl(fallbackKey, 'more');
+        else requestAnimationFrame(() => document.getElementById('dc-search')?.focus({ preventScroll: true }));
+    }
 }
 
 function handleKeepClick(keepBtn) {
@@ -945,20 +1166,9 @@ function handleKeepClick(keepBtn) {
 function handleLockClick(lockBtn) {
     const key = lockBtn.dataset.key;
     if (!characterColors[key]) return;
-    const wasLocked = !!characterColors[key].locked;
     characterColors[key].locked = !characterColors[key].locked;
     saveHistory();
     saveData(); updateCharList();
-    if (!wasLocked && characterColors[key]?.locked) {
-        const duplicateKeys = collectDuplicateColorKeys();
-        if (duplicateKeys.length) {
-            removeCharacterKeys(duplicateKeys, {
-                actionLabel: 'Auto-cleared',
-                itemLabel: 'duplicate-color character',
-                blockedMessage: 'Only pinned duplicate-color characters remain. Turn off Keep first.'
-            });
-        }
-    }
 }
 
 function handleSwapClick(swapBtn) {
@@ -971,12 +1181,10 @@ function handleSwapClick(swapBtn) {
     }
 }
 
-function handleStyleClick(styleBtn) {
-    const key = styleBtn.dataset.key;
+function handleStyleSelect(styleSelect) {
+    const key = styleSelect.dataset.key;
     if (!characterColors[key]) return;
-    const styles = ['', 'bold', 'italic', 'bold italic'];
-    const curr = characterColors[key].style || '';
-    characterColors[key].style = styles[(styles.indexOf(curr) + 1) % styles.length];
+    characterColors[key].style = ['', 'bold', 'italic', 'bold italic'].includes(styleSelect.value) ? styleSelect.value : '';
     commit();
     repaintDomAfterCharacterDataChange(0);
 }
@@ -991,6 +1199,7 @@ function handleAliasRemoveClick(e, aliasRemoveBtn) {
             characterColors[key].aliases = nextAliases;
             commit();
             repaintDomAfterCharacterDataChange(0);
+            focusCharacterControl(key, 'alias');
         }
     }
 }
@@ -1001,27 +1210,37 @@ function handleAliasClick(aliasBtn) {
     if (existing) { existing.remove(); return; }
     const inputRow = document.createElement('div');
     inputRow.className = 'dc-inline-input';
-    inputRow.style.cssText = 'display:flex;gap:4px;padding:2px 0 2px 26px;';
-    inputRow.innerHTML = `<input type="text" class="text_pole" placeholder="Alias name..." style="flex:1;padding:2px 4px;font-size:0.8em;"><button class="menu_button" style="padding:2px 6px;font-size:0.8em;">Add</button>`;
+    const key = aliasBtn.dataset.key;
+    const inputId = `dc-alias-input-${key}`;
+    inputRow.innerHTML = `<label class="dc-visually-hidden" for="${escapeAttr(inputId)}">Alias for ${escapeHtml(characterColors[key]?.name || '')}</label><input id="${escapeAttr(inputId)}" type="text" class="text_pole" placeholder="Alias name"><button type="button" class="menu_button dc-inline-submit">Add</button><button type="button" class="menu_button dc-inline-cancel">Cancel</button>`;
     row.appendChild(inputRow);
     const inp = inputRow.querySelector('input');
     inp.focus();
+    const close = () => { inputRow.remove(); focusCharacterControl(key, 'alias'); };
     const submit = () => {
         const alias = inp.value.trim();
         if (alias) {
-            const aliases = characterColors[aliasBtn.dataset.key].aliases = characterColors[aliasBtn.dataset.key].aliases || [];
+            const existingKey = resolveCharacterKeyByNameOrAlias(alias);
+            if (existingKey && existingKey !== key) {
+                inp.setAttribute('aria-invalid', 'true');
+                toast.warning(`${escapeHtml(alias)} already belongs to another character.`);
+                return;
+            }
+            const aliases = characterColors[key].aliases = characterColors[key].aliases || [];
             if (!aliases.includes(alias)) {
                 aliases.push(alias);
                 commit();
                 repaintDomAfterCharacterDataChange(0);
+                focusCharacterControl(key, 'alias');
             } else {
-                inputRow.remove();
+                close();
             }
         }
-        else inputRow.remove();
+        else close();
     };
-    inputRow.querySelector('button').onclick = submit;
-    inp.onkeydown = ev => { if (ev.key === 'Enter') submit(); if (ev.key === 'Escape') inputRow.remove(); };
+    inputRow.querySelector('.dc-inline-submit').onclick = submit;
+    inputRow.querySelector('.dc-inline-cancel').onclick = close;
+    inp.onkeydown = ev => { if (ev.key === 'Enter') submit(); if (ev.key === 'Escape') close(); };
 }
 
 function handleFontClick(fontBtn) {
@@ -1032,26 +1251,29 @@ function handleFontClick(fontBtn) {
     const current = normalizeGoogleFontName(characterColors[key]?.font);
     const inputRow = document.createElement('div');
     inputRow.className = 'dc-inline-input';
-    inputRow.style.cssText = 'display:flex;gap:4px;padding:2px 0 2px 26px;';
-    inputRow.innerHTML = `<input type="text" class="text_pole" placeholder="Google Font name..." value="${escapeAttr(current)}" style="flex:1;padding:2px 4px;font-size:0.8em;"><button class="menu_button" style="padding:2px 6px;font-size:0.8em;">Set</button>`;
+    const inputId = `dc-font-input-${key}`;
+    inputRow.innerHTML = `<label class="dc-visually-hidden" for="${escapeAttr(inputId)}">Google Font for ${escapeHtml(characterColors[key]?.name || '')}</label><input id="${escapeAttr(inputId)}" type="text" class="text_pole" placeholder="Google Font name" value="${escapeAttr(current)}"><button type="button" class="menu_button dc-inline-submit">Set</button><button type="button" class="menu_button dc-inline-cancel">Cancel</button>`;
     row.appendChild(inputRow);
     const inp = inputRow.querySelector('input');
     inp.focus();
     inp.select();
+    const close = () => { inputRow.remove(); focusCharacterControl(key, 'font'); };
     const submit = () => {
-        if (!characterColors[key]) { inputRow.remove(); return; }
+        if (!characterColors[key]) { close(); return; }
         const nextFont = normalizeGoogleFontName(inp.value);
         if ((normalizeGoogleFontName(characterColors[key].font)) !== nextFont) {
             characterColors[key].font = nextFont;
             if (nextFont) loadGoogleFont(nextFont);
             commit();
             repaintDomAfterCharacterDataChange(0);
+            focusCharacterControl(key, 'font');
         } else {
-            inputRow.remove();
+            close();
         }
     };
-    inputRow.querySelector('button').onclick = submit;
-    inp.onkeydown = ev => { if (ev.key === 'Enter') submit(); if (ev.key === 'Escape') inputRow.remove(); };
+    inputRow.querySelector('.dc-inline-submit').onclick = submit;
+    inputRow.querySelector('.dc-inline-cancel').onclick = close;
+    inp.onkeydown = ev => { if (ev.key === 'Enter') submit(); if (ev.key === 'Escape') close(); };
 }
 
 function handleGroupClick(groupBtn) {
@@ -1062,24 +1284,27 @@ function handleGroupClick(groupBtn) {
     const current = characterColors[key]?.group || '';
     const inputRow = document.createElement('div');
     inputRow.className = 'dc-inline-input';
-    inputRow.style.cssText = 'display:flex;gap:4px;padding:2px 0 2px 26px;';
-    inputRow.innerHTML = `<input type="text" class="text_pole" placeholder="Group name..." value="${escapeHtml(current)}" style="flex:1;padding:2px 4px;font-size:0.8em;"><button class="menu_button" style="padding:2px 6px;font-size:0.8em;">Set</button>`;
+    const inputId = `dc-group-input-${key}`;
+    inputRow.innerHTML = `<label class="dc-visually-hidden" for="${escapeAttr(inputId)}">Group for ${escapeHtml(characterColors[key]?.name || '')}</label><input id="${escapeAttr(inputId)}" type="text" class="text_pole" placeholder="Group name" value="${escapeAttr(current)}"><button type="button" class="menu_button dc-inline-submit">Set</button><button type="button" class="menu_button dc-inline-cancel">Cancel</button>`;
     row.appendChild(inputRow);
     const inp = inputRow.querySelector('input');
     inp.focus();
     inp.select();
+    const close = () => { inputRow.remove(); focusCharacterControl(key, 'group'); };
     const submit = () => {
         const nextGroup = inp.value.trim();
         if ((characterColors[key]?.group || '') !== nextGroup) {
             characterColors[key].group = nextGroup;
             saveHistory();
             saveData(); updateCharList();
+            focusCharacterControl(key, 'group');
         } else {
-            inputRow.remove();
+            close();
         }
     };
-    inputRow.querySelector('button').onclick = submit;
-    inp.onkeydown = ev => { if (ev.key === 'Enter') submit(); if (ev.key === 'Escape') inputRow.remove(); };
+    inputRow.querySelector('.dc-inline-submit').onclick = submit;
+    inputRow.querySelector('.dc-inline-cancel').onclick = close;
+    inp.onkeydown = ev => { if (ev.key === 'Enter') submit(); if (ev.key === 'Escape') close(); };
 }
 
 function getGradientEditorContext(control) {
@@ -1171,13 +1396,16 @@ function synchronizeGradientEditorFromEntry(editor, entry) {
 function applyGradientValue(key, gradient, { commitImmediately = false, saveImmediately = false } = {}) {
     const entry = characterColors[key];
     if (!entry) return false;
+    const previousStructure = `${entry.gradient?.type || 'none'}:${entry.gradient?.stops?.length || 0}`;
     const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
     setEntryGradient(entry, gradient);
+    const nextStructure = `${entry.gradient?.type || 'none'}:${entry.gradient?.stops?.length || 0}`;
     applyLiveColorChangesFromSnapshot(snapshot, [key], { saveImmediately });
     repaintDomAfterCharacterDataChange(0);
     if (commitImmediately) commit();
     else queueColorStateSave({ updateList: false });
-    refreshGradientVisualSurfaces([key]);
+    if (previousStructure !== nextStructure) updateCharList();
+    else refreshGradientVisualSurfaces([key]);
     return true;
 }
 
@@ -1185,6 +1413,13 @@ function handleGradientPrimaryInput(control, final = false) {
     const { editor, key, entry } = getGradientEditorContext(control);
     if (!editor || !entry) return;
     const nextColor = normalizeHexColor(control.value, getBaseColor(entry));
+    if (!final) {
+        const previewEntry = JSON.parse(JSON.stringify(entry));
+        setEntryFromBaseColor(previewEntry, nextColor);
+        editor.querySelectorAll('.dc-gradient-primary-color').forEach(input => { input.value = nextColor; });
+        previewCharacterSurfaces(key, previewEntry);
+        return;
+    }
     if (!applyCharacterBaseColor(key, nextColor, { saveImmediately: final })) return;
     editor.querySelectorAll('.dc-gradient-primary-color').forEach(input => { input.value = getBaseColor(characterColors[key]); });
     queueColorStateSave({ updateList: false });
@@ -1217,6 +1452,12 @@ function handleGradientEditorMutation(control, { commitImmediately = false, fina
     }
     const gradient = readGradientFromEditor(editor, entry);
     if (!gradient) return;
+    if (!final && !commitImmediately) {
+        const previewEntry = JSON.parse(JSON.stringify(entry));
+        setEntryGradient(previewEntry, gradient);
+        previewCharacterSurfaces(key, previewEntry);
+        return;
+    }
     applyGradientValue(key, gradient, { commitImmediately, saveImmediately: final });
     if (final && !commitImmediately) synchronizeGradientEditorFromEntry(editor, characterColors[key]);
     if (final && !commitImmediately) flushColorStateSave();
@@ -1337,7 +1578,7 @@ export function refreshGradientPresetControls(preferredCustomName = '') {
     });
 }
 
-function handleSaveCustomGradientPreset(button) {
+async function handleSaveCustomGradientPreset(button) {
     const { editor, entry } = getGradientEditorContext(button);
     const nameInput = editor?.querySelector('.dc-gradient-preset-name');
     const name = normalizeGradientPresetName(nameInput?.value);
@@ -1346,7 +1587,13 @@ function handleSaveCustomGradientPreset(button) {
         return;
     }
     const overwrite = Object.prototype.hasOwnProperty.call(getCustomGradientPresets(), name);
-    if (overwrite && !confirm(`Replace gradient preset "${name}"?`)) return;
+    if (overwrite && !await confirmReviewedAction({
+        title: 'Replace gradient preset?',
+        description: `“${name}” already exists. Its saved gradient will be replaced.`,
+        confirmLabel: 'Replace preset',
+        danger: true,
+        opener: button,
+    })) return;
     if (!saveCustomGradientPreset(name, entry, { immediate: true, overwrite })) {
         toast.error('Could not save gradient preset');
         return;
@@ -1375,7 +1622,7 @@ function handleRenameCustomGradientPreset(button) {
     toast.success(`Gradient preset renamed to "${escapeHtml(nextName)}"`);
 }
 
-function handleDeleteCustomGradientPreset(button) {
+async function handleDeleteCustomGradientPreset(button) {
     const { editor } = getGradientEditorContext(button);
     const selected = editor?.querySelector('.dc-gradient-custom-preset')?.value || '';
     const name = selected.startsWith('custom:') ? selected.slice(7) : '';
@@ -1383,7 +1630,13 @@ function handleDeleteCustomGradientPreset(button) {
         toast.warning('Select a custom gradient preset first');
         return;
     }
-    if (!confirm(`Delete gradient preset "${name}"?`)) return;
+    if (!await confirmReviewedAction({
+        title: 'Delete gradient preset?',
+        description: `“${name}” will be removed. Characters already using it are not changed.`,
+        confirmLabel: 'Delete preset',
+        danger: true,
+        opener: button,
+    })) return;
     if (!deleteCustomGradientPreset(name, { immediate: true })) {
         toast.error('Could not delete gradient preset');
         return;
@@ -1426,8 +1679,8 @@ function handleCharListClick(e) {
     if (lockBtn) { handleLockClick(lockBtn); return; }
     const swapBtn = t.closest('.dc-swap');
     if (swapBtn) { handleSwapClick(swapBtn); return; }
-    const styleBtn = t.closest('.dc-style');
-    if (styleBtn) { handleStyleClick(styleBtn); return; }
+    const harmonyBtn = t.closest('.dc-harmony');
+    if (harmonyBtn) { showHarmonyPopup(harmonyBtn.dataset.key, harmonyBtn); return; }
     const aliasRemoveBtn = t.closest('.dc-alias-remove');
     if (aliasRemoveBtn) { handleAliasRemoveClick(e, aliasRemoveBtn); return; }
     const aliasBtn = t.closest('.dc-alias');
@@ -1441,12 +1694,6 @@ function handleCharListClick(e) {
 export function installCharListDelegation(list) {
     if (list.__dcDelegated) return;
     list.__dcDelegated = true;
-
-    const stopPropagation = e => e.stopPropagation();
-    list.addEventListener('touchstart', stopPropagation, { passive: true });
-    list.addEventListener('touchmove', stopPropagation, { passive: true });
-    list.addEventListener('touchend', stopPropagation, { passive: true });
-    list.addEventListener('wheel', stopPropagation, { passive: true });
 
     list.addEventListener('input', (e) => {
         const t = e.target;
@@ -1465,7 +1712,7 @@ export function installCharListDelegation(list) {
         ) {
             handleGradientEditorMutation(t);
         } else if (t.classList.contains('dc-color-input')) {
-            applyColorInputForElement(t);
+            previewColorInputForElement(t);
         }
     });
 
@@ -1495,6 +1742,8 @@ export function installCharListDelegation(list) {
             maybeAutoRecolorAfterColorChange();
         } else if (t.classList.contains('dc-color-hex')) {
             if (applyHexInputForElement(t, { saveImmediately: true })) maybeAutoRecolorAfterColorChange();
+        } else if (t.classList.contains('dc-style-select')) {
+            handleStyleSelect(t);
         }
     });
 
@@ -1534,12 +1783,29 @@ export function installCharListDelegation(list) {
 export function updateCharList() {
     const list = document.getElementById('dc-char-list'); if (!list) return;
     installCharListDelegation(list);
+    list.setAttribute('role', 'list');
+    list.setAttribute('aria-label', 'Tracked characters');
+    const activeElement = document.activeElement;
+    const focusedControl = activeElement?.closest?.('.dc-char[data-key] [data-focus-id]');
+    const focusState = focusedControl ? {
+        key: focusedControl.closest('.dc-char')?.dataset.key,
+        id: focusedControl.dataset.focusId,
+    } : null;
     const entries = getSortedEntries();
     const countEl = document.getElementById('dc-count');
     if (countEl) countEl.textContent = Object.keys(characterColors).length;
 
     if (!entries.length) {
-        list.innerHTML = `<small style="opacity:0.6;">${searchTerm ? 'No matches' : 'No characters'}</small>`;
+        list.innerHTML = searchTerm
+            ? '<div class="dc-empty-state"><strong>No matching characters</strong><button type="button" class="menu_button" id="dc-clear-search">Clear search</button></div>'
+            : '<div class="dc-empty-state"><strong>No characters yet</strong><span>Scan the chat or add a character above.</span></div>';
+        list.querySelector('#dc-clear-search')?.addEventListener('click', () => {
+            setSearchTerm('');
+            const search = document.getElementById('dc-search');
+            if (search) search.value = '';
+            updateCharList();
+            search?.focus();
+        });
         applyControlHelpText(list);
         updateLegend();
         return;
@@ -1554,7 +1820,7 @@ export function updateCharList() {
             const g = v.group || '(ungrouped)';
             if (g !== lastGroup) {
                 lastGroup = g;
-                desired.push({ blockKey: '__group__:' + g, sig: 'h:' + g, html: `<div class="dc-group-header">${escapeHtml(g)}</div>` });
+                desired.push({ blockKey: '__group__:' + g, sig: 'h:' + g, html: `<div class="dc-group-header" role="listitem"><span role="heading" aria-level="3">${escapeHtml(g)}</span></div>` });
             }
         }
         desired.push({ blockKey: 'row:' + k, sig: buildCharRowSignature(k, v), html: buildCharRowHtml(k, v) });
@@ -1572,14 +1838,18 @@ export function updateCharList() {
     // Reconcile in order: reuse unchanged nodes (preserving open inline
     // inputs and avoiding handler churn), rebuild changed ones, append new.
     const used = new Set();
+    let cursor = list.firstElementChild;
     for (const item of desired) {
         let node = existing.get(item.blockKey);
-        if (!(node && node.getAttribute('data-dc-sig') === item.sig)) {
+        const containsActiveEditor = !!node?.contains(activeElement)
+            && !!activeElement?.matches?.('input[type="text"], input[type="search"], input[type="number"], input[type="range"], input[type="color"], textarea');
+        if (!(node && (node.getAttribute('data-dc-sig') === item.sig || containsActiveEditor))) {
             node = htmlToNode(item.html);
             node.setAttribute('data-dc-block', item.blockKey);
             node.setAttribute('data-dc-sig', item.sig);
         }
-        list.appendChild(node);
+        if (node !== cursor) list.insertBefore(node, cursor);
+        cursor = node.nextElementSibling;
         used.add(node);
     }
     for (const node of Array.from(list.children)) {
@@ -1588,12 +1858,15 @@ export function updateCharList() {
 
     applyControlHelpText(list);
     updateLegend();
+    if (focusState?.key && focusState.id) {
+        list.querySelector(`.dc-char[data-key="${CSS.escape(focusState.key)}"] [data-focus-id="${CSS.escape(focusState.id)}"]`)?.focus({ preventScroll: true });
+    }
 }
 
 export function setControlHelp(element, text) {
     if (!element || !text) return;
     element.title = text;
-    if (!element.hasAttribute('aria-label')) element.setAttribute('aria-label', text);
+    if (!element.hasAttribute('aria-label') && !element.textContent.trim() && !element.closest('label')) element.setAttribute('aria-label', text);
 }
 
 export function applyControlHelpText(root = document) {
@@ -1613,8 +1886,10 @@ export function updateEngineVisibility() {
         el.style.display = domMode ? '' : 'none';
     });
     const recolorButton = document.getElementById('dc-recolor');
-    if (recolorButton && !recolorButton.disabled) {
-        recolorButton.textContent = domMode ? 'Refresh DOM Colors' : 'Recolor Chat';
+    if (recolorButton && recolorButton.getAttribute('aria-busy') !== 'true') {
+        const label = domMode ? 'Refresh rendered dialogue' : 'Recolor entire chat';
+        recolorButton.textContent = label;
+        recolorButton.dataset.defaultLabel = label;
     }
     updateSystemPromptDisplay();
 }
@@ -1623,12 +1898,139 @@ export function autoAssignFromCard() {
     try {
         const ctx = getContext();
         const char = ctx?.characters?.[ctx?.characterId];
-        const key = char?.name?.toLowerCase();
-        if (key && !characterColors[key]) {
-            addCharacter(char.name);
-            toast.success(`Added ${escapeHtml(char.name)}`);
+        const name = char?.name?.trim();
+        const key = name ? resolveCharacterKeyByNameOrAlias(name) : null;
+        if (name && !key) {
+            const result = addCharacter(name);
+            if (result?.added) toast.success(`Added ${escapeHtml(name)}`);
         }
     } catch { }
+}
+
+export function updateStorageScopeStatus() {
+    const scope = getCurrentStorageScope();
+    const descriptor = getStorageScopeDescriptor(scope);
+    const characterCount = Object.keys(characterColors).length;
+    const select = document.getElementById('dc-storage-scope');
+    const status = document.getElementById('dc-scope-status');
+    if (select) select.value = scope;
+    if (status) {
+        status.textContent = `${formatScopeName(scope)}: ${characterCount} character${characterCount === 1 ? '' : 's'}${descriptor.updatedAt ? `, saved ${formatDate(descriptor.updatedAt)}` : ''}.`;
+    }
+}
+
+async function handleStorageScopeChange(select) {
+    const previousScope = getCurrentStorageScope();
+    const nextScope = select.value;
+    if (nextScope === previousScope) return;
+    const source = getStorageScopeDescriptor(previousScope);
+    const target = getStorageScopeDescriptor(nextScope);
+    const detailsHtml = `<dl class="dc-review-list"><div><dt>Current</dt><dd>${escapeHtml(formatScopeName(previousScope))}, ${source.characterCount} characters</dd></div><div><dt>Destination</dt><dd>${escapeHtml(formatScopeName(nextScope))}, ${target.characterCount} characters</dd></div><div><dt>Last saved</dt><dd>${escapeHtml(formatDate(target.updatedAt))}</dd></div></dl><p class="dc-section-note">If Auto-recolor is enabled, changing assignments can also update saved LLM font tags.</p>`;
+    const targetIsEmpty = !target.exists || target.characterCount === 0;
+    const decision = await openDecisionDialog({
+        title: `Switch to ${formatScopeName(nextScope)} colors?`,
+        description: targetIsEmpty
+            ? 'This destination has no assignments. Choose what should appear there.'
+            : 'This destination already has assignments. Choose how to handle them.',
+        detailsHtml,
+        opener: select,
+        choices: targetIsEmpty ? [
+            { value: 'copy', label: 'Copy current', primary: true },
+            { value: 'empty', label: 'Start empty' },
+            { value: 'cancel', label: 'Cancel' },
+        ] : [
+            { value: 'switch', label: 'Use destination', primary: true },
+            { value: 'merge', label: 'Merge current into it' },
+            { value: 'replace', label: 'Replace it with current', danger: true },
+            { value: 'cancel', label: 'Cancel' },
+        ],
+    });
+    if (!decision.value || decision.value === 'cancel') {
+        select.value = previousScope;
+        return;
+    }
+    select.disabled = true;
+    const result = await switchColorStorageScope(nextScope, decision.value);
+    select.disabled = false;
+    select.focus({ preventScroll: true });
+    if (!result.ok) {
+        select.value = previousScope;
+        toast.error(result.message || 'Could not switch color storage.');
+        return;
+    }
+    updateStorageScopeStatus();
+    toast.success(result.message);
+}
+
+function buildImportReviewDetails(preview) {
+    const rows = [];
+    if (Number.isFinite(preview.characterCount)) rows.push(`<div><dt>Characters</dt><dd>${preview.characterCount}</dd></div>`);
+    if (preview.settingsPresent) rows.push(`<div><dt>Settings</dt><dd>${preview.settingsCount} recognized values</dd></div>`);
+    if (preview.customGradientPresetCount) rows.push(`<div><dt>Gradient presets</dt><dd>${preview.customGradientPresetCount}</dd></div>`);
+    if (preview.requestedStorageScope) rows.push(`<div><dt>Saved scope</dt><dd>${escapeHtml(formatScopeName(preview.requestedStorageScope))}</dd></div>`);
+    const presetNote = preview.customGradientPresetCount
+        ? '<p class="dc-section-note">Gradient presets are merged; existing presets with the same name are kept.</p>'
+        : '';
+    return `<dl class="dc-review-list">${rows.join('')}</dl>${presetNote}`;
+}
+
+async function reviewAndApplyImport(analysis, kind, opener) {
+    if (!analysis.ok) {
+        toast.error(analysis.message || 'The selected data is not recognized.');
+        return analysis;
+    }
+    const isSettings = kind === 'settings';
+    const hasRequestedScope = !!analysis.preview.requestedStorageScope;
+    const requestedScope = analysis.preview.requestedStorageScope;
+    const destination = hasRequestedScope ? getStorageScopeDescriptor(requestedScope) : null;
+    const scopeDetails = destination
+        ? `<p class="dc-import-scope-warning">Switching storage first loads the ${escapeHtml(formatScopeName(requestedScope))} table, which currently has ${destination.characterCount} character${destination.characterCount === 1 ? '' : 's'}. Any imported colors are then applied to that table.</p>`
+        : '';
+    const decision = await openDecisionDialog({
+        title: kind === 'card' ? 'Review card data' : `Review ${isSettings ? 'settings' : 'color'} import`,
+        description: isSettings
+            ? 'Apply the recognized settings values. Assignments stay unchanged unless you also switch storage below.'
+            : analysis.preview.characterCount === 0
+                ? 'This source contains 0 characters. Merge keeps current assignments; Replace clears the current character table.'
+                : 'Merge keeps current entries when names conflict. Replace uses only the incoming character table.',
+        detailsHtml: `${buildImportReviewDetails(analysis.preview)}${scopeDetails}${isSettings ? '' : '<p class="dc-section-note">If Auto-recolor is enabled, changed assignments can also update saved LLM font tags.</p>'}`,
+        checkbox: hasRequestedScope ? { label: `Switch to ${formatScopeName(requestedScope)} first (${destination.characterCount} characters)` } : null,
+        opener,
+        choices: isSettings ? [
+            { value: 'merge', label: 'Apply included values', primary: true },
+            { value: 'cancel', label: 'Cancel' },
+        ] : [
+            { value: 'merge', label: 'Merge', primary: true },
+            { value: 'replace', label: analysis.preview.characterCount === 0 ? 'Replace and clear current' : 'Replace current', danger: true },
+            { value: 'cancel', label: 'Cancel' },
+        ],
+    });
+    if (!decision.value || decision.value === 'cancel') return { ok: false, cancelled: true };
+    const apply = kind === 'settings' ? applySettingsImport : kind === 'card' ? applyCardData : applyColorImport;
+    const result = await apply(analysis.payload, { mode: decision.value, applyScope: decision.checked });
+    if (result.ok) {
+        updateStorageScopeStatus();
+        toast.success(kind === 'card' ? 'Card data applied.' : `${isSettings ? 'Settings' : 'Colors'} imported.`);
+    } else toast.error(result.message || 'The reviewed data could not be applied.');
+    return result;
+}
+
+async function confirmCharacterRemoval(keys, options = {}) {
+    const candidates = [...new Set(keys)].filter(key => characterColors[key]);
+    const pinned = candidates.filter(key => characterColors[key]?.keep);
+    const removable = candidates.filter(key => !characterColors[key]?.keep);
+    if (!candidates.length) { toast.info(options.emptyMessage || 'No matching characters.'); return false; }
+    if (!removable.length) { toast.info(options.blockedMessage || 'All matching characters are pinned.'); return false; }
+    const confirmed = await confirmReviewedAction({
+        title: options.title || 'Delete characters?',
+        description: `${removable.length} character${removable.length === 1 ? '' : 's'} will be deleted. ${pinned.length ? `${pinned.length} pinned ${pinned.length === 1 ? 'entry is' : 'entries are'} protected.` : 'No pinned entries are affected.'}`,
+        detailsHtml: `<p class="dc-review-names">${removable.slice(0, 8).map(key => escapeHtml(characterColors[key].name)).join(', ')}${removable.length > 8 ? `, and ${removable.length - 8} more` : ''}</p>`,
+        confirmLabel: options.confirmLabel || 'Delete',
+        danger: true,
+        opener: options.opener,
+    });
+    if (!confirmed) return false;
+    return removeCharacterKeys(candidates, options);
 }
 
 export function syncUIWithSettings() {
@@ -1650,8 +2052,6 @@ export function syncUIWithSettings() {
     if ($('dc-right-click')) $('dc-right-click').checked = settings.enableRightClick;
     if ($('dc-legend')) $('dc-legend').checked = settings.showLegend;
     if ($('dc-disable-narration')) $('dc-disable-narration').checked = settings.disableNarration !== false;
-    if ($('dc-share-global')) $('dc-share-global').checked = settings.shareColorsGlobally || false;
-    if ($('dc-css-effects')) $('dc-css-effects').checked = settings.cssEffects || false;
     if ($('dc-disable-toasts')) $('dc-disable-toasts').checked = settings.disableToasts || false;
     if ($('dc-engine')) $('dc-engine').value = settings.coloringEngine || 'llm';
     if ($('dc-llm-profile')) $('dc-llm-profile').value = settings.llmConnectionProfile || '';
@@ -1666,249 +2066,120 @@ export function syncUIWithSettings() {
     if ($('dc-prompt-role')) $('dc-prompt-role').value = settings.promptRole || 'system';
     if ($('dc-prompt-mode')) $('dc-prompt-mode').value = settings.promptMode || 'inject';
     if ($('dc-sort')) $('dc-sort').value = settings.sortMode || 'name';
+    if ($('dc-narrator')) $('dc-narrator').disabled = settings.disableNarration !== false;
+    syncProcessControlState();
     refreshPresetDropdown();
     refreshPaletteDropdown();
     updateSystemPromptDisplay();
     updateEngineVisibility();
     updateAutoSyncUI();
+    updateStorageScopeStatus();
     applyControlHelpText();
 }
 
 function buildSettingsPanelHtml() {
     return `
     <div id="dc-ext" class="inline-drawer">
-        <div class="inline-drawer-toggle inline-drawer-header"><b>Dialogue Colors</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
-        <div class="inline-drawer-content" style="padding:10px;font-size:0.9em;">
+        <div class="inline-drawer-toggle inline-drawer-header"><h2>Dialogue Colors</h2><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
+        <div class="inline-drawer-content dc-panel-content">
             <details class="dc-section" open>
-                <summary>Basic</summary>
-                <p class="dc-section-note">The everyday controls live here. Clear keeps any character marked with Keep.</p>
+                <summary>Current setup</summary>
                 <div class="dc-stack">
-                    <div class="dc-field-row">
-                        <label class="dc-inline-label" for="dc-engine">Coloring engine</label>
-                        <select id="dc-engine" class="text_pole" data-help="Choose LLM prompt-based coloring or local DOM-only coloring that never edits chat text."><option value="llm">LLM</option><option value="dom">Local (DOM-only)</option></select>
-                        <small class="dc-dom-only" style="display:none;opacity:0.72;flex-basis:100%;">DOM mode colors rendered quotes locally, stores quote overrides in chat metadata, and can optionally use the selected LLM profile to verify attribution after generation.</small>
+                    <div class="dc-setup-strip">
+                        <label class="checkbox_label dc-enable-toggle"><input type="checkbox" id="dc-enabled"><span>Enabled</span></label>
+                        <div class="dc-field-row"><label class="dc-inline-label" for="dc-storage-scope">Colors saved</label><select id="dc-storage-scope" class="text_pole"><option value="chat">Per chat</option><option value="card">Per card</option><option value="global">Global</option></select></div>
+                        <div class="dc-field-row"><label class="dc-inline-label" for="dc-engine">Engine</label><select id="dc-engine" class="text_pole"><option value="llm">LLM</option><option value="dom">Local (DOM-only)</option></select></div>
                     </div>
-                    <div class="dc-button-row dc-button-row-3">
-                        <button id="dc-scan" class="menu_button" data-help="Scan the current chat for characters and colors.">Scan Chat</button>
-                        <button id="dc-clear" class="menu_button dc-danger-button" data-help="Clear tracked characters, but keep anything pinned with Keep.">Clear Non-Kept</button>
-                        <button id="dc-recolor" class="menu_button" data-help="Rewrite message colors to match the current character assignments.">Recolor Chat</button>
-                    </div>
-                    <div class="dc-button-row dc-button-row-3">
-                        <button id="dc-colorize" class="menu_button dc-llm-only" data-help="Colorize uncolored messages. Shift-click for only the latest message.">Colorize Missing</button>
-                        <button id="dc-verify-attr" class="menu_button dc-dom-only" style="display:none;" data-help="Verify DOM quote attribution with the selected LLM profile. Shift-click scans visible unverified messages.">Verify Colors (LLM)</button>
-                        <button id="dc-stats" class="menu_button" data-help="Open dialogue statistics for tracked characters.">Show Stats</button>
-                    </div>
-                    <div class="dc-field-row">
-                        <label class="dc-inline-label" for="dc-theme">Theme</label>
-                        <select id="dc-theme" class="text_pole" data-help="Choose Auto, Dark, or Light targeting for generated color readability."><option value="auto">Auto</option><option value="dark">Dark</option><option value="light">Light</option></select>
-                    </div>
-                    <div class="dc-field-row">
-                        <label class="dc-inline-label" for="dc-palette">Palette</label>
-                        <select id="dc-palette" class="text_pole" data-help="Pick the color palette used for new or regenerated character colors."></select>
-                    </div>
-                    <div class="dc-field-row">
-                        <label class="dc-inline-label" for="dc-brightness">Brightness</label>
-                        <input type="range" id="dc-brightness" min="-100" max="100" value="0" data-help="Bias newly generated colors lighter or darker.">
-                        <span id="dc-bright-val" class="dc-inline-value">0</span>
-                    </div>
-                    <div class="dc-toggle-grid">
-                        <label class="checkbox_label"><input type="checkbox" id="dc-enabled" data-help="Enable or disable Dialogue Colors."><span>Enable Dialogue Colors</span></label>
-                        <label class="checkbox_label"><input type="checkbox" id="dc-highlight" data-help="Add background highlights behind colored dialogue."><span>Highlight dialogue</span></label>
-                        <label class="checkbox_label"><input type="checkbox" id="dc-legend" data-help="Show a floating legend of active character colors."><span>Show floating legend</span></label>
-                        <label class="checkbox_label"><input type="checkbox" id="dc-css-effects" data-help="Allow transform-based CSS effects for dramatic dialogue."><span>Enable CSS effects</span></label>
-                        <label class="checkbox_label"><input type="checkbox" id="dc-auto-recolor" data-help="Automatically recolor chat after color changes."><span>Auto-recolor after changes</span></label>
-                        <label class="checkbox_label dc-dom-only"><input type="checkbox" id="dc-stealth-colors" data-help="In DOM mode, inject a slim instruction for the model to include [COLORS:Name=#RRGGBB] for new speakers."><span>Stealth colors block</span></label>
-                        <label class="checkbox_label dc-dom-only"><input type="checkbox" id="dc-llm-attr-check" data-help="In DOM mode, automatically ask the selected LLM profile to verify rendered unverified messages and save metadata corrections."><span>LLM attribution check</span></label>
-                        <label class="checkbox_label dc-dom-only"><input type="checkbox" id="dc-llm-attr-parallel" data-help="During streaming in DOM mode, verify quote attribution after 2-second pauses so corrections can appear before generation fully ends."><span>LLM streaming attribution</span></label>
-                        <label class="checkbox_label dc-dom-only"><input type="checkbox" id="dc-attr-conservative" data-help="In DOM mode, the LLM verifier will only fill Uncolored/Unknown segments and will not overwrite existing colors."><span>Conservative verify</span></label>
-                    </div>
-                    <div class="dc-field-row dc-dom-only">
-                        <label class="dc-inline-label" for="dc-attr-profile">Verify profile</label>
-                        <select id="dc-attr-profile" class="text_pole" data-help="Connection profile to use for LLM attribution verification."><option value="">-- Use main chat AI --</option></select>
-                    </div>
-                    <div class="dc-field-row dc-dom-only">
-                        <label class="dc-inline-label" for="dc-attr-max-tokens">Verify tokens</label>
-                        <input type="number" id="dc-attr-max-tokens" min="256" max="32768" value="4096" class="text_pole" data-help="Maximum tokens for the LLM verifier. Increase for reasoning models that think before outputting JSON.">
-                    </div>
-                    <div class="dc-field-row dc-llm-only">
-                        <label class="dc-inline-label" for="dc-prompt-depth">Depth</label>
-                        <input type="number" id="dc-prompt-depth" min="0" max="99" value="1" class="text_pole" data-help="How far from the chat end the prompt is injected.">
-                    </div>
-                    <div class="dc-field-row dc-llm-only">
-                        <label class="dc-inline-label" for="dc-prompt-role">Role</label>
-                        <select id="dc-prompt-role" class="text_pole" data-help="Inject the prompt as a system or user message."><option value="system">System</option><option value="user">User</option></select>
-                    </div>
-                    <div class="dc-field-row dc-llm-only">
-                        <label class="dc-inline-label" for="dc-prompt-mode">Mode</label>
-                        <select id="dc-prompt-mode" class="text_pole" data-help="Inject automatically or use the macro manually."><option value="inject">Inject</option><option value="macro">Macro</option></select>
-                    </div>
+                    <p id="dc-scope-status" class="dc-status-line"></p>
+                    <small class="dc-engine-note dc-dom-only" style="display:none;">Local mode colors rendered dialogue without editing chat text. Manual quote assignments are saved in chat metadata.</small>
+                    <small class="dc-engine-note dc-llm-only">LLM mode stores ordinary font colors in chat text; gradients remain a local visual enhancement.</small>
+                </div>
+            </details>
+            <details class="dc-section" open>
+                <summary>Process chat</summary>
+                <p class="dc-section-note">Each action names exactly what it changes.</p>
+                <div class="dc-process-grid">
+                    <div class="dc-action-block"><span><strong>Discover</strong><small>Read the entire chat and update tracked speakers.</small></span><button id="dc-scan" class="menu_button">Scan entire chat</button></div>
+                    <div class="dc-action-block dc-llm-only"><span><strong>Colorize missing</strong><small>Add font tags only where dialogue is uncolored.</small></span><div class="dc-action-control"><select id="dc-colorize-target" class="text_pole" aria-label="Colorize target"><option value="last">Latest message</option><option value="all">Entire chat</option></select><button id="dc-colorize" class="menu_button">Colorize</button></div></div>
+                    <div class="dc-action-block dc-dom-only" style="display:none;"><span><strong>Verify attribution</strong><small>Ask the selected LLM profile to review local assignments.</small></span><div class="dc-action-control"><select id="dc-verify-target" class="text_pole" aria-label="Verification target"><option value="latest">Latest message</option><option value="visible">Visible messages</option></select><button id="dc-verify-attr" class="menu_button">Verify</button></div></div>
+                    <div class="dc-action-block"><span><strong class="dc-llm-only">Recolor saved tags</strong><strong class="dc-dom-only" style="display:none;">Refresh local colors</strong><small class="dc-llm-only">Rewrite existing color tags across the entire chat.</small><small class="dc-dom-only" style="display:none;">Reapply current styles to rendered dialogue.</small></span><button id="dc-recolor" class="menu_button">Recolor entire chat</button></div>
+                    <div class="dc-action-block"><span><strong>List tools</strong><small>Inspect activity or clear every unpinned entry.</small></span><div class="dc-action-control"><button id="dc-stats" class="menu_button">Statistics</button><button id="dc-clear" class="menu_button dc-danger-button">Clear unpinned</button></div></div>
                 </div>
             </details>
             <details class="dc-section" open>
                 <summary>Characters</summary>
-                <p class="dc-section-note">Keep marks main characters so they survive Clear and all bulk delete tools.</p>
+                <p class="dc-section-note">Keep pins important entries. Edit reveals color, lock, type, aliases, and gradients.</p>
                 <div class="dc-stack">
-                    <div class="dc-field-row dc-field-row-wrap">
-                        <input type="text" id="dc-search" placeholder="Search characters..." class="text_pole" data-help="Filter characters by name.">
-                        <select id="dc-sort" class="text_pole" data-help="Sort by name, dialogue count, or group. This preference is saved and restored across sessions."><option value="name">Sort: Name</option><option value="count">Sort: Dialogue Count</option><option value="group">Sort: Group</option></select>
-                    </div>
-                    <div class="dc-field-row dc-field-row-wrap">
-                        <input type="text" id="dc-add-name" placeholder="Add character..." class="text_pole" data-help="Type a new character name to add manually.">
-                        <button id="dc-add-btn" class="menu_button" data-help="Add the typed character with a suggested color.">Add Character</button>
-                    </div>
-                    <small>Characters: <span id="dc-count">0</span> (⭐=50+, 💎=100+)</small>
+                    <div class="dc-field-row dc-field-row-wrap"><label class="dc-visually-hidden" for="dc-search">Search characters</label><input type="search" id="dc-search" placeholder="Search names, aliases, groups…" class="text_pole"><select id="dc-sort" class="text_pole" aria-label="Character sort"><option value="name">Sort: Name</option><option value="count">Sort: Dialogue activity</option><option value="group">Sort: Group</option></select></div>
+                    <div class="dc-field-row dc-field-row-wrap"><label class="dc-visually-hidden" for="dc-add-name">New character name</label><input type="text" id="dc-add-name" placeholder="Character name" class="text_pole" aria-describedby="dc-add-error"><button id="dc-add-btn" class="menu_button">Add</button><button id="dc-card" class="menu_button">Add current card</button><button id="dc-avatar-color" class="menu_button">Avatar color</button><span id="dc-add-error" class="dc-field-error" aria-live="polite"></span></div>
+                    <small><span id="dc-count">0</span> tracked characters</small>
                     <div id="dc-char-list" class="dc-char-list"></div>
                 </div>
             </details>
             <details class="dc-section">
-                <summary>Advanced</summary>
-                <p class="dc-section-note">Less common tools live here so the main workflow stays simple.</p>
+                <summary>Appearance</summary>
                 <div class="dc-stack">
-                    <details class="dc-subsection">
-                        <summary>Automation</summary>
-                        <div class="dc-stack">
-                            <div class="dc-toggle-grid">
-                                <label class="checkbox_label"><input type="checkbox" id="dc-autoscan" data-help="Automatically scan existing chat messages after chat load."><span>Auto-scan on chat load</span></label>
-                                <label class="checkbox_label"><input type="checkbox" id="dc-autoscan-new" data-help="Automatically scan newly arriving messages for speakers/colors."><span>Auto-scan new messages</span></label>
-                                <label class="checkbox_label"><input type="checkbox" id="dc-auto-lock" data-help="Automatically lock newly detected characters."><span>Auto-lock new characters</span></label>
-                                <label class="checkbox_label"><input type="checkbox" id="dc-auto-random-gradients" data-help="Give newly added NPCs a random 2–5 stop gradient while keeping their primary color. Current cards, group members, and user names stay solid."><span>Random gradients for new NPCs</span></label>
-                                <label class="checkbox_label dc-llm-only"><input type="checkbox" id="dc-auto-colorize" data-help="Automatically colorize messages when the model skips color tags."><span>Auto-colorize fallback</span></label>
-                                <label class="checkbox_label"><input type="checkbox" id="dc-right-click" data-help="Enable right-click or long-press reassignment on dialogue."><span>Enable right-click reassignment</span></label>
-                                <label class="checkbox_label"><input type="checkbox" id="dc-disable-narration" data-help="Skip narrator color instructions."><span>Disable narration coloring</span></label>
-                                <label class="checkbox_label"><input type="checkbox" id="dc-share-global" data-help="Use one shared color table across all chats."><span>Share colors across chats</span></label>
-                                <label class="checkbox_label"><input type="checkbox" id="dc-disable-toasts" data-help="Suppress non-error toast notifications."><span>Reduce toast popups</span></label>
-                            </div>
-                            <div class="dc-field-row dc-llm-only">
-                                <label class="dc-inline-label" for="dc-llm-profile">LLM Profile</label>
-                                <select id="dc-llm-profile" class="text_pole" data-help="Connection profile to use for LLM colorization."><option value="">-- Use main chat AI --</option></select>
-                            </div>
-                        </div>
-                    </details>
-                    <details class="dc-subsection">
-                        <summary>Prompt & narration</summary>
-                        <div class="dc-stack">
-                            <div class="dc-field-row">
-                                <label class="dc-inline-label" for="dc-narrator">Narrator</label>
-                                <input type="color" id="dc-narrator" value="#888888" data-help="Set narrator fallback color.">
-                                <button id="dc-narrator-clear" class="menu_button" data-help="Reset narrator color to default.">Reset Narrator</button>
-                            </div>
-                            <div class="dc-field-row dc-field-row-wrap">
-                                <label class="dc-inline-label" for="dc-thought-symbols">Thoughts</label>
-                                <input type="text" id="dc-thought-symbols" placeholder="*" class="text_pole" data-help="Symbols used to detect inner-thought dialogue.">
-                                <button id="dc-thought-add" class="menu_button" data-help="Append another thought symbol.">Add Symbol</button>
-                                <button id="dc-thought-clear" class="menu_button" data-help="Remove all thought symbols.">Clear Symbols</button>
-                            </div>
-                            <div id="dc-system-prompt-container" class="dc-llm-only" style="display:none;">
-                                <label style="font-weight:bold;margin-bottom:4px;display:block;">Add to your system prompt:</label>
-                                <textarea id="dc-system-prompt-text" readonly class="text_pole" style="width:100%;min-height:60px;font-size:0.75em;font-family:monospace;resize:vertical;">{{dialoguecolors}}</textarea>
-                                <button id="dc-copy-system-prompt" class="menu_button" style="margin-top:4px;width:100%;">Copy Macro</button>
-                            </div>
-                        </div>
-                    </details>
-                    <details class="dc-subsection">
-                        <summary>Palette tools</summary>
-                        <div class="dc-stack">
-                            <div class="dc-field-row dc-field-row-wrap">
-                                <input type="text" id="dc-palette-name-input" placeholder="Palette name..." class="text_pole" data-help="Name used when creating or saving a custom palette.">
-                                <input type="text" id="dc-palette-notes-input" placeholder="Palette notes (optional)" class="text_pole" data-help="Optional notes for generated palettes.">
-                            </div>
-                            <label class="checkbox_label"><input type="checkbox" id="dc-overwrite-existing" data-help="Allow replacing an existing custom palette with the same name."><span>Overwrite existing custom palette</span></label>
-                            <div class="dc-button-row dc-button-row-3">
-                                <button id="dc-gen-palette" class="menu_button" data-help="Generate a custom palette from the name and notes fields.">Generate Palette</button>
-                                <button id="dc-save-palette" class="menu_button" data-help="Save current character colors as a custom palette.">Save Current As Palette</button>
-                                <button id="dc-del-palette" class="menu_button dc-danger-button" data-help="Delete the currently selected custom palette.">Delete Selected Palette</button>
-                            </div>
-                        </div>
-                    </details>
-                    <details class="dc-subsection">
-                        <summary>Presets & import/export</summary>
-                        <div class="dc-stack">
-                            <div class="dc-button-row dc-button-row-1">
-                                <button id="dc-restore-defaults" class="menu_button dc-danger-button" data-help="Reset all settings to their default values. Character colors are preserved.">Restore All Settings to Defaults</button>
-                            </div>
-                            <hr style="margin:8px 0;opacity:0.2;">
-                            <div class="dc-field-row dc-field-row-wrap">
-                                <input type="text" id="dc-preset-name" placeholder="Preset name..." class="text_pole" data-help="Preset name used when saving current assignments.">
-                                <button id="dc-save-preset" class="menu_button" data-help="Save current assignments into a named preset.">Save Preset</button>
-                            </div>
-                            <div class="dc-field-row dc-field-row-wrap">
-                                <select id="dc-preset-select" class="text_pole" data-help="Select a preset to load or delete."><option value="">-- Select Preset --</option></select>
-                                <button id="dc-load-preset" class="menu_button" data-help="Load the selected preset into the current character list.">Load Preset</button>
-                                <button id="dc-delete-preset" class="menu_button dc-danger-button" data-help="Delete the selected preset.">Delete Preset</button>
-                            </div>
-                            <div class="dc-button-row dc-button-row-3">
-                                <button id="dc-export" class="menu_button" data-help="Export colors and settings to JSON.">Export Colors</button>
-                                <button id="dc-import" class="menu_button" data-help="Import colors and settings from JSON.">Import Colors</button>
-                                <button id="dc-export-png" class="menu_button" data-help="Export the floating legend as an image.">Export Legend PNG</button>
-                            </div>
-                            <div class="dc-button-row dc-button-row-2">
-                                <button id="dc-export-settings" class="menu_button" data-help="Export only settings to JSON.">Export Settings</button>
-                                <button id="dc-import-settings" class="menu_button" data-help="Import settings without overwriting local colors.">Import Settings</button>
-                            </div>
-                            <input type="file" id="dc-import-file" accept=".json" style="display:none;">
-                            <input type="file" id="dc-import-settings-file" accept=".json" style="display:none;">
-                        </div>
-                    </details>
-                    <details class="dc-subsection">
-                        <summary>Card & sync</summary>
-                        <div class="dc-stack">
-                            <div class="dc-button-row dc-button-row-2">
-                                <button id="dc-card" class="menu_button" data-help="Add the current card character if missing.">Add Current Card</button>
-                                <button id="dc-avatar-color" class="menu_button" data-help="Use the current avatar's dominant color.">Use Avatar Color</button>
-                            </div>
-                            <div class="dc-button-row dc-button-row-2">
-                                <button id="dc-save-card" class="menu_button" data-help="Save this chat color data into the character card.">Save To Card</button>
-                                <button id="dc-load-card" class="menu_button" data-help="Load saved color data from the character card.">Load From Card</button>
-                            </div>
-                            <div class="dc-button-row dc-button-row-2">
-                                <button id="dc-setup-autosync" class="menu_button" data-help="Enable automatic settings sync across devices.">Enable Auto-Sync</button>
-                                <button id="dc-disable-autosync" class="menu_button" style="display:none;" data-help="Disable automatic settings synchronization.">Disable Auto-Sync</button>
-                            </div>
-                            <span id="dc-autosync-status" class="dc-status-text"></span>
-                        </div>
-                    </details>
-                    <details class="dc-subsection">
-                        <summary>Maintenance</summary>
-                        <div class="dc-stack">
-                            <div class="dc-button-row dc-button-row-3">
-                                <button id="dc-undo" class="menu_button" data-help="Undo the last color-table change.">Undo</button>
-                                <button id="dc-redo" class="menu_button" data-help="Redo the last undone change.">Redo</button>
-                                <button id="dc-fix-conflicts" class="menu_button" data-help="Auto-resolve colors that are too similar.">Fix Similar Colors</button>
-                            </div>
-                            <div class="dc-button-row dc-button-row-3">
-                                <button id="dc-regen" class="menu_button" data-help="Regenerate colors for unlocked characters.">Regenerate Unlocked</button>
-                                <button id="dc-flip-theme" class="menu_button" data-help="Flip color lightness for theme switching.">Flip For Theme</button>
-                                <button id="dc-storage" class="menu_button" data-help="Browse and clear stored color data across chats.">Storage Manager</button>
-                            </div>
-                        </div>
-                    </details>
+                    <div class="dc-field-row"><label class="dc-inline-label" for="dc-theme">Target surface</label><select id="dc-theme" class="text_pole"><option value="auto">Auto</option><option value="dark">Dark</option><option value="light">Light</option></select></div>
+                    <div class="dc-field-row"><label class="dc-inline-label" for="dc-palette">New-color palette</label><select id="dc-palette" class="text_pole"></select></div>
+                    <div class="dc-field-row"><label class="dc-inline-label" for="dc-brightness">Current color brightness</label><input type="range" id="dc-brightness" min="-100" max="100" value="0"><span id="dc-bright-val" class="dc-inline-value">0</span></div>
+                    <small>The value previews while dragging; colors update when released.</small>
+                    <div class="dc-toggle-grid"><label class="checkbox_label"><input type="checkbox" id="dc-highlight"><span>Highlight dialogue</span></label><label class="checkbox_label"><input type="checkbox" id="dc-legend"><span>Show floating legend</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-recolor"><span>Auto-recolor after changes</span></label></div>
                 </div>
+            </details>
+            <details class="dc-section">
+                <summary>Engine settings</summary>
+                <div class="dc-stack">
+                    <div class="dc-llm-only dc-stack">
+                        <div class="dc-field-row"><label class="dc-inline-label" for="dc-llm-profile">Colorize profile</label><select id="dc-llm-profile" class="text_pole"><option value="">Use main chat AI</option></select></div>
+                        <div class="dc-field-row"><label class="dc-inline-label" for="dc-prompt-depth">Prompt depth</label><input type="number" id="dc-prompt-depth" min="0" max="99" value="1" class="text_pole"></div>
+                        <div class="dc-field-row"><label class="dc-inline-label" for="dc-prompt-role">Prompt role</label><select id="dc-prompt-role" class="text_pole"><option value="system">System</option><option value="user">User</option></select></div>
+                        <div class="dc-field-row"><label class="dc-inline-label" for="dc-prompt-mode">Prompt mode</label><select id="dc-prompt-mode" class="text_pole"><option value="inject">Inject automatically</option><option value="macro">Use macro manually</option></select></div>
+                        <div id="dc-system-prompt-container" style="display:none;"><label for="dc-system-prompt-text" class="dc-inline-label">Macro text</label><textarea id="dc-system-prompt-text" readonly class="text_pole dc-macro-text">{{dialoguecolors}}</textarea><button id="dc-copy-system-prompt" class="menu_button">Copy macro</button></div>
+                    </div>
+                    <div class="dc-dom-only dc-stack" style="display:none;">
+                        <label class="checkbox_label"><input type="checkbox" id="dc-stealth-colors"><span>Ask for hidden speaker color blocks</span></label><label class="checkbox_label"><input type="checkbox" id="dc-llm-attr-check"><span>Verify attribution automatically</span></label><label class="checkbox_label"><input type="checkbox" id="dc-llm-attr-parallel"><span>Verify during streaming pauses</span></label><label class="checkbox_label"><input type="checkbox" id="dc-attr-conservative"><span>Only fill unknown attribution</span></label>
+                        <div class="dc-field-row"><label class="dc-inline-label" for="dc-attr-profile">Verify profile</label><select id="dc-attr-profile" class="text_pole"><option value="">Use main chat AI</option></select></div><div class="dc-field-row"><label class="dc-inline-label" for="dc-attr-max-tokens">Verify token limit</label><input type="number" id="dc-attr-max-tokens" min="256" max="32768" value="4096" class="text_pole"></div>
+                    </div>
+                    <div class="dc-field-row"><label class="dc-inline-label" for="dc-narrator">Narrator color</label><input type="color" id="dc-narrator" value="#888888"><button id="dc-narrator-clear" class="menu_button">Use default</button></div>
+                    <label class="checkbox_label"><input type="checkbox" id="dc-disable-narration"><span>Disable narration coloring</span></label>
+                    <div class="dc-field-row dc-field-row-wrap"><label class="dc-inline-label" for="dc-thought-symbols">Thought delimiters</label><input type="text" id="dc-thought-symbols" placeholder="*" class="text_pole"><button id="dc-thought-clear" class="menu_button">Clear</button></div>
+                </div>
+            </details>
+            <details class="dc-section">
+                <summary>Automation</summary>
+                <div class="dc-toggle-grid"><label class="checkbox_label"><input type="checkbox" id="dc-autoscan"><span>Scan when the character list is empty</span></label><label class="checkbox_label"><input type="checkbox" id="dc-autoscan-new"><span>Scan new messages</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-lock"><span>Lock new characters</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-random-gradients"><span>Random gradients for new NPCs</span></label><label class="checkbox_label dc-llm-only"><input type="checkbox" id="dc-auto-colorize"><span>Colorize missing tags automatically</span></label><label class="checkbox_label"><input type="checkbox" id="dc-right-click"><span>Manual dialogue reassignment</span></label><label class="checkbox_label"><input type="checkbox" id="dc-disable-toasts"><span>Reduce routine notifications</span></label></div>
+            </details>
+            <details class="dc-section">
+                <summary>Style library</summary>
+                <div class="dc-stack">
+                    <details class="dc-subsection"><summary>Assignment presets</summary><div class="dc-stack"><div class="dc-field-row dc-field-row-wrap"><label class="dc-visually-hidden" for="dc-preset-name">Preset name</label><input type="text" id="dc-preset-name" placeholder="Preset name" class="text_pole"><button id="dc-save-preset" class="menu_button">Save current</button></div><div class="dc-field-row dc-field-row-wrap"><select id="dc-preset-select" class="text_pole" aria-label="Assignment preset"><option value="">Select preset</option></select><button id="dc-load-preset" class="menu_button">Load</button><button id="dc-delete-preset" class="menu_button dc-danger-button">Delete</button></div></div></details>
+                    <details class="dc-subsection"><summary>Custom palettes</summary><div class="dc-stack"><div class="dc-field-row dc-field-row-wrap"><label class="dc-visually-hidden" for="dc-palette-name-input">Palette name</label><input type="text" id="dc-palette-name-input" placeholder="Palette name" class="text_pole"><label class="dc-visually-hidden" for="dc-palette-notes-input">Palette notes</label><input type="text" id="dc-palette-notes-input" placeholder="Notes or mood words" class="text_pole"></div><label class="checkbox_label"><input type="checkbox" id="dc-overwrite-existing"><span>Allow replacing an existing palette</span></label><div class="dc-button-row"><button id="dc-gen-palette" class="menu_button">Generate</button><button id="dc-save-palette" class="menu_button">Save current colors</button><button id="dc-del-palette" class="menu_button dc-danger-button">Delete selected</button></div></div></details>
+                </div>
+            </details>
+            <details class="dc-section">
+                <summary>Storage & transfer</summary>
+                <div class="dc-stack">
+                    <div class="dc-button-row"><button id="dc-export" class="menu_button">Export colors</button><button id="dc-import" class="menu_button">Import colors</button><button id="dc-export-settings" class="menu_button">Export settings</button><button id="dc-import-settings" class="menu_button">Import settings</button><button id="dc-export-png" class="menu_button">Export legend image</button></div>
+                    <input type="file" id="dc-import-file" accept=".json,application/json" hidden><input type="file" id="dc-import-settings-file" accept=".json,application/json" hidden>
+                    <div class="dc-button-row"><button id="dc-save-card" class="menu_button">Save to card</button><button id="dc-load-card" class="menu_button">Review card data</button><button id="dc-storage" class="menu_button">Storage manager</button></div>
+                    <div class="dc-button-row"><button id="dc-setup-autosync" class="menu_button">Enable auto-sync</button><button id="dc-disable-autosync" class="menu_button" style="display:none;">Disable auto-sync</button></div><span id="dc-autosync-status" class="dc-status-text" role="status" aria-live="polite"></span>
+                </div>
+            </details>
+            <details class="dc-section">
+                <summary>Maintenance</summary>
+                <div class="dc-stack"><div class="dc-button-row"><button id="dc-undo" class="menu_button">Undo</button><button id="dc-redo" class="menu_button">Redo</button><button id="dc-fix-conflicts" class="menu_button">Fix similar colors</button></div><div class="dc-button-row"><button id="dc-regen" class="menu_button">Regenerate unlocked</button><button id="dc-flip-theme" class="menu_button">Flip for theme</button><button id="dc-restore-defaults" class="menu_button dc-danger-button">Restore setting defaults</button></div></div>
             </details>
             <details class="dc-section dc-danger-zone">
-                <summary>Danger Zone</summary>
-                <p class="dc-section-note">Pinned characters are protected here too. Turn off Keep first if you really want to remove them.</p>
+                <summary>Danger zone</summary>
+                <p class="dc-section-note">Deletion tools review the target count first and always skip pinned characters.</p>
                 <div class="dc-stack">
-                    <div class="dc-button-row dc-button-row-3">
-                        <button id="dc-lock-all" class="menu_button" data-help="Lock every tracked character color.">Lock All</button>
-                        <button id="dc-unlock-all" class="menu_button" data-help="Unlock every tracked character color.">Unlock All</button>
-                        <button id="dc-reset" class="menu_button dc-danger-button" data-help="Reassign random palette colors to all unlocked characters.">Reset Unlocked Colors</button>
-                    </div>
-                    <div class="dc-button-row dc-button-row-2">
-                        <button id="dc-del-locked" class="menu_button dc-danger-button" data-help="Delete all locked characters except kept ones.">Delete Locked</button>
-                        <button id="dc-del-unlocked" class="menu_button dc-danger-button" data-help="Delete all unlocked characters except kept ones.">Delete Unlocked</button>
-                    </div>
-                    <div class="dc-field-row dc-field-row-wrap">
-                        <input type="number" id="dc-del-least-threshold" min="0" value="3" class="text_pole" data-help="Minimum dialogue count to keep when using the threshold delete tool.">
-                        <button id="dc-del-least" class="menu_button dc-danger-button" data-help="Delete characters below the dialogue threshold, except kept ones.">Delete Below Threshold</button>
-                    </div>
-                    <div class="dc-button-row dc-button-row-1">
-                        <button id="dc-del-dupes" class="menu_button dc-danger-button" data-help="Delete duplicate-color characters, keeping the highest dialogue count and any kept characters.">Delete Duplicate Colors</button>
-                    </div>
+                    <div class="dc-button-row"><button id="dc-lock-all" class="menu_button">Lock all</button><button id="dc-unlock-all" class="menu_button">Unlock all</button><button id="dc-reset" class="menu_button dc-danger-button">Reset unlocked colors</button></div>
+                    <div class="dc-button-row"><button id="dc-del-locked" class="menu_button dc-danger-button">Delete locked</button><button id="dc-del-unlocked" class="menu_button dc-danger-button">Delete unlocked</button></div>
+                    <div class="dc-field-row dc-field-row-wrap"><label for="dc-del-least-threshold">Minimum dialogue segments to keep</label><input type="number" id="dc-del-least-threshold" min="0" value="3" class="text_pole"><button id="dc-del-least" class="menu_button dc-danger-button">Delete below threshold</button></div>
+                    <button id="dc-del-dupes" class="menu_button dc-danger-button">Delete duplicate colors</button>
                 </div>
             </details>
-            <hr style="margin:8px 0 4px;opacity:0.2;">
-            <small>Preview:</small>
-            <div id="dc-prompt-preview" style="font-size:0.75em;max-height:40px;overflow-y:auto;padding:3px;background:var(--SmartThemeBlurTintColor);border-radius:3px;"></div>
+            <div id="dc-prompt-preview" class="dc-prompt-preview"></div>
         </div>
     </div>`;
 }
@@ -1924,6 +2195,7 @@ function bindSettingsPanelControls($) {
         injectPrompt();
         scheduleDomRefreshSeries(0);
         scheduleCustomFontRefresh(0);
+        syncProcessControlState();
     };
     $('dc-highlight').onchange = e => { settings.highlightMode = e.target.checked; saveData(); injectPrompt(); scheduleDomRefreshSeries(0); };
     $('dc-autoscan').onchange = e => { settings.autoScanOnLoad = e.target.checked; saveData(); };
@@ -1959,9 +2231,8 @@ function bindSettingsPanelControls($) {
     $('dc-stealth-colors').onchange = e => { settings.domStealthColors = e.target.checked; saveData(); injectPrompt(); };
     $('dc-right-click').onchange = e => { settings.enableRightClick = e.target.checked; saveData(); };
     $('dc-legend').onchange = e => { settings.showLegend = e.target.checked; saveData(); updateLegend(); };
-    $('dc-disable-narration').onchange = e => { settings.disableNarration = e.target.checked; saveData(); injectPrompt(); scheduleDomRefreshSeries(0); };
-    $('dc-share-global').onchange = e => { settings.shareColorsGlobally = e.target.checked; saveData(); loadData(); updateCharList(); injectPrompt(); scheduleCustomFontRefresh(0); };
-    $('dc-css-effects').onchange = e => { settings.cssEffects = e.target.checked; saveData(); injectPrompt(); };
+    $('dc-disable-narration').onchange = e => { settings.disableNarration = e.target.checked; $('dc-narrator').disabled = e.target.checked; saveData(); injectPrompt(); scheduleDomRefreshSeries(0); };
+    $('dc-storage-scope').onchange = e => { handleStorageScopeChange(e.target); };
     $('dc-disable-toasts').onchange = e => { settings.disableToasts = e.target.checked; saveData(); };
     $('dc-engine').onchange = e => {
         const wasDomEngine = isDomEngine();
@@ -1989,20 +2260,22 @@ function bindSettingsPanelControls($) {
     $('dc-attr-profile').onchange = e => { settings.attributionConnectionProfile = e.target.value || null; saveData(); };
     $('dc-theme').onchange = e => {
         applyThemeOrBrightnessChange(() => { settings.themeMode = e.target.value; }, { saveImmediately: true });
-        saveData(); updateCharList(); injectPrompt(); flushChatSave();
+        updateCharList(); injectPrompt(); flushChatSave();
     };
     $('dc-palette').onchange = e => { settings.colorTheme = e.target.value; saveData(); injectPrompt(); };
     $('dc-brightness').oninput = e => {
         const brightness = parseInt(e.target.value, 10) || 0;
         $('dc-bright-val').textContent = String(brightness);
-        applyThemeOrBrightnessChange(() => { settings.brightness = brightness; });
-        queueColorStateSave({ history: false });
     };
-    $('dc-brightness').onchange = () => { flushColorStateSave(); flushChatSave(); };
+    $('dc-brightness').onchange = e => {
+        const brightness = parseInt(e.target.value, 10) || 0;
+        applyThemeOrBrightnessChange(() => { settings.brightness = brightness; }, { saveImmediately: true });
+        flushColorStateSave();
+        flushChatSave();
+    };
     $('dc-narrator').oninput = e => { settings.narratorColor = e.target.value; saveData(); injectPrompt(); scheduleDomRefreshSeries(); };
     $('dc-narrator-clear').onclick = () => { settings.narratorColor = ''; $('dc-narrator').value = '#888888'; saveData(); injectPrompt(); scheduleDomRefreshSeries(0); };
     $('dc-thought-symbols').oninput = e => { settings.thoughtSymbols = e.target.value; saveData(); injectPrompt(); scheduleDomRefreshSeries(); };
-    $('dc-thought-add').onclick = () => { const s = prompt('Add thought symbol (e.g., *, 「, 『):'); if (s?.trim()) { settings.thoughtSymbols = (settings.thoughtSymbols || '') + s.trim(); $('dc-thought-symbols').value = settings.thoughtSymbols; saveData(); injectPrompt(); scheduleDomRefreshSeries(0); } };
     $('dc-thought-clear').onclick = () => { settings.thoughtSymbols = ''; $('dc-thought-symbols').value = ''; saveData(); injectPrompt(); scheduleDomRefreshSeries(0); };
     $('dc-prompt-depth').oninput = e => { settings.promptDepth = parseInt(e.target.value, 10) || 0; saveData(); injectPrompt(); };
     $('dc-prompt-role').onchange = e => { settings.promptRole = e.target.value; saveData(); injectPrompt(); };
@@ -2016,44 +2289,98 @@ function bindSettingsPanelControls($) {
         setTimeout(() => { $('dc-copy-system-prompt').textContent = 'Copy Macro'; }, 1500);
     };
     $('dc-scan').onclick = scanAllMessages;
-    $('dc-clear').onclick = () => {
+    $('dc-clear').onclick = async e => {
         const allKeys = Object.keys(characterColors);
-        const keptKeys = getKeptKeys(allKeys);
-        if (!allKeys.length) { toast.info('No characters to clear'); return; }
-        if (keptKeys.length === allKeys.length) {
-            toast.info('Only pinned characters remain. Turn off Keep to clear them.');
-            return;
-        }
-        const restore = createRestoreSnapshot();
-        keepCharacterKeysOnly(keptKeys);
-        commit();
-        repaintDomAfterCharacterDataChange(0);
-        showUndoToast(buildKeepAwareRemovalMessage('Cleared', allKeys.length - keptKeys.length, keptKeys.length), restore);
+        await confirmCharacterRemoval(allKeys, {
+            title: 'Clear unpinned characters?',
+            confirmLabel: 'Clear unpinned',
+            actionLabel: 'Cleared',
+            itemLabel: 'character',
+            emptyMessage: 'No characters to clear.',
+            blockedMessage: 'Only pinned characters remain.',
+            opener: e.currentTarget,
+        });
     };
     $('dc-stats').onclick = showStatsPopup;
-    $('dc-recolor').onclick = () => {
-        if (confirm('Recolor all messages with current color assignments?')) recolorAllMessages();
+    $('dc-recolor').onclick = async e => {
+        if (isDomEngine()) { scheduleDomRefreshSeries(0); scheduleCustomFontRefresh(0); return; }
+        const confirmed = await confirmReviewedAction({
+            title: 'Recolor the entire chat?',
+            description: 'Existing saved font-color tags will be rewritten to match current assignments. Message wording is not changed.',
+            confirmLabel: 'Recolor entire chat',
+            opener: e.currentTarget,
+        });
+        if (confirmed) recolorAllMessages();
     };
-    $('dc-colorize').onclick = (e) => {
-        if (e.shiftKey) colorizeMessages('last');
-        else if (confirm('Colorize all uncolored messages with known character colors?')) colorizeMessages('all');
+    $('dc-colorize').onclick = async e => {
+        const target = $('dc-colorize-target').value === 'all' ? 'all' : 'last';
+        if (target === 'last') { colorizeMessages('last'); return; }
+        const confirmed = await confirmReviewedAction({
+            title: 'Colorize missing dialogue across the chat?',
+            description: 'Font-color tags will be added only to dialogue that is currently uncolored.',
+            confirmLabel: 'Colorize entire chat',
+            opener: e.currentTarget,
+        });
+        if (confirmed) colorizeMessages('all');
     };
-    $('dc-verify-attr').onclick = (e) => {
-        if (e.shiftKey) runAttributionVerification(() => verifyVisibleAttributionsWithLLM({ manual: true }), { manual: true });
-        else runAttributionVerification(() => verifyLatestAttributionsWithLLM({ manual: true }), { manual: true });
+    $('dc-verify-attr').onclick = () => {
+        const target = $('dc-verify-target').value;
+        const verify = target === 'visible' ? verifyVisibleAttributionsWithLLM : verifyLatestAttributionsWithLLM;
+        runAttributionVerification(() => verify({ manual: true }), { manual: true });
     };
     $('dc-fix-conflicts').onclick = autoResolveConflicts;
-    $('dc-regen').onclick = regenerateAllColors;
+    $('dc-regen').onclick = async e => {
+        const unlockedCount = Object.values(characterColors).filter(entry => !entry.locked).length;
+        if (!unlockedCount) { toast.info('No unlocked colors to regenerate'); return; }
+        const confirmed = await confirmReviewedAction({
+            title: 'Regenerate unlocked colors?',
+            description: `${unlockedCount} character color${unlockedCount === 1 ? '' : 's'} will change. Locked colors remain unchanged.`,
+            confirmLabel: 'Regenerate colors',
+            danger: true,
+            opener: e.currentTarget,
+        });
+        if (confirmed) regenerateAllColors();
+    };
     $('dc-flip-theme').onclick = flipColorsForTheme;
-    $('dc-restore-defaults').onclick = restoreAllSettingsToDefaults;
-    $('dc-save-preset').onclick = saveColorPreset;
+    $('dc-restore-defaults').onclick = async e => {
+        if (await confirmReviewedAction({
+            title: 'Restore setting defaults?',
+            description: 'Extension settings will return to defaults. Character assignments are preserved, and the previous settings can be restored from the recovery notice.',
+            confirmLabel: 'Restore defaults',
+            danger: true,
+            opener: e.currentTarget,
+        })) restoreAllSettingsToDefaults();
+    };
+    $('dc-save-preset').onclick = async e => {
+        const name = $('dc-preset-name').value.trim();
+        if (name && Object.prototype.hasOwnProperty.call(getPresets(), name)) {
+            const replace = await confirmReviewedAction({
+                title: 'Replace assignment preset?',
+                description: `“${name}” already exists. Its saved character assignments will be replaced.`,
+                confirmLabel: 'Replace preset',
+                danger: true,
+                opener: e.currentTarget,
+            });
+            if (!replace) return;
+        }
+        saveColorPreset();
+    };
     $('dc-load-preset').onclick = loadColorPreset;
-    $('dc-delete-preset').onclick = deleteColorPreset;
+    $('dc-delete-preset').onclick = async e => {
+        const name = $('dc-preset-select').value;
+        if (!name) { toast.warning('Select a preset first.'); return; }
+        if (await confirmReviewedAction({ title: 'Delete assignment preset?', description: `“${name}” will be removed. Character assignments are not changed.`, confirmLabel: 'Delete preset', danger: true, opener: e.currentTarget })) deleteColorPreset();
+    };
     $('dc-gen-palette').onclick = async () => { await generateCustomPaletteFromWords(); };
     $('dc-save-palette').onclick = saveCustomPalette;
     $('dc-palette-name-input').onkeypress = e => { if (e.key === 'Enter') $('dc-gen-palette').click(); };
     $('dc-palette-notes-input').onkeypress = e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) $('dc-gen-palette').click(); };
-    $('dc-del-palette').onclick = deleteCustomPalette;
+    $('dc-del-palette').onclick = async e => {
+        const value = $('dc-palette').value;
+        if (!value?.startsWith('custom:')) { toast.warning('Select a custom palette in Appearance first.'); return; }
+        const name = value.slice(7);
+        if (await confirmReviewedAction({ title: 'Delete custom palette?', description: `“${name}” will be removed. Existing character colors are not changed.`, confirmLabel: 'Delete palette', danger: true, opener: e.currentTarget })) deleteCustomPalette();
+    };
     $('dc-card').onclick = autoAssignFromCard;
     $('dc-avatar-color').onclick = async () => {
         try {
@@ -2082,51 +2409,84 @@ function bindSettingsPanelControls($) {
             toast.error('Failed to extract avatar color');
         }
     };
-    $('dc-save-card').onclick = saveToCard;
-    $('dc-load-card').onclick = loadFromCard;
+    $('dc-save-card').onclick = async e => {
+        const existing = await readCardData();
+        if (existing.ok) {
+            const count = existing.preview?.characterCount ?? 0;
+            const confirmed = await confirmReviewedAction({
+                title: 'Replace saved card data?',
+                description: `This card already stores ${count} character${count === 1 ? '' : 's'}. Its saved Dialogue Colors payload will be replaced with the current table.`,
+                confirmLabel: 'Replace card data',
+                danger: true,
+                opener: e.currentTarget,
+            });
+            if (!confirmed) return;
+        } else if (existing.error !== 'no_card_data') {
+            toast.error(existing.message || 'The current card could not be reviewed.');
+            return;
+        }
+        saveToCard();
+    };
+    $('dc-load-card').onclick = async e => reviewAndApplyImport(await readCardData(), 'card', e.currentTarget);
     $('dc-undo').onclick = undo;
     $('dc-redo').onclick = redo;
     $('dc-export').onclick = exportColors;
     $('dc-import').onclick = () => $('dc-import-file').click();
     $('dc-export-png').onclick = exportLegendPng;
-    $('dc-import-file').onchange = e => { if (e.target.files[0]) importColors(e.target.files[0]); };
+    $('dc-import-file').onchange = async e => {
+        const file = e.target.files[0];
+        if (file) await reviewAndApplyImport(await analyzeColorImport(file), 'colors', $('dc-import'));
+        e.target.value = '';
+    };
     $('dc-export-settings').onclick = exportSettings;
     $('dc-import-settings').onclick = () => $('dc-import-settings-file').click();
-    $('dc-import-settings-file').onchange = e => { if (e.target.files[0]) importSettings(e.target.files[0]); };
+    $('dc-import-settings-file').onchange = async e => {
+        const file = e.target.files[0];
+        if (file) await reviewAndApplyImport(await analyzeSettingsImport(file), 'settings', $('dc-import-settings'));
+        e.target.value = '';
+    };
     $('dc-setup-autosync').onclick = () => { enableAutoSync(); updateAutoSyncUI(); };
     $('dc-disable-autosync').onclick = () => { disableAutoSync(); updateAutoSyncUI(); };
-    $('dc-del-locked').onclick = () => {
-        removeCharacterKeys(Object.keys(characterColors).filter(k => characterColors[k]?.locked), {
+    $('dc-del-locked').onclick = e => {
+        confirmCharacterRemoval(Object.keys(characterColors).filter(k => characterColors[k]?.locked), {
+            title: 'Delete locked characters?',
             actionLabel: 'Deleted',
             itemLabel: 'locked character',
             emptyMessage: 'No locked characters to delete',
-            blockedMessage: 'Only pinned locked characters remain. Turn off Keep first.'
+            blockedMessage: 'Only pinned locked characters remain.',
+            opener: e.currentTarget,
         });
     };
-    $('dc-del-unlocked').onclick = () => {
-        removeCharacterKeys(Object.keys(characterColors).filter(k => characterColors[k] && !characterColors[k].locked), {
+    $('dc-del-unlocked').onclick = e => {
+        confirmCharacterRemoval(Object.keys(characterColors).filter(k => characterColors[k] && !characterColors[k].locked), {
+            title: 'Delete unlocked characters?',
             actionLabel: 'Deleted',
             itemLabel: 'unlocked character',
             emptyMessage: 'No unlocked characters to delete',
-            blockedMessage: 'Only pinned unlocked characters remain. Turn off Keep first.'
+            blockedMessage: 'Only pinned unlocked characters remain.',
+            opener: e.currentTarget,
         });
     };
-    $('dc-del-least').onclick = () => {
+    $('dc-del-least').onclick = e => {
         const min = parseInt($('dc-del-least-threshold')?.value || '3', 10);
         if (isNaN(min) || min < 0) { toast.warning('Invalid threshold'); return; }
-        removeCharacterKeys(Object.keys(characterColors).filter(k => (characterColors[k]?.dialogueCount || 0) < min), {
+        confirmCharacterRemoval(Object.keys(characterColors).filter(k => (characterColors[k]?.dialogueCount || 0) < min), {
+            title: `Delete characters below ${min} dialogue segments?`,
             actionLabel: 'Deleted',
             itemLabel: 'low-dialogue character',
             emptyMessage: `No characters below ${min} dialogues`,
-            blockedMessage: 'Only pinned low-dialogue characters remain. Turn off Keep first.'
+            blockedMessage: 'Only pinned low-dialogue characters remain.',
+            opener: e.currentTarget,
         });
     };
-    $('dc-del-dupes').onclick = () => {
-        removeCharacterKeys(collectDuplicateColorKeys(), {
+    $('dc-del-dupes').onclick = e => {
+        confirmCharacterRemoval(collectDuplicateColorKeys(), {
+            title: 'Delete duplicate primary colors?',
             actionLabel: 'Deleted',
             itemLabel: 'duplicate-color character',
             emptyMessage: 'No duplicate colors found',
-            blockedMessage: 'Only pinned duplicate-color characters remain. Turn off Keep first.'
+            blockedMessage: 'Only pinned duplicate-color characters remain.',
+            opener: e.currentTarget,
         });
     };
     $('dc-storage').onclick = showStorageManager;
@@ -2152,8 +2512,17 @@ function bindSettingsPanelControls($) {
         if (count) saveHistory();
         saveData(); updateCharList(); toast.info(`Unlocked ${count} characters`);
     };
-    $('dc-reset').onclick = () => {
-        if (!confirm('Reset all colors?')) return;
+    $('dc-reset').onclick = async e => {
+        const unlockedCount = Object.values(characterColors).filter(entry => !entry.locked).length;
+        if (!unlockedCount) { toast.info('No unlocked colors to reset'); return; }
+        const confirmed = await confirmReviewedAction({
+            title: 'Reset unlocked colors?',
+            description: `${unlockedCount} character color${unlockedCount === 1 ? '' : 's'} will be regenerated. Locked colors remain unchanged.`,
+            confirmLabel: 'Reset colors',
+            danger: true,
+            opener: e.currentTarget,
+        });
+        if (!confirmed) return;
         const restore = createRestoreSnapshot();
         let changed = 0;
         const changedKeys = [];
@@ -2170,9 +2539,33 @@ function bindSettingsPanelControls($) {
         commit();
         showUndoToast(`Reset ${changed} unlocked color${changed !== 1 ? 's' : ''}.`, restore);
     };
-    $('dc-search').oninput = e => { setSearchTerm(e.target.value); updateCharList(); };
+    let searchFrame = 0;
+    $('dc-search').oninput = e => {
+        setSearchTerm(e.target.value);
+        cancelAnimationFrame(searchFrame);
+        searchFrame = requestAnimationFrame(updateCharList);
+    };
     $('dc-sort').onchange = e => { settings.sortMode = e.target.value; saveData(); updateCharList(); };
-    $('dc-add-btn').onclick = () => { addCharacter($('dc-add-name').value); $('dc-add-name').value = ''; };
+    $('dc-add-btn').onclick = () => {
+        const input = $('dc-add-name');
+        const error = $('dc-add-error');
+        const result = addCharacter(input.value);
+        if (result?.added || result?.existing) {
+            input.value = '';
+            input.removeAttribute('aria-invalid');
+            if (error) error.textContent = '';
+        } else {
+            input.setAttribute('aria-invalid', 'true');
+            if (error) error.textContent = input.value.trim()
+                ? 'Use a name without brackets, commas, equals signs, parentheses, or line breaks.'
+                : 'Enter a character name.';
+            input.focus({ preventScroll: true });
+        }
+    };
+    $('dc-add-name').oninput = e => {
+        e.target.removeAttribute('aria-invalid');
+        if ($('dc-add-error')) $('dc-add-error').textContent = '';
+    };
     $('dc-add-name').onkeypress = e => { if (e.key === 'Enter') $('dc-add-btn').click(); };
 
 }
