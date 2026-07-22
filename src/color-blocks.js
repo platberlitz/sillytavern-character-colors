@@ -2,6 +2,7 @@
 import { DOM_RETRY_REFRESH_DELAYS, decorateAllMessages, scheduleDomSettleRefresh } from './dom-engine.js';
 import { commit, repaintDomAfterCharacterDataChange } from './live-colors.js';
 import { applyThemeReadabilityAndBrightness, buildCharacterEntry, checkColorConflicts, deriveBaseColorFromEffectiveColor, getEntryEffectiveColor, setEntryFromEffectiveColor } from './palettes.js';
+import { NARRATOR_VISUAL_ID, getNarratorVisual, setTransientNarratorCount } from './narrator-style.js';
 import { getThoughtDelimiterSymbols } from './prompts.js';
 import { escapeHtml, escapeRegex, getContext } from './st-api.js';
 import { characterColors, isDomEngine, settings } from './state.js';
@@ -104,6 +105,7 @@ export function processColorPairs(pairsString) {
     let hadRemapping = false;
     const remappedAssignments = [];
     const countedKeys = new Set();
+    let narratorSeen = false;
     const colorPairs = pairsString.split(',');
     for (const pair of colorPairs) {
         const eqIdx = pair.indexOf('=');
@@ -113,6 +115,10 @@ export function processColorPairs(pairsString) {
         const rawColor = pair.substring(eqIdx + 1).trim();
         if (!name || !rawColor || !/^#[a-fA-F0-9]{6}$/i.test(rawColor)) continue;
         const assignedColor = normalizeHexColor(rawColor);
+        if (name.toLowerCase() === 'narrator') {
+            narratorSeen = true;
+            continue;
+        }
         const existingKey = resolveCharacterKeyByNameOrAlias(name);
         const key = existingKey || name.toLowerCase();
         const canonicalName = existingKey ? characterColors[existingKey].name : name;
@@ -150,7 +156,7 @@ export function processColorPairs(pairsString) {
             });
         }
     }
-    return { foundNew, hadRemapping, remappedAssignments, countedKeys: Array.from(countedKeys) };
+    return { foundNew, hadRemapping, remappedAssignments, countedKeys: Array.from(countedKeys), narratorSeen };
 }
 
 export function processColorBlocksInText(text) {
@@ -160,6 +166,7 @@ export function processColorBlocksInText(text) {
     let foundColorBlock = false;
     let foundNew = false;
     let hadRemapping = false;
+    let narratorSeen = false;
     const remappedAssignments = [];
 
     while ((match = colorBlockRegex.exec(text || '')) !== null) {
@@ -167,11 +174,12 @@ export function processColorBlocksInText(text) {
         foundColorBlock = true;
         if (result.foundNew) foundNew = true;
         if (result.hadRemapping) hadRemapping = true;
+        if (result.narratorSeen) narratorSeen = true;
         if (Array.isArray(result.remappedAssignments)) remappedAssignments.push(...result.remappedAssignments);
         if (Array.isArray(result.countedKeys)) result.countedKeys.forEach(key => countedKeys.add(key));
     }
 
-    return { foundColorBlock, foundNew, hadRemapping, remappedAssignments, countedKeys };
+    return { foundColorBlock, foundNew, hadRemapping, remappedAssignments, countedKeys, narratorSeen };
 }
 
 export function buildUniqueKnownColorStatsLookup() {
@@ -262,6 +270,7 @@ export function scanAllMessages() {
     for (const { text, countedKeys } of processedMessages) {
         countFontColorStatsFromKnownColors(text, countedKeys, colorLookup);
     }
+    refreshTransientNarratorCount(chat);
 
     commit();
     stripColorBlocksFromDisplay();
@@ -324,6 +333,42 @@ export function parseNamedColorAssignmentsFromText(text) {
         }
     }
     return assignments;
+}
+
+export function countNarratorFontTagsFromText(text) {
+    const assignments = parseNamedColorAssignmentsFromText(text);
+    const narratorColors = new Set(assignments
+        .filter(assignment => assignment.name.toLowerCase() === 'narrator')
+        .map(assignment => assignment.color));
+    if (!narratorColors.size) return { present: false, count: null };
+    const namesByColor = new Map();
+    assignments.forEach(assignment => {
+        if (!namesByColor.has(assignment.color)) namesByColor.set(assignment.color, new Set());
+        namesByColor.get(assignment.color).add(assignment.name.toLowerCase());
+    });
+    if ([...narratorColors].some(color => [...(namesByColor.get(color) || [])].some(name => name !== 'narrator'))) {
+        return { present: true, count: null };
+    }
+    let count = 0;
+    const fontTagRegex = /<font\b[^>]*\bcolor\s*=\s*["']?(#[0-9a-fA-F]{6})["']?[^>]*>/gi;
+    let match;
+    while ((match = fontTagRegex.exec(text || '')) !== null) {
+        if (narratorColors.has(match[1].toLowerCase())) count++;
+    }
+    return { present: true, count: count || null };
+}
+
+export function refreshTransientNarratorCount(chat = getContext()?.chat || []) {
+    let total = 0;
+    let present = false;
+    for (const msg of chat) {
+        const result = countNarratorFontTagsFromText(msg?.mes || '');
+        if (!result.present) continue;
+        present = true;
+        if (result.count === null) return setTransientNarratorCount(null, chat);
+        total += result.count;
+    }
+    return setTransientNarratorCount(present ? total : null, chat);
 }
 
 export function buildDialogueRegex() {
@@ -406,9 +451,6 @@ export function buildNameColorLookup(extraAssignments = []) {
     for (const entry of Object.values(characterColors)) {
         registerLookupAssignment(lookup, entry.name, getEntryEffectiveColor(entry), entry.aliases, false, entry.font);
     }
-    if (settings.narratorColor) {
-        registerLookupAssignment(lookup, 'Narrator', applyThemeReadabilityAndBrightness(settings.narratorColor));
-    }
     const pendingCompositeAssignments = [];
     for (const assignment of Array.isArray(extraAssignments) ? extraAssignments : []) {
         if (!assignment) continue;
@@ -489,13 +531,17 @@ export function buildColorRenderingLookup(rawText = '') {
             continue;
         }
         const [nameKey] = Array.from(names);
-        const key = resolveCharacterKeyByNameOrAlias(nameKey);
-        const entry = key ? characterColors[key] : null;
+        const narrator = nameKey === 'narrator' ? getNarratorVisual(settings, applyThemeReadabilityAndBrightness) : null;
+        const key = narrator ? NARRATOR_VISUAL_ID : resolveCharacterKeyByNameOrAlias(nameKey);
+        const entry = narrator || (key ? characterColors[key] : null);
         if (entry) colorToRendering.set(normalizedColor, { key, entry });
         else colorToRendering.delete(normalizedColor);
     }
 
-    for (const [key, entry] of Object.entries(characterColors)) {
+    const currentEntries = Object.entries(characterColors);
+    const narrator = getNarratorVisual(settings, applyThemeReadabilityAndBrightness);
+    if (narrator) currentEntries.push([NARRATOR_VISUAL_ID, narrator]);
+    for (const [key, entry] of currentEntries) {
         const color = normalizeHexColor(getEntryEffectiveColor(entry), null);
         if (!color || lockedColors.has(color) || ambiguousColors.has(color)) continue;
         const existing = colorToRendering.get(color);

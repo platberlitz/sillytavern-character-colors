@@ -1,11 +1,12 @@
 // live-colors.js - extracted from index.js (mechanical split)
-import { colorizeMessageText, ensureCharacterEntry } from './attribution.js';
-import { collectFontColorsFromText, countFontColorStatsFromKnownColors, parseColorAssignmentsFromText, processColorBlocksInText, stripColorBlockFromElement } from './color-blocks.js';
+import { clearSpeakerRegexCache, colorizeMessageText, ensureCharacterEntry } from './attribution.js';
+import { collectFontColorsFromText, countFontColorStatsFromKnownColors, parseColorAssignmentsFromText, processColorBlocksInText, refreshTransientNarratorCount, stripColorBlockFromElement } from './color-blocks.js';
 import { DOM_RETRY_REFRESH_DELAYS, decorateAllMessages, refreshMessageDom, scheduleDomRefreshSeries, scheduleDomSettleRefresh } from './dom-engine.js';
 import { scheduleCustomFontRefresh } from './fonts.js';
 import { saveHistory } from './history.js';
 import { callLLMWithProfile } from './llm.js';
-import { applyThemeReadabilityAndBrightness, getBaseColor, getEntryEffectiveColor, syncAllEffectiveColors } from './palettes.js';
+import { getNarratorVisual } from './narrator-style.js';
+import { applyThemeReadabilityAndBrightness, getBaseColor, getEntryEffectiveColor, invalidateThemeCache, syncAllEffectiveColors } from './palettes.js';
 import { buildColorMetadataPromptLines, buildLLMColorizeRules, buildThoughtSymbolColorPromptRule, formatColorBlockPair, getThoughtDelimiterSymbols, injectPrompt } from './prompts.js';
 import { generateQuietPrompt, getContext } from './st-api.js';
 import { COLOR_STATE_SAVE_DELAY_MS, LIVE_CHAT_SAVE_DELAY_MS, characterColors, colorStateSaveTimer, isAutoColorizing, isColorizing, isDomEngine, isRecoloring, lastProcessedMessageSignature, liveChatSaveTimer, pendingColorStateHistory, pendingColorStateInjectPrompt, pendingColorStateSaveData, pendingColorStateUpdateList, pendingLiveChatSave, setColorStateSaveTimer, setIsAutoColorizing, setIsColorizing, setIsRecoloring, setLastProcessedMessageSignature, setLiveChatSaveTimer, setPendingColorStateHistory, setPendingColorStateInjectPrompt, setPendingColorStateSaveData, setPendingColorStateUpdateList, setPendingLiveChatSave, settings } from './state.js';
@@ -230,9 +231,8 @@ export function buildNameToCurrentColorForKeys(keys = Object.keys(characterColor
         nameToNewColor[entry.name] = color;
         for (const alias of entry.aliases || []) nameToNewColor[alias] = color;
     }
-    if (settings.narratorColor) {
-        nameToNewColor.Narrator = applyThemeReadabilityAndBrightness(settings.narratorColor);
-    }
+    const narrator = getNarratorVisual(settings, applyThemeReadabilityAndBrightness);
+    if (narrator) nameToNewColor.Narrator = narrator.color;
     return nameToNewColor;
 }
 
@@ -270,6 +270,7 @@ export function applyLiveColorChangesFromSnapshot(snapshot, keys = Object.keys(s
         scheduleCustomFontRefresh(options.saveImmediately ? 0 : 120);
         return 0;
     }
+    if (options.repaintStyles) scheduleDomRefreshSeries(options.saveImmediately ? 0 : 120);
     scheduleCustomFontRefresh(options.saveImmediately ? 0 : 120);
     if (!settings.autoRecolor && !options.force) return 0;
     const list = Array.isArray(keys) ? keys : [keys];
@@ -283,6 +284,12 @@ export function applyLiveColorChangesFromSnapshot(snapshot, keys = Object.keys(s
 export function repaintDomAfterCharacterDataChange(delay = 0) {
     if (isDomEngine()) scheduleDomRefreshSeries(delay);
     scheduleCustomFontRefresh(delay);
+}
+
+export function refreshEffectiveColorsAfterRestore() {
+    clearSpeakerRegexCache();
+    invalidateThemeCache();
+    syncAllEffectiveColors();
 }
 
 export function queueColorStateSave(options = {}) {
@@ -425,6 +432,8 @@ export async function colorizeMessageWithLLM(rawText, messageSpeakerName = '') {
             defaultSpeakerColor = color;
         }
     }
+    const narratorColor = getNarratorVisual(settings, applyThemeReadabilityAndBrightness)?.color || null;
+    if (narratorColor) charList.push(`Narrator=${narratorColor}`);
     if (!charList.length) return null;
 
     if (!defaultSpeakerColor && trimmedSpeaker) {
@@ -436,7 +445,6 @@ export async function colorizeMessageWithLLM(rawText, messageSpeakerName = '') {
     }
 
     const thoughtSymbols = getThoughtDelimiterSymbols();
-    const narratorColor = settings.narratorColor ? applyThemeReadabilityAndBrightness(settings.narratorColor) : null;
 
     const lines = [
         '[Dialogue Colors — colorize existing message]',
@@ -477,11 +485,11 @@ export async function colorizeMultipleMessagesWithLLM(messageBatch) {
         const color = getEntryEffectiveColor(entry);
         charList.push(`${entry.name}=${color}`);
     }
+    const narratorColor = getNarratorVisual(settings, applyThemeReadabilityAndBrightness)?.color || null;
+    if (narratorColor) charList.push(`Narrator=${narratorColor}`);
     if (!charList.length) return [];
 
     const thoughtSymbols = getThoughtDelimiterSymbols();
-    const narratorColor = settings.narratorColor ?
-        applyThemeReadabilityAndBrightness(settings.narratorColor) : null;
 
     // Build instruction
     const lines = [
@@ -584,10 +592,8 @@ export async function recolorAllMessages() {
                 nameToNewColor[alias.toLowerCase()] = adjusted;
             }
         }
-        // Include narrator color if set
-        if (settings.narratorColor) {
-            nameToNewColor['narrator'] = applyThemeReadabilityAndBrightness(settings.narratorColor);
-        }
+        const narrator = getNarratorVisual(settings, applyThemeReadabilityAndBrightness);
+        if (narrator) nameToNewColor.narrator = narrator.color;
 
         // Step 3: Process each non-user message
         let recoloredCount = 0;
@@ -792,6 +798,9 @@ export async function colorizeMessages(targetMode = 'all') {
             for (const index of updatedMessageIndices) {
                 if (chat[index]) await refreshMessageDom(index, chat[index]);
             }
+            refreshTransientNarratorCount(chat);
+            scheduleCustomFontRefresh(0);
+            updateLegend();
             toast.info(`Colorized ${colorizedCount} message${colorizedCount !== 1 ? 's' : ''}${skippedNoColor > 0 ? ` (${skippedNoColor} skipped — no speaker/color match)` : ''}.`);
         } else if (skippedNoColor > 0) {
             toast.info(`No uncolored dialogue found; ${skippedNoColor} message${skippedNoColor !== 1 ? 's' : ''} skipped (no known speaker/color could be resolved).`);
@@ -832,6 +841,7 @@ export function onNewMessage() {
         setLastProcessedMessageSignature(signature);
         const colorStats = processColorBlocksInText(text);
         countFontColorStatsFromKnownColors(text, colorStats.countedKeys);
+        refreshTransientNarratorCount(chat);
         const foundColorBlock = colorStats.foundColorBlock;
         const hadRemapping = colorStats.hadRemapping;
         const remappedAssignments = colorStats.remappedAssignments;

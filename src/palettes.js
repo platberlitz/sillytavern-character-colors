@@ -1,14 +1,19 @@
 // palettes.js - extracted from index.js (mechanical split)
 import { clearSpeakerRegexCache } from './attribution.js';
-import { applyGradientPresetToEntry, buildRandomGradient, cloneGradient, mapGradientStops, normalizeGradient, serializeGradient, synchronizeGradientEffectiveColors } from './gradients.js';
+import { simulateColorVision } from './color-vision.js';
+import { applyGradientPresetToEntry, cloneGradient, mapGradientStops, normalizeGradient, serializeGradient, synchronizeGradientEffectiveColors } from './gradients.js';
+import { applyGroupProfile, normalizeGroupName, normalizeGroupProfiles, resolveGroupAutomation, resolveGroupProfile } from './group-profiles.js';
 import { createRestoreSnapshot, showUndoToast } from './history.js';
 import { applyLiveColorChangesFromSnapshot, captureEffectiveColorSnapshot, commit, repaintDomAfterCharacterDataChange } from './live-colors.js';
 import { callLLMWithProfile } from './llm.js';
 import { injectPrompt } from './prompts.js';
+import { createPerceptualConflictReport } from './perceptual-conflicts.js';
+import { NARRATOR_VISUAL_ID, getNarratorVisual, setNarratorStyle } from './narrator-style.js';
+import { GRADIENT_GENERATOR_ALGORITHM, advanceGradientGenerator, generateSeededGradient, normalizeGradientGenerator } from './seeded-gradient-generator.js';
 import { escapeHtml, generateQuietPrompt, getContext } from './st-api.js';
-import { characterColors, expandedCharacterRows, setCharacterColors, setExpandedCharacterRows, setSwapMode, settings, swapMode } from './state.js';
-import { getAutoSyncRecord, isPlainObject, persistModuleStore, saveData } from './storage.js';
-import { COLOR_CONFLICT_HUE_THRESHOLD, COLOR_CONFLICT_LIGHTNESS_THRESHOLD, VALID_STYLES, colorDistance, hexToHsl, hslToHex, normalizeAliases, normalizeCharacterEntry, normalizeGoogleFontName, normalizeHexColor, toast } from './utils.js';
+import { characterColors, expandedCharacterRows, groupProfiles, setCharacterColors, setExpandedCharacterRows, setGroupProfiles, setSwapMode, settings, swapMode } from './state.js';
+import { getAutoSyncRecord, isPlainObject, persistModuleStore, saveData, saveGlobalSettingsSnapshot } from './storage.js';
+import { VALID_STYLES, colorDistance, hexToHsl, hslToHex, normalizeAliases, normalizeCharacterEntry, normalizeEntryGradientGenerator, normalizeGoogleFontName, normalizeHexColor, toast } from './utils.js';
 
 export const COLOR_THEMES = {
     pastel: [[340, 70, 75], [200, 70, 75], [120, 50, 70], [45, 80, 70], [280, 60, 75], [170, 60, 70], [20, 80, 75], [240, 60, 75]],
@@ -185,21 +190,65 @@ export function getNextColor() {
 
 // Phase 3B: Optimized conflict check with pre-computed HSL and early-out
 export function checkColorConflicts() {
-    const colors = Object.entries(characterColors);
-    if (colors.length > 50) return [];
-    const conflicts = [];
-    const hslCache = colors.map(([, v]) => ({ name: v.name, hsl: hexToHsl(getEntryEffectiveColor(v)) }));
-    for (let i = 0; i < hslCache.length - 1; i++) {
-        for (let j = i + 1; j < hslCache.length; j++) {
-            const [h1, , l1] = hslCache[i].hsl;
-            const [h2, , l2] = hslCache[j].hsl;
-            const hDiff = Math.min(Math.abs(h1 - h2), 360 - Math.abs(h1 - h2));
-            if (hDiff < COLOR_CONFLICT_HUE_THRESHOLD && Math.abs(l1 - l2) < COLOR_CONFLICT_LIGHTNESS_THRESHOLD) {
-                conflicts.push([hslCache[i].name, hslCache[j].name]);
-            }
-        }
-    }
-    return conflicts;
+    const report = getPerceptualConflictReport();
+    const seen = new Set();
+    return report.conflicts.filter(conflict => {
+        const key = [conflict.left.id, conflict.right.id].sort().join('\u0000');
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    }).map(conflict => [conflict.left.label, conflict.right.label]);
+}
+
+function getConflictSurfaceColor() {
+    return getContrastSurfaceColor();
+}
+
+export function getPerceptualConflictReport(options = {}) {
+    const conflictVisuals = { ...characterColors };
+    const narrator = getNarratorVisual(settings, applyThemeReadabilityAndBrightness);
+    if (narrator) conflictVisuals[NARRATOR_VISUAL_ID] = narrator;
+    const report = createPerceptualConflictReport(conflictVisuals, {
+        modes: options.modes,
+        cvdSeverity: options.cvdSeverity ?? 1,
+        sampleCount: options.sampleCount,
+        conflictDeltaE: options.conflictDeltaE,
+        strongConflictDeltaE: options.strongConflictDeltaE,
+    });
+    const surface = getConflictSurfaceColor();
+    report.modes.forEach(mode => {
+        const modeSurface = simulateColorVision(surface, mode);
+        mode.readability = mode.items.map(item => {
+            const ratios = item.samples.map(sample => getContrastRatio(sample.color, modeSurface));
+            const minimumRatio = Math.min(...ratios);
+            return {
+                id: item.id,
+                label: item.label,
+                minimumRatio: Number(minimumRatio.toFixed(2)),
+                level: minimumRatio >= 4.5 ? 'pass' : minimumRatio >= 3 ? 'large-text-only' : 'low',
+            };
+        });
+        const readabilityById = new Map(mode.readability.map(item => [item.id, item]));
+        mode.conflicts.forEach(conflict => {
+            conflict.readability = {
+                left: readabilityById.get(conflict.left.id),
+                right: readabilityById.get(conflict.right.id),
+            };
+            const gradientOverlap = conflict.samples.left.position !== 0 || conflict.samples.right.position !== 0;
+            conflict.reasons = [
+                `${conflict.level === 'strong' ? 'Very small' : 'Small'} perceptual distance (Delta E ${conflict.deltaE}).`,
+                gradientOverlap
+                    ? `Closest gradient samples occur near ${Math.round(conflict.samples.left.position)}% and ${Math.round(conflict.samples.right.position)}%.`
+                    : 'Primary colors are perceptually close.',
+            ];
+        });
+    });
+    report.conflicts = report.modes.flatMap(mode => mode.conflicts.map(conflict => ({
+        mode: mode.mode,
+        severity: mode.severity,
+        ...conflict,
+    })));
+    return report;
 }
 
 // Pre-compiled color name mapping for faster lookups
@@ -240,26 +289,112 @@ export function regenerateAllColors() {
 
 // Phase 4B: Improved conflict resolution feedback listing pairs
 export function autoResolveConflicts() {
-    const conflicts = checkColorConflicts();
-    if (!conflicts.length) { toast.info('No conflicts found'); return; }
-    const fixedPairs = [];
-    const changedKeys = [];
+    const result = repairPerceptualConflicts();
+    if (!result.initialConflictCount) toast.info('No conflicts found');
+    else if (!result.changedKeys.length) toast.warning(`No safe repair was found; ${result.unresolvedCount} conflict${result.unresolvedCount === 1 ? '' : 's'} remain.`);
+    else toast.success(`Recolored ${result.changedKeys.length} character${result.changedKeys.length === 1 ? '' : 's'}; ${result.unresolvedCount} conflict${result.unresolvedCount === 1 ? '' : 's'} remain.`);
+    return result;
+}
+
+function hashRepairValue(value) {
+    let hash = 2166136261;
+    for (const character of String(value ?? '')) {
+        hash ^= character.codePointAt(0);
+        hash = Math.imul(hash, 16777619);
+    }
+    return hash >>> 0;
+}
+
+function buildRepairColor(entry, key, attempt) {
+    const [hue, saturation] = hexToHsl(getBaseColor(entry));
+    const { minLightness, maxLightness } = getThemeLightnessBounds();
+    const hash = hashRepairValue(`${key}:${attempt}`);
+    const nextHue = (hue + 47 + ((attempt + 1) * 137.508) + (hash % 31)) % 360;
+    const nextSaturation = Math.max(48, Math.min(92, (saturation || 64) + ((hash % 19) - 9)));
+    const span = Math.max(1, maxLightness - minLightness);
+    const nextLightness = minLightness + ((hash + (attempt * 23)) % (span + 1));
+    return hslToHex(nextHue, nextSaturation, nextLightness);
+}
+
+function scoreConflictReport(report) {
+    return report.conflicts.reduce((score, conflict) => {
+        const deficit = Math.max(0, report.thresholds.conflictDeltaE - conflict.deltaE);
+        return score + 1 + deficit + (conflict.level === 'strong' ? report.thresholds.conflictDeltaE : 0);
+    }, 0);
+}
+
+function canRepairConflictEntry(key) {
+    const entry = characterColors[key];
+    return !!entry && !entry.locked && !entry.keep && String(entry.name || key).trim().toLowerCase() !== 'narrator';
+}
+
+export function repairPerceptualConflicts(options = {}) {
+    let report = getPerceptualConflictReport(options);
+    const initialConflictCount = report.conflicts.length;
+    const changedKeys = new Set();
+    const blockedPairs = new Set();
     const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
-    conflicts.forEach(([name1, name2]) => {
-        const key1 = name1.toLowerCase(), key2 = name2.toLowerCase();
-        if (characterColors[key1] && !characterColors[key1].locked) {
-            setEntryFromBaseColor(characterColors[key1], getNextColor());
-            changedKeys.push(key1);
-            fixedPairs.push(`${name1} & ${name2} (changed ${name1})`);
-        } else if (characterColors[key2] && !characterColors[key2].locked) {
-            setEntryFromBaseColor(characterColors[key2], getNextColor());
-            changedKeys.push(key2);
-            fixedPairs.push(`${name1} & ${name2} (changed ${name2})`);
+    const maxIterations = Math.max(1, Math.min(96, Number(options.maxIterations) || Math.max(12, Object.keys(characterColors).length * 2)));
+    const candidateLimit = Math.max(4, Math.min(32, Number(options.candidateLimit) || 20));
+
+    for (let iteration = 0; iteration < maxIterations && report.conflicts.length; iteration++) {
+        const conflict = report.conflicts.find(item => {
+            const pairKey = [item.left.id, item.right.id, item.mode].sort().join('\u0000');
+            const involvesNarrator = item.left.kind === 'narrator' || item.right.kind === 'narrator'
+                || item.left.id === NARRATOR_VISUAL_ID || item.right.id === NARRATOR_VISUAL_ID;
+            return !involvesNarrator && !blockedPairs.has(pairKey)
+                && (canRepairConflictEntry(item.left.id) || canRepairConflictEntry(item.right.id));
+        });
+        if (!conflict) break;
+        const pairKey = [conflict.left.id, conflict.right.id, conflict.mode].sort().join('\u0000');
+        const candidates = [conflict.left.id, conflict.right.id]
+            .filter(canRepairConflictEntry)
+            .sort((left, right) => (characterColors[left].dialogueCount || 0) - (characterColors[right].dialogueCount || 0)
+                || characterColors[left].name.localeCompare(characterColors[right].name));
+        const key = candidates[0];
+        if (!key) {
+            blockedPairs.add(pairKey);
+            continue;
         }
-    });
-    applyLiveColorChangesFromSnapshot(snapshot, changedKeys);
-    commit();
-    toast.success(`Fixed: ${fixedPairs.map(escapeHtml).join('; ')}`);
+
+        const entry = characterColors[key];
+        const original = JSON.parse(JSON.stringify(entry));
+        const currentScore = scoreConflictReport(report);
+        let best = null;
+        for (let attempt = 0; attempt < candidateLimit; attempt++) {
+            Object.assign(entry, JSON.parse(JSON.stringify(original)));
+            setEntryFromBaseColor(entry, buildRepairColor(original, key, attempt));
+            const candidateReport = getPerceptualConflictReport(options);
+            const candidateScore = scoreConflictReport(candidateReport);
+            if (!best || candidateScore < best.score) {
+                best = { score: candidateScore, entry: JSON.parse(JSON.stringify(entry)), report: candidateReport };
+            }
+        }
+        if (!best || best.score >= currentScore) {
+            Object.keys(entry).forEach(property => delete entry[property]);
+            Object.assign(entry, original);
+            blockedPairs.add(pairKey);
+            continue;
+        }
+        Object.keys(entry).forEach(property => delete entry[property]);
+        Object.assign(entry, best.entry);
+        changedKeys.add(key);
+        report = best.report;
+    }
+
+    const changed = [...changedKeys];
+    if (changed.length) {
+        applyLiveColorChangesFromSnapshot(snapshot, changed, { saveImmediately: true, repaintStyles: true });
+        commit({ data: false });
+        saveData({ preserveEffectiveColors: true });
+        repaintDomAfterCharacterDataChange(0);
+    }
+    return {
+        changedKeys: changed,
+        initialConflictCount,
+        unresolvedCount: report.conflicts.length,
+        report,
+    };
 }
 
 // Phase 5A: Preset management with dropdown UI
@@ -291,18 +426,23 @@ export function saveColorPreset() {
     const name = nameInput?.value?.trim();
     if (!name) { toast.warning('Enter a preset name'); return; }
     const presets = getPresets();
-    presets[name] = Object.entries(characterColors).map(([, v]) => ({
-        name: String(v.name ?? '').trim(),
-        color: getEntryEffectiveColor(v),
-        baseColor: getBaseColor(v),
-        style: VALID_STYLES.has(v.style) ? v.style : '',
-        font: normalizeGoogleFontName(v.font),
-        aliases: normalizeAliases(v.aliases),
-        group: String(v.group ?? '').trim(),
-        locked: !!v.locked,
-        keep: !!v.keep,
-        gradient: serializeGradient(v.gradient),
-    }));
+    presets[name] = {
+        version: 2,
+        entries: Object.entries(characterColors).map(([, v]) => ({
+            name: String(v.name ?? '').trim(),
+            color: getEntryEffectiveColor(v),
+            baseColor: getBaseColor(v),
+            style: VALID_STYLES.has(v.style) ? v.style : '',
+            font: normalizeGoogleFontName(v.font),
+            aliases: normalizeAliases(v.aliases),
+            group: String(v.group ?? '').trim(),
+            locked: !!v.locked,
+            keep: !!v.keep,
+            gradient: serializeGradient(v.gradient),
+            gradientGenerator: normalizeEntryGradientGenerator(v.gradientGenerator, v.gradient),
+        })),
+        groupProfiles: normalizeGroupProfiles(groupProfiles),
+    };
     if (!persistPresets(presets)) return;
     nameInput.value = '';
     refreshPresetDropdown();
@@ -315,7 +455,8 @@ export function loadColorPreset() {
     if (!name) { toast.warning('Select a preset first'); return; }
     const presets = getPresets();
     if (!presets[name]) { toast.error('Preset not found'); return; }
-    const presetData = presets[name];
+    const presetValue = presets[name];
+    const presetData = Array.isArray(presetValue) ? presetValue : presetValue?.entries;
     if (!Array.isArray(presetData)) { toast.error('Preset is invalid'); return; }
     let changed = false;
     const changedKeys = [];
@@ -332,6 +473,13 @@ export function loadColorPreset() {
         if (!characterColors[key].locked) setEntryFromBaseColor(characterColors[key], getBaseColor(characterColors[key]));
         changedKeys.push(key);
         changed = true;
+    }
+    if (!Array.isArray(presetValue)) {
+        const nextProfiles = normalizeGroupProfiles({ ...groupProfiles, ...presetValue.groupProfiles });
+        if (JSON.stringify(nextProfiles) !== JSON.stringify(groupProfiles)) {
+            setGroupProfiles(nextProfiles);
+            changed = true;
+        }
     }
     if (changed) applyLiveColorChangesFromSnapshot(snapshot, changedKeys);
     commit({ history: changed });
@@ -926,7 +1074,7 @@ function rgbToHex({ r, g, b }) {
     return `#${channel(r)}${channel(g)}${channel(b)}`;
 }
 
-function getContrastSurfaceColor() {
+export function getContrastSurfaceColor() {
     if (typeof document === 'undefined') return settings.themeMode === 'dark' ? '#202328' : '#f5f5f5';
     const now = Date.now();
     if (cachedContrastSurface && now - cachedContrastSurfaceCheckedAt < 250) return cachedContrastSurface;
@@ -1031,9 +1179,10 @@ export function setEntryFromEffectiveColor(entry, effectiveColor) {
     return entry.color;
 }
 
-export function setEntryGradient(entry, gradient) {
+export function setEntryGradient(entry, gradient, options = {}) {
     if (!entry) return null;
     entry.gradient = synchronizeGradientEffectiveColors(normalizeGradient(gradient), applyThemeReadabilityAndBrightness);
+    if (options.preserveGenerator !== true) entry.gradientGenerator = null;
     return entry.gradient;
 }
 
@@ -1046,16 +1195,51 @@ function getActiveGradientPaletteColors() {
         .map(([hue, saturation, lightness]) => hslToHex(hue, saturation, lightness));
 }
 
+export function canonicalizeGradientCharacterName(name) {
+    return String(name ?? '').normalize('NFKC').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+export function createGradientRandomMasterSeed() {
+    if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID().slice(0, 128);
+    if (typeof globalThis.crypto?.getRandomValues === 'function') {
+        const values = new Uint32Array(4);
+        globalThis.crypto.getRandomValues(values);
+        return [...values].map(value => value.toString(16).padStart(8, '0')).join('').slice(0, 128);
+    }
+    return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`.slice(0, 128);
+}
+
+export function ensureGradientRandomMasterSeed() {
+    const current = String(settings.gradientRandomMasterSeed ?? '').replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 128);
+    if (current) {
+        settings.gradientRandomMasterSeed = current;
+        return current;
+    }
+    settings.gradientRandomMasterSeed = createGradientRandomMasterSeed();
+    saveGlobalSettingsSnapshot({ immediate: true });
+    return settings.gradientRandomMasterSeed;
+}
+
 export function createRandomGradient(entry, options = {}) {
     if (!entry) return null;
     const animation = options.preserveAnimation === false ? null : normalizeGradient(entry.gradient)?.animation;
-    const gradient = buildRandomGradient(getBaseColor(entry), {
+    const masterSeed = ensureGradientRandomMasterSeed();
+    const seed = `${masterSeed}\u001f${canonicalizeGradientCharacterName(entry.name)}`;
+    const existing = normalizeEntryGradientGenerator(entry.gradientGenerator, entry.gradient);
+    let generator = normalizeGradientGenerator({ algorithm: GRADIENT_GENERATOR_ALGORITHM, seed, iteration: 0 });
+    if (Number.isFinite(Number(options.iteration))) {
+        generator.iteration = Math.max(0, Math.floor(Number(options.iteration)));
+    } else if (options.initial !== true && existing?.seed === seed) {
+        generator = advanceGradientGenerator(existing);
+    }
+    const generated = generateSeededGradient(getBaseColor(entry), generator, {
         palette: getActiveGradientPaletteColors(),
         animation: animation || undefined,
         totalStops: options.totalStops,
         transformColor: applyThemeReadabilityAndBrightness,
-    }, options.random);
-    return synchronizeGradientEffectiveColors(gradient, applyThemeReadabilityAndBrightness);
+    });
+    entry.gradientGenerator = generated.generator;
+    return synchronizeGradientEffectiveColors(generated.gradient, applyThemeReadabilityAndBrightness);
 }
 
 function getCurrentGroupCharacterNames(context) {
@@ -1117,6 +1301,7 @@ export function applyGradientPreset(entry, preset) {
     entry.baseColor = applied.baseColor;
     entry.color = applied.color;
     entry.gradient = applied.gradient;
+    entry.gradientGenerator = null;
     return entry.gradient;
 }
 
@@ -1126,11 +1311,13 @@ export function swapEntryColorData(firstEntry, secondEntry) {
         baseColor: getBaseColor(firstEntry),
         color: getEntryEffectiveColor(firstEntry),
         gradient: cloneGradient(firstEntry.gradient),
+        gradientGenerator: normalizeEntryGradientGenerator(firstEntry.gradientGenerator, firstEntry.gradient),
     };
     const second = {
         baseColor: getBaseColor(secondEntry),
         color: getEntryEffectiveColor(secondEntry),
         gradient: cloneGradient(secondEntry.gradient),
+        gradientGenerator: normalizeEntryGradientGenerator(secondEntry.gradientGenerator, secondEntry.gradient),
     };
     Object.assign(firstEntry, second);
     Object.assign(secondEntry, first);
@@ -1145,6 +1332,7 @@ export function syncAllEffectiveColors() {
             setEntryFromBaseColor(entry, baseColor);
         }
     }
+    setNarratorStyle(settings, settings.narratorStyle, applyThemeReadabilityAndBrightness);
 }
 
 export function collectAssignedColors(excludeKeys = []) {
@@ -1222,7 +1410,7 @@ export function resolveUniqueAssignedColor(preferredColor, excludeKeys = []) {
 
 export function buildCharacterEntry(name, options = {}) {
     const trimmedName = String(name ?? '').trim();
-    if (!trimmedName) return { key: '', entry: null, remapped: false };
+    if (!trimmedName || trimmedName.toLowerCase() === 'narrator') return { key: '', entry: null, remapped: false };
 
     const key = trimmedName.toLowerCase();
     const colorMode = options.colorMode === 'effective' ? 'effective' : 'base';
@@ -1239,22 +1427,49 @@ export function buildCharacterEntry(name, options = {}) {
         : deriveBaseColorFromEffectiveColor(assignedColor);
     const suppliedGradient = synchronizeGradientEffectiveColors(normalizeGradient(options.gradient), applyThemeReadabilityAndBrightness);
 
+    const origin = String(options.origin ?? 'runtime').trim().toLowerCase();
+    const bypassAutomation = ['import', 'preset', 'undo'].includes(origin);
+    const group = normalizeGroupName(options.group);
+    const profile = bypassAutomation ? null : resolveGroupProfile(groupProfiles, group);
+    const locked = resolveGroupAutomation(profile, 'autoLock', {
+        hasExplicit: Object.prototype.hasOwnProperty.call(options, 'locked'),
+        explicit: options.locked === true,
+        globalValue: bypassAutomation ? undefined : settings.autoLockDetected !== false,
+        defaultValue: false,
+    });
+    const randomGradient = resolveGroupAutomation(profile, 'randomGradient', {
+        hasExplicit: Object.prototype.hasOwnProperty.call(options, 'randomGradient'),
+        explicit: options.randomGradient === true,
+        globalValue: bypassAutomation ? undefined : shouldAutoRandomizeGradient(trimmedName),
+        defaultValue: false,
+    });
+    const applyStyleOnCreate = !!profile && resolveGroupAutomation(profile, 'applyStyleOnCreate', {
+        hasExplicit: Object.prototype.hasOwnProperty.call(options, 'applyStyleOnCreate'),
+        explicit: options.applyStyleOnCreate === true,
+        defaultValue: false,
+    });
+
     const entry = {
         color: assignedColor,
         baseColor,
         name: trimmedName,
-        locked: !!options.locked,
+        locked,
         keep: !!options.keep,
         aliases: normalizeAliases(options.aliases),
         style: VALID_STYLES.has(options.style) ? options.style : '',
         dialogueCount: Number.isFinite(options.dialogueCount) && options.dialogueCount > 0 ? Math.floor(options.dialogueCount) : 0,
-        group: String(options.group ?? '').trim(),
+        group,
         font: normalizeGoogleFontName(options.font),
         gradient: suppliedGradient,
+        gradientGenerator: normalizeEntryGradientGenerator(options.gradientGenerator, suppliedGradient),
     };
-    if (!entry.gradient && options.randomGradient !== false
-        && (options.randomGradient === true || shouldAutoRandomizeGradient(trimmedName))) {
-        entry.gradient = createRandomGradient(entry, { preserveAnimation: false });
+    if (applyStyleOnCreate) {
+        const changedFields = applyGroupProfile(entry, profile);
+        if (changedFields.includes('baseColor')) setEntryFromBaseColor(entry, getBaseColor(entry));
+        else if (changedFields.includes('gradient')) setEntryGradient(entry, entry.gradient);
+    }
+    if (!entry.gradient && randomGradient) {
+        entry.gradient = createRandomGradient(entry, { preserveAnimation: false, initial: true });
     }
 
     return {

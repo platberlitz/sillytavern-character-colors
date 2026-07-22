@@ -1,6 +1,8 @@
 // utils.js - extracted from index.js (mechanical split)
 import { pruneReducibleCompositeEntries } from './color-blocks.js';
 import { cloneGradient, normalizeGradient } from './gradients.js';
+import { normalizeGroupName } from './group-profiles.js';
+import { GRADIENT_GENERATOR_ALGORITHM, normalizeGradientGenerator } from './seeded-gradient-generator.js';
 import { escapeHtml } from './st-api.js';
 import { settings } from './state.js';
 
@@ -67,10 +69,19 @@ export function normalizeCharacterEntry(entry, fallbackName = '') {
         aliases: normalizeAliases(entry?.aliases),
         style: VALID_STYLES.has(entry?.style) ? entry.style : '',
         dialogueCount: Number.isFinite(entry?.dialogueCount) && entry.dialogueCount > 0 ? Math.floor(entry.dialogueCount) : 0,
-        group: String(entry?.group ?? '').trim(),
+        group: normalizeGroupName(entry?.group),
         font: normalizeGoogleFontName(entry?.font),
         gradient: normalizeGradient(entry?.gradient),
+        gradientGenerator: normalizeEntryGradientGenerator(entry?.gradientGenerator, entry?.gradient),
     };
+}
+
+export function normalizeEntryGradientGenerator(value, gradient = true) {
+    if (!gradient || !value || typeof value !== 'object' || Array.isArray(value)) return null;
+    if (value.algorithm !== undefined && value.algorithm !== GRADIENT_GENERATOR_ALGORITHM) return null;
+    const seed = String(value.seed ?? '');
+    if (!seed) return null;
+    return normalizeGradientGenerator({ ...value, seed });
 }
 
 export function normalizeCharacterColors(rawColors, options = {}) {
@@ -80,6 +91,7 @@ export function normalizeCharacterColors(rawColors, options = {}) {
         const normalizedEntry = normalizeCharacterEntry(entry, rawKey);
         if (!normalizedEntry) continue;
         const key = normalizedEntry.name.toLowerCase();
+        if (key === 'narrator') continue;
         if (!normalized[key]) {
             normalized[key] = normalizedEntry;
             continue;
@@ -92,7 +104,13 @@ export function normalizeCharacterColors(rawColors, options = {}) {
         if (!existing.group && normalizedEntry.group) existing.group = normalizedEntry.group;
         if (!existing.style && normalizedEntry.style) existing.style = normalizedEntry.style;
         if (!existing.font && normalizedEntry.font) existing.font = normalizedEntry.font;
-        if (!existing.gradient && normalizedEntry.gradient) existing.gradient = cloneGradient(normalizedEntry.gradient);
+        if (!existing.gradient && normalizedEntry.gradient) {
+            existing.gradient = cloneGradient(normalizedEntry.gradient);
+            existing.gradientGenerator = normalizedEntry.gradientGenerator ? { ...normalizedEntry.gradientGenerator } : null;
+        } else if (!existing.gradientGenerator && normalizedEntry.gradientGenerator
+            && JSON.stringify(existing.gradient) === JSON.stringify(normalizedEntry.gradient)) {
+            existing.gradientGenerator = { ...normalizedEntry.gradientGenerator };
+        }
         if (existing.baseColor === '#888888' && normalizedEntry.baseColor !== '#888888') existing.baseColor = normalizedEntry.baseColor;
         if (existing.color === '#888888' && normalizedEntry.color !== '#888888') existing.color = normalizedEntry.color;
     }

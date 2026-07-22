@@ -16,7 +16,12 @@ A SillyTavern extension that gives each character's dialogue a consistent visual
 - **Three storage scopes**: separate colors per chat, share them across one character card, or use one global table.
 - **Reviewed scope switching**: choose whether to use, copy, merge, replace, or start an empty destination. Existing data is never overwritten merely by changing the scope selector.
 - **Compact character editor**: Keep and Edit stay visible; color, lock, typography, aliases, groups, deletion, and gradients are disclosed on demand.
-- **Custom gradients**: create linear or radial gradients with 2–5 stops, animation, exact positions, 16 built-in presets, custom presets, and one-click randomization.
+- **Custom gradients**: create linear or radial gradients with 2–5 stops, deterministic `dc-gradient-v1` seeds, animation, exact positions, 16 built-in presets, custom presets, preset gallery, and one-click randomization.
+- **Group profiles**: define scoped group styles and automation rules. Group profiles are stored with the active color table and apply materialized styles on assignment or character creation.
+- **Multi-select bulk editing & style copy/paste**: select multiple character rows to lock, keep, group, randomize, or delete in one transaction. Copy character style fields (gradient, font, text style) and paste them across rows.
+- **Color-vision simulation & perceptual conflict reports**: preview how dialogue appears under protanopia, deuteranopia, tritanopia, or achromatopsia without mutating stored colors. Detect and repair perceptual color conflicts across all character pairs.
+- **Narrator style**: configure dedicated narrator colors, gradients, and text styles. Narrator styling works across LLM prompts, DOM rendering, legend, statistics, and conflict reports.
+- **Attribution reviews**: verifier suggestions are queued for explicit human review by default. Accept, edit, or reject suggestions segment by segment or in bulk.
 - **Automatic NPC gradients**: optionally randomize gradients for newly discovered NPCs while excluding the current card, group cards, and user persona. Off by default.
 - **Automatic gradients for every new character**: a separate default-off override can randomize gradients for every newly created entry.
 - **Global gradient drift**: optionally animate every gradient without changing each character's individual Drift setting. Off by default.
@@ -99,6 +104,9 @@ Local-mode assignments are stored as per-chat quote overrides. LLM-mode assignme
 - Generate custom palettes from a name and mood notes, or save current colors as a palette.
 - Apply 16 built-in gradient presets or manage reusable custom gradient presets from a character's gradient editor.
 - Export/import color data and settings as JSON. Imports are analyzed before any changes are applied.
+- Build portable **Style packs** (`dialogue-colors-style-pack` v1) from selected custom palettes, palette metadata, custom gradient presets, optional assignment presets, and safe appearance values. This format is separate from the internal color schema version.
+- Style-pack imports are local-only and reviewed before installation. Palette, gradient, and assignment-preset conflicts can keep, rename, or replace per category; assignment application and appearance changes are explicit opt-ins.
+- Style packs never carry storage scope, auto-sync, connection profiles, prompts, attribution/automation settings, UI positions, URLs, CSS, or font files. Font family names in optional assignment presets are shown during review as a privacy note.
 
 ## Storage, Cards, and Sync
 
@@ -134,7 +142,7 @@ LLM mode supports prompt depth, system/user role, and two delivery modes:
 
 ## Notes
 
-- Storage and import/export preserve gradients, aliases, styles, groups, locks, fonts, Keep state, custom gradient presets, and settings.
+- Storage and import/export preserve gradients, aliases, styles, groups, locks, fonts, Keep state, custom gradient presets, and settings. Style packs additionally round-trip custom palette metadata when palettes are selected.
 - DOM-only quote overrides are stored in chat metadata and ignored if the source message changes, preventing stale assignment to the wrong quote.
 - Composite speaker labels such as `Alice & Bob`, `Alice/Bob`, or `Alice and Bob` are split and attributed individually.
 - Ctrl/Cmd+Z and redo operate on extension history while focus is outside text-editing fields.

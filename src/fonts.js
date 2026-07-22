@@ -1,9 +1,9 @@
 // fonts.js - extracted from index.js (mechanical split)
-import { buildColorFontLookup, buildColorRenderingLookup, resolveCharacterKeyByNameOrAlias } from './color-blocks.js';
-import { applyGradientText, clearGradientText } from './gradient-rendering.js';
-import { getEntryEffectiveColor } from './palettes.js';
+import { buildColorFontLookup, buildColorRenderingLookup, refreshTransientNarratorCount, resolveCharacterKeyByNameOrAlias } from './color-blocks.js';
+import { applyGradientText, clearGradientText, getVisualRenderState } from './gradient-rendering.js';
 import { getContext } from './st-api.js';
 import { characterColors, loadedGoogleFonts, settings } from './state.js';
+import { applyTextStyle, clearTextStyle, TEXT_STYLE_MARKER_ATTRIBUTE } from './text-style-rendering.js';
 import { getGoogleFontFamily, normalizeGoogleFontName, normalizeHexColor } from './utils.js';
 
 const invalidGoogleFontNames = new Set(['']);
@@ -46,7 +46,13 @@ function clearCustomFontOnly(fontEl) {
 export function clearCustomFontTag(fontEl) {
     if (!fontEl) return false;
     let changed = clearGradientText(fontEl);
+    if (clearTextStyle(fontEl)) changed = true;
     if (clearCustomFontOnly(fontEl)) changed = true;
+    if (fontEl.hasAttribute('data-dc-preview-color')) {
+        fontEl.style.color = '';
+        fontEl.removeAttribute('data-dc-preview-color');
+        changed = true;
+    }
     if (fontEl.hasAttribute('data-dc-aria-label')) {
         fontEl.removeAttribute('aria-label');
         fontEl.removeAttribute('data-dc-aria-label');
@@ -61,7 +67,7 @@ export function clearCustomFontTag(fontEl) {
 
 export function clearCustomFontsFromFontTags(root = document) {
     let changed = false;
-    root?.querySelectorAll?.('font[data-dc-font], font[data-dc-gradient], font[data-dc-aria-label], font[data-dc-speaker-name]').forEach(fontEl => {
+    root?.querySelectorAll?.(`font[data-dc-font], font[data-dc-gradient], font[${TEXT_STYLE_MARKER_ATTRIBUTE}], font[data-dc-aria-label], font[data-dc-speaker-name], font[data-dc-preview-color]`).forEach(fontEl => {
         if (clearCustomFontTag(fontEl)) changed = true;
     });
     return changed;
@@ -91,7 +97,21 @@ export function applyCustomFontsToFontTags(mesText, rawText = '') {
         } else if (clearCustomFontOnly(fontEl)) {
             changed = true;
         }
-        const gradientResult = applyGradientText(fontEl, rendering?.entry);
+        const textStyleResult = applyTextStyle(fontEl, rendering?.entry?.style);
+        if (textStyleResult.changed) changed = true;
+        if (rendering?.entry) {
+            const displayColor = getVisualRenderState(rendering.entry, { target: 'chat' }).fallbackColor;
+            if (fontEl.style.color !== displayColor) {
+                fontEl.style.color = displayColor;
+                changed = true;
+            }
+            fontEl.setAttribute('data-dc-preview-color', '1');
+        } else if (fontEl.hasAttribute('data-dc-preview-color')) {
+            fontEl.style.color = '';
+            fontEl.removeAttribute('data-dc-preview-color');
+            changed = true;
+        }
+        const gradientResult = applyGradientText(fontEl, rendering?.entry, { target: 'chat' });
         if (gradientResult.changed) changed = true;
         const generatedLabel = rendering?.entry?.name ? `${rendering.entry.name}: ${fontEl.textContent.trim()}` : '';
         const generatedSpeakerName = rendering?.entry?.name || '';
@@ -142,6 +162,7 @@ export function applyCustomFontsToMessageElements(elements) {
 }
 
 export function applyCustomFontsToRenderedMessages() {
+    refreshTransientNarratorCount(getContext()?.chat || []);
     return applyCustomFontsToMessageElements(document.querySelectorAll('#chat .mes[mesid]'));
 }
 
@@ -191,11 +212,11 @@ export function styleAllCharacterCards() {
         const key = resolveCharacterKeyByNameOrAlias(name);
         if (key && characterColors[key]) {
             const entry = characterColors[key];
-            const color = getEntryEffectiveColor(entry);
+            const color = getVisualRenderState(entry, { target: 'chat' }).fallbackColor;
             
             // Apply name color
             nameEl.style.color = color;
-            applyGradientText(nameEl, { ...entry, color });
+            applyGradientText(nameEl, entry, { target: 'chat' });
             
             // Apply custom font if set
             if (entry.font) {

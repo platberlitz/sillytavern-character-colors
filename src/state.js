@@ -34,7 +34,7 @@ export function isDomEngine() {
 
 export const MODULE_NAME = 'dialogue-colors';
 
-export const COLOR_SCHEMA_VERSION = 5;
+export const COLOR_SCHEMA_VERSION = 8;
 
 export const COLOR_STORAGE_SCOPES = Object.freeze(['chat', 'card', 'global']);
 
@@ -50,6 +50,8 @@ export const LEGEND_POSITION_KEY = 'dc_legend_position';
 
 export let characterColors = {};
 
+export let groupProfiles = {};
+
 export const loadedGoogleFonts = new Set();
 
 export let colorHistory = [];
@@ -62,7 +64,10 @@ export let searchTerm = '';
 
 export let expandedCharacterRows = new Set();
 
-export let settings = { enabled: true, themeMode: 'auto', narratorColor: '', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, thoughtSymbols: '*', disableNarration: true, colorStorageScope: DEFAULT_COLOR_STORAGE_SCOPE, autoScanNewMessages: true, autoLockDetected: true, autoRandomNpcGradients: false, autoRandomAllGradients: false, driftAllGradientColors: false, enableRightClick: false, promptDepth: 1, autoRecolor: true, autoColorize: false, llmAttributionCheck: false, llmAttributionParallel: false, attributionConservativeOnly: false, attributionMaxTokens: 4096, domStealthColors: true, disableToasts: false, llmConnectionProfile: null, attributionConnectionProfile: null, colorSchemaVersion: COLOR_SCHEMA_VERSION, promptMode: 'inject', promptRole: 'system', sortMode: 'name', coloringEngine: 'llm' };
+// Runtime-only selection for character list bulk actions.
+export const selectedCharacterKeys = new Set();
+
+export let settings = { enabled: true, themeMode: 'auto', narratorStyle: { enabled: false, baseColor: '#888888', gradient: null, gradientGenerator: null }, narratorColor: '#888888', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, thoughtSymbols: '*', disableNarration: true, colorStorageScope: DEFAULT_COLOR_STORAGE_SCOPE, autoScanNewMessages: true, autoLockDetected: true, autoRandomNpcGradients: false, autoRandomAllGradients: false, driftAllGradientColors: false, gradientRandomMasterSeed: '', colorVisionPreviewMode: 'none', colorVisionPreviewSeverity: 100, colorVisionPreviewTarget: 'all', gradientAnimationMode: 'auto', enableRightClick: false, promptDepth: 1, autoRecolor: true, autoColorize: false, llmAttributionCheck: false, llmAttributionParallel: false, attributionConservativeOnly: false, attributionReviewPolicy: 'review', attributionMaxTokens: 4096, domStealthColors: true, disableToasts: false, llmConnectionProfile: null, attributionConnectionProfile: null, colorSchemaVersion: COLOR_SCHEMA_VERSION, promptMode: 'inject', promptRole: 'system', sortMode: 'name', coloringEngine: 'llm' };
 
 export const TOGGLE_SETTING_DEFAULTS = Object.freeze({
     enabled: true,
@@ -87,11 +92,11 @@ export const TOGGLE_SETTING_DEFAULTS = Object.freeze({
 
 export const GLOBAL_TOGGLE_KEYS = Object.freeze(Object.keys(TOGGLE_SETTING_DEFAULTS));
 
-export const GLOBAL_VISUAL_KEYS = Object.freeze(['thoughtSymbols', 'themeMode', 'colorTheme', 'brightness', 'promptDepth', 'promptRole', 'promptMode', 'coloringEngine']);
+export const GLOBAL_VISUAL_KEYS = Object.freeze(['thoughtSymbols', 'themeMode', 'colorTheme', 'brightness', 'promptDepth', 'promptRole', 'promptMode', 'coloringEngine', 'gradientRandomMasterSeed', 'colorVisionPreviewMode', 'colorVisionPreviewSeverity', 'colorVisionPreviewTarget', 'gradientAnimationMode']);
 
-export const GLOBAL_SETTINGS_V2_KEYS = Object.freeze([...new Set([...GLOBAL_VISUAL_KEYS, ...GLOBAL_TOGGLE_KEYS, 'colorStorageScope'])]);
+export const GLOBAL_SETTINGS_V2_KEYS = Object.freeze([...new Set([...GLOBAL_VISUAL_KEYS, ...GLOBAL_TOGGLE_KEYS, 'narratorStyle', 'narratorColor', 'colorStorageScope'])]);
 
-export const ACTIVE_SETTING_KEYS = Object.freeze([...new Set([...GLOBAL_SETTINGS_V2_KEYS, 'narratorColor', 'llmConnectionProfile', 'attributionConnectionProfile', 'attributionConservativeOnly', 'attributionMaxTokens', 'colorSchemaVersion', 'sortMode'])]);
+export const ACTIVE_SETTING_KEYS = Object.freeze([...new Set([...GLOBAL_SETTINGS_V2_KEYS, 'llmConnectionProfile', 'attributionConnectionProfile', 'attributionConservativeOnly', 'attributionReviewPolicy', 'attributionMaxTokens', 'colorSchemaVersion', 'sortMode'])]);
 
 export const LEGACY_AUTO_SYNC_ENABLED_KEY = 'dc_autosync_enabled';
 
@@ -117,13 +122,17 @@ export let isVerifyingAttribution = false;
 
 export let pendingAttributionVerifications = [];
 
-export const ATTRIBUTION_VERIFIER_VERSION = 3;
+export const ATTRIBUTION_VERIFIER_VERSION = 4;
 
 export const AUTO_ATTRIBUTION_VERIFY_DELAY_MS = 300;
 
 export const AUTO_ATTRIBUTION_VERIFY_STABLE_RETRY_DELAY_MS = 500;
 
 export const AUTO_ATTRIBUTION_VERIFY_RETRY_DELAY_MS = 3000;
+
+export const AUTO_ATTRIBUTION_VERIFY_RENDERED_LIMIT = 3;
+
+export const MAX_PENDING_AUTO_ATTRIBUTION_VERIFICATIONS = 50;
 
 export const STREAMING_ATTRIBUTION_VERIFY_DELAY_MS = 1000;
 
@@ -199,6 +208,7 @@ export function setAutoSyncSaveTimeout(value) { autoSyncSaveTimeout = value; ret
 export function setAutoSyncSequence(value) { autoSyncSequence = value; return value; }
 export function setAutoSyncStatusError(value) { autoSyncStatusError = value; return value; }
 export function setCharacterColors(value) { characterColors = value; return value; }
+export function setGroupProfiles(value) { groupProfiles = value; return value; }
 export function setColorHistory(value) { colorHistory = value; return value; }
 export function setColorStateSaveTimer(value) { colorStateSaveTimer = value; return value; }
 export function setExpandedCharacterRows(value) { expandedCharacterRows = value; return value; }

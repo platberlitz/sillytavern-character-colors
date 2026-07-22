@@ -1,12 +1,17 @@
 // dom-engine.js - extracted from index.js (mechanical split)
 import { attributeDialogueSegments } from './attribution.js';
+import { ATTRIBUTION_REVIEW_STATUS, ATTRIBUTION_VERIFICATION_STATUS, createAttributionStore, deleteAttributionOverrideRecord, normalizeAttributionConfidence, normalizeAttributionSource } from './attribution-store.js';
+import { unregisterGradientAnimationRoot } from './animation-controller.js';
 import { collectFontColorsFromText, resolveCharacterKeyByNameOrAlias } from './color-blocks.js';
 import { applyCustomFontsToFontTags, applyCustomFontsToMessageElements, clearCustomFontsFromFontTags, loadGoogleFont, scheduleCardStyle, scheduleCustomFontRefresh } from './fonts.js';
-import { applyGradientText, clearGradientText } from './gradient-rendering.js';
+import { applyGradientText, clearGradientText, getVisualRenderState } from './gradient-rendering.js';
 import { queueColorStateSave } from './live-colors.js';
+import { getNarratorVisual } from './narrator-style.js';
+import { applyThemeReadabilityAndBrightness } from './palettes.js';
 import { converter, escapeHtml, eventSource, event_types, getContext } from './st-api.js';
 import { ATTRIBUTION_VERIFIER_VERSION, AUTO_ATTRIBUTION_VERIFY_DELAY_MS, attributionChatGeneration, characterColors, isDomEngine, runtimeState, settings, streamingAttributionOverrides, streamingHeuristicCache } from './state.js';
 import { isPlainObject } from './storage.js';
+import { applyTextStyle, clearTextStyle } from './text-style-rendering.js';
 import { updateLegend } from './ui.js';
 import { captureOpenDetailsState, getGoogleFontFamily, getMessageElementByIndex, hashMessageText, normalizeSegmentText, restoreOpenDetailsState, stripColorBlocks } from './utils.js';
 import { queueAutoAttributionVerificationForElements, queueAutoAttributionVerificationForMessage, queueAutoAttributionVerificationForRenderedMessages } from './verify.js';
@@ -102,7 +107,7 @@ export function getMessageDomReadiness(mesElement, msg, mesIndex) {
     }
     const attribution = attributeDialogueSegments(msg.mes, msg.name, {
         autoAddMessageSpeaker: false,
-        overrides: getMessageQuoteOverridesForDecoration(mesIndex, msg),
+        ...getMessageQuoteOverrideOptions(mesIndex, msg),
         mesIndex,
     });
     const quoteSegments = attribution.segments.filter(seg => seg.delimiter !== '*' && seg.delimiter !== '_');
@@ -480,6 +485,21 @@ export function getMessageQuoteOverridesForDecoration(mesIndex, msg) {
     return { ...streaming, ...persisted };
 }
 
+export function getMessageQuoteOverrideOptions(mesIndex, msg) {
+    const persisted = getMessageQuoteOverrideEntry(mesIndex, msg, false);
+    const streaming = getStreamingAttributionOverrideEntry(mesIndex, msg, false);
+    const overrides = getMessageQuoteOverridesForDecoration(mesIndex, msg);
+    const sources = persisted?.sources || streaming?.sources
+        ? { ...(streaming?.sources || {}), ...(persisted?.sources || {}) }
+        : null;
+    return {
+        overrides,
+        overrideSources: sources,
+        overrideConfidences: persisted?.confidences || null,
+        overrideRecords: persisted?.records || null,
+    };
+}
+
 export function hasMessageQuoteOverridesForDecoration(mesIndex, msg) {
     const overrides = getMessageQuoteOverridesForDecoration(mesIndex, msg);
     return !!overrides && Object.keys(overrides).length > 0;
@@ -527,14 +547,51 @@ export function getMessageQuoteOverrideEntry(mesIndex, msg, create = false) {
 export function setMessageQuoteOverride(mesIndex, msg, segmentIndex, speakerName, options = {}) {
     const entry = getMessageQuoteOverrideEntry(mesIndex, msg, true);
     if (!entry) return false;
-    entry.segments[String(segmentIndex)] = String(speakerName);
+    const key = String(segmentIndex);
+    entry.segments[key] = String(speakerName);
     if (!isPlainObject(entry.sources)) entry.sources = {};
-    entry.sources[String(segmentIndex)] = options.source || 'manual';
+    entry.sources[key] = normalizeAttributionSource(options.source, 'manual');
+    if (options.confidence !== undefined) {
+        if (!isPlainObject(entry.confidences)) entry.confidences = {};
+        entry.confidences[key] = normalizeAttributionConfidence(options.confidence);
+    }
+    if (options.reviewId !== undefined && options.reviewId !== null) {
+        const reviewId = String(options.reviewId).trim().slice(0, 96);
+        if (reviewId) {
+            if (!isPlainObject(entry.reviewIds)) entry.reviewIds = {};
+            entry.reviewIds[key] = reviewId;
+        }
+    }
+    if (options.evidence !== undefined) {
+        if (!isPlainObject(entry.records)) entry.records = {};
+        entry.records[key] = {
+            speaker: String(speakerName),
+            source: entry.sources[key],
+            confidence: entry.confidences?.[key],
+            evidence: Array.isArray(options.evidence) ? options.evidence : [options.evidence],
+            ...(entry.reviewIds?.[key] ? { reviewId: entry.reviewIds[key] } : {}),
+        };
+    }
+    const messageId = msg?.id ?? msg?.send_date;
+    if (messageId !== undefined && messageId !== null && String(messageId).trim()) entry.messageId = String(messageId).trim().slice(0, 120);
+    entry.textLength = String(msg?.mes ?? '').length;
+    if (Object.values(ATTRIBUTION_VERIFICATION_STATUS).includes(options.verificationStatus)) {
+        entry.verificationStatus = options.verificationStatus;
+    }
     streamingHeuristicCache.clear();
     // A manual override means the LLM-verified state is no longer authoritative.
     delete entry.verifiedHash;
     delete entry.verifiedAt;
     delete entry.verifiedVersion;
+    saveChatMetadata();
+    return true;
+}
+
+export function deleteMessageQuoteOverride(mesIndex, msg, segmentIndex) {
+    const map = getQuoteOverridesMap(false);
+    const entry = getMessageQuoteOverrideEntry(mesIndex, msg, false);
+    if (!map || !entry || !deleteAttributionOverrideRecord(map, mesIndex, segmentIndex)) return false;
+    streamingHeuristicCache.clear();
     saveChatMetadata();
     return true;
 }
@@ -550,12 +607,18 @@ export function restoreMessageQuoteOverrideEntry(mesIndex, snapshot) {
     return true;
 }
 
-export function markMessageAttributionVerified(mesIndex, msg) {
+export function markMessageAttributionVerified(mesIndex, msg, verificationStatus = ATTRIBUTION_VERIFICATION_STATUS.CLEAN) {
     const entry = getMessageQuoteOverrideEntry(mesIndex, msg, true);
     if (!entry) return false;
     entry.verifiedHash = hashMessageText(msg?.mes);
     entry.verifiedAt = Date.now();
     entry.verifiedVersion = ATTRIBUTION_VERIFIER_VERSION;
+    entry.verificationStatus = Object.values(ATTRIBUTION_VERIFICATION_STATUS).includes(verificationStatus)
+        ? verificationStatus
+        : ATTRIBUTION_VERIFICATION_STATUS.CLEAN;
+    const messageId = msg?.id ?? msg?.send_date;
+    if (messageId !== undefined && messageId !== null && String(messageId).trim()) entry.messageId = String(messageId).trim().slice(0, 120);
+    entry.textLength = String(msg?.mes ?? '').length;
     saveChatMetadata();
     return true;
 }
@@ -563,7 +626,74 @@ export function markMessageAttributionVerified(mesIndex, msg) {
 export function isMessageAttributionVerified(mesIndex, msg) {
     const entry = getMessageQuoteOverrideEntry(mesIndex, msg, false);
     const hash = hashMessageText(msg?.mes);
-    return !!entry && entry.hash === hash && entry.verifiedHash === hash && entry.verifiedVersion === ATTRIBUTION_VERIFIER_VERSION;
+    return !!entry
+        && entry.hash === hash
+        && entry.verifiedHash === hash
+        && entry.verifiedVersion === ATTRIBUTION_VERIFIER_VERSION
+        && Object.values(ATTRIBUTION_VERIFICATION_STATUS).includes(entry.verificationStatus);
+}
+
+function markAttributionReviewDecisionStatus(review) {
+    const chat = getContext()?.chat || [];
+    const index = Number(review?.messageIndex);
+    const msg = Number.isInteger(index) ? chat[index] : null;
+    const expectedId = String(review?.messageId ?? '');
+    const currentId = String(msg?.id ?? msg?.send_date ?? '');
+    if (!msg || (expectedId && expectedId !== currentId)) return false;
+    if (review?.messageHash && review.messageHash !== hashMessageText(msg.mes)) return false;
+    const hasPendingReview = getAttributionReviewAdapter().list({ status: ATTRIBUTION_REVIEW_STATUS.PENDING })
+        .some(item => item.messageFingerprint === review.messageFingerprint);
+    return markMessageAttributionVerified(
+        index,
+        msg,
+        hasPendingReview ? ATTRIBUTION_VERIFICATION_STATUS.PENDING_REVIEW : ATTRIBUTION_VERIFICATION_STATUS.CLEAN,
+    );
+}
+
+export function getAttributionReviewAdapter() {
+    return createAttributionStore({
+        getMetadata: getChatMetadataStore,
+        getChat: () => getContext()?.chat || [],
+        getOverrideMap: () => getQuoteOverridesMap(true),
+        saveMetadata: saveChatMetadata,
+        extendedOverrides: true,
+        applyOverride(review) {
+            streamingHeuristicCache.clear();
+            markAttributionReviewDecisionStatus(review);
+        },
+    });
+}
+
+export function getAttributionReviewStore() {
+    return getAttributionReviewAdapter().get();
+}
+
+export function upsertAttributionReview(candidate, options = {}) {
+    return getAttributionReviewAdapter().upsert(candidate, options);
+}
+
+export function listAttributionReviews(options = {}) {
+    return getAttributionReviewAdapter().list(options);
+}
+
+export function acceptAttributionReview(id, options = {}) {
+    return getAttributionReviewAdapter().accept(id, options);
+}
+
+export function rejectAttributionReview(id, options = {}) {
+    const decision = getAttributionReviewAdapter().reject(id, options);
+    if (decision?.status === ATTRIBUTION_REVIEW_STATUS.REJECTED) markAttributionReviewDecisionStatus(decision);
+    return decision;
+}
+
+export function dismissAttributionReview(id, options = {}) {
+    const decision = getAttributionReviewAdapter().dismiss(id, options);
+    if (decision?.status === ATTRIBUTION_REVIEW_STATUS.STALE) markAttributionReviewDecisionStatus(decision);
+    return decision;
+}
+
+export function pruneAttributionReviews(options = {}) {
+    return getAttributionReviewAdapter().prune(options);
 }
 
 export function getMessageIndexFromElement(el) {
@@ -583,7 +713,7 @@ export function refreshDomDialogueCounts(chat = getContext()?.chat || []) {
         if (!msg || msg.is_system || !msg.mes || collectFontColorsFromText(msg.mes).size) continue;
         const attribution = attributeDialogueSegments(msg.mes, msg.name, {
             autoAddMessageSpeaker: true,
-            overrides: getMessageQuoteOverrides(i, msg),
+            ...getMessageQuoteOverrideOptions(i, msg),
             mesIndex: i,
         });
         if (attribution.createdCharacters) createdCharacters = true;
@@ -637,7 +767,7 @@ export function resolveDomSegmentIndexForElement(segmentEl, mesIndex, msg) {
 
     const attribution = attributeDialogueSegments(msg.mes, msg.name, {
         autoAddMessageSpeaker: true,
-        overrides: getMessageQuoteOverridesForDecoration(mesIndex, msg),
+        ...getMessageQuoteOverrideOptions(mesIndex, msg),
         mesIndex,
     });
 
@@ -666,6 +796,7 @@ export function resolveDomSegmentIndexForElement(segmentEl, mesIndex, msg) {
 
 export function clearSegmentDecoration(el) {
     clearGradientText(el);
+    clearTextStyle(el);
     el.style.color = '';
     el.style.backgroundColor = '';
     el.style.fontFamily = '';
@@ -681,43 +812,122 @@ export function clearSegmentDecoration(el) {
     }
 }
 
+export function clearNarratorTextSpans(mesText) {
+    const spans = Array.from(mesText?.querySelectorAll?.('span[data-dc-narrator]') || []);
+    spans.forEach(span => {
+        clearGradientText(span);
+        clearTextStyle(span);
+        const parent = span.parentNode;
+        if (!parent) return;
+        while (span.firstChild) parent.insertBefore(span.firstChild, span);
+        span.remove();
+    });
+    return spans.length > 0;
+}
+
+function clearLegacyNarratorContainerStyle(mesText) {
+    if (!mesText?.hasAttribute?.('data-dc-narrator')) return false;
+    mesText.style.color = '';
+    mesText.removeAttribute('data-dc-narrator');
+    if (!mesText.getAttribute('style')) mesText.removeAttribute('style');
+    return true;
+}
+
+function applyNarratorSpanVisual(span, narrator) {
+    const displayVisual = getVisualRenderState(narrator, { target: 'chat' });
+    span.style.color = displayVisual.fallbackColor;
+    applyTextStyle(span, narrator.style);
+    const family = getGoogleFontFamily(narrator.font);
+    if (family) {
+        loadGoogleFont(narrator.font);
+        span.style.fontFamily = family;
+        span.setAttribute('data-dc-font', '1');
+    } else {
+        span.style.fontFamily = '';
+        span.removeAttribute('data-dc-font');
+    }
+    applyGradientText(span, narrator, { target: 'chat' });
+}
+
+function collectNarratorTextNodes(mesText) {
+    if (!mesText) return [];
+    const documentRef = mesText.ownerDocument || document;
+    const nodeFilter = documentRef.defaultView?.NodeFilter || globalThis.NodeFilter;
+    if (!nodeFilter || typeof documentRef.createTreeWalker !== 'function') return [];
+    const walker = documentRef.createTreeWalker(mesText, nodeFilter.SHOW_TEXT, {
+        acceptNode(node) {
+            if (!node.nodeValue?.trim()) return nodeFilter.FILTER_REJECT;
+            const parent = node.parentElement;
+            if (!parent || parent.closest('q, em, font, script, style, textarea, pre, code, [data-dc-colored], [data-dc-narrator], .dc-auto-colorize-indicator')) {
+                return nodeFilter.FILTER_REJECT;
+            }
+            return nodeFilter.FILTER_ACCEPT;
+        },
+    });
+    const textNodes = [];
+    let textNode;
+    while ((textNode = walker.nextNode())) textNodes.push(textNode);
+    return textNodes;
+}
+
+export function hasNarratorTextNodesToDecorate(mesText) {
+    return collectNarratorTextNodes(mesText).length > 0;
+}
+
+export function decorateNarratorTextNodes(mesText, narrator) {
+    if (!mesText || !narrator) return 0;
+    const existing = Array.from(mesText.querySelectorAll('span[data-dc-narrator]'));
+    existing.forEach(span => applyNarratorSpanVisual(span, narrator));
+    const documentRef = mesText.ownerDocument || document;
+    const textNodes = collectNarratorTextNodes(mesText);
+    textNodes.forEach(node => {
+        const span = documentRef.createElement('span');
+        span.setAttribute('data-dc-narrator', '1');
+        node.parentNode.insertBefore(span, node);
+        span.appendChild(node);
+        applyNarratorSpanVisual(span, narrator);
+    });
+    return existing.length + textNodes.length;
+}
+
 export function undecorateMessageDom(mesElement, options = {}) {
     const mesText = mesElement?.querySelector?.('.mes_text');
     if (mesText) {
+        clearLegacyNarratorContainerStyle(mesText);
         mesText.querySelectorAll('[data-dc-colored], [data-dc-seg]').forEach(clearSegmentDecoration);
         clearCustomFontsFromFontTags(mesText);
-        if (mesText.hasAttribute('data-dc-narrator')) {
-            mesText.style.color = '';
-            if (!mesText.getAttribute('style')) mesText.removeAttribute('style');
-            mesText.removeAttribute('data-dc-narrator');
-        }
+        if (options.preserveNarrator !== true) clearNarratorTextSpans(mesText);
     }
     // Tear down the external-rebuild watcher so it doesn't re-decorate
     // a message we've intentionally undecorated.
     if (options.clearWatcher !== false) clearDecoratedWatcher(mesElement);
+    if (options.clearWatcher !== false) unregisterGradientAnimationRoot(mesElement);
 }
 
 export function decorateMessageDom(mesElement, msg, mesIndex) {
     const mesText = mesElement?.querySelector?.('.mes_text');
     if (!mesText) return { decorated: false, createdCharacters: false, needsRetry: !!msg && !msg.is_system };
     if (suspendMessageDomWorkForEdit(mesElement, mesIndex)) return { decorated: false, createdCharacters: false, needsRetry: false };
-    undecorateMessageDom(mesElement, { clearWatcher: false });
+    undecorateMessageDom(mesElement, { clearWatcher: false, preserveNarrator: true });
     if (!settings.enabled || !msg || msg.is_system) {
+        clearNarratorTextSpans(mesText);
         return { decorated: false, createdCharacters: false };
     }
     const hasPersistedFontColors = mesText.querySelector('font[color]') || collectFontColorsFromText(msg.mes).size;
     if (hasPersistedFontColors) {
+        clearNarratorTextSpans(mesText);
         applyCustomFontsToFontTags(mesText, msg.mes);
         clearDecoratedWatcher(mesElement);
         return { decorated: false, createdCharacters: false };
     }
     if (!isDomEngine()) {
+        clearNarratorTextSpans(mesText);
         return { decorated: false, createdCharacters: false };
     }
 
     const attribution = attributeDialogueSegments(msg.mes, msg.name, {
         autoAddMessageSpeaker: true,
-        overrides: getMessageQuoteOverridesForDecoration(mesIndex, msg),
+        ...getMessageQuoteOverrideOptions(mesIndex, msg),
         mesIndex: mesIndex,
     });
 
@@ -725,11 +935,13 @@ export function decorateMessageDom(mesElement, msg, mesIndex) {
     const applyDecoration = (seg, el) => {
         el.setAttribute('data-dc-seg', String(seg.index));
         if (!seg.assignment) return;
-        el.style.color = seg.assignment.color;
         const entryKey = characterColors[seg.assignment.key]
             ? seg.assignment.key
             : resolveCharacterKeyByNameOrAlias(seg.assignment.name || seg.assignment.key);
         const entry = entryKey ? characterColors[entryKey] : null;
+        const displayVisual = getVisualRenderState(entry || { color: seg.assignment.color, baseColor: seg.assignment.color }, { target: 'chat' });
+        el.style.color = displayVisual.fallbackColor;
+        applyTextStyle(el, entry?.style);
         const font = entry?.font || seg.assignment.font;
         const family = getGoogleFontFamily(font);
         if (family) {
@@ -737,8 +949,8 @@ export function decorateMessageDom(mesElement, msg, mesIndex) {
             el.style.fontFamily = family;
             el.setAttribute('data-dc-font', '1');
         }
-        const highlightColor = settings.highlightMode ? `${seg.assignment.color}26` : '';
-        const gradientResult = applyGradientText(el, entry, { highlightColor });
+        const highlightColor = settings.highlightMode ? `${displayVisual.fallbackColor}26` : '';
+        const gradientResult = applyGradientText(el, entry, { highlightColor, target: 'chat' });
         if (settings.highlightMode && !gradientResult.applied) el.style.backgroundColor = highlightColor;
         el.setAttribute('data-dc-colored', '1');
         el.setAttribute('data-dc-speaker', seg.assignment.key);
@@ -762,10 +974,9 @@ export function decorateMessageDom(mesElement, msg, mesIndex) {
     matchSegmentsToElements(emphasisSegments, emElements, seg => normalizeSegmentText(seg.text.slice(1, -1)), applyDecoration);
     matchedDecorations = mesText.querySelectorAll('[data-dc-colored]').length;
 
-    if (!settings.disableNarration && settings.narratorColor) {
-        mesText.style.color = settings.narratorColor;
-        mesText.setAttribute('data-dc-narrator', '1');
-    }
+    const narrator = getNarratorVisual(settings, applyThemeReadabilityAndBrightness);
+    if (narrator) decorated = decorateNarratorTextNodes(mesText, narrator) > 0 || decorated;
+    else clearNarratorTextSpans(mesText);
 
     return {
         decorated,
@@ -798,8 +1009,9 @@ export function clearDomSettleRefreshes() {
 // Disconnect every long-lived "decorated message" watcher. Called on chat
 // change and when DOM decoration is disabled wholesale.
 export function clearDecoratedWatchers() {
-    for (const { observer } of runtimeState.decoratedWatchers.values()) {
+    for (const [mesElement, { observer }] of runtimeState.decoratedWatchers.entries()) {
         try { observer.disconnect(); } catch (_) { /* ignored */ }
+        unregisterGradientAnimationRoot(mesElement);
     }
     runtimeState.decoratedWatchers.clear();
     decoratedWatcherHealthIterator = null;
@@ -949,8 +1161,11 @@ export function watchDecoratedMessage(mesElement, mesIndex) {
         if (!currentMesText || !currentMesText.isConnected) return;
         // Skip messages with LLM-emitted font[color] tags.
         if (currentMesText.querySelector('font[color]')) return;
-        // If our decorations are still present, the rebuild didn't wipe them.
-        if (currentMesText.querySelector('[data-dc-colored]') || currentMesText.querySelector('[data-dc-narrator]')) return;
+        // If all applicable decorations are still present, the rebuild did not wipe them.
+        const narrator = getNarratorVisual(settings, applyThemeReadabilityAndBrightness);
+        const narratorMissing = narrator && !currentMesText.querySelector('[data-dc-narrator]')
+            && hasNarratorTextNodesToDecorate(currentMesText);
+        if ((currentMesText.querySelector('[data-dc-colored]') || currentMesText.querySelector('[data-dc-narrator]')) && !narratorMissing) return;
         const msg = getContext()?.chat?.[repairIndex];
         if (!msg || msg.is_system) return;
         decorateObservedMessages([mesElement]);
@@ -1037,11 +1252,14 @@ export function getMessageDomHealthRepairType(mesElement, msg, mesIndex) {
     if (suspendMessageDomWorkForEdit(mesElement, mesIndex)) return '';
     if (mesText.querySelector('font[color]') || collectFontColorsFromText(msg.mes).size) return '';
     const readiness = getMessageDomReadiness(mesElement, msg, mesIndex);
+    const narrator = getNarratorVisual(settings, applyThemeReadabilityAndBrightness);
+    const narratorMissing = narrator && !mesText.querySelector('[data-dc-narrator]')
+        && hasNarratorTextNodesToDecorate(mesText);
     if (readiness.totalSegments === 0) {
-        return !settings.disableNarration && !!settings.narratorColor && !mesText.hasAttribute('data-dc-narrator') ? 'decorate' : '';
+        return narratorMissing ? 'decorate' : '';
     }
     if (!readiness.ready) return 'refresh';
-    return readiness.expectedDecorations > readiness.correctDecorations ? 'decorate' : '';
+    return readiness.expectedDecorations > readiness.correctDecorations || narratorMissing ? 'decorate' : '';
 }
 
 export function runDomHealthCheck() {

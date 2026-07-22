@@ -1,6 +1,9 @@
-// gradient-rendering.js - shared DOM markers and CSS variables for gradient text.
-import { buildGradientCss, getGradientSignature, normalizeGradient } from './gradients.js';
+// gradient-rendering.js - shared display-only visual resolution for rendered text.
+import { registerGradientAnimationElement, refreshGradientAnimationState } from './animation-controller.js';
+import { normalizeColorVisionSimulation } from './color-vision.js';
+import { normalizeGradient } from './gradients.js';
 import { settings } from './state.js';
+import { resolveVisual } from './visual-resolver.js';
 
 export const GRADIENT_TEXT_CLASS = 'dc-gradient-text';
 export const GRADIENT_ANIMATED_CLASS = 'dc-gradient-animated';
@@ -23,11 +26,28 @@ const GRADIENT_DATA_ATTRIBUTES = Object.freeze([
     'data-dc-gradient-reverse',
 ]);
 
-function normalizeFallbackColor(entry) {
-    const color = String(entry?.color ?? '').trim().toLowerCase();
-    if (/^#[0-9a-f]{6}$/.test(color)) return color;
-    const baseColor = String(entry?.baseColor ?? '').trim().toLowerCase();
-    return /^#[0-9a-f]{6}$/.test(baseColor) ? baseColor : '#888888';
+export function getColorVisionSimulationForTarget(target = 'chat', sourceSettings = settings) {
+    const previewTarget = ['ui', 'chat', 'all'].includes(sourceSettings?.colorVisionPreviewTarget)
+        ? sourceSettings.colorVisionPreviewTarget
+        : 'all';
+    const applies = previewTarget === 'all' || previewTarget === target;
+    const severity = Math.max(0, Math.min(100, Number(sourceSettings?.colorVisionPreviewSeverity) || 0)) / 100;
+    return normalizeColorVisionSimulation({
+        mode: applies ? sourceSettings?.colorVisionPreviewMode : 'none',
+        severity: applies ? severity : 0,
+    });
+}
+
+export function getVisualRenderState(entry, options = {}) {
+    const sourceSettings = options.settings || settings;
+    const colorVision = options.colorVision === undefined
+        ? getColorVisionSimulationForTarget(options.target || 'chat', sourceSettings)
+        : normalizeColorVisionSimulation(options.colorVision);
+    return resolveVisual(entry, {
+        colorVision,
+        animateAllGradients: sourceSettings.driftAllGradientColors === true,
+        reducedMotion: options.reducedMotion === true,
+    });
 }
 
 function setClass(element, className, enabled) {
@@ -49,26 +69,26 @@ function setStyleProperty(element, name, value) {
     return true;
 }
 
-export function getGradientRenderState(entry) {
+export function getGradientRenderState(entry, options = {}) {
     const gradient = normalizeGradient(entry?.gradient);
-    const css = buildGradientCss(entry);
-    if (!gradient || !css) return null;
-    const animationEnabled = gradient.animation.enabled || settings.driftAllGradientColors === true;
+    const visual = getVisualRenderState(entry, options);
+    if (!gradient || !visual.gradientCss) return null;
+    const animationEnabled = options.allowAnimation === false ? false : visual.effectiveAnimation.requested;
     return {
-        css,
-        fallbackColor: normalizeFallbackColor(entry),
+        css: visual.gradientCss,
+        fallbackColor: visual.fallbackColor,
         type: gradient.type,
         animationEnabled,
-        durationSeconds: gradient.animation.duration,
-        reverse: gradient.animation.reverse,
-        signature: `${getGradientSignature(entry)}:${animationEnabled ? 1 : 0}`,
+        durationSeconds: visual.effectiveAnimation.durationSeconds,
+        reverse: visual.effectiveAnimation.reverse,
+        signature: `${visual.signature}:${animationEnabled ? 1 : 0}`,
     };
 }
 
 export function clearGradientText(element) {
     if (!element) return false;
     let changed = false;
-    for (const className of [GRADIENT_TEXT_CLASS, GRADIENT_ANIMATED_CLASS, GRADIENT_REVERSE_CLASS, GRADIENT_HIGHLIGHT_CLASS]) {
+    for (const className of [GRADIENT_TEXT_CLASS, GRADIENT_ANIMATED_CLASS, 'dc-gradient-running', GRADIENT_REVERSE_CLASS, GRADIENT_HIGHLIGHT_CLASS]) {
         if (element.classList.contains(className)) {
             element.classList.remove(className);
             changed = true;
@@ -87,11 +107,12 @@ export function clearGradientText(element) {
         }
     }
     if (!element.getAttribute('style')) element.removeAttribute('style');
+    refreshGradientAnimationState();
     return changed;
 }
 
 export function applyGradientText(element, entry, options = {}) {
-    const state = getGradientRenderState(entry);
+    const state = getGradientRenderState(entry, options);
     if (!element || !state) {
         return { applied: false, changed: clearGradientText(element), state: null };
     }
@@ -118,5 +139,7 @@ export function applyGradientText(element, entry, options = {}) {
         changed = true;
     }
 
+    registerGradientAnimationElement(element);
+    refreshGradientAnimationState();
     return { applied: true, changed, state };
 }

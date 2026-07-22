@@ -1,18 +1,82 @@
 // verify.js - extracted from index.js (mechanical split)
-import { attributeDialogueSegments, ensureCharacterEntry } from './attribution.js';
-import { buildNameColorLookup, collectFontColorsFromText, parseNamedColorAssignmentsFromText, registerLookupAssignment, resolveSingleSpeakerAssignment } from './color-blocks.js';
-import { cancelMessageDomFollowupRepairs, clearMessageDomRepairTimer, clearStreamingAttributionOverrides, decorateMessageDomFromCurrentRender, decorateObservedMessages, getMessageQuoteOverrideEntry, getMessageQuoteOverridesForDecoration, isMessageAttributionVerified, markMessageAttributionVerified, scheduleMessageDomFollowupRepair, setMessageQuoteOverride, setStreamingAttributionOverride, suspendMessageDomWorkForEdit } from './dom-engine.js';
+import { attributeDialogueSegments } from './attribution.js';
+import { ATTRIBUTION_SOURCE, ATTRIBUTION_VERIFICATION_STATUS, normalizeAttributionConfidence } from './attribution-store.js';
+import { buildNameColorLookup, collectFontColorsFromText, parseNamedColorAssignmentsFromText, resolveCharacterKeyByNameOrAlias } from './color-blocks.js';
+import { cancelMessageDomFollowupRepairs, clearMessageDomRepairTimer, clearStreamingAttributionOverrides, decorateMessageDomFromCurrentRender, decorateObservedMessages, getMessageQuoteOverrideEntry, getMessageQuoteOverrideOptions, isMessageAttributionVerified, markMessageAttributionVerified, scheduleMessageDomFollowupRepair, setMessageQuoteOverride, setStreamingAttributionOverride, suspendMessageDomWorkForEdit, upsertAttributionReview } from './dom-engine.js';
 import { callLLMWithProfile } from './llm.js';
-import { getEntryEffectiveColor } from './palettes.js';
 import { formatPromptLiteralSymbol, getThoughtDelimiterSymbols } from './prompts.js';
 import { getContext } from './st-api.js';
-import { AUTO_ATTRIBUTION_VERIFY_DELAY_MS, AUTO_ATTRIBUTION_VERIFY_RETRY_DELAY_MS, AUTO_ATTRIBUTION_VERIFY_STABLE_RETRY_DELAY_MS, STREAMING_ATTRIBUTION_VERIFY_DELAY_MS, attributionChatGeneration, autoAttributionVerifyTimer, autoAttributionVerifyTimerDue, characterColors, isDomEngine, isStreamingGenerationActive, isVerifyingAttribution, lastStreamingAttributionVerifyKey, pendingAttributionVerifications, pendingAutoAttributionVerifyIndices, recentAutoAttributionVerifyAttempts, setAutoAttributionVerifyTimer, setAutoAttributionVerifyTimerDue, setIsVerifyingAttribution, setLastStreamingAttributionVerifyKey, setStreamingAttributionGeneration, setStreamingAttributionVerifyTimer, settings, streamingAttributionGeneration, streamingAttributionVerifyTimer } from './state.js';
-import { saveData } from './storage.js';
-import { setVerifyAttributionButtonBusy, updateCharList } from './ui.js';
+import { AUTO_ATTRIBUTION_VERIFY_DELAY_MS, AUTO_ATTRIBUTION_VERIFY_RENDERED_LIMIT, AUTO_ATTRIBUTION_VERIFY_RETRY_DELAY_MS, AUTO_ATTRIBUTION_VERIFY_STABLE_RETRY_DELAY_MS, MAX_PENDING_AUTO_ATTRIBUTION_VERIFICATIONS, STREAMING_ATTRIBUTION_VERIFY_DELAY_MS, attributionChatGeneration, autoAttributionVerifyTimer, autoAttributionVerifyTimerDue, characterColors, isDomEngine, isStreamingGenerationActive, isVerifyingAttribution, lastStreamingAttributionVerifyKey, pendingAttributionVerifications, pendingAutoAttributionVerifyIndices, recentAutoAttributionVerifyAttempts, setAutoAttributionVerifyTimer, setAutoAttributionVerifyTimerDue, setIsVerifyingAttribution, setLastStreamingAttributionVerifyKey, setStreamingAttributionGeneration, setStreamingAttributionVerifyTimer, settings, streamingAttributionGeneration, streamingAttributionVerifyTimer } from './state.js';
+import { setVerifyAttributionButtonBusy } from './ui.js';
 import { getMessageElementByIndex, hashMessageText, isCompositeSpeakerLabel, toast, unwrapCodeFence } from './utils.js';
 
 export function isMessageEligibleForAttributionVerification(msg) {
     return !!msg && !msg.is_system && !!msg.mes && !collectFontColorsFromText(msg.mes).size;
+}
+
+export const MAX_ATTRIBUTION_VERIFIER_RESPONSE_CHARS = 65536;
+export const MAX_ATTRIBUTION_VERIFIER_CORRECTIONS = 50;
+export const AUTO_HIGH_ATTRIBUTION_CONFIDENCE = 0.85;
+
+const RESERVED_VERIFIER_SPEAKER_NAMES = new Set(['unknown', 'unclear', 'narrator', 'none', 'n/a']);
+const RESERVED_VERIFIER_SPEAKER_SYNTAX = /[\u0000-\u001f\u007f\[\]{}<>=,():;]/;
+
+function isPlainObject(value) {
+    return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+export function normalizeAttributionVerifierSpeaker(value) {
+    if (typeof value !== 'string') return null;
+    const speaker = value.trim();
+    if (!speaker || speaker.length > 80 || RESERVED_VERIFIER_SPEAKER_SYNTAX.test(speaker)) return null;
+    if (RESERVED_VERIFIER_SPEAKER_NAMES.has(speaker.toLowerCase()) || isCompositeSpeakerLabel(speaker)) return null;
+    return speaker;
+}
+
+export function normalizeAttributionVerifierConfidence(value) {
+    if (typeof value === 'number') return Number.isFinite(value) && value >= 0 && value <= 1
+        ? normalizeAttributionConfidence(value)
+        : null;
+    if (typeof value !== 'string') return null;
+    const text = value.trim().toLowerCase();
+    const labels = { none: 0, low: 0.25, medium: 0.5, high: 0.75, certain: 1 };
+    if (Object.prototype.hasOwnProperty.call(labels, text)) return labels[text];
+    if (!/^\d+(?:\.\d+)?%?$/.test(text)) return null;
+    const numeric = Number.parseFloat(text) / (text.endsWith('%') ? 100 : 1);
+    return Number.isFinite(numeric) && numeric >= 0 && numeric <= 1
+        ? normalizeAttributionConfidence(numeric)
+        : null;
+}
+
+export function normalizeAttributionVerifierReason(value) {
+    if (typeof value !== 'string') return null;
+    const reason = value.trim();
+    if (!reason || reason.length > 240 || /[\u0000-\u001f\u007f]/.test(reason)) return null;
+    return reason;
+}
+
+export function normalizeAttributionVerifierCorrection(value) {
+    if (!isPlainObject(value)) return null;
+    const index = Number(value.index);
+    const speaker = normalizeAttributionVerifierSpeaker(value.speaker);
+    const confidence = normalizeAttributionVerifierConfidence(value.confidence);
+    const reason = normalizeAttributionVerifierReason(value.reason);
+    if (!Number.isInteger(index) || index < 0 || !speaker || confidence === null || !reason) return null;
+    return { index, speaker, confidence, reason };
+}
+
+export function validateAttributionVerifierCorrections(corrections, segments = null) {
+    if (!Array.isArray(corrections) || corrections.length > MAX_ATTRIBUTION_VERIFIER_CORRECTIONS) return null;
+    const segmentIndexes = Array.isArray(segments) ? new Set(segments.map(segment => segment?.index)) : null;
+    const indexes = new Set();
+    const normalized = [];
+    for (const correction of corrections) {
+        const valid = normalizeAttributionVerifierCorrection(correction);
+        if (!valid || indexes.has(valid.index) || (segmentIndexes && !segmentIndexes.has(valid.index))) return null;
+        indexes.add(valid.index);
+        normalized.push(valid);
+    }
+    return normalized;
 }
 
 export function isAutoAttributionVerificationEnabled() {
@@ -78,6 +142,15 @@ export function scheduleAutoAttributionVerificationDrain(delay = AUTO_ATTRIBUTIO
     }, Math.max(0, nextDue - Date.now())));
 }
 
+function boundPendingAutoAttributionVerifications() {
+    if (pendingAutoAttributionVerifyIndices.size <= MAX_PENDING_AUTO_ATTRIBUTION_VERIFICATIONS) return;
+    const retained = Array.from(pendingAutoAttributionVerifyIndices.values())
+        .sort((left, right) => right.mesIndex - left.mesIndex)
+        .slice(0, MAX_PENDING_AUTO_ATTRIBUTION_VERIFICATIONS);
+    pendingAutoAttributionVerifyIndices.clear();
+    retained.reverse().forEach(item => pendingAutoAttributionVerifyIndices.set(item.key, item));
+}
+
 export function queueAutoAttributionVerificationForMessage(mesIndex, options = {}) {
     const index = Number(mesIndex);
     const msg = getContext()?.chat?.[index];
@@ -92,6 +165,7 @@ export function queueAutoAttributionVerificationForMessage(mesIndex, options = {
         chatGeneration: attributionChatGeneration,
         force: options.force === true || existing?.force === true,
     });
+    boundPendingAutoAttributionVerifications();
     scheduleAutoAttributionVerificationDrain(options.delay ?? AUTO_ATTRIBUTION_VERIFY_DELAY_MS);
     return true;
 }
@@ -107,7 +181,9 @@ export function queueAutoAttributionVerificationForElements(elements, options = 
 }
 
 export function queueAutoAttributionVerificationForRenderedMessages(options = {}) {
-    const messages = Array.from(document.querySelectorAll('#chat .mes[mesid]')).reverse();
+    const messages = Array.from(document.querySelectorAll('#chat .mes[mesid]'))
+        .reverse()
+        .slice(0, AUTO_ATTRIBUTION_VERIFY_RENDERED_LIMIT);
     return queueAutoAttributionVerificationForElements(messages, options);
 }
 
@@ -156,6 +232,7 @@ export async function drainAutoAttributionVerificationQueue() {
             // Streaming started mid-drain: re-queue the whole unprocessed suffix,
             // not just the current item, so no message silently loses verification.
             for (const rest of queued.slice(i)) pendingAutoAttributionVerifyIndices.set(rest.key, rest);
+            boundPendingAutoAttributionVerifications();
             scheduleAutoAttributionVerificationDrain(AUTO_ATTRIBUTION_VERIFY_DELAY_MS);
             break;
         }
@@ -193,6 +270,7 @@ export async function drainAutoAttributionVerificationQueue() {
     }
     if (deferredItems.length) {
         for (const item of deferredItems) pendingAutoAttributionVerifyIndices.set(item.key, item);
+        boundPendingAutoAttributionVerifications();
         scheduleAutoAttributionVerificationDrain(AUTO_ATTRIBUTION_VERIFY_DELAY_MS);
     }
 }
@@ -235,7 +313,7 @@ export function collectJsonObjectCandidates(text) {
 }
 
 export function parseAttributionVerifierResponse(responseText) {
-    if (!responseText || typeof responseText !== 'string') return null;
+    if (!responseText || typeof responseText !== 'string' || responseText.length > MAX_ATTRIBUTION_VERIFIER_RESPONSE_CHARS) return null;
     // Strip common reasoning/thinking wrappers so we can find the final JSON.
     let cleaned = responseText
         .replace(/<think>[\s\S]*?<\/think>/gi, '')
@@ -268,7 +346,8 @@ export function parseAttributionVerifierResponse(responseText) {
             // Only accept candidates that actually carry a corrections array; a
             // parseable-but-wrong-shape object (e.g. a trailing status object)
             // must not hide the real answer later in the candidate list.
-            if (Array.isArray(corrections)) return corrections;
+            const validated = validateAttributionVerifierCorrections(corrections);
+            if (validated) return validated;
         } catch { /* try next candidate */ }
     }
     return null;
@@ -308,7 +387,7 @@ export function buildAttributionVerifierPrompt(msg, mesIndex, segments, lookup) 
 Return ONLY valid JSON. No reasoning, no Markdown, no code fence, no extra text.
 
 Required schema:
-{"corrections":[{"index":0,"speaker":"Name"}]}
+{"corrections":[{"index":0,"speaker":"Name","confidence":0.95,"reason":"explicit speaker tag"}]}
 
 If there are no corrections, return exactly:
 {"corrections":[]}
@@ -318,9 +397,10 @@ Rules:
 2. If the current speaker is already correct, omit that segment.
 3. If the speaker is unclear or only a guess, omit that segment.
 4. Use one speaker name only, preferably from the known speakers and aliases.
-5. Do not invent a speaker unless the full message text explicitly names them.
-6. Do not use Unknown, Unclear, None, N/A, Narrator, or a group/composite name as a speaker correction.
-7. Correction indexes must match the numbered segment list exactly.
+5. Include a numeric confidence from 0 to 1 and a short evidence-based reason for every correction.
+6. If an explicitly named speaker is not known, it may be proposed for review but will not be applied automatically.
+7. Do not use Unknown, Unclear, None, N/A, Narrator, or a group/composite name as a speaker correction.
+8. Correction indexes must match the numbered segment list exactly.
 
 Context:
 - Message index: ${mesIndex}
@@ -335,23 +415,91 @@ ${quoteList}`;
 }
 
 export function resolveVerifierSpeakerName(rawName, lookup) {
-    const speakerName = String(rawName ?? '').trim();
-    // Reject control characters (prompt-injection vector into future verifier
-    // prompts) and [COLORS:...] block delimiters (would corrupt the block on
-    // the next ingest round-trip).
-    if (!speakerName || speakerName.length > 80 || isCompositeSpeakerLabel(speakerName)) return { assignment: null, created: false };
-    if (/[\r\n\t\[\]=,()]/.test(speakerName)) return { assignment: null, created: false };
-    const normalized = speakerName.toLowerCase();
-    if (['unknown', 'unclear', 'narrator', 'none', 'n/a'].includes(normalized)) return { assignment: null, created: false };
+    const speakerName = normalizeAttributionVerifierSpeaker(rawName);
+    if (!speakerName) return { assignment: null, created: false };
+    // Verifier output may only reuse a configured character or alias. A model
+    // suggestion must never create a new character entry on its own.
+    const key = resolveCharacterKeyByNameOrAlias(speakerName);
+    if (!key || !characterColors[key]) return { assignment: null, created: false };
+    const assignment = lookup.get(speakerName.toLowerCase())
+        || lookup.get(characterColors[key].name.toLowerCase())
+        || lookup.get(key)
+        || null;
+    return { assignment, created: false };
+}
 
-    let assignment = resolveSingleSpeakerAssignment(speakerName, lookup);
-    if (assignment) return { assignment, created: false };
+export function getAttributionReviewPolicy(value = settings.attributionReviewPolicy) {
+    const policy = String(value ?? '').trim().toLowerCase();
+    return ['review', 'auto-high', 'legacy-auto'].includes(policy) ? policy : 'review';
+}
 
-    const ensured = ensureCharacterEntry(speakerName);
-    if (!ensured?.entry) return { assignment: null, created: false };
-    registerLookupAssignment(lookup, ensured.entry.name, getEntryEffectiveColor(ensured.entry), ensured.entry.aliases, false, ensured.entry.font);
-    assignment = lookup.get(speakerName.toLowerCase()) || lookup.get(ensured.key) || null;
-    return { assignment, created: !!ensured.created };
+export function isHumanAttributionOverride(source) {
+    return source !== ATTRIBUTION_SOURCE.LLM;
+}
+
+function captureAttributionVerificationTarget(mesIndex, msg, segments) {
+    return {
+        mesIndex,
+        message: msg,
+        messageId: getAutoAttributionMessageId(msg),
+        text: String(msg?.mes ?? ''),
+        segments: new Map(segments.map(segment => [segment.index, {
+            index: segment.index,
+            start: segment.start,
+            end: segment.end,
+            text: segment.text,
+            delimiter: segment.delimiter,
+        }])),
+    };
+}
+
+function isAttributionVerificationTargetCurrent(target, { allowAppendedText = false } = {}) {
+    const msg = getContext()?.chat?.[target.mesIndex];
+    if (msg !== target.message || getAutoAttributionMessageId(msg) !== target.messageId) return false;
+    const currentText = String(msg?.mes ?? '');
+    return currentText === target.text || (allowAppendedText && currentText.startsWith(target.text));
+}
+
+function hasCurrentVerifierSegments(target, segments) {
+    const current = new Map(segments.map(segment => [segment.index, segment]));
+    for (const original of target.segments.values()) {
+        const next = current.get(original.index);
+        if (!next || next.start !== original.start || next.end !== original.end
+            || next.text !== original.text || next.delimiter !== original.delimiter) return false;
+    }
+    return true;
+}
+
+function isAttributionVerificationTargetAndSegmentsCurrent(target, options = {}) {
+    if (!isAttributionVerificationTargetCurrent(target, options)) return false;
+    const msg = getContext()?.chat?.[target.mesIndex];
+    const attribution = attributeDialogueSegments(msg?.mes, msg?.name, {
+        autoAddMessageSpeaker: false,
+        ...getMessageQuoteOverrideOptions(target.mesIndex, msg),
+        mesIndex: target.mesIndex,
+    });
+    return hasCurrentVerifierSegments(target, attribution.segments);
+}
+
+function createVerifierEvidence(segment, correction) {
+    const evidence = [{
+        type: 'verifier-correction',
+        source: ATTRIBUTION_SOURCE.LLM,
+        speaker: correction.speaker,
+        detail: correction.reason,
+        segmentIndex: segment.index,
+    }];
+    if (segment.provenance?.source) {
+        evidence.push({
+            type: 'heuristic-provenance',
+            source: segment.provenance.source,
+            method: segment.provenance.method,
+            speaker: segment.assignment?.name,
+            detail: segment.evidence?.map(item => item.type).filter(Boolean).join(', '),
+            segmentIndex: segment.index,
+        });
+    }
+    return evidence;
 }
 
 export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
@@ -365,31 +513,25 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
     const quiet = options.quiet === true;
     if (!options.manual && isMessageAttributionVerified(mesIndex, msg)) return { checked: false, corrections: 0, createdCharacters: false };
 
-    const localAssignments = parseNamedColorAssignmentsFromText(msg.mes);
-    const lookup = buildNameColorLookup(localAssignments);
-    const existingEntry = getMessageQuoteOverrideEntry(mesIndex, msg, false);
-    const attributionOverrides = useTransientOverrides
-        ? getMessageQuoteOverridesForDecoration(mesIndex, msg)
-        : existingEntry?.segments || null;
     const attribution = attributeDialogueSegments(msg.mes, msg.name, {
-        autoAddMessageSpeaker: true,
-        overrides: attributionOverrides,
-        mesIndex: mesIndex,
+        // A verifier pass must not create characters just because the model or
+        // message speaker names someone not already configured.
+        autoAddMessageSpeaker: false,
+        ...getMessageQuoteOverrideOptions(mesIndex, msg),
+        mesIndex,
     });
-    const persistCreatedCharacters = () => {
-        if (!attribution.createdCharacters) return;
-        saveData();
-        updateCharList();
-    };
     const segments = attribution.segments;
     if (!segments.length) {
-        if (!skipMarkVerified) {
-            markMessageAttributionVerified(mesIndex, msg);
+        if (!skipMarkVerified && !useTransientOverrides) {
+            markMessageAttributionVerified(mesIndex, msg, ATTRIBUTION_VERIFICATION_STATUS.CLEAN);
             clearStreamingAttributionOverrides(mesIndex);
         }
-        persistCreatedCharacters();
-        return { checked: true, corrections: 0, createdCharacters: attribution.createdCharacters };
+        return { checked: true, corrections: 0, createdCharacters: false, queuedReviews: 0 };
     }
+
+    const localAssignments = parseNamedColorAssignmentsFromText(msg.mes);
+    const lookup = buildNameColorLookup(localAssignments);
+    const target = captureAttributionVerificationTarget(mesIndex, msg, segments);
 
     const jsonSchema = {
         type: 'object',
@@ -401,10 +543,13 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
                     properties: {
                         index: { type: 'integer' },
                         speaker: { type: 'string' },
+                        confidence: { type: 'number', minimum: 0, maximum: 1 },
+                        reason: { type: 'string', minLength: 1, maxLength: 240 },
                     },
-                    required: ['index', 'speaker'],
+                    required: ['index', 'speaker', 'confidence', 'reason'],
                     additionalProperties: false,
                 },
+                maxItems: MAX_ATTRIBUTION_VERIFIER_CORRECTIONS,
             },
         },
         required: ['corrections'],
@@ -412,7 +557,6 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
     };
 
     let corrections = null;
-    const textBeforeVerify = msg.mes;
     try {
         const response = await callLLMWithProfile(buildAttributionVerifierPrompt(msg, mesIndex, segments, lookup), {
             profileId: settings.attributionConnectionProfile,
@@ -424,78 +568,120 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
     } catch (e) {
         console.warn('[Dialogue Colors] LLM attribution verification failed:', e);
         if (!quiet) toast.warning('Color verification failed (see console).');
-        persistCreatedCharacters();
         return { checked: false, corrections: 0, createdCharacters: false };
     }
 
     if (!Array.isArray(corrections)) {
         console.warn('[Dialogue Colors] LLM attribution verification returned invalid JSON.');
         if (!quiet) toast.warning('Color verification failed (see console).');
-        persistCreatedCharacters();
         return { checked: false, corrections: 0, createdCharacters: false };
     }
 
-    // The message may have been edited/swiped/regenerated while the LLM call was
-    // in flight; applying corrections computed from the old text would persist
-    // wrong overrides under the new text's hash. For the streaming (transient)
-    // path, appended tokens are fine — only non-append changes abort.
-    if (getContext()?.chat?.[mesIndex] !== msg) {
-        return { checked: false, corrections: 0, createdCharacters: false };
-    }
-    const textUnchanged = msg.mes === textBeforeVerify;
-    const textOnlyAppended = useTransientOverrides && msg.mes.startsWith(textBeforeVerify);
-    if (!textUnchanged && !textOnlyAppended) {
+    // A verifier response is only valid for the exact message object, stable
+    // message ID, and text snapshot it was generated from. Streaming previews
+    // may retain their already-complete segments when text is appended.
+    if (!isAttributionVerificationTargetCurrent(target, { allowAppendedText: useTransientOverrides })) {
         return { checked: false, corrections: 0, createdCharacters: false };
     }
 
-    const segmentByIndex = new Map(segments.map(seg => [seg.index, seg]));
+    const currentAttribution = attributeDialogueSegments(msg.mes, msg.name, {
+        autoAddMessageSpeaker: false,
+        ...getMessageQuoteOverrideOptions(mesIndex, msg),
+        mesIndex,
+    });
+    const validCorrections = validateAttributionVerifierCorrections(corrections, currentAttribution.segments);
+    if (!validCorrections || !hasCurrentVerifierSegments(target, currentAttribution.segments)) {
+        return { checked: false, corrections: 0, createdCharacters: false };
+    }
+
+    const segmentByIndex = new Map(currentAttribution.segments.map(segment => [segment.index, segment]));
+    const currentLookup = buildNameColorLookup(parseNamedColorAssignmentsFromText(msg.mes));
+    const policy = getAttributionReviewPolicy();
     let appliedCorrections = 0;
-    let createdCharacters = !!attribution.createdCharacters;
-    for (const correction of corrections) {
-        const index = Number(correction?.index);
-        if (!Number.isInteger(index) || !segmentByIndex.has(index)) continue;
-        const seg = segmentByIndex.get(index);
-        // In conservative mode we only fill segments that are currently uncolored/unknown.
-        if (settings.attributionConservativeOnly && seg.assignment?.key) continue;
-        const { assignment, created } = resolveVerifierSpeakerName(correction?.speaker, lookup);
-        if (!assignment || assignment.key === seg.assignment?.key) continue;
+    let queuedReviews = 0;
+    for (const correction of validCorrections) {
+        const seg = segmentByIndex.get(correction.index);
+        const { assignment } = resolveVerifierSpeakerName(correction.speaker, currentLookup);
+        if (assignment?.key === seg.assignment?.key) continue;
 
         const latestEntry = getMessageQuoteOverrideEntry(mesIndex, msg, !useTransientOverrides);
-        const existingOverride = latestEntry?.segments?.[String(index)];
-        const existingSource = latestEntry?.sources?.[String(index)];
-        if (existingOverride && existingSource !== 'llm' && !options.manual) continue;
+        const existingOverride = latestEntry?.segments?.[String(correction.index)];
+        const existingSource = latestEntry?.sources?.[String(correction.index)];
+        const hasHumanOverride = !!existingOverride && isHumanAttributionOverride(existingSource);
+        const canAutoApply = !settings.attributionConservativeOnly || !seg.assignment?.key;
+        const evidence = createVerifierEvidence(seg, correction);
+        const shouldQueueReview = !useTransientOverrides && (
+            policy === 'review'
+            || !assignment
+            || !canAutoApply
+            || (policy === 'auto-high' && (correction.confidence < AUTO_HIGH_ATTRIBUTION_CONFIDENCE || hasHumanOverride))
+        );
+        if (shouldQueueReview) {
+            const review = upsertAttributionReview({
+                message: msg,
+                messageIndex: mesIndex,
+                messageId: target.messageId,
+                messageHash: hashMessageText(target.text),
+                segment: seg,
+                currentSpeaker: seg.assignment?.name,
+                proposedSpeaker: correction.speaker,
+                source: ATTRIBUTION_SOURCE.LLM,
+                confidence: correction.confidence,
+                reason: correction.reason,
+                evidence,
+            });
+            if (review) queuedReviews++;
+            continue;
+        }
 
-        const overrideSource = options.manual ? 'manual' : 'llm';
+        const shouldApply = !!assignment && !hasHumanOverride && canAutoApply && (
+            policy === 'legacy-auto'
+            || (policy === 'auto-high' && correction.confidence >= AUTO_HIGH_ATTRIBUTION_CONFIDENCE)
+        );
+        if (!shouldApply) continue;
         const didSetOverride = useTransientOverrides
-            ? setStreamingAttributionOverride(mesIndex, msg, index, assignment.name, { source: overrideSource })
-            : setMessageQuoteOverride(mesIndex, msg, index, assignment.name, { source: overrideSource });
+            ? setStreamingAttributionOverride(mesIndex, msg, correction.index, assignment.name, { source: ATTRIBUTION_SOURCE.LLM })
+            : setMessageQuoteOverride(mesIndex, msg, correction.index, assignment.name, {
+                source: ATTRIBUTION_SOURCE.LLM,
+                confidence: correction.confidence,
+                evidence,
+            });
         if (didSetOverride) {
             appliedCorrections++;
-            if (created) createdCharacters = true;
         }
     }
 
-    if (!skipMarkVerified) {
-        if (appliedCorrections === 0) markMessageAttributionVerified(mesIndex, msg);
+    if (!skipMarkVerified && !useTransientOverrides) {
+        const verificationStatus = queuedReviews > 0
+            ? ATTRIBUTION_VERIFICATION_STATUS.PENDING_REVIEW
+            : appliedCorrections > 0
+                ? ATTRIBUTION_VERIFICATION_STATUS.AUTO_APPLIED
+                : ATTRIBUTION_VERIFICATION_STATUS.CLEAN;
+        if (!isAttributionVerificationTargetCurrent(target)) {
+            return { checked: false, corrections: 0, createdCharacters: false };
+        }
+        markMessageAttributionVerified(mesIndex, msg, verificationStatus);
         clearStreamingAttributionOverrides(mesIndex);
-    }
-    if (appliedCorrections) {
-        saveData();
-        updateCharList();
     }
     if (appliedCorrections) {
         clearMessageDomRepairTimer(mesIndex);
         cancelMessageDomFollowupRepairs(mesIndex);
         // Verifier corrections only change override metadata; decorate the
         // already-rendered DOM without an innerHTML fallback write.
-        const repainted = await decorateMessageDomFromCurrentRender(mesIndex, msg, { queueVerification: false, renderFallback: false });
-        if (repainted) scheduleMessageDomFollowupRepair(mesIndex, repainted);
+        if (isAttributionVerificationTargetAndSegmentsCurrent(target, { allowAppendedText: useTransientOverrides })) {
+            const repainted = await decorateMessageDomFromCurrentRender(mesIndex, msg, { queueVerification: false, renderFallback: false });
+            if (repainted && isAttributionVerificationTargetAndSegmentsCurrent(target, { allowAppendedText: useTransientOverrides })) {
+                scheduleMessageDomFollowupRepair(mesIndex, repainted);
+            }
+        }
     } else {
         const mesElement = document.querySelector(`#chat .mes[mesid="${mesIndex}"]`) || document.querySelectorAll('#chat .mes[mesid]')[mesIndex];
-        if (mesElement) decorateObservedMessages([mesElement]);
+        if (mesElement && isAttributionVerificationTargetCurrent(target, { allowAppendedText: useTransientOverrides })) {
+            decorateObservedMessages([mesElement]);
+        }
     }
 
-    return { checked: true, corrections: appliedCorrections, createdCharacters };
+    return { checked: true, corrections: appliedCorrections, createdCharacters: false, queuedReviews };
 }
 
 export async function verifyLatestAttributionsWithLLM(options = {}) {
@@ -549,7 +735,12 @@ export async function runAttributionVerification(action, options = {}) {
                 ? pendingAttributionVerifications.findIndex(item => item.options?.queueKey === queueKey)
                 : -1;
             if (existingIndex >= 0) pendingAttributionVerifications[existingIndex] = queued;
-            else pendingAttributionVerifications.push(queued);
+            else {
+                pendingAttributionVerifications.push(queued);
+                if (pendingAttributionVerifications.length > MAX_PENDING_AUTO_ATTRIBUTION_VERIFICATIONS) {
+                    pendingAttributionVerifications.splice(0, pendingAttributionVerifications.length - MAX_PENDING_AUTO_ATTRIBUTION_VERIFICATIONS);
+                }
+            }
         }
         return { checked: false, corrections: 0, createdCharacters: false, queued: !options.manual && options.queue !== false };
     }
@@ -581,6 +772,7 @@ export function cancelStreamingAttributionVerification(options = {}) {
 
 export function scheduleStreamingAttributionVerification() {
     if (!settings.enabled || !isDomEngine() || !settings.llmAttributionParallel) return;
+    if (getAttributionReviewPolicy() === 'review') return;
     // Continuous loop: do NOT reset an already-scheduled timer on every token.
     // The loop reschedules itself from runStreamingAttributionVerification's finally,
     // so we only arm the timer when nothing is pending.
@@ -602,6 +794,7 @@ export function rescheduleStreamingAttributionVerification(mesIndex, generation)
     if (generation !== streamingAttributionGeneration) return;
     if (!isStreamingGenerationActive) return;
     if (!settings.enabled || !isDomEngine() || !settings.llmAttributionParallel) return;
+    if (getAttributionReviewPolicy() === 'review') return;
     if (streamingAttributionVerifyTimer) return;
     setStreamingAttributionVerifyTimer(setTimeout(() => {
         setStreamingAttributionVerifyTimer(null);
@@ -614,6 +807,7 @@ export async function runStreamingAttributionVerification(mesIndex, generation) 
     try {
         if (generation !== streamingAttributionGeneration) return { checked: false, corrections: 0, createdCharacters: false };
         if (!settings.enabled || !isDomEngine() || !settings.llmAttributionParallel) return { checked: false, corrections: 0, createdCharacters: false };
+        if (getAttributionReviewPolicy() === 'review') return { checked: false, corrections: 0, createdCharacters: false };
         if (isVerifyingAttribution) return { checked: false, corrections: 0, createdCharacters: false };
 
         const msg = getContext()?.chat?.[mesIndex];

@@ -291,6 +291,7 @@ export function applyGradientPresetToEntry(entry, preset, resolveEffectiveColor 
         baseColor: normalizedPreset.baseColor,
         color,
         gradient: synchronizeGradientEffectiveColors(normalizedPreset.gradient, resolveEffectiveColor),
+        gradientGenerator: null,
     };
 }
 

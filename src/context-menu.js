@@ -1,7 +1,7 @@
 // context-menu.js - extracted from index.js (mechanical split)
 import { attributeDialogueSegments } from './attribution.js';
 import { resolveCharacterKeyByNameOrAlias } from './color-blocks.js';
-import { cancelMessageDomFollowupRepairs, clearMessageDomRepairTimer, clearStreamingAttributionOverrides, decorateMessageDomFromCurrentRender, getMessageIndexFromElement, getMessageQuoteOverrideEntry, markMessageAttributionVerified, matchSegmentsToElements, refreshMessageDom, resolveDomSegmentIndexForElement, restoreMessageQuoteOverrideEntry, scheduleMessageDomFollowupRepair, setMessageQuoteOverride } from './dom-engine.js';
+import { cancelMessageDomFollowupRepairs, clearMessageDomRepairTimer, clearStreamingAttributionOverrides, decorateMessageDomFromCurrentRender, deleteMessageQuoteOverride, getMessageIndexFromElement, getMessageQuoteOverrideEntry, getMessageQuoteOverrideOptions, matchSegmentsToElements, refreshMessageDom, resolveDomSegmentIndexForElement, restoreMessageQuoteOverrideEntry, scheduleMessageDomFollowupRepair, setMessageQuoteOverride } from './dom-engine.js';
 import { scheduleCustomFontRefresh } from './fonts.js';
 import { applyLiveColorChangesFromSnapshot, captureEffectiveColorSnapshot, commit, flushChatSave, queueChatSave, updateTextColorReferences, updateVisibleMessageColors } from './live-colors.js';
 import { buildCharacterEntry, getEntryEffectiveColor, setEntryFromEffectiveColor } from './palettes.js';
@@ -25,6 +25,48 @@ function readCharacterName(nameInput) {
     }
     nameInput.removeAttribute('aria-invalid');
     return name;
+}
+
+function formatAttributionSource(source) {
+    const labels = {
+        llm: 'LLM verifier',
+        review: 'Reviewed suggestion',
+        manual: 'Manual assignment',
+        override: 'Saved override',
+        'explicit-mention': 'Explicit mention',
+        'streaming-cache': 'Streaming cache',
+        'paragraph-carry': 'Paragraph carry',
+        alternation: 'Speaker alternation',
+        'message-speaker': 'Message speaker',
+        'color-block': 'Color block',
+        heuristic: 'Heuristic',
+        imported: 'Imported',
+        unknown: 'Unknown',
+    };
+    return labels[source] || String(source || 'Unknown').replace(/-/g, ' ');
+}
+
+function getDomAttributionDetails(targetEl) {
+    const messageIndex = getMessageIndexFromElement(targetEl);
+    const message = getContext()?.chat?.[messageIndex];
+    if (!message || !Number.isInteger(messageIndex) || messageIndex < 0) return null;
+    const segmentIndex = resolveDomSegmentIndexForElement(targetEl, messageIndex, message);
+    if (!Number.isFinite(segmentIndex)) return null;
+    const attribution = attributeDialogueSegments(message.mes, message.name, {
+        autoAddMessageSpeaker: false,
+        ...getMessageQuoteOverrideOptions(messageIndex, message),
+        mesIndex: messageIndex,
+    });
+    const segment = attribution.segments.find(item => item.index === segmentIndex);
+    const override = getMessageQuoteOverrideEntry(messageIndex, message, false);
+    return {
+        messageIndex,
+        message,
+        segmentIndex,
+        source: segment?.provenance?.source || '',
+        confidence: Number(segment?.confidence),
+        hasOverride: !!override?.segments && Object.prototype.hasOwnProperty.call(override.segments, String(segmentIndex)),
+    };
 }
 
 function getMenuPosition(e, targetEl) {
@@ -138,6 +180,13 @@ function showMenu(e, fontTag, qElement = null) {
         ? normalizeHexColor(domSpeakerColor, quoteFallbackColor)
         : isBareQuote ? quoteFallbackColor : normalizeHexColor(fontTag.getAttribute('color'));
     const text = targetEl.textContent.substring(0, 30) + (targetEl.textContent.length > 30 ? '...' : '');
+    const attributionDetails = isDomSegment ? getDomAttributionDetails(targetEl) : null;
+    const attributionStatus = attributionDetails?.source
+        ? `<div class="dc-context-attribution">Source: ${escapeHtml(formatAttributionSource(attributionDetails.source))}${Number.isFinite(attributionDetails.confidence) ? `; Confidence: ${Math.round(Math.max(0, Math.min(1, attributionDetails.confidence)) * 100)}%` : ''}</div>`
+        : '';
+    const automaticAttributionAction = attributionDetails?.hasOverride
+        ? '<button id="dc-ctx-use-automatic" class="menu_button" style="width:100%;margin-bottom:4px;">Use automatic attribution</button>'
+        : '';
 
     // Build character list for datalist
     const charList = getSortedEntries()
@@ -153,19 +202,53 @@ function showMenu(e, fontTag, qElement = null) {
     const { x, y } = getMenuPosition(e, targetEl);
     menu.style.cssText = `position:fixed;left:${x}px;top:${y}px;background:var(--SmartThemeBlurTintColor);border:1px solid var(--SmartThemeBorderColor);border-radius:6px;padding:8px;z-index:10001;min-width:180px;color:var(--SmartThemeTextColor);box-shadow:0 4px 12px rgba(0,0,0,0.5);`;
     menu.innerHTML = `
-        <div id="dc-ctx-title" style="font-weight:600;margin-bottom:4px;">Assign dialogue</div>
+        <div id="dc-ctx-title" style="font-weight:600;margin-bottom:4px;">Assign dialogue manually</div>
         <div id="dc-ctx-preview" style="font-size:0.8em;opacity:0.7;margin-bottom:6px;">${isDomSegment ? '<em style="font-size:0.9em;">(DOM override)</em><br>' : isBareQuote ? '<em style="font-size:0.9em;">(uncolored quote)</em><br>' : ''}"${escapeHtml(text)}"</div>
+        ${attributionStatus}
         <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
             <span aria-hidden="true" style="width:12px;height:12px;border-radius:50%;background:${color};"></span>
             <input type="color" id="dc-ctx-color" value="${color}" aria-label="Character color" style="width:24px;height:20px;border:none;">
             <input type="text" id="dc-ctx-name" list="dc-ctx-chars" aria-label="Character name" placeholder="Character name (type to search)" class="text_pole" style="flex:1;padding:3px;font-size:0.85em;" autocomplete="off">
             <datalist id="dc-ctx-chars">${datalistOptions}</datalist>
         </div>
-        <button id="dc-ctx-assign" class="menu_button" style="width:100%;margin-bottom:4px;">Assign to Character</button>
+        <p class="dc-context-note">Direct manual assignment may create a character only from the name you enter.</p>
+        <button id="dc-ctx-assign" class="menu_button" style="width:100%;margin-bottom:4px;">Assign manually</button>
+        ${automaticAttributionAction}
         <button id="dc-ctx-close" class="menu_button" style="width:100%;">Cancel</button>
     `;
     const closeMenu = mountAssignmentSurface(menu, opener);
     menu.querySelector('#dc-ctx-close').onclick = () => closeMenu();
+
+    menu.querySelector('#dc-ctx-use-automatic')?.addEventListener('click', async () => {
+        try {
+            const messageIndex = attributionDetails?.messageIndex;
+            const segmentIndex = attributionDetails?.segmentIndex;
+            const message = Number.isInteger(messageIndex) ? getContext()?.chat?.[messageIndex] : null;
+            if (!message || !Number.isFinite(segmentIndex)) {
+                toast.error('Could not map this dialogue segment.');
+                return;
+            }
+            if (!deleteMessageQuoteOverride(messageIndex, message, segmentIndex)) {
+                toast.info('This dialogue segment is already using automatic attribution.');
+                return;
+            }
+            clearMessageDomRepairTimer(messageIndex);
+            cancelMessageDomFollowupRepairs(messageIndex);
+            clearStreamingAttributionOverrides(messageIndex);
+            const repainted = await decorateMessageDomFromCurrentRender(messageIndex, message, {
+                queueVerification: false,
+                renderFallback: false,
+            });
+            scheduleMessageDomFollowupRepair(messageIndex, repainted);
+            updateLegend();
+            toast.success('Automatic attribution restored.');
+        } catch (error) {
+            toast.error('Could not restore automatic attribution.');
+            console.error('[Dialogue Colors] Failed to clear dialogue override:', error);
+        } finally {
+            closeMenu();
+        }
+    });
 
     const nameInput = menu.querySelector('#dc-ctx-name');
     const colorInput = menu.querySelector('#dc-ctx-color');
@@ -253,7 +336,6 @@ function showMenu(e, fontTag, qElement = null) {
                 }
                 clearMessageDomRepairTimer(mesIndex);
                 cancelMessageDomFollowupRepairs(mesIndex);
-                markMessageAttributionVerified(mesIndex, msg);
                 clearStreamingAttributionOverrides(mesIndex);
                 assignmentSucceeded = true;
                 // Override-only change: the visible DOM is already rendered by
@@ -345,7 +427,7 @@ function showSelectionMenu(e, selection, range, selectedText, mesEl) {
     const { x, y } = getMenuPosition(e, mesEl);
     menu.style.cssText = `position:fixed;left:${x}px;top:${y}px;background:var(--SmartThemeBlurTintColor);border:1px solid var(--SmartThemeBorderColor);border-radius:6px;padding:8px;z-index:10001;min-width:180px;color:var(--SmartThemeTextColor);box-shadow:0 4px 12px rgba(0,0,0,0.5);`;
     menu.innerHTML = `
-        <div id="dc-ctx-title" style="font-weight:600;margin-bottom:4px;">Assign selected dialogue</div>
+        <div id="dc-ctx-title" style="font-weight:600;margin-bottom:4px;">Assign selected dialogue manually</div>
         <div id="dc-ctx-preview" style="font-size:0.8em;opacity:0.7;margin-bottom:6px;"><em style="font-size:0.9em;">(selected text)</em><br>"${escapeHtml(preview)}"</div>
         <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
             <span id="dc-ctx-color-dot" aria-hidden="true" style="width:12px;height:12px;border-radius:50%;background:#888888;"></span>
@@ -353,7 +435,8 @@ function showSelectionMenu(e, selection, range, selectedText, mesEl) {
             <input type="text" id="dc-ctx-name" list="dc-ctx-chars" aria-label="Character name" placeholder="Character name (type to search)" class="text_pole" style="flex:1;padding:3px;font-size:0.85em;" autocomplete="off">
             <datalist id="dc-ctx-chars">${datalistOptions}</datalist>
         </div>
-        <button id="dc-ctx-assign" class="menu_button" style="width:100%;margin-bottom:4px;">Assign to Character</button>
+        <p class="dc-context-note">Direct manual assignment may create a character only from the name you enter.</p>
+        <button id="dc-ctx-assign" class="menu_button" style="width:100%;margin-bottom:4px;">Assign manually</button>
         <button id="dc-ctx-close" class="menu_button" style="width:100%;">Cancel</button>
     `;
     const closeMenu = mountAssignmentSurface(menu, opener);

@@ -1,6 +1,7 @@
 // prompts.js - extracted from index.js (mechanical split)
 import { resolveCharacterKeyByNameOrAlias } from './color-blocks.js';
 import { applyThemeReadabilityAndBrightness, getBrightnessOffset, getCustomPaletteMeta, getCustomPalettes, getEntryEffectiveColor, getThemeLightnessBounds } from './palettes.js';
+import { getNarratorVisual } from './narrator-style.js';
 import { escapeHtml, extension_prompt_roles, extension_prompt_types, setExtensionPrompt } from './st-api.js';
 import { MODULE_NAME, characterColors, isDomEngine, settings } from './state.js';
 import { normalizeAliases, normalizeHexColor } from './utils.js';
@@ -102,12 +103,17 @@ export function buildCurrentColorPairsList() {
     const pairs = Object.values(characterColors)
         .map(entry => formatColorBlockPair(entry?.name, getEntryEffectiveColor(entry)))
         .filter(Boolean);
+    const narrator = getNarratorVisual(settings, applyThemeReadabilityAndBrightness);
+    if (narrator) pairs.push(formatColorBlockPair('Narrator', narrator.color));
     return pairs.join(',');
 }
 
 export function buildColorMetadataPromptLines(options = {}) {
     const usageBlockMode = options.usageBlockMode || 'used';
     const currentPairs = buildCurrentColorPairsList();
+    const coloredContent = getNarratorVisual(settings, applyThemeReadabilityAndBrightness)
+        ? 'dialogue/thought/narration'
+        : 'dialogue/thought';
     if (usageBlockMode === 'new') {
         if (!currentPairs) {
             return [
@@ -125,16 +131,16 @@ export function buildColorMetadataPromptLines(options = {}) {
 
     if (!currentPairs) {
         return [
-            'When any dialogue/thought/narration is colored, end with exactly one final line: [COLORS:Name=#RRGGBB,...].',
-            'Include every speaker whose dialogue/thought/narration you colored in this reply. Omit only if no dialogue/thought/narration was colored.',
+            `When any ${coloredContent} is colored, end with exactly one final line: [COLORS:Name=#RRGGBB,...].`,
+            `Include every speaker whose ${coloredContent} you colored in this reply. Omit only if no ${coloredContent} was colored.`,
             'The [COLORS:] line must be the final output line, after the reply text.',
         ];
     }
     return [
         `Known colors: ${currentPairs}`,
         'Reuse those exact names and colors. Do not rename, re-color, or split aliases from their canonical name.',
-        'When any dialogue/thought/narration is colored, end with exactly one final line: [COLORS:Name=#RRGGBB,...].',
-        'Include every speaker whose dialogue/thought/narration you colored in this reply, including already-known speakers. Omit only if no dialogue/thought/narration was colored.',
+        `When any ${coloredContent} is colored, end with exactly one final line: [COLORS:Name=#RRGGBB,...].`,
+        `Include every speaker whose ${coloredContent} you colored in this reply, including already-known speakers. Omit only if no ${coloredContent} was colored.`,
         'The [COLORS:] line must be the final output line, after the reply text.',
     ];
 }
@@ -230,8 +236,9 @@ export function buildMinimalPromptInstruction() {
         if (paletteDesc) parts.push(`- ${paletteDesc}`);
     }
 
-    if (!settings.disableNarration && settings.narratorColor) {
-        parts.push(`- Narrator text: <font color="${applyThemeReadabilityAndBrightness(settings.narratorColor)}">...</font>.`);
+    const narrator = getNarratorVisual(settings, applyThemeReadabilityAndBrightness);
+    if (narrator) {
+        parts.push(`- Narrator text: <font color="${narrator.color}">...</font>.`);
     }
     if (settings.highlightMode) {
         parts.push('- Add a subtle background highlight to colored spans when it improves readability.');
@@ -279,8 +286,12 @@ export function buildColoredPromptPreview() {
         return '<span style="opacity:0.5">(local DOM engine: no prompt injected)</span>';
     }
     const entries = Object.entries(characterColors);
-    if (!entries.length) return '<span style="opacity:0.5">(no characters)</span>';
-    return entries.map(([, v]) => `<span style="color:${getEntryEffectiveColor(v)}">${escapeHtml(v.name)}</span>`).join(', ');
+    const narrator = getNarratorVisual(settings, applyThemeReadabilityAndBrightness);
+    if (!entries.length && !narrator) return '<span style="opacity:0.5">(no characters)</span>';
+    return [
+        ...entries.map(([, v]) => `<span style="color:${getEntryEffectiveColor(v)}">${escapeHtml(v.name)}</span>`),
+        ...(narrator ? [`<span style="color:${narrator.color}">Narration</span>`] : []),
+    ].join(', ');
 }
 
 export function injectPrompt() {

@@ -1,5 +1,6 @@
 // attribution.js - extracted from index.js (mechanical split)
 import { buildDialogueRegex, buildNameColorLookup, parseNamedColorAssignmentsFromText, registerLookupAssignment, resolveCharacterKeyByNameOrAlias, resolveSingleSpeakerAssignment } from './color-blocks.js';
+import { ATTRIBUTION_SOURCE, normalizeAttributionConfidence, normalizeAttributionEvidence, normalizeAttributionSource } from './attribution-store.js';
 import { buildCharacterEntry, getEntryEffectiveColor } from './palettes.js';
 import { formatColorBlockPair } from './prompts.js';
 import { escapeRegex, getContext } from './st-api.js';
@@ -205,12 +206,34 @@ export function ensureCharacterEntry(name, color) {
     const built = buildCharacterEntry(trimmedName, {
         color,
         colorMode: 'base',
-        locked: false,
+        origin: 'detected',
         dialogueCount: 0
     });
     if (!built.entry) return { key, entry: null, created: false };
     characterColors[key] = built.entry;
     return { key, entry: characterColors[key], created: true };
+}
+
+function getSegmentMapValue(map, index) {
+    if (map instanceof Map) return map.get(index) ?? map.get(String(index));
+    return map && typeof map === 'object' ? map[String(index)] : undefined;
+}
+
+function getOverrideSpeaker(value) {
+    if (typeof value === 'string') return value;
+    if (!value || typeof value !== 'object') return '';
+    return value.speaker ?? value.name ?? value.assignment?.name ?? value.value ?? '';
+}
+
+function createSegmentProvenance(source, method, confidence, evidence) {
+    return {
+        provenance: {
+            source: normalizeAttributionSource(source),
+            method,
+        },
+        confidence: normalizeAttributionConfidence(confidence),
+        evidence: normalizeAttributionEvidence(evidence),
+    };
 }
 
 export function attributeDialogueSegments(rawText, messageSpeakerName = '', options = {}) {
@@ -226,9 +249,11 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
         .sort((left, right) => right.length - left.length);
     const trimmedSpeakerName = String(messageSpeakerName ?? '').trim();
     let defaultSpeaker = resolveSingleSpeakerAssignment(trimmedSpeakerName, lookup);
+    let defaultSpeakerSource = defaultSpeaker ? ATTRIBUTION_SOURCE.MESSAGE_SPEAKER : ATTRIBUTION_SOURCE.UNKNOWN;
 
     if (!defaultSpeaker && localAssignments.length === 1) {
         defaultSpeaker = resolveSingleSpeakerAssignment(localAssignments[0].name, lookup);
+        if (defaultSpeaker) defaultSpeakerSource = ATTRIBUTION_SOURCE.COLOR_BLOCK;
     }
 
     const ensureDefaultSpeaker = () => {
@@ -238,6 +263,7 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
         if (ensured.created) result.createdCharacters = true;
         registerLookupAssignment(lookup, ensured.entry.name, getEntryEffectiveColor(ensured.entry), ensured.entry.aliases, false, ensured.entry.font);
         defaultSpeaker = lookup.get(trimmedSpeakerName.toLowerCase()) || lookup.get(ensured.key) || null;
+        if (defaultSpeaker) defaultSpeakerSource = ATTRIBUTION_SOURCE.MESSAGE_SPEAKER;
         if (defaultSpeaker && !sortedLookupKeys.includes(ensured.key)) {
             sortedLookupKeys.push(ensured.key);
             sortedLookupKeys.sort((left, right) => right.length - left.length);
@@ -299,18 +325,54 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
     for (const segment of collectedSegments) {
         const sameParagraphAsPrevious = isSameDialogueParagraph(segment.paragraph, previousParagraph);
         let assignment = null;
+        let attributionMetadata = createSegmentProvenance(
+            ATTRIBUTION_SOURCE.UNKNOWN,
+            'unresolved',
+            0,
+            [{ type: 'no-speaker-match' }],
+        );
 
         // Tier 1: explicit per-segment override. Manual/verifier overrides
         // must always beat cached streaming heuristics, otherwise a stale
         // cached speaker can make right-click and Verified DOM corrections
         // appear to do nothing on the latest message.
-        const overrideName = overrides ? overrides[segment.index] : undefined;
+        const overrideValue = getSegmentMapValue(overrides, segment.index);
+        const overrideRecord = getSegmentMapValue(options.overrideRecords, segment.index);
+        const overrideName = getOverrideSpeaker(overrideValue) || getOverrideSpeaker(overrideRecord);
         if (overrideName) {
             assignment = resolveSingleSpeakerAssignment(String(overrideName), lookup);
+            if (assignment) {
+                const source = getSegmentMapValue(options.overrideSources, segment.index)
+                    ?? overrideRecord?.source
+                    ?? overrideValue?.source
+                    ?? ATTRIBUTION_SOURCE.OVERRIDE;
+                const confidence = getSegmentMapValue(options.overrideConfidences, segment.index)
+                    ?? overrideRecord?.confidence
+                    ?? overrideValue?.confidence;
+                const evidence = overrideRecord?.evidence
+                    ?? overrideValue?.evidence
+                    ?? [{ type: 'segment-override', segmentIndex: segment.index }];
+                const normalizedSource = normalizeAttributionSource(source, ATTRIBUTION_SOURCE.OVERRIDE);
+                const fallbackConfidence = normalizedSource === ATTRIBUTION_SOURCE.MANUAL ? 1 : 0.95;
+                attributionMetadata = createSegmentProvenance(
+                    normalizedSource,
+                    'override',
+                    normalizeAttributionConfidence(confidence, fallbackConfidence),
+                    evidence,
+                );
+            }
         }
 
         if (!assignment && isStreamingMsg && streamingHeuristicCache.has(segment.start)) {
             assignment = streamingHeuristicCache.get(segment.start);
+            if (assignment) {
+                attributionMetadata = createSegmentProvenance(
+                    ATTRIBUTION_SOURCE.STREAMING_CACHE,
+                    'streaming-cache',
+                    0.8,
+                    [{ type: 'cached-segment-offset', start: segment.start }],
+                );
+            }
         }
 
         // Tier 2: masked, paragraph-scoped proximity near the quote.
@@ -318,21 +380,54 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
             const windowStart = Math.max(segment.paragraph.start, segment.start - 240);
             const windowEnd = Math.min(segment.paragraph.end, segment.end + 120);
             assignment = findClosestMentionedSpeakerInContext(maskedText, windowStart, windowEnd, segment.start, segment.end, lookup, sortedLookupKeys, defaultSpeaker);
+            if (assignment) {
+                attributionMetadata = createSegmentProvenance(
+                    ATTRIBUTION_SOURCE.EXPLICIT_MENTION,
+                    'context-proximity',
+                    0.85,
+                    [{ type: 'nearby-speaker-mention' }],
+                );
+            }
         }
 
         // Tier 3: carry only within the same paragraph/line.
         if (!assignment && sameParagraphAsPrevious && lastResolvedSpeakerKey) {
             assignment = lookup.get(lastResolvedSpeakerKey) || null;
+            if (assignment) {
+                attributionMetadata = createSegmentProvenance(
+                    ATTRIBUTION_SOURCE.PARAGRAPH_CARRY,
+                    'same-paragraph-carry',
+                    0.7,
+                    [{ type: 'same-paragraph-speaker' }],
+                );
+            }
         }
 
         // Tier 4: alternate speakers across unattributed new paragraphs.
         if (!assignment && !sameParagraphAsPrevious) {
             assignment = getAlternatingAssignment();
+            if (assignment) {
+                attributionMetadata = createSegmentProvenance(
+                    ATTRIBUTION_SOURCE.ALTERNATION,
+                    'recent-speaker-alternation',
+                    0.45,
+                    [{ type: 'recent-speaker-alternation' }],
+                );
+            }
         }
 
         // Tier 5: default message speaker.
         if (!assignment) {
             assignment = defaultSpeaker || ensureDefaultSpeaker();
+            if (assignment) {
+                const fromColorBlock = defaultSpeakerSource === ATTRIBUTION_SOURCE.COLOR_BLOCK;
+                attributionMetadata = createSegmentProvenance(
+                    fromColorBlock ? ATTRIBUTION_SOURCE.COLOR_BLOCK : ATTRIBUTION_SOURCE.MESSAGE_SPEAKER,
+                    fromColorBlock ? 'sole-color-assignment' : 'message-speaker-default',
+                    fromColorBlock ? 0.75 : 0.6,
+                    [{ type: fromColorBlock ? 'sole-color-assignment' : 'message-speaker' }],
+                );
+            }
         }
 
         if (isStreamingMsg && assignment) {
@@ -355,7 +450,8 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
             end: segment.end,
             text: segment.text,
             delimiter: segment.delimiter,
-            assignment: assignment ? { key: assignment.key, name: assignment.name, color: assignment.color, font: assignment.font } : null
+            assignment: assignment ? { key: assignment.key, name: assignment.name, color: assignment.color, font: assignment.font } : null,
+            ...attributionMetadata,
         });
         previousParagraph = segment.paragraph;
     }

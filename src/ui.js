@@ -1,22 +1,30 @@
 // ui.js - extracted from index.js (mechanical split)
-import { clearSpeakerRegexCache } from './attribution.js';
+import { attributeDialogueSegments, clearSpeakerRegexCache } from './attribution.js';
+import { ATTRIBUTION_REVIEW_STATUS, createMessageFingerprint, createSegmentFingerprint } from './attribution-store.js';
+import { refreshGradientAnimationState, registerGradientAnimationElement, registerGradientAnimationRoot, setGradientAnimationMode, unregisterGradientAnimationRoot } from './animation-controller.js';
+import { DEFAULT_CHARACTER_STYLE_FIELD_MASK, applyGroupProfileToKeys, clearCharacterSelection, copyCharacterStyle, deleteCharacterKeys, executeSelectedCharacterMutation, getCharacterKeysForGroup, getCharacterStyleClipboard, getSelectedCharacterKeys, pasteCharacterStyle, randomizeCharacterColors, selectCharacterKeys, setCharacterGroup, setCharacterKeep, setCharacterLock, setCharacterSelected } from './character-operations.js';
+import { CHARACTER_STYLE_FIELD_MASKS, captureCharacterStyle } from './character-style.js';
 import { resolveCharacterKeyByNameOrAlias, scanAllMessages } from './color-blocks.js';
-import { DOM_RETRY_REFRESH_DELAYS, decorateAllMessages, scheduleDomRefreshSeries, scheduleDomSettleRefresh, setupChatObserver, setupChatRootObserver, startDomHealthCheck, stopDomHealthCheck, undecorateAllMessages } from './dom-engine.js';
+import { DOM_RETRY_REFRESH_DELAYS, acceptAttributionReview, cancelMessageDomFollowupRepairs, clearMessageDomRepairTimer, clearStreamingAttributionOverrides, decorateAllMessages, decorateMessageDomFromCurrentRender, dismissAttributionReview, getMessageQuoteOverrideOptions, listAttributionReviews, pruneAttributionReviews, refreshAndDecorateMessageDom, rejectAttributionReview, scheduleDomRefreshSeries, scheduleDomSettleRefresh, scheduleMessageDomFollowupRepair, setMessageQuoteOverride, setupChatObserver, setupChatRootObserver, startDomHealthCheck, stopDomHealthCheck, undecorateAllMessages } from './dom-engine.js';
 import { loadGoogleFont, scheduleCustomFontRefresh } from './fonts.js';
-import { getGradientRenderState } from './gradient-rendering.js';
-import { BUILTIN_GRADIENT_PRESETS, DEFAULT_GRADIENT_ANGLE, DEFAULT_GRADIENT_DURATION, DEFAULT_GRADIENT_POSITION, MAX_GRADIENT_STOPS, buildGradientCss, cloneGradient, getBuiltInGradientPreset, getGradientSignature, normalizeGradient, normalizeGradientPresetName } from './gradients.js';
+import { getColorVisionSimulationForTarget, getGradientRenderState, getVisualRenderState } from './gradient-rendering.js';
+import { BUILTIN_GRADIENT_PRESETS, DEFAULT_GRADIENT_ANGLE, DEFAULT_GRADIENT_DURATION, DEFAULT_GRADIENT_POSITION, MAX_GRADIENT_STOPS, cloneGradient, getBuiltInGradientPreset, getGradientSignature, normalizeGradient, normalizeGradientPresetName } from './gradients.js';
+import { GROUP_PROFILE_AUTOMATION_KEYS, deleteGroupProfile, getGroupProfile, normalizeGroupKey, normalizeGroupName, renameGroupProfile, setGroupProfile } from './group-profiles.js';
 import { createRestoreSnapshot, redo, saveHistory, showUndoToast, undo } from './history.js';
 import { applyFastColorUiUpdates, applyLiveColorChangesFromSnapshot, captureEffectiveColorSnapshot, colorizeMessages, commit, flushChatSave, flushColorStateSave, queueColorStateSave, recolorAllMessages, repaintDomAfterCharacterDataChange } from './live-colors.js';
 import { registerKeyboardShortcuts } from './main.js';
-import { applyGradientPreset, autoResolveConflicts, buildCharacterEntry, collectDuplicateColorKeys, createRandomGradient, deleteColorPreset, deleteCustomPalette, detectTheme, flipColorsForTheme, generateCustomPaletteFromWords, getBaseColor, getEntryEffectiveColor, getNextColor, getPresets, invalidateThemeCache, loadColorPreset, refreshPaletteDropdown, refreshPresetDropdown, regenerateAllColors, removeCharacterKeys, saveColorPreset, saveCustomPalette, setEntryFromBaseColor, setEntryGradient, showHarmonyPopup, suggestColorForName, swapEntryColorData, syncAllEffectiveColors } from './palettes.js';
+import { getTransientNarratorCount, getNarratorVisual, normalizeNarratorStyle, setNarratorStyle } from './narrator-style.js';
+import { applyGradientPreset, applyThemeReadabilityAndBrightness, buildCharacterEntry, collectDuplicateColorKeys, createGradientRandomMasterSeed, createRandomGradient, deleteColorPreset, deleteCustomPalette, detectTheme, flipColorsForTheme, generateCustomPaletteFromWords, getBaseColor, getCustomPaletteMeta, getCustomPalettes, getEntryEffectiveColor, getNextColor, getPerceptualConflictReport, getPresets, invalidateThemeCache, loadColorPreset, refreshPaletteDropdown, refreshPresetDropdown, regenerateAllColors, removeCharacterKeys, repairPerceptualConflicts, saveColorPreset, saveCustomPalette, setEntryFromBaseColor, setEntryGradient, showHarmonyPopup, suggestColorForName, swapEntryColorData, syncAllEffectiveColors } from './palettes.js';
 import { injectPrompt, updateSystemPromptDisplay } from './prompts.js';
 import { escapeHtml, getContext } from './st-api.js';
-import { autoRecolorHintShown, characterColors, expandedCharacterRows, isDomEngine, legendListeners, searchTerm, setAutoRecolorHintShown, setCharacterColors, setLegendListeners, setSearchTerm, setSwapMode, settings, swapMode } from './state.js';
-import { analyzeColorImport, analyzeSettingsImport, applyCardData, applyColorImport, applySettingsImport, archiveStoredColorData, deleteCustomGradientPreset, disableAutoSync, enableAutoSync, exportColors, exportSettings, getArchivedColorData, getCurrentStorageScope, getCustomGradientPresets, getLegendPosition, getStorageKey, getStorageLabelForKey, getStorageScopeDescriptor, getUserColorDataStore, normalizeColorDataEntry, normalizeToggleSettings, readCardData, renameCustomGradientPreset, restoreAllSettingsToDefaults, restoreArchivedColorData, saveCustomGradientPreset, saveData, saveLegendPosition, saveToCard, switchColorStorageScope, updateAutoSyncUI } from './storage.js';
-import { escapeAttr, getGoogleFontFamily, htmlToNode, normalizeGoogleFontName, normalizeHexColor, normalizeManualColorInput, toast } from './utils.js';
-import { cancelStreamingAttributionVerification, clearAutoAttributionVerificationQueue, queueAutoAttributionVerificationForRenderedMessages, runAttributionVerification, verifyLatestAttributionsWithLLM, verifyVisibleAttributionsWithLLM } from './verify.js';
+import { autoRecolorHintShown, characterColors, expandedCharacterRows, groupProfiles, isDomEngine, legendListeners, searchTerm, selectedCharacterKeys, setAutoRecolorHintShown, setCharacterColors, setGroupProfiles, setLegendListeners, setSearchTerm, setSwapMode, settings, swapMode } from './state.js';
+import { analyzeColorImport, analyzeSettingsImport, analyzeStylePackImport, applyCardData, applyColorImport, applySettingsImport, applyStylePackImport, archiveStoredColorData, deleteCustomGradientPreset, disableAutoSync, enableAutoSync, exportColors, exportSettings, getArchivedColorData, getCurrentStorageScope, getCustomGradientPresets, getLegendPosition, getStorageKey, getStorageLabelForKey, getStorageScopeDescriptor, getStylePackRegistry, getUserColorDataStore, normalizeColorDataEntry, normalizeToggleSettings, readCardData, renameCustomGradientPreset, restoreAllSettingsToDefaults, restoreArchivedColorData, saveCustomGradientPreset, saveData, saveLegendPosition, saveToCard, switchColorStorageScope, updateAutoSyncUI } from './storage.js';
+import { buildStylePackEnvelope } from './style-pack-adapter.js';
+import { escapeAttr, getGoogleFontFamily, htmlToNode, normalizeEntryGradientGenerator, normalizeGoogleFontName, normalizeHexColor, normalizeManualColorInput, toast } from './utils.js';
+import { AUTO_HIGH_ATTRIBUTION_CONFIDENCE, cancelStreamingAttributionVerification, clearAutoAttributionVerificationQueue, queueAutoAttributionVerificationForRenderedMessages, runAttributionVerification, verifyLatestAttributionsWithLLM, verifyVisibleAttributionsWithLLM } from './verify.js';
 
 export const DYNAMIC_CONTROL_HELP_TEXT = Object.freeze({
+    '.dc-char-select': 'Select this character for bulk actions.',
     '.dc-color-dot': 'Click to open the color picker for this character.',
     '.dc-color-input': 'Pick this character’s primary color.',
     '.dc-gradient-toggle': 'Enable or remove this character gradient.',
@@ -36,6 +44,13 @@ export const DYNAMIC_CONTROL_HELP_TEXT = Object.freeze({
     '.dc-alias-remove': 'Remove this alias from the character.'
 });
 
+function buildCharacterControlId(prefix, key) {
+    const token = Array.from(String(key ?? '')).map(character => /[A-Za-z0-9_-]/.test(character)
+        ? character
+        : `_${character.codePointAt(0).toString(16)}_`).join('');
+    return `${prefix}-${token || 'character'}`;
+}
+
 const GRADIENT_DIRECTIONS = Object.freeze([
     { value: 0, label: 'Up' },
     { value: 45, label: 'Up right' },
@@ -51,31 +66,48 @@ const GRADIENT_DIRECTIONS = Object.freeze([
 const expandedGradientAdvancedRows = new Set();
 let lastLegendSignature = '';
 let closeActiveUiDialog = null;
+let copiedGradientGenerator = null;
+let selectedGradientGalleryPreset = '';
+let gradientGallerySearch = '';
+let gradientGalleryFilter = 'all';
+let gradientGalleryMotionActive = false;
+let lastColorVisionPreviewSignature = '';
+const STYLE_PACK_COPY_LIMIT = 100 * 1024;
+const STYLE_PACK_FILE_LIMIT = 1024 * 1024;
+
+function getEffectiveNarratorVisual() {
+    return getNarratorVisual(settings, applyThemeReadabilityAndBrightness);
+}
 
 function getDialogFocusables(dialog) {
     return [...dialog.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')]
         .filter(element => !element.hidden && element.getClientRects().length > 0);
 }
 
-function openDecisionDialog({ title, description = '', detailsHtml = '', choices = [], checkbox = null, opener = document.activeElement }) {
+function openDecisionDialog({ title, description = '', detailsHtml = '', choices = [], checkbox = null, input = null, formHtml = '', opener = document.activeElement }) {
     if (closeActiveUiDialog) closeActiveUiDialog(null, { restoreFocus: false });
     return new Promise(resolve => {
         const backdrop = document.createElement('div');
         backdrop.className = 'dc-dialog-backdrop';
         const titleId = `dc-dialog-title-${Date.now()}`;
         const descriptionId = description ? `${titleId}-description` : '';
+        const inputId = input ? `${titleId}-input` : '';
+        const inputListId = input?.options?.length ? `${inputId}-options` : '';
         backdrop.innerHTML = `
             <div class="dc-dialog" role="dialog" aria-modal="true" aria-labelledby="${titleId}"${descriptionId ? ` aria-describedby="${descriptionId}"` : ''}>
                 <h2 id="${titleId}" class="dc-dialog-title">${escapeHtml(title)}</h2>
                 ${description ? `<p id="${descriptionId}" class="dc-dialog-description">${escapeHtml(description)}</p>` : ''}
                 ${detailsHtml ? `<div class="dc-dialog-details">${detailsHtml}</div>` : ''}
                 ${checkbox ? `<label class="checkbox_label dc-dialog-checkbox"><input type="checkbox" class="dc-dialog-checkbox-input"><span>${escapeHtml(checkbox.label)}</span></label>` : ''}
+                ${input ? `<label class="dc-dialog-input" for="${inputId}"><span>${escapeHtml(input.label)}</span><input id="${inputId}" class="text_pole dc-dialog-text-input" type="text" value="${escapeAttr(input.value || '')}"${inputListId ? ` list="${inputListId}"` : ''} autocomplete="off">${input.help ? `<small>${escapeHtml(input.help)}</small>` : ''}</label>${inputListId ? `<datalist id="${inputListId}">${input.options.map(option => `<option value="${escapeAttr(option)}"></option>`).join('')}</datalist>` : ''}` : ''}
+                ${formHtml}
                 <div class="dc-dialog-actions">
-                    ${choices.map(choice => `<button type="button" class="menu_button${choice.primary ? ' dc-primary-button' : ''}${choice.danger ? ' dc-danger-button' : ''}" data-dialog-value="${escapeAttr(choice.value)}"${choice.initial ? ' data-dialog-initial="true"' : ''}>${escapeHtml(choice.label)}</button>`).join('')}
+                    ${choices.map(choice => `<button type="button" class="menu_button${choice.primary ? ' dc-primary-button' : ''}${choice.danger ? ' dc-danger-button' : ''}" data-dialog-value="${escapeAttr(choice.value)}"${choice.initial ? ' data-dialog-initial="true"' : ''}${choice.disabled ? ' disabled' : ''}>${escapeHtml(choice.label)}</button>`).join('')}
                 </div>
             </div>`;
         document.body.appendChild(backdrop);
         const dialog = backdrop.querySelector('.dc-dialog');
+        registerGradientAnimationRoot(dialog);
         const inertSiblings = [...document.body.children]
             .filter(element => element !== backdrop && !element.inert)
             .map(element => { element.inert = true; return element; });
@@ -85,12 +117,19 @@ function openDecisionDialog({ title, description = '', detailsHtml = '', choices
             closed = true;
             const checked = !!dialog.querySelector('.dc-dialog-checkbox-input')?.checked;
             const selected = [...dialog.querySelectorAll('.dc-dialog-select:checked')].map(input => input.dataset.value);
+            const inputValue = dialog.querySelector('.dc-dialog-text-input')?.value ?? '';
+            const formValues = {};
+            dialog.querySelectorAll('[data-dialog-field]').forEach(field => {
+                if (!field.dataset.dialogField) return;
+                formValues[field.dataset.dialogField] = field.type === 'checkbox' ? field.checked : field.value;
+            });
             document.removeEventListener('keydown', onKeyDown, true);
             inertSiblings.forEach(element => { element.inert = false; });
+            unregisterGradientAnimationRoot(dialog);
             backdrop.remove();
             if (closeActiveUiDialog === close) closeActiveUiDialog = null;
             if (restoreFocus && opener?.isConnected && typeof opener.focus === 'function') opener.focus({ preventScroll: true });
-            resolve({ value, checked, selected });
+            resolve({ value, checked, selected, inputValue, formValues });
         };
         const onKeyDown = event => {
             if (event.key === 'Escape') {
@@ -113,7 +152,7 @@ function openDecisionDialog({ title, description = '', detailsHtml = '', choices
         dialog.querySelectorAll('[data-dialog-value]').forEach(button => {
             button.addEventListener('click', () => close(button.dataset.dialogValue));
         });
-        (dialog.querySelector('[data-dialog-initial]') || dialog.querySelector('.dc-primary-button') || getDialogFocusables(dialog)[0])?.focus({ preventScroll: true });
+        (dialog.querySelector('[data-dialog-autofocus]') || dialog.querySelector('.dc-dialog-text-input') || dialog.querySelector('[data-dialog-initial]') || dialog.querySelector('.dc-primary-button') || getDialogFocusables(dialog)[0])?.focus({ preventScroll: true });
     });
 }
 
@@ -148,9 +187,9 @@ function formatDate(value) {
     return Number.isNaN(date.getTime()) ? 'Unknown date' : date.toLocaleString();
 }
 
-function getGradientPresentation(entry) {
+function getGradientPresentation(entry, options = {}) {
     const gradient = normalizeGradient(entry?.gradient);
-    const state = getGradientRenderState(entry);
+    const state = getGradientRenderState(entry, { target: options.target || 'ui', allowAnimation: options.allowAnimation });
     if (!gradient || !state) return null;
     return {
         gradient,
@@ -160,9 +199,9 @@ function getGradientPresentation(entry) {
     };
 }
 
-function buildGradientSurfaceStyle(entry, { text = false } = {}) {
-    const color = getEntryEffectiveColor(entry);
-    const presentation = getGradientPresentation(entry);
+function buildGradientSurfaceStyle(entry, { text = false, target = 'ui', allowAnimation } = {}) {
+    const color = getVisualRenderState(entry, { target }).fallbackColor;
+    const presentation = getGradientPresentation(entry, { target, allowAnimation });
     if (!presentation) return text ? `color:${color};` : `background-color:${color};`;
     const animationProperties = `--dc-text-gradient:${presentation.css};--dc-gradient:${presentation.css};--dc-gradient-fallback:${presentation.fallbackColor};--dc-gradient-animation-enabled:${presentation.animationEnabled ? 1 : 0};--dc-gradient-duration:${presentation.durationSeconds}s;--dc-gradient-reverse:${presentation.reverse ? 1 : 0};--dc-gradient-direction:${presentation.reverse ? 'alternate-reverse' : 'alternate'};`;
     if (text) {
@@ -171,10 +210,10 @@ function buildGradientSurfaceStyle(entry, { text = false } = {}) {
     return `background-color:${color};${animationProperties}background-image:${presentation.css};`;
 }
 
-function setGradientPresentation(element, entry, { text = false } = {}) {
+function setGradientPresentation(element, entry, { text = false, target = 'ui', allowAnimation } = {}) {
     if (!element) return;
-    const color = getEntryEffectiveColor(entry);
-    const presentation = getGradientPresentation(entry);
+    const color = getVisualRenderState(entry, { target }).fallbackColor;
+    const presentation = getGradientPresentation(entry, { target, allowAnimation });
     element.classList.toggle('dc-gradient-surface', !!presentation && !text);
     element.classList.toggle('dc-gradient-text', !!presentation && text);
     element.classList.toggle('dc-has-gradient', !!presentation);
@@ -205,6 +244,7 @@ function setGradientPresentation(element, entry, { text = false } = {}) {
             element.style.webkitBackgroundClip = '';
             element.style.webkitTextFillColor = '';
         }
+        refreshGradientAnimationState();
         return;
     }
     element.dataset.gradient = presentation.gradient.type;
@@ -227,23 +267,30 @@ function setGradientPresentation(element, entry, { text = false } = {}) {
         element.style.webkitBackgroundClip = 'text';
         element.style.webkitTextFillColor = 'transparent';
     }
+    registerGradientAnimationElement(element);
+    refreshGradientAnimationState();
 }
 
-function getGradientCanvasStops(entry) {
+function getGradientCanvasStops(entry, options = {}) {
     const gradient = normalizeGradient(entry?.gradient);
     if (!gradient) return null;
+    const visual = getVisualRenderState(entry, {
+        target: options.target || 'ui',
+        colorVision: options.colorVision,
+    });
     return {
         gradient,
-        stops: [
-            { color: getEntryEffectiveColor(entry), position: gradient.primaryPosition },
-            ...gradient.stops.map(stop => ({ color: stop.color, position: stop.position })),
-        ].sort((left, right) => left.position - right.position),
+        stops: visual.canvasStops.map(stop => ({ color: stop.color, position: stop.offset * 100 })),
+        fallbackColor: visual.fallbackColor,
     };
 }
 
-export function createCanvasGradientFill(ctx, entry, bounds) {
-    const data = getGradientCanvasStops(entry);
-    if (!data || !ctx || !bounds) return getEntryEffectiveColor(entry);
+export function createCanvasGradientFill(ctx, entry, bounds, options = {}) {
+    const data = getGradientCanvasStops(entry, options);
+    if (!data || !ctx || !bounds) return getVisualRenderState(entry, {
+        target: options.target || 'ui',
+        colorVision: options.colorVision,
+    }).fallbackColor;
     const x = Number(bounds.x) || 0;
     const y = Number(bounds.y) || 0;
     const width = Math.max(1, Number(bounds.width) || 1);
@@ -286,9 +333,18 @@ export function getSortedEntries() {
             .some(value => String(value || '').toLowerCase().includes(needle));
     });
     entries.sort((a, b) => {
+        if (settings.sortMode === 'group') {
+            const leftGroup = normalizeGroupKey(a[1].group);
+            const rightGroup = normalizeGroupKey(b[1].group);
+            const groupComparison = !leftGroup && rightGroup ? 1
+                : leftGroup && !rightGroup ? -1
+                    : leftGroup.localeCompare(rightGroup);
+            if (groupComparison) return groupComparison;
+            if (!!b[1].keep !== !!a[1].keep) return Number(b[1].keep) - Number(a[1].keep);
+            return a[1].name.localeCompare(b[1].name);
+        }
         if (!!b[1].keep !== !!a[1].keep) return Number(b[1].keep) - Number(a[1].keep);
         if (settings.sortMode === 'count') return (b[1].dialogueCount || 0) - (a[1].dialogueCount || 0) || a[1].name.localeCompare(b[1].name);
-        if (settings.sortMode === 'group') return (a[1].group || '').localeCompare(b[1].group || '') || a[1].name.localeCompare(b[1].name);
         return a[1].name.localeCompare(b[1].name);
     });
     return entries;
@@ -330,29 +386,61 @@ export async function extractAvatarColor(imgSrc) {
 // Right-click and long-press context menu for messages
 
 // Phase 4A: Theme-aware PNG export
-export function exportLegendPng() {
-    const entries = Object.entries(characterColors);
-    if (!entries.length) { toast.info('No characters to export'); return; }
+export async function exportLegendPng() {
+    const characterEntries = Object.values(characterColors).map(entry => ({ entry, label: entry.name, kind: 'character' }));
+    const narrator = getEffectiveNarratorVisual();
+    const entries = [...characterEntries, ...(narrator ? [{ entry: narrator, label: 'Narration', kind: 'narrator' }] : [])];
+    if (!entries.length) { toast.info('No character or narration visuals to export'); return; }
+    const activePreview = settings.colorVisionPreviewMode !== 'none'
+        && Number(settings.colorVisionPreviewSeverity) > 0
+        && ['ui', 'all'].includes(settings.colorVisionPreviewTarget);
+    let colorVision = { mode: 'none', severity: 0 };
+    if (activePreview) {
+        const decision = await openDecisionDialog({
+            title: 'Export legend appearance',
+            description: 'Choose whether the image uses stored colors or the current color-vision preview.',
+            choices: [
+                { value: 'normal', label: 'Normal colors', primary: true, initial: true },
+                { value: 'preview', label: 'Current preview' },
+                { value: 'cancel', label: 'Cancel' },
+            ],
+        });
+        if (!decision.value || decision.value === 'cancel') return;
+        if (decision.value === 'preview') colorVision = getColorVisionSimulationForTarget('ui');
+    }
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
     const lineHeight = 24, padding = 16, dotSize = 10;
     canvas.width = 300;
-    canvas.height = entries.length * lineHeight + padding * 2;
+    const narrationGap = narrator && characterEntries.length ? 10 : 0;
+    canvas.height = entries.length * lineHeight + narrationGap + padding * 2;
     const mode = settings.themeMode === 'auto' ? detectTheme() : settings.themeMode;
     ctx.fillStyle = mode === 'dark' ? '#1a1a2e' : '#f0f0f0';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-    entries.forEach(([, v], i) => {
-        const y = padding + i * lineHeight + lineHeight / 2;
-        const safeColor = getEntryEffectiveColor(v);
+    let rowY = padding + lineHeight / 2;
+    entries.forEach(({ entry: v, label, kind }) => {
+        if (kind === 'narrator' && characterEntries.length) {
+            ctx.strokeStyle = mode === 'dark' ? '#596070' : '#c4c7ce';
+            ctx.beginPath();
+            ctx.moveTo(padding, rowY - lineHeight / 2 + 2);
+            ctx.lineTo(canvas.width - padding, rowY - lineHeight / 2 + 2);
+            ctx.stroke();
+            rowY += narrationGap;
+        }
+        const y = rowY;
+        const safeColor = getVisualRenderState(v, { target: 'ui', colorVision }).fallbackColor;
         ctx.beginPath();
         ctx.arc(padding + dotSize / 2, y, dotSize / 2, 0, Math.PI * 2);
-        ctx.fillStyle = createCanvasGradientFill(ctx, v, { x: padding, y: y - dotSize / 2, width: dotSize, height: dotSize });
+        ctx.fillStyle = createCanvasGradientFill(ctx, v, { x: padding, y: y - dotSize / 2, width: dotSize, height: dotSize }, { colorVision });
         ctx.fill();
         ctx.font = '14px sans-serif';
         const textX = padding + dotSize + 8;
-        const textWidth = Math.max(1, ctx.measureText(v.name).width);
-        ctx.fillStyle = createCanvasGradientFill(ctx, v, { x: textX, y: y - 12, width: textWidth, height: 17 }) || safeColor;
-        ctx.fillText(v.name, textX, y + 5);
+        const count = kind === 'narrator' ? getTransientNarratorCount(getContext()?.chat) : null;
+        const text = kind === 'narrator' && count !== null ? `${label} (${count})` : label;
+        const textWidth = Math.max(1, ctx.measureText(text).width);
+        ctx.fillStyle = createCanvasGradientFill(ctx, v, { x: textX, y: y - 12, width: textWidth, height: 17 }, { colorVision }) || safeColor;
+        ctx.fillText(text, textX, y + 5);
+        rowY += lineHeight;
     });
     const a = document.createElement('a');
     a.href = canvas.toDataURL('image/png');
@@ -479,6 +567,7 @@ export function createLegend() {
         setLegendListeners({ onMouseMove, onMouseUp });
 
         document.body.appendChild(legend);
+        registerGradientAnimationRoot(legend);
     }
     return legend;
 }
@@ -486,19 +575,23 @@ export function createLegend() {
 export function updateLegend() {
     const legend = createLegend();
     const entries = Object.entries(characterColors);
+    const narrator = getEffectiveNarratorVisual();
+    const narratorCount = getTransientNarratorCount(getContext()?.chat);
     const signature = JSON.stringify({
         visible: !!settings.showLegend,
         driftAll: settings.driftAllGradientColors === true,
+        colorVision: getColorVisionSimulationForTarget('ui'),
         entries: entries.map(([key, entry]) => [
             key,
             entry.name,
             entry.dialogueCount || 0,
-            getEntryEffectiveColor(entry),
+            getVisualRenderState(entry, { target: 'ui' }).fallbackColor,
             normalizeGoogleFontName(entry.font),
             getGradientSignature(entry),
         ]),
+        narrator: narrator ? [narratorCount, getVisualRenderState(narrator, { target: 'ui' }).fallbackColor, getGradientSignature(narrator)] : null,
     });
-    if (!entries.length || !settings.showLegend) {
+    if ((!entries.length && !narrator) || !settings.showLegend) {
         legend.style.display = 'none';
         lastLegendSignature = signature;
         return;
@@ -507,16 +600,24 @@ export function updateLegend() {
     lastLegendSignature = signature;
     legend.innerHTML = '<div class="dc-legend-handle" tabindex="0" role="toolbar" aria-label="Move character legend with arrow keys"><strong>Characters</strong><span><button type="button" class="dc-legend-reset" aria-label="Reset legend position" title="Reset position">↺</button><button type="button" class="dc-legend-hide" aria-label="Hide character legend" title="Hide legend">×</button></span></div>' +
         entries.map(([, v]) => {
-            const presentation = getGradientPresentation(v);
+             const presentation = getGradientPresentation(v, { target: 'ui' });
             const fontFamily = getGoogleFontFamily(v.font);
             if (fontFamily) loadGoogleFont(v.font);
             const fontStyle = fontFamily ? `font-family:${escapeAttr(fontFamily)};` : '';
             const gradientClasses = presentation ? ` dc-gradient-legend-item ${presentation.classes}` : '';
             const gradientAttributes = presentation ? ` ${presentation.dataAttributes}` : '';
             return `<div class="dc-legend-character${gradientClasses}"${gradientAttributes} style="display:flex;align-items:center;gap:4px;"><span class="dc-legend-swatch${presentation ? ' dc-gradient-surface' : ''}"${gradientAttributes} style="width:8px;height:8px;border-radius:50%;${escapeAttr(buildGradientSurfaceStyle(v))}"></span><span class="dc-legend-name${presentation ? ' dc-gradient-text' : ''}"${gradientAttributes} style="${escapeAttr(buildGradientSurfaceStyle(v, { text: true }))}${fontStyle}">${escapeHtml(v.name)}</span><span style="opacity:0.5;font-size:0.8em;">${v.dialogueCount || 0}</span></div>`;
-        }).join('');
+        }).join('') + (narrator ? (() => {
+            const presentation = getGradientPresentation(narrator, { target: 'ui' });
+            const gradientClasses = presentation ? ` dc-gradient-legend-item ${presentation.classes}` : '';
+            const gradientAttributes = presentation ? ` ${presentation.dataAttributes}` : '';
+            const countLabel = narratorCount === null ? 'Visual only' : String(narratorCount);
+            return `<div class="dc-legend-section-label">Narration</div><div class="dc-legend-character dc-legend-narration${gradientClasses}"${gradientAttributes} style="display:flex;align-items:center;gap:4px;"><span class="dc-legend-swatch${presentation ? ' dc-gradient-surface' : ''}"${gradientAttributes} style="width:8px;height:8px;border-radius:50%;${escapeAttr(buildGradientSurfaceStyle(narrator))}"></span><span class="dc-legend-name${presentation ? ' dc-gradient-text' : ''}"${gradientAttributes} style="${escapeAttr(buildGradientSurfaceStyle(narrator, { text: true }))}">Narration</span><span style="opacity:0.5;font-size:0.8em;">${escapeHtml(countLabel)}</span></div>`;
+        })() : '');
     legend.style.display = settings.showLegend ? 'block' : 'none';
     if (settings.showLegend) requestAnimationFrame(() => legend.__dcClampPosition?.());
+    registerGradientAnimationRoot(legend);
+    refreshGradientAnimationState();
 }
 
 export function getDialogueStats() {
@@ -530,15 +631,16 @@ export function getDialogueStats() {
         font: normalizeGoogleFontName(v.font),
         baseColor: getBaseColor(v),
         gradient: cloneGradient(v.gradient),
-        gradientCss: buildGradientCss(v),
+        gradientCss: getVisualRenderState(v, { target: 'ui' }).gradientCss,
     })).sort((a, b) => b.count - a.count);
 }
 
 export async function showStatsPopup() {
     const stats = getDialogueStats();
-    if (!stats.length) { toast.info('No dialogue data'); return; }
+    const narrator = getEffectiveNarratorVisual();
+    if (!stats.length && !narrator) { toast.info('No dialogue or narration data'); return; }
     const maxCount = Math.max(...stats.map(s => s.count), 1);
-    let html = stats.map(s => {
+    const dialogueHtml = stats.map(s => {
         const statEntry = { color: s.color, baseColor: s.baseColor, gradient: s.gradient };
         const fontFamily = getGoogleFontFamily(s.font);
         if (fontFamily) loadGoogleFont(s.font);
@@ -548,9 +650,18 @@ export async function showStatsPopup() {
         const gradientAttributes = presentation ? ` ${presentation.dataAttributes}` : '';
         return `<div class="dc-stats-character${gradientClasses}"${gradientAttributes}><span class="dc-stats-name${presentation ? ' dc-gradient-text' : ''}"${gradientAttributes} style="${escapeAttr(buildGradientSurfaceStyle(statEntry, { text: true }))}${fontStyle}">${escapeHtml(s.name)}</span><div class="dc-stats-track" aria-hidden="true"><div class="dc-stats-bar${presentation ? ' dc-gradient-surface' : ''}"${gradientAttributes} style="width:${s.count / maxCount * 100}%;${escapeAttr(buildGradientSurfaceStyle(statEntry))}"></div></div><span class="dc-stats-value">${s.count} (${s.pct}%)</span></div>`;
     }).join('');
+    const narratorCount = getTransientNarratorCount(getContext()?.chat);
+    const narrationHtml = narrator ? (() => {
+        const presentation = getGradientPresentation(narrator);
+        const gradientClasses = presentation ? ` ${presentation.classes}` : '';
+        const gradientAttributes = presentation ? ` ${presentation.dataAttributes}` : '';
+        const value = narratorCount === null ? 'Visual only; no reliable count available' : `${narratorCount} tagged narration span${narratorCount === 1 ? '' : 's'}`;
+        return `<div class="dc-stats-narration${gradientClasses}"${gradientAttributes}><span class="dc-stats-name${presentation ? ' dc-gradient-text' : ''}"${gradientAttributes} style="${escapeAttr(buildGradientSurfaceStyle(narrator, { text: true }))}">Narration</span><span class="dc-stats-value">${escapeHtml(value)}</span></div>`;
+    })() : '';
+    const html = `${dialogueHtml}${narrationHtml ? `<div class="dc-stats-section-label">Narration</div>${narrationHtml}` : ''}`;
     await openDecisionDialog({
         title: 'Dialogue activity',
-        description: 'Counts represent attributed dialogue segments and can differ by coloring engine.',
+        description: 'Dialogue percentages exclude narration. Narration is shown separately and counted only when saved tags identify it safely.',
         detailsHtml: `<div class="dc-stats-list">${html}</div>`,
         choices: [{ value: 'close', label: 'Close', primary: true }],
     });
@@ -569,19 +680,20 @@ export async function showStorageManager() {
         const size = new Blob([raw]).size;
         const colors = entry.colors || {};
         const colorCount = Object.keys(colors).length;
+        const groupProfileCount = Object.keys(entry.groupProfiles || {}).length;
         const names = Object.values(colors).map(v => v.name).filter(Boolean).slice(0, 3);
         const isCurrent = k === currentKey;
         const scope = k === 'dc_global' ? 'Global' : k.startsWith('dc_chat_') ? 'Per chat' : 'Per card';
         const identity = names.length ? names.join(', ') + (colorCount > 3 ? ` (+${colorCount - 3})` : '') : getStorageLabelForKey(k);
         const label = `${scope}: ${identity}`;
         const sizeStr = size < 1024 ? `${size} B` : `${(size / 1024).toFixed(1)} KB`;
-        return { key: k, label, colorCount, sizeStr, size, isCurrent, updatedAt: entry.updatedAt || '' };
+        return { key: k, label, colorCount, groupProfileCount, sizeStr, size, isCurrent, updatedAt: entry.updatedAt || '' };
     });
     entries.sort((a, b) => a.isCurrent ? -1 : b.isCurrent ? 1 : a.key.localeCompare(b.key));
 
     const rows = entries.map(e => {
         const tag = e.isCurrent ? '<span class="dc-current-badge">Active</span>' : '';
-        return `<label class="dc-storage-row${e.isCurrent ? ' dc-storage-current' : ''}"><input type="checkbox" class="dc-dialog-select" data-value="${escapeAttr(e.key)}"${e.isCurrent ? ' disabled' : ''}><span class="dc-storage-entry"><strong>${escapeHtml(e.label)} ${tag}</strong><small>${e.colorCount} characters, ${escapeHtml(e.sizeStr)}, ${escapeHtml(formatDate(e.updatedAt))}</small></span></label>`;
+        return `<label class="dc-storage-row${e.isCurrent ? ' dc-storage-current' : ''}"><input type="checkbox" class="dc-dialog-select" data-value="${escapeAttr(e.key)}"${e.isCurrent ? ' disabled' : ''}><span class="dc-storage-entry"><strong>${escapeHtml(e.label)} ${tag}</strong><small>${e.colorCount} characters, ${e.groupProfileCount} group profiles, ${escapeHtml(e.sizeStr)}, ${escapeHtml(formatDate(e.updatedAt))}</small></span></label>`;
     }).join('');
     const decision = await openDecisionDialog({
         title: 'Storage manager',
@@ -670,6 +782,338 @@ export function setVerifyAttributionButtonBusy(isBusyState) {
     button.removeAttribute('aria-busy');
     button.textContent = button.dataset.defaultLabel || 'Verify Colors (LLM)';
     syncProcessControlState();
+    refreshAttributionReviewStatus();
+}
+
+function formatAttributionSource(source) {
+    const labels = {
+        llm: 'LLM verifier',
+        review: 'Reviewed suggestion',
+        manual: 'Manual assignment',
+        override: 'Saved override',
+        'explicit-mention': 'Explicit mention',
+        'streaming-cache': 'Streaming cache',
+        'paragraph-carry': 'Paragraph carry',
+        alternation: 'Speaker alternation',
+        'message-speaker': 'Message speaker',
+        'color-block': 'Color block',
+        heuristic: 'Heuristic',
+        imported: 'Imported',
+        unknown: 'Unknown',
+    };
+    return labels[source] || String(source || 'Unknown').replace(/-/g, ' ');
+}
+
+function formatAttributionConfidence(value) {
+    const confidence = Math.max(0, Math.min(1, Number(value) || 0));
+    const label = confidence >= AUTO_HIGH_ATTRIBUTION_CONFIDENCE
+        ? 'High'
+        : confidence >= 0.5 ? 'Medium' : 'Low';
+    return `${label} (${Math.round(confidence * 100)}%)`;
+}
+
+function getPendingAttributionReviews() {
+    return listAttributionReviews({
+        status: ATTRIBUTION_REVIEW_STATUS.PENDING,
+        oldestFirst: true,
+    });
+}
+
+export function refreshAttributionReviewStatus() {
+    const count = getPendingAttributionReviews().length;
+    const button = document.getElementById('dc-review-attr');
+    const status = document.getElementById('dc-review-attr-status');
+    if (button) button.textContent = `Review suggestions (${count})`;
+    if (status) status.textContent = `${count} review suggestion${count === 1 ? '' : 's'}.`;
+    return count;
+}
+
+function getKnownReviewSpeakerName(name) {
+    const key = resolveCharacterKeyByNameOrAlias(String(name || '').trim());
+    return key && characterColors[key] ? characterColors[key].name : '';
+}
+
+function getKnownReviewSpeakerOptions() {
+    const names = new Set();
+    Object.values(characterColors).forEach(entry => {
+        if (!entry?.name) return;
+        names.add(entry.name);
+        (entry.aliases || []).forEach(alias => names.add(alias));
+    });
+    return [...names].sort((left, right) => left.localeCompare(right));
+}
+
+function getReviewMessage(review) {
+    const chat = getContext()?.chat || [];
+    const expectedId = String(review.messageId || '');
+    const matchesId = message => !expectedId || String(message?.id ?? message?.send_date ?? '') === expectedId;
+    const indexed = Number.isInteger(review.messageIndex) ? chat[review.messageIndex] : null;
+    if (indexed && matchesId(indexed)) {
+        return { message: indexed, index: review.messageIndex };
+    }
+    const byId = expectedId ? chat.find(message => matchesId(message)) : null;
+    if (byId) return { message: byId, index: chat.indexOf(byId) };
+    const byFingerprint = chat.find(message => createMessageFingerprint(message) === review.messageFingerprint);
+    return byFingerprint ? { message: byFingerprint, index: chat.indexOf(byFingerprint) } : { message: null, index: -1 };
+}
+
+function getAttributionReviewPresentation(review) {
+    const resolved = getReviewMessage(review);
+    const message = resolved.message;
+    if (!message) {
+        return {
+            review,
+            message: null,
+            messageIndex: -1,
+            excerpt: '',
+            currentSpeaker: review.currentSpeaker || 'Unassigned',
+            stale: true,
+            staleReason: 'Message is no longer in this chat.',
+        };
+    }
+
+    const messageFingerprint = createMessageFingerprint(message);
+    if (messageFingerprint !== review.messageFingerprint) {
+        return {
+            review,
+            message,
+            messageIndex: resolved.index,
+            excerpt: String(message.mes || '').slice(0, 280),
+            currentSpeaker: review.currentSpeaker || 'Unassigned',
+            stale: true,
+            staleReason: 'Message text changed.',
+        };
+    }
+
+    const attribution = attributeDialogueSegments(message.mes, message.name, {
+        autoAddMessageSpeaker: false,
+        ...getMessageQuoteOverrideOptions(resolved.index, message),
+        mesIndex: resolved.index,
+    });
+    const segment = attribution.segments.find(item => item.index === review.segmentIndex);
+    const segmentMatches = !!segment
+        && createSegmentFingerprint(segment, messageFingerprint) === review.segmentFingerprint;
+    const excerpt = segment?.text
+        || (Number.isInteger(review.segmentStart) && Number.isInteger(review.segmentEnd)
+            ? String(message.mes || '').slice(review.segmentStart, review.segmentEnd)
+            : String(message.mes || '').slice(0, 280));
+    return {
+        review,
+        message,
+        messageIndex: resolved.index,
+        segment,
+        excerpt,
+        currentSpeaker: segment?.assignment?.name || review.currentSpeaker || 'Unassigned',
+        stale: !segmentMatches,
+        staleReason: segmentMatches ? '' : 'Dialogue segment changed.',
+    };
+}
+
+function buildAttributionReviewDetails(presentation) {
+    const { review } = presentation;
+    const excerpt = presentation.excerpt || 'No matching dialogue excerpt is available.';
+    return `<article class="dc-attribution-review-item${presentation.stale ? ' dc-attribution-review-stale' : ''}">
+        <dl class="dc-review-list dc-attribution-review-list">
+            <div><dt>Message index</dt><dd>${presentation.messageIndex >= 0 ? presentation.messageIndex : review.messageIndex ?? 'Unknown'}</dd></div>
+            <div><dt>Excerpt</dt><dd><q class="dc-attribution-review-excerpt">${escapeHtml(excerpt)}</q></dd></div>
+            <div><dt>Current speaker</dt><dd>${escapeHtml(presentation.currentSpeaker)}</dd></div>
+            <div><dt>Proposed speaker</dt><dd>${escapeHtml(review.proposedSpeaker)}</dd></div>
+            <div><dt>Source</dt><dd>${escapeHtml(formatAttributionSource(review.source))}</dd></div>
+            <div><dt>Confidence</dt><dd>${escapeHtml(formatAttributionConfidence(review.confidence))}</dd></div>
+            <div><dt>Status</dt><dd><strong>${presentation.stale ? 'Stale' : 'Current'}</strong>${presentation.staleReason ? `: ${escapeHtml(presentation.staleReason)}` : ''}</dd></div>
+        </dl>
+    </article>`;
+}
+
+function jumpToAttributionReviewMessage(presentation) {
+    if (!Number.isInteger(presentation.messageIndex) || presentation.messageIndex < 0) {
+        toast.info('This message is no longer available.');
+        return;
+    }
+    const messageElement = document.querySelector(`#chat .mes[mesid="${presentation.messageIndex}"]`)
+        || document.querySelectorAll('#chat .mes[mesid]')[presentation.messageIndex];
+    if (!messageElement) {
+        toast.info('This message is not currently rendered.');
+        return;
+    }
+    messageElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    const target = messageElement.querySelector(`[data-dc-seg="${presentation.review.segmentIndex}"]`) || messageElement.querySelector('.mes_text') || messageElement;
+    if (!target.hasAttribute('tabindex')) target.setAttribute('tabindex', '-1');
+    target.focus({ preventScroll: true });
+}
+
+async function repaintAcceptedAttributionReview(decision) {
+    const messageIndex = Number(decision?.messageIndex);
+    const message = Number.isInteger(messageIndex) ? getContext()?.chat?.[messageIndex] : null;
+    if (!message) return false;
+    clearMessageDomRepairTimer(messageIndex);
+    cancelMessageDomFollowupRepairs(messageIndex);
+    clearStreamingAttributionOverrides(messageIndex);
+    let repainted = await decorateMessageDomFromCurrentRender(messageIndex, message, {
+        queueVerification: false,
+        renderFallback: false,
+    });
+    if (!repainted) repainted = await refreshAndDecorateMessageDom(messageIndex, message, { queueVerification: false });
+    if (repainted) scheduleMessageDomFollowupRepair(messageIndex, repainted);
+    return repainted;
+}
+
+async function editAndAcceptAttributionReview(review, opener) {
+    const options = getKnownReviewSpeakerOptions();
+    let editedName = review.proposedSpeaker;
+    while (true) {
+        const decision = await openDecisionDialog({
+            title: 'Edit suggested speaker',
+            description: 'Use a configured canonical speaker or alias. This is a reviewed assignment, not a new-character action.',
+            detailsHtml: `<p class="dc-section-note">Suggested: ${escapeHtml(review.proposedSpeaker)}</p>`,
+            input: {
+                label: 'Known speaker or alias',
+                value: editedName,
+                options,
+                help: 'Only known speakers and aliases can be accepted here.',
+            },
+            opener,
+            choices: [
+                { value: 'accept', label: 'Edit and accept', primary: true, initial: true },
+                { value: 'cancel', label: 'Cancel' },
+            ],
+        });
+        if (decision.value !== 'accept') return '';
+        editedName = decision.inputValue;
+        const canonicalName = getKnownReviewSpeakerName(editedName);
+        if (canonicalName) return canonicalName;
+        toast.warning('Choose a known canonical speaker or alias. Direct manual assignment is available from the dialogue context menu.');
+    }
+}
+
+async function acceptAttributionReviewFromUi(presentation, speakerName = '', options = {}) {
+    const review = presentation.review;
+    const acceptedName = getKnownReviewSpeakerName(speakerName || review.proposedSpeaker);
+    if (!acceptedName) {
+        toast.warning('The proposed speaker is not configured. Edit the suggestion to a known speaker or reject it.');
+        return false;
+    }
+    const decision = acceptAttributionReview(review.id);
+    if (!decision || decision.status !== ATTRIBUTION_REVIEW_STATUS.ACCEPTED) {
+        toast.info('This suggestion is no longer current. Dismiss the stale suggestion instead.');
+        return false;
+    }
+    if (speakerName && acceptedName !== review.proposedSpeaker) {
+        const messageIndex = Number(decision.messageIndex);
+        const message = Number.isInteger(messageIndex) ? getContext()?.chat?.[messageIndex] : null;
+        if (!message || !setMessageQuoteOverride(messageIndex, message, decision.segmentIndex, acceptedName, {
+            source: 'review',
+            confidence: decision.confidence,
+            evidence: decision.evidence,
+            reviewId: decision.id,
+        })) {
+            toast.warning('The review was accepted, but the edited speaker could not be applied.');
+            return false;
+        }
+    }
+    try {
+        await repaintAcceptedAttributionReview(decision);
+    } catch (error) {
+        console.error('[Dialogue Colors] Accepted attribution review could not repaint:', error);
+        toast.warning('The suggestion was accepted, but its message could not refresh immediately.');
+    }
+    if (!options.quiet) toast.success(`Accepted ${escapeHtml(acceptedName)}.`);
+    return true;
+}
+
+async function acceptAllHighConfidenceAttributionReviews(opener) {
+    const candidates = getPendingAttributionReviews()
+        .map(getAttributionReviewPresentation)
+        .filter(presentation => !presentation.stale
+            && Number(presentation.review.confidence) >= AUTO_HIGH_ATTRIBUTION_CONFIDENCE
+            && !!getKnownReviewSpeakerName(presentation.review.proposedSpeaker));
+    if (!candidates.length) {
+        toast.info(`No current known-speaker suggestions meet the ${Math.round(AUTO_HIGH_ATTRIBUTION_CONFIDENCE * 100)}% threshold.`);
+        return 0;
+    }
+    const confirmed = await confirmReviewedAction({
+        title: `Accept ${candidates.length} high-confidence suggestion${candidates.length === 1 ? '' : 's'}?`,
+        description: `Each suggestion is at least ${Math.round(AUTO_HIGH_ATTRIBUTION_CONFIDENCE * 100)}% confident and targets an existing speaker. This keeps the default review-all policy unchanged.`,
+        detailsHtml: `<p class="dc-review-names">${candidates.slice(0, 12).map(presentation => `Message ${presentation.messageIndex}: ${escapeHtml(getKnownReviewSpeakerName(presentation.review.proposedSpeaker))}`).join('<br>')}${candidates.length > 12 ? `<br>and ${candidates.length - 12} more` : ''}</p>`,
+        confirmLabel: 'Accept high-confidence',
+        opener,
+    });
+    if (!confirmed) return 0;
+    let accepted = 0;
+    for (const presentation of candidates) {
+        if (await acceptAttributionReviewFromUi(presentation, '', { quiet: true })) accepted++;
+    }
+    if (accepted > 1) toast.success(`Accepted ${accepted} high-confidence suggestions.`);
+    return accepted;
+}
+
+async function showAttributionReviewDialog(opener) {
+    let nextReviewId = '';
+    while (true) {
+        const reviews = getPendingAttributionReviews();
+        if (!reviews.length) {
+            await openDecisionDialog({
+                title: 'Review suggestions',
+                description: 'No pending attribution suggestions.',
+                opener,
+                choices: [{ value: 'close', label: 'Close', primary: true, initial: true }],
+            });
+            break;
+        }
+        const reviewIndex = Math.max(0, reviews.findIndex(review => review.id === nextReviewId));
+        const review = reviews[reviewIndex];
+        const presentation = getAttributionReviewPresentation(review);
+        const canAccept = !presentation.stale && !!getKnownReviewSpeakerName(review.proposedSpeaker);
+        const decision = await openDecisionDialog({
+            title: `Review suggestion ${reviewIndex + 1} of ${reviews.length}`,
+            description: canAccept
+                ? 'Review the proposed attribution before applying it.'
+                : presentation.stale
+                    ? 'This suggestion no longer matches the current chat.'
+                    : 'The proposed speaker is not a configured character or alias.',
+            detailsHtml: buildAttributionReviewDetails(presentation),
+            opener,
+            choices: [
+                { value: 'accept', label: 'Accept', primary: canAccept, disabled: !canAccept },
+                { value: 'edit', label: 'Edit and accept', disabled: presentation.stale },
+                { value: 'reject', label: 'Keep current/reject', disabled: presentation.stale },
+                { value: 'jump', label: 'Jump to message', disabled: presentation.messageIndex < 0 },
+                { value: 'next', label: 'Next' },
+                { value: 'accept-high', label: 'Accept all high-confidence' },
+                ...(presentation.stale ? [{ value: 'dismiss', label: 'Dismiss stale', primary: true }] : []),
+                { value: 'close', label: 'Close', initial: !canAccept && !presentation.stale },
+            ],
+        });
+        if (!decision.value || decision.value === 'close') break;
+        if (decision.value === 'jump') {
+            jumpToAttributionReviewMessage(presentation);
+            break;
+        }
+        if (decision.value === 'next') {
+            nextReviewId = reviews[reviewIndex + 1]?.id || reviews[0]?.id || '';
+            continue;
+        }
+        if (decision.value === 'accept-high') {
+            await acceptAllHighConfidenceAttributionReviews(opener);
+            nextReviewId = reviews[reviewIndex + 1]?.id || '';
+            continue;
+        }
+        if (decision.value === 'edit') {
+            const editedSpeaker = await editAndAcceptAttributionReview(review, opener);
+            if (editedSpeaker) await acceptAttributionReviewFromUi(presentation, editedSpeaker);
+        } else if (decision.value === 'accept') {
+            await acceptAttributionReviewFromUi(presentation);
+        } else if (decision.value === 'reject') {
+            rejectAttributionReview(review.id);
+            toast.info('Kept the current speaker.');
+        } else if (decision.value === 'dismiss') {
+            dismissAttributionReview(review.id, { reason: 'dismissed-in-review' });
+            pruneAttributionReviews();
+            toast.info('Dismissed stale suggestion.');
+        }
+        nextReviewId = reviews[reviewIndex + 1]?.id || '';
+    }
+    refreshAttributionReviewStatus();
 }
 
 export function showAutoColorizeIndicator(mesElement) {
@@ -695,8 +1139,12 @@ export function hideAutoColorizeIndicator(mesElement) {
     if (indicator) indicator.remove();
 }
 
-export function addCharacter(name, color) {
+export function addCharacter(name, color, options = {}) {
     if (!name.trim()) return;
+    if (name.trim().toLowerCase() === 'narrator') {
+        toast.info('Use the dedicated Narration editor instead of adding Narrator as a character.');
+        return;
+    }
     // Names with [COLORS:] block delimiters or control characters cannot
     // round-trip through ingest and would corrupt the prompt block.
     if (/[\r\n\t\[\]=,()]/.test(name.trim())) {
@@ -725,9 +1173,10 @@ export function addCharacter(name, color) {
         applyLiveColorChangesFromSnapshot(snapshot, [key]);
     } else {
         const built = buildCharacterEntry(name.trim(), {
+            ...options,
             color,
             colorMode: 'base',
-            locked: false,
+            origin: options.origin || 'manual',
             dialogueCount: 0
         });
         if (!built.entry) return;
@@ -831,6 +1280,10 @@ function buildGradientEditorHtml(key, entry) {
     const previewClasses = presentation ? ` ${presentation.classes}` : '';
     const previewAttributes = presentation ? ` ${presentation.dataAttributes}` : '';
     const presetOptions = buildGradientPresetOptionsHtml();
+    const generator = normalizeEntryGradientGenerator(entry.gradientGenerator, gradient);
+    const generatorStatus = generator
+        ? `<span class="dc-gradient-generator-status" title="Deterministic gradient variation ${generator.iteration}">Seeded ${generator.iteration}</span>`
+        : '';
     const presetControls = `
         <div class="dc-gradient-presets dc-gradient-compact-presets">
             <label>Preset
@@ -838,6 +1291,7 @@ function buildGradientEditorHtml(key, entry) {
             </label>
             <button type="button" class="dc-gradient-apply-preset menu_button" data-key="${safeKey}" data-focus-id="gradient-preset-apply">Apply</button>
             <button type="button" class="dc-gradient-randomize menu_button" data-key="${safeKey}" data-focus-id="gradient-randomize" aria-label="Randomize gradient for ${safeName}">Randomize</button>
+            ${generatorStatus}
         </div>`;
     if (!gradient) {
         return `
@@ -986,12 +1440,14 @@ function refreshGradientVisualSurfaces(keys = Object.keys(characterColors)) {
 
 export function buildCharRowHtml(k, v) {
     const safeKey = escapeAttr(k);
-    const safeColor = getEntryEffectiveColor(v);
+    const colorControlId = buildCharacterControlId('dc-color', k);
+    const safeColor = getVisualRenderState(v, { target: 'ui' }).fallbackColor;
     const pickerColor = getBaseColor(v, safeColor);
     const gradientPresentation = getGradientPresentation(v);
     const gradientClasses = gradientPresentation ? ` ${gradientPresentation.classes}` : '';
     const gradientAttributes = gradientPresentation ? ` ${gradientPresentation.dataAttributes}` : '';
     const rowExpanded = expandedCharacterRows.has(k);
+    const rowSelected = selectedCharacterKeys.has(k);
     const styleLabel = v.style || 'Normal';
     const fontName = normalizeGoogleFontName(v.font);
     const fontFamily = getGoogleFontFamily(fontName);
@@ -1008,8 +1464,12 @@ export function buildCharRowHtml(k, v) {
         `<span class="dc-alias-chip">${escapeHtml(a)}<button type="button" class="dc-alias-remove" data-key="${safeKey}" data-alias="${escapeAttr(a)}" aria-label="Remove alias ${escapeAttr(a)} from ${escapeAttr(v.name)}">&times;</button></span>`
     ).join('');
     return `
-        <article class="dc-char ${swapMode === k ? 'dc-swap-selected' : ''} ${v.keep ? 'dc-char-kept' : ''}${gradientClasses}" data-key="${safeKey}" role="listitem" aria-label="${escapeAttr(v.name)}"${gradientAttributes}>
+        <article class="dc-char ${swapMode === k ? 'dc-swap-selected' : ''} ${v.keep ? 'dc-char-kept' : ''} ${rowSelected ? 'dc-char-selected' : ''}${gradientClasses}" data-key="${safeKey}" role="listitem" aria-label="${escapeAttr(v.name)}"${gradientAttributes}>
             <div class="dc-char-main">
+                <label class="checkbox_label dc-char-select-control" title="Select ${escapeAttr(v.name)} for bulk actions">
+                    <input type="checkbox" class="dc-char-select" data-key="${safeKey}" data-focus-id="select" aria-label="Select ${escapeAttr(v.name)} for bulk actions"${rowSelected ? ' checked' : ''}>
+                    <span class="dc-visually-hidden">Select ${escapeHtml(v.name)}</span>
+                </label>
                 <span class="dc-color-swatch">
                     <span class="dc-color-dot${gradientPresentation ? ' dc-gradient-surface' : ''}"${gradientPresentation ? ` ${gradientPresentation.dataAttributes}` : ''} style="${escapeAttr(buildGradientSurfaceStyle(v))}"></span>
                     <input type="color" value="${pickerColor}" data-key="${safeKey}" class="dc-color-input" aria-label="Color for ${escapeAttr(v.name)}">
@@ -1028,8 +1488,8 @@ export function buildCharRowHtml(k, v) {
             ${rowExpanded ? `
             <div class="dc-char-advanced">
                 <div class="dc-field-row dc-character-color-row">
-                    <label class="dc-inline-label" for="dc-color-${safeKey}">Primary color</label>
-                    <input id="dc-color-${safeKey}" type="text" value="${escapeAttr(pickerColor)}" data-key="${safeKey}" class="dc-color-hex text_pole" inputmode="text" autocapitalize="none" autocomplete="off" spellcheck="false" maxlength="7" aria-label="Hex color for ${escapeAttr(v.name)}">
+                    <label class="dc-inline-label" for="${escapeAttr(colorControlId)}">Primary color</label>
+                    <input id="${escapeAttr(colorControlId)}" type="text" value="${escapeAttr(pickerColor)}" data-key="${safeKey}" class="dc-color-hex text_pole" inputmode="text" autocapitalize="none" autocomplete="off" spellcheck="false" maxlength="7" aria-label="Hex color for ${escapeAttr(v.name)}">
                     <button type="button" class="dc-harmony menu_button" data-key="${safeKey}" data-focus-id="harmony">Harmony</button>
                 </div>
                 <div class="dc-inline-toolbar">
@@ -1047,11 +1507,12 @@ export function buildCharRowHtml(k, v) {
 }
 
 export function buildCharRowSignature(k, v) {
-    const safeColor = getEntryEffectiveColor(v);
+    const safeColor = getVisualRenderState(v, { target: 'ui' }).fallbackColor;
     return [
         safeColor,
         getBaseColor(v, safeColor),
         expandedCharacterRows.has(k) ? 1 : 0,
+        selectedCharacterKeys.has(k) ? 1 : 0,
         v.keep ? 1 : 0,
         v.locked ? 1 : 0,
         v.group || '',
@@ -1060,6 +1521,9 @@ export function buildCharRowSignature(k, v) {
         v.dialogueCount || 0,
         swapMode === k ? 1 : 0,
         settings.driftAllGradientColors ? 1 : 0,
+        settings.colorVisionPreviewMode || 'none',
+        settings.colorVisionPreviewSeverity ?? 100,
+        settings.colorVisionPreviewTarget || 'all',
         getGradientSignature(v),
         (v.aliases || []).join('\u0001'),
         v.name || ''
@@ -1212,7 +1676,7 @@ function handleAliasClick(aliasBtn) {
     const inputRow = document.createElement('div');
     inputRow.className = 'dc-inline-input';
     const key = aliasBtn.dataset.key;
-    const inputId = `dc-alias-input-${key}`;
+    const inputId = buildCharacterControlId('dc-alias-input', key);
     inputRow.innerHTML = `<label class="dc-visually-hidden" for="${escapeAttr(inputId)}">Alias for ${escapeHtml(characterColors[key]?.name || '')}</label><input id="${escapeAttr(inputId)}" type="text" class="text_pole" placeholder="Alias name"><button type="button" class="menu_button dc-inline-submit">Add</button><button type="button" class="menu_button dc-inline-cancel">Cancel</button>`;
     row.appendChild(inputRow);
     const inp = inputRow.querySelector('input');
@@ -1252,7 +1716,7 @@ function handleFontClick(fontBtn) {
     const current = normalizeGoogleFontName(characterColors[key]?.font);
     const inputRow = document.createElement('div');
     inputRow.className = 'dc-inline-input';
-    const inputId = `dc-font-input-${key}`;
+    const inputId = buildCharacterControlId('dc-font-input', key);
     inputRow.innerHTML = `<label class="dc-visually-hidden" for="${escapeAttr(inputId)}">Google Font for ${escapeHtml(characterColors[key]?.name || '')}</label><input id="${escapeAttr(inputId)}" type="text" class="text_pole" placeholder="Google Font name" value="${escapeAttr(current)}"><button type="button" class="menu_button dc-inline-submit">Set</button><button type="button" class="menu_button dc-inline-cancel">Cancel</button>`;
     row.appendChild(inputRow);
     const inp = inputRow.querySelector('input');
@@ -1285,7 +1749,7 @@ function handleGroupClick(groupBtn) {
     const current = characterColors[key]?.group || '';
     const inputRow = document.createElement('div');
     inputRow.className = 'dc-inline-input';
-    const inputId = `dc-group-input-${key}`;
+    const inputId = buildCharacterControlId('dc-group-input', key);
     inputRow.innerHTML = `<label class="dc-visually-hidden" for="${escapeAttr(inputId)}">Group for ${escapeHtml(characterColors[key]?.name || '')}</label><input id="${escapeAttr(inputId)}" type="text" class="text_pole" placeholder="Group name" value="${escapeAttr(current)}"><button type="button" class="menu_button dc-inline-submit">Set</button><button type="button" class="menu_button dc-inline-cancel">Cancel</button>`;
     row.appendChild(inputRow);
     const inp = inputRow.querySelector('input');
@@ -1293,15 +1757,14 @@ function handleGroupClick(groupBtn) {
     inp.select();
     const close = () => { inputRow.remove(); focusCharacterControl(key, 'group'); };
     const submit = () => {
-        const nextGroup = inp.value.trim();
-        if ((characterColors[key]?.group || '') !== nextGroup) {
-            characterColors[key].group = nextGroup;
-            saveHistory();
-            saveData(); updateCharList();
-            focusCharacterControl(key, 'group');
-        } else {
-            close();
-        }
+        const nextGroup = normalizeGroupName(inp.value);
+        if ((characterColors[key]?.group || '') === nextGroup) { close(); return; }
+        const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
+        const result = setCharacterGroup([key], nextGroup);
+        if (!result.changedKeys.length) { close(); return; }
+        applyLiveColorChangesFromSnapshot(snapshot, result.changedKeys, { saveImmediately: true, repaintStyles: true });
+        commit();
+        focusCharacterControl(key, 'group');
     };
     inputRow.querySelector('.dc-inline-submit').onclick = submit;
     inputRow.querySelector('.dc-inline-cancel').onclick = close;
@@ -1394,12 +1857,13 @@ function synchronizeGradientEditorFromEntry(editor, entry) {
     if (duration) duration.value = String(gradient.animation.duration);
 }
 
-function applyGradientValue(key, gradient, { commitImmediately = false, saveImmediately = false } = {}) {
+function applyGradientValue(key, gradient, { commitImmediately = false, saveImmediately = false, preserveGenerator = false, gradientGenerator = null } = {}) {
     const entry = characterColors[key];
     if (!entry) return false;
     const previousStructure = `${entry.gradient?.type || 'none'}:${entry.gradient?.stops?.length || 0}`;
     const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
-    setEntryGradient(entry, gradient);
+    setEntryGradient(entry, gradient, { preserveGenerator });
+    if (preserveGenerator) entry.gradientGenerator = normalizeEntryGradientGenerator(gradientGenerator || entry.gradientGenerator, entry.gradient);
     const nextStructure = `${entry.gradient?.type || 'none'}:${entry.gradient?.stops?.length || 0}`;
     applyLiveColorChangesFromSnapshot(snapshot, [key], { saveImmediately });
     repaintDomAfterCharacterDataChange(0);
@@ -1477,6 +1941,142 @@ function createDefaultGradient(entry) {
     };
 }
 
+function getNarratorPreviewVisual(style = normalizeNarratorStyle(settings.narratorStyle, { legacy: settings })) {
+    return getNarratorVisual({ narratorStyle: { ...style, enabled: true } }, applyThemeReadabilityAndBrightness);
+}
+
+function previewNarratorStyle(style) {
+    const preview = document.getElementById('dc-narrator-preview');
+    if (preview) setGradientPresentation(preview, getNarratorPreviewVisual(style));
+}
+
+function commitNarratorStyle(style) {
+    const before = JSON.stringify(settings.narratorStyle);
+    setNarratorStyle(settings, style, applyThemeReadabilityAndBrightness);
+    if (before === JSON.stringify(settings.narratorStyle)) {
+        renderNarratorEditor();
+        return false;
+    }
+    applyLiveColorChangesFromSnapshot({}, [], { saveImmediately: true, repaintStyles: true });
+    saveHistory();
+    saveData({ preserveEffectiveColors: true });
+    injectPrompt();
+    scheduleDomRefreshSeries(0);
+    scheduleCustomFontRefresh(0);
+    updateLegend();
+    renderNarratorEditor();
+    return true;
+}
+
+function updateNarratorGradientFromControl(style, control) {
+    const gradient = cloneGradient(style.gradient);
+    if (!gradient) return style;
+    const number = Number(control.value);
+    if (control.id === 'dc-narrator-gradient-type') gradient.type = control.value === 'radial' ? 'radial' : 'linear';
+    else if (control.id === 'dc-narrator-gradient-angle' && Number.isFinite(number)) gradient.angle = number;
+    else if (control.id === 'dc-narrator-gradient-x' && Number.isFinite(number)) gradient.x = number;
+    else if (control.id === 'dc-narrator-gradient-y' && Number.isFinite(number)) gradient.y = number;
+    else if (control.id === 'dc-narrator-gradient-primary-position' && Number.isFinite(number)) gradient.primaryPosition = number;
+    else if (control.id === 'dc-narrator-gradient-animation') gradient.animation.enabled = control.checked;
+    else if (control.classList.contains('dc-narrator-stop-color')) {
+        const stop = gradient.stops[Number(control.dataset.stopIndex)];
+        if (stop) stop.baseColor = stop.color = normalizeHexColor(control.value, stop.baseColor);
+    } else if (control.classList.contains('dc-narrator-stop-position') && Number.isFinite(number)) {
+        const stop = gradient.stops[Number(control.dataset.stopIndex)];
+        if (stop) stop.position = number;
+    }
+    return { ...style, gradient, gradientGenerator: null };
+}
+
+function bindNarratorEditorControls(host) {
+    const currentStyle = () => normalizeNarratorStyle(settings.narratorStyle, { legacy: settings });
+    host.querySelector('#dc-narrator-enabled')?.addEventListener('change', event => {
+        commitNarratorStyle({ ...currentStyle(), enabled: event.target.checked });
+    });
+    const colorInput = host.querySelector('#dc-narrator-color');
+    colorInput?.addEventListener('input', event => {
+        previewNarratorStyle({ ...currentStyle(), baseColor: normalizeHexColor(event.target.value, '#888888') });
+    });
+    colorInput?.addEventListener('change', event => {
+        commitNarratorStyle({ ...currentStyle(), baseColor: normalizeHexColor(event.target.value, '#888888') });
+    });
+    host.querySelector('#dc-narrator-gradient-toggle')?.addEventListener('click', () => {
+        const style = currentStyle();
+        const entry = getNarratorPreviewVisual(style);
+        commitNarratorStyle({ ...style, gradient: style.gradient ? null : createDefaultGradient(entry), gradientGenerator: null });
+    });
+    host.querySelector('#dc-narrator-gradient-randomize')?.addEventListener('click', () => {
+        const style = currentStyle();
+        const entry = getNarratorPreviewVisual(style);
+        const gradient = createRandomGradient(entry);
+        if (!gradient) return;
+        commitNarratorStyle({ ...style, gradient, gradientGenerator: entry.gradientGenerator });
+        const seedInput = document.getElementById('dc-gradient-master-seed');
+        if (seedInput) seedInput.value = settings.gradientRandomMasterSeed;
+    });
+    host.querySelector('#dc-narrator-gradient-apply-preset')?.addEventListener('click', () => {
+        const preset = resolveGradientPreset(host.querySelector('#dc-narrator-gradient-preset')?.value || '');
+        if (!preset) { toast.warning('Select a gradient preset first'); return; }
+        const style = currentStyle();
+        const entry = getNarratorPreviewVisual(style);
+        if (!applyGradientPreset(entry, preset)) { toast.error('Gradient preset is invalid'); return; }
+        commitNarratorStyle({ ...style, baseColor: entry.baseColor, gradient: entry.gradient, gradientGenerator: null });
+    });
+    host.querySelector('#dc-narrator-gradient-add-stop')?.addEventListener('click', () => {
+        const style = currentStyle();
+        const gradient = cloneGradient(style.gradient);
+        if (!gradient || gradient.stops.length + 1 >= MAX_GRADIENT_STOPS) return;
+        const baseColor = normalizeHexColor(getNextColor(), style.baseColor);
+        gradient.stops.push({ baseColor, color: baseColor, position: getNewGradientStopPosition(gradient) });
+        commitNarratorStyle({ ...style, gradient, gradientGenerator: null });
+    });
+    host.querySelectorAll('.dc-narrator-gradient-remove-stop').forEach(button => {
+        button.addEventListener('click', () => {
+            const style = currentStyle();
+            const gradient = cloneGradient(style.gradient);
+            const index = Number(button.dataset.stopIndex);
+            if (!gradient || gradient.stops.length <= 1 || !Number.isInteger(index)) return;
+            gradient.stops.splice(index, 1);
+            commitNarratorStyle({ ...style, gradient, gradientGenerator: null });
+        });
+    });
+    const gradientControls = host.querySelectorAll('#dc-narrator-gradient-type, #dc-narrator-gradient-angle, #dc-narrator-gradient-x, #dc-narrator-gradient-y, #dc-narrator-gradient-primary-position, #dc-narrator-gradient-animation, .dc-narrator-stop-color, .dc-narrator-stop-position');
+    gradientControls.forEach(control => {
+        if (control.type === 'color' || control.type === 'number') {
+            control.addEventListener('input', () => previewNarratorStyle(updateNarratorGradientFromControl(currentStyle(), control)));
+        }
+        control.addEventListener('change', () => commitNarratorStyle(updateNarratorGradientFromControl(currentStyle(), control)));
+    });
+}
+
+function renderNarratorEditor() {
+    const host = document.getElementById('dc-narrator-editor');
+    if (!host) return;
+    const style = normalizeNarratorStyle(settings.narratorStyle, { legacy: settings });
+    const visual = getNarratorPreviewVisual(style);
+    const gradient = normalizeGradient(style.gradient);
+    const disabled = style.enabled ? '' : ' disabled';
+    const generator = normalizeEntryGradientGenerator(style.gradientGenerator, gradient);
+    const generatorStatus = generator ? `Seeded variation ${generator.iteration}` : 'Manual gradient';
+    const geometry = gradient?.type === 'radial'
+        ? `<label>Origin X <input id="dc-narrator-gradient-x" type="number" class="text_pole" min="0" max="100" step="0.1" value="${gradient.x}"${disabled}>%</label><label>Origin Y <input id="dc-narrator-gradient-y" type="number" class="text_pole" min="0" max="100" step="0.1" value="${gradient.y}"${disabled}>%</label>`
+        : gradient ? `<label>Angle <input id="dc-narrator-gradient-angle" type="number" class="text_pole" min="0" max="360" step="0.1" value="${gradient.angle}"${disabled}>°</label>` : '';
+    const stopRows = gradient ? gradient.stops.map((stop, index) => `<div class="dc-narrator-stop"><label>Stop ${index + 2} <input type="color" class="dc-narrator-stop-color" data-stop-index="${index}" value="${stop.baseColor}"${disabled}></label><label>Position <input type="number" class="dc-narrator-stop-position text_pole" data-stop-index="${index}" min="0" max="100" step="0.1" value="${stop.position}"${disabled}>%</label><button type="button" class="dc-narrator-gradient-remove-stop menu_button dc-danger-button" data-stop-index="${index}"${disabled}${gradient.stops.length === 1 ? ' disabled' : ''}>Remove</button></div>`).join('') : '';
+    host.innerHTML = `
+        <label class="checkbox_label dc-narrator-enable"><input type="checkbox" id="dc-narrator-enabled"${style.enabled ? ' checked' : ''}><span>Color narration</span></label>
+        <div class="dc-narrator-compact">
+            <label>Primary <input type="color" id="dc-narrator-color" value="${style.baseColor}"${disabled}></label>
+            <button type="button" id="dc-narrator-gradient-toggle" class="menu_button${gradient ? ' dc-danger-button' : ''}"${disabled}>${gradient ? 'Remove gradient' : 'Enable gradient'}</button>
+            <button type="button" id="dc-narrator-gradient-randomize" class="menu_button"${disabled}>Randomize</button>
+            <label>Preset <select id="dc-narrator-gradient-preset" class="text_pole"${disabled}>${buildGradientPresetOptionsHtml()}</select></label>
+            <button type="button" id="dc-narrator-gradient-apply-preset" class="menu_button"${disabled}>Apply</button>
+            <div id="dc-narrator-preview" class="dc-narrator-preview${gradient ? ' dc-gradient-surface' : ''}" role="img" aria-label="Narration visual preview" style="${escapeAttr(buildGradientSurfaceStyle(visual))}"></div>
+        </div>
+        ${gradient ? `<div class="dc-narrator-gradient-controls"><label>Type <select id="dc-narrator-gradient-type" class="text_pole"${disabled}><option value="linear"${gradient.type === 'linear' ? ' selected' : ''}>Linear</option><option value="radial"${gradient.type === 'radial' ? ' selected' : ''}>Radial</option></select></label>${geometry}<label>Primary position <input id="dc-narrator-gradient-primary-position" type="number" class="text_pole" min="0" max="100" step="0.1" value="${gradient.primaryPosition}"${disabled}>%</label><label class="checkbox_label"><input type="checkbox" id="dc-narrator-gradient-animation"${gradient.animation.enabled ? ' checked' : ''}${disabled}><span>Drift colors</span></label><span class="dc-gradient-generator-status">${escapeHtml(generatorStatus)}</span></div><div class="dc-narrator-stops">${stopRows}<button type="button" id="dc-narrator-gradient-add-stop" class="menu_button"${disabled}${gradient.stops.length + 1 >= MAX_GRADIENT_STOPS ? ' disabled' : ''}>Add stop (${gradient.stops.length + 1}/${MAX_GRADIENT_STOPS})</button></div>` : ''}`;
+    setGradientPresentation(host.querySelector('#dc-narrator-preview'), visual);
+    bindNarratorEditorControls(host);
+}
+
 function handleGradientToggle(toggleButton) {
     const key = toggleButton.dataset.key;
     const entry = characterColors[key];
@@ -1490,7 +2090,10 @@ function handleGradientRandomize(button) {
     if (!entry) return;
     const gradient = createRandomGradient(entry);
     if (!gradient) return;
-    applyGradientValue(key, gradient, { commitImmediately: true, saveImmediately: true });
+    const gradientGenerator = normalizeEntryGradientGenerator(entry.gradientGenerator, gradient);
+    applyGradientValue(key, gradient, { commitImmediately: true, saveImmediately: true, preserveGenerator: true, gradientGenerator });
+    const masterSeedInput = document.getElementById('dc-gradient-master-seed');
+    if (masterSeedInput) masterSeedInput.value = settings.gradientRandomMasterSeed;
 }
 
 function getNewGradientStopPosition(gradient) {
@@ -1577,6 +2180,185 @@ export function refreshGradientPresetControls(preferredCustomName = '') {
         select.innerHTML = customOptions;
         if ([...select.options].some(option => option.value === previous)) select.value = previous;
     });
+    renderGradientPresetGallery(preferredCustomName ? `custom:${preferredCustomName}` : '');
+    renderNarratorEditor();
+}
+
+function getGradientPresetCatalog() {
+    const builtIns = Object.entries(BUILTIN_GRADIENT_PRESETS).map(([name, preset]) => ({
+        id: `builtin:${name}`,
+        name: formatGradientPresetName(name),
+        source: 'builtin',
+        preset,
+    }));
+    const customs = Object.entries(getCustomGradientPresets())
+        .sort((left, right) => left[0].localeCompare(right[0]))
+        .map(([name, preset]) => ({ id: `custom:${name}`, name, source: 'custom', preset }));
+    return [...builtIns, ...customs];
+}
+
+function formatGradientMotion(preset) {
+    const animation = preset.gradient.animation;
+    if (!animation.enabled && settings.driftAllGradientColors) return 'Static preset; global drift active';
+    return animation.enabled
+        ? `${animation.duration}s ${animation.reverse ? 'reverse drift' : 'drift'}`
+        : 'Static';
+}
+
+function getGradientGalleryTargets() {
+    return Object.entries(characterColors)
+        .sort((left, right) => left[1].name.localeCompare(right[1].name));
+}
+
+function focusGradientGalleryControl(focusId) {
+    requestAnimationFrame(() => document.querySelector(`#dc-gradient-gallery [data-gallery-focus="${CSS.escape(focusId)}"]`)?.focus({ preventScroll: true }));
+}
+
+export function renderGradientPresetGallery(preferredPreset = '', focusId = '') {
+    const host = document.getElementById('dc-gradient-gallery');
+    if (!host) return;
+    const catalog = getGradientPresetCatalog();
+    if (preferredPreset && catalog.some(item => item.id === preferredPreset)) selectedGradientGalleryPreset = preferredPreset;
+    if (!catalog.some(item => item.id === selectedGradientGalleryPreset)) selectedGradientGalleryPreset = catalog[0]?.id || '';
+    const query = gradientGallerySearch.trim().toLowerCase();
+    const visible = catalog.filter(item => (gradientGalleryFilter === 'all' || item.source === gradientGalleryFilter)
+        && (!query || item.name.toLowerCase().includes(query)));
+    const selectedIsVisible = visible.some(item => item.id === selectedGradientGalleryPreset);
+    const selected = catalog.find(item => item.id === selectedGradientGalleryPreset) || null;
+    const selectedGradient = selected?.preset?.gradient;
+    const selectedPresentation = selected ? getGradientPresentation(selected.preset, {
+        target: 'ui',
+        allowAnimation: gradientGalleryMotionActive,
+    }) : null;
+    const selectedClasses = selectedPresentation ? ` dc-gradient-surface ${selectedPresentation.classes}` : '';
+    const targetOptions = getGradientGalleryTargets().map(([key, entry]) =>
+        `<option value="character:${escapeAttr(key)}">${escapeHtml(entry.name)}</option>`).join('');
+    const selectedCount = getSelectedCharacterKeys().length;
+    host.innerHTML = `
+        <div class="dc-gradient-gallery-tools">
+            <label class="dc-visually-hidden" for="dc-gradient-gallery-search">Search gradient presets</label>
+            <input type="search" id="dc-gradient-gallery-search" class="text_pole" data-gallery-focus="search" value="${escapeAttr(gradientGallerySearch)}" placeholder="Search gradients">
+            <label class="dc-visually-hidden" for="dc-gradient-gallery-filter">Gradient preset source</label>
+            <select id="dc-gradient-gallery-filter" class="text_pole" data-gallery-focus="filter"><option value="all"${gradientGalleryFilter === 'all' ? ' selected' : ''}>All presets</option><option value="builtin"${gradientGalleryFilter === 'builtin' ? ' selected' : ''}>Built-in</option><option value="custom"${gradientGalleryFilter === 'custom' ? ' selected' : ''}>Custom</option></select>
+        </div>
+        <div class="dc-gradient-gallery-list" role="listbox" aria-label="Gradient presets">
+            ${visible.length ? visible.map((item, index) => {
+                const gradient = item.preset.gradient;
+                const itemSelected = item.id === selectedGradientGalleryPreset;
+                return `<button type="button" class="dc-gradient-gallery-item${itemSelected ? ' dc-gradient-gallery-item-selected' : ''}" role="option" aria-selected="${itemSelected}" tabindex="${itemSelected || (!selectedIsVisible && index === 0) ? '0' : '-1'}" data-gradient-gallery-preset="${escapeAttr(item.id)}" data-gallery-focus="preset:${escapeAttr(item.id)}"><span class="dc-gradient-gallery-sample dc-gradient-surface" aria-hidden="true" style="${escapeAttr(buildGradientSurfaceStyle(item.preset, { allowAnimation: false }))}"></span><span><strong>${escapeHtml(item.name)}</strong><small>${item.source === 'builtin' ? 'Built-in' : 'Custom'} · ${gradient.stops.length + 1} stops · ${escapeHtml(formatGradientMotion(item.preset))}</small></span></button>`;
+            }).join('') : '<p class="dc-empty-state">No matching gradient presets.</p>'}
+        </div>
+        ${selected ? `<div class="dc-gradient-gallery-preview">
+            <div class="dc-gradient-gallery-preview-sample${selectedClasses}" role="img" aria-label="${escapeAttr(selected.name)} preview in the current color-vision preview" style="${escapeAttr(buildGradientSurfaceStyle(selected.preset, { allowAnimation: gradientGalleryMotionActive }))}"></div>
+            <div class="dc-gradient-gallery-details"><strong>${escapeHtml(selected.name)}</strong><span>${selectedGradient.type === 'linear' ? `Linear ${selectedGradient.angle} degrees` : `Radial at ${selectedGradient.x}%, ${selectedGradient.y}%`} · ${selectedGradient.stops.length + 1} stops · ${escapeHtml(formatGradientMotion(selected.preset))}</span></div>
+            <button type="button" id="dc-gradient-gallery-motion" class="menu_button" data-gallery-focus="motion" aria-pressed="${gradientGalleryMotionActive}"${selectedGradient.animation.enabled || settings.driftAllGradientColors ? '' : ' disabled'}>${gradientGalleryMotionActive ? 'Pause preview' : 'Play motion'}</button>
+        </div>
+        <div class="dc-gradient-gallery-apply">
+            <label for="dc-gradient-gallery-target">Apply to</label><select id="dc-gradient-gallery-target" class="text_pole"><option value="selected">Selected rows (${selectedCount})</option>${targetOptions}</select>
+            <button type="button" id="dc-gradient-gallery-apply" class="menu_button dc-primary-button" data-gallery-focus="apply">Apply colors and gradient</button>
+        </div>
+        ${selected.source === 'custom' ? `<div class="dc-gradient-gallery-custom"><label class="dc-visually-hidden" for="dc-gradient-gallery-rename">New custom preset name</label><input type="text" id="dc-gradient-gallery-rename" class="text_pole" maxlength="80" value="${escapeAttr(selected.name)}"><button type="button" id="dc-gradient-gallery-rename-button" class="menu_button" data-gallery-focus="rename">Rename</button><button type="button" id="dc-gradient-gallery-delete" class="menu_button dc-danger-button" data-gallery-focus="delete">Delete</button></div>` : ''}` : '<p class="dc-empty-state">No gradient presets available.</p>'}`;
+
+    const searchInput = host.querySelector('#dc-gradient-gallery-search');
+    searchInput?.addEventListener('input', event => {
+        gradientGallerySearch = event.target.value;
+        renderGradientPresetGallery('', 'search');
+        const nextSearch = document.getElementById('dc-gradient-gallery-search');
+        nextSearch?.focus({ preventScroll: true });
+        nextSearch?.setSelectionRange(gradientGallerySearch.length, gradientGallerySearch.length);
+    });
+    host.querySelector('#dc-gradient-gallery-filter')?.addEventListener('change', event => {
+        gradientGalleryFilter = event.target.value;
+        renderGradientPresetGallery('', 'filter');
+    });
+    host.querySelectorAll('[data-gradient-gallery-preset]').forEach(button => {
+        button.addEventListener('click', () => {
+            selectedGradientGalleryPreset = button.dataset.gradientGalleryPreset;
+            gradientGalleryMotionActive = false;
+            renderGradientPresetGallery(selectedGradientGalleryPreset, `preset:${selectedGradientGalleryPreset}`);
+        });
+        button.addEventListener('keydown', event => {
+            if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+            event.preventDefault();
+            const options = [...host.querySelectorAll('[data-gradient-gallery-preset]')];
+            const currentIndex = options.indexOf(button);
+            const nextIndex = event.key === 'Home' ? 0
+                : event.key === 'End' ? options.length - 1
+                    : event.key === 'ArrowDown' ? Math.min(options.length - 1, currentIndex + 1)
+                        : Math.max(0, currentIndex - 1);
+            options[nextIndex]?.click();
+        });
+    });
+    host.querySelector('#dc-gradient-gallery-motion')?.addEventListener('click', () => {
+        gradientGalleryMotionActive = !gradientGalleryMotionActive;
+        renderGradientPresetGallery('', 'motion');
+    });
+    host.querySelector('#dc-gradient-gallery-apply')?.addEventListener('click', applyGradientGalleryPreset);
+    host.querySelector('#dc-gradient-gallery-rename-button')?.addEventListener('click', renameGradientGalleryPreset);
+    host.querySelector('#dc-gradient-gallery-delete')?.addEventListener('click', deleteGradientGalleryPreset);
+    registerGradientAnimationRoot(document.getElementById('dc-ext'));
+    refreshGradientAnimationState();
+    if (focusId) focusGradientGalleryControl(focusId);
+}
+
+function applyGradientGalleryPreset() {
+    const preset = resolveGradientPreset(selectedGradientGalleryPreset);
+    if (!preset) { toast.warning('Choose a gradient preset.'); return; }
+    const target = document.getElementById('dc-gradient-gallery-target')?.value || 'selected';
+    const keys = target === 'selected'
+        ? getSelectedCharacterKeys()
+        : [target.startsWith('character:') ? target.slice(10) : ''].filter(key => characterColors[key]);
+    if (!keys.length) { toast.info('Select rows or choose a character target.'); return; }
+    const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
+    const changedKeys = [];
+    keys.forEach(key => {
+        const entry = characterColors[key];
+        if (!entry) return;
+        const before = JSON.stringify([entry.baseColor, entry.color, entry.gradient, entry.gradientGenerator]);
+        if (!applyGradientPreset(entry, preset)) return;
+        if (before !== JSON.stringify([entry.baseColor, entry.color, entry.gradient, entry.gradientGenerator])) changedKeys.push(key);
+    });
+    if (!changedKeys.length) { toast.info('The target already uses those colors and gradient.'); return; }
+    applyLiveColorChangesFromSnapshot(snapshot, changedKeys, { saveImmediately: true, repaintStyles: true });
+    commit();
+    repaintDomAfterCharacterDataChange(0);
+    renderGradientPresetGallery('', 'apply');
+    toast.success(`Applied colors and gradient to ${changedKeys.length} character${changedKeys.length === 1 ? '' : 's'}.`);
+}
+
+function renameGradientGalleryPreset() {
+    if (!selectedGradientGalleryPreset.startsWith('custom:')) return;
+    const currentName = selectedGradientGalleryPreset.slice(7);
+    const nextName = normalizeGradientPresetName(document.getElementById('dc-gradient-gallery-rename')?.value);
+    if (!nextName) { toast.warning('Enter a preset name.'); return; }
+    if (!renameCustomGradientPreset(currentName, nextName, { immediate: true })) {
+        toast.warning('That preset could not be renamed. The new name may already exist.');
+        return;
+    }
+    selectedGradientGalleryPreset = `custom:${nextName}`;
+    refreshGradientPresetControls(nextName);
+    focusGradientGalleryControl('rename');
+    toast.success(`Gradient preset renamed to "${escapeHtml(nextName)}"`);
+}
+
+async function deleteGradientGalleryPreset(event) {
+    if (!selectedGradientGalleryPreset.startsWith('custom:')) return;
+    const name = selectedGradientGalleryPreset.slice(7);
+    if (!await confirmReviewedAction({
+        title: 'Delete gradient preset?',
+        description: `“${name}” will be removed. Characters already using it are not changed.`,
+        confirmLabel: 'Delete preset',
+        danger: true,
+        opener: event.currentTarget,
+    })) return;
+    const catalog = getGradientPresetCatalog();
+    const currentIndex = catalog.findIndex(item => item.id === selectedGradientGalleryPreset);
+    if (!deleteCustomGradientPreset(name, { immediate: true })) { toast.error('Could not delete gradient preset'); return; }
+    const nextCatalog = getGradientPresetCatalog();
+    selectedGradientGalleryPreset = nextCatalog[Math.min(currentIndex, nextCatalog.length - 1)]?.id || '';
+    refreshGradientPresetControls();
+    focusGradientGalleryControl(selectedGradientGalleryPreset ? `preset:${selectedGradientGalleryPreset}` : 'search');
+    toast.success(`Gradient preset "${escapeHtml(name)}" deleted`);
 }
 
 async function handleSaveCustomGradientPreset(button) {
@@ -1720,7 +2502,11 @@ export function installCharListDelegation(list) {
     list.addEventListener('change', (e) => {
         const t = e.target;
         if (!t.classList) return;
-        if (t.classList.contains('dc-gradient-type')) {
+        if (t.classList.contains('dc-char-select')) {
+            setCharacterSelected(t.dataset.key, t.checked);
+            t.closest('.dc-char')?.classList.toggle('dc-char-selected', t.checked);
+            updateBulkToolbar(getSortedEntries());
+        } else if (t.classList.contains('dc-gradient-type')) {
             handleGradientEditorMutation(t, { commitImmediately: true, final: true });
         } else if (t.classList.contains('dc-gradient-primary-color')) {
             handleGradientPrimaryInput(t, true);
@@ -1781,8 +2567,219 @@ export function installCharListDelegation(list) {
 }
 
 // Phase 5B: Alias chips, Phase 6B: Group headers, Phase 5D: Harmony on dblclick
+function getGroupProfileFieldMask() {
+    return (document.getElementById('dc-group-profile-primary')?.checked ? CHARACTER_STYLE_FIELD_MASKS.BASE_COLOR : 0)
+        | (document.getElementById('dc-group-profile-gradient')?.checked ? CHARACTER_STYLE_FIELD_MASKS.GRADIENT : 0)
+        | (document.getElementById('dc-group-profile-font')?.checked ? CHARACTER_STYLE_FIELD_MASKS.FONT : 0)
+        | (document.getElementById('dc-group-profile-text')?.checked ? CHARACTER_STYLE_FIELD_MASKS.STYLE : 0);
+}
+
+function getGroupProfileEditorName() {
+    return normalizeGroupName(document.getElementById('dc-group-profile-name')?.value);
+}
+
+function setGroupProfileAutomationControls(profile) {
+    for (const key of GROUP_PROFILE_AUTOMATION_KEYS) {
+        const control = document.getElementById(`dc-group-profile-${key}`);
+        if (!control) continue;
+        const value = profile?.automation?.[key];
+        control.value = value === true ? 'true' : value === false ? 'false' : 'null';
+    }
+}
+
+function syncGroupProfileEditor() {
+    const profile = getGroupProfile(groupProfiles, getGroupProfileEditorName());
+    const fields = profile?.style?.fields ?? DEFAULT_CHARACTER_STYLE_FIELD_MASK;
+    const fieldControls = [
+        ['dc-group-profile-primary', CHARACTER_STYLE_FIELD_MASKS.BASE_COLOR],
+        ['dc-group-profile-gradient', CHARACTER_STYLE_FIELD_MASKS.GRADIENT],
+        ['dc-group-profile-font', CHARACTER_STYLE_FIELD_MASKS.FONT],
+        ['dc-group-profile-text', CHARACTER_STYLE_FIELD_MASKS.STYLE],
+    ];
+    fieldControls.forEach(([id, field]) => {
+        const control = document.getElementById(id);
+        if (control) control.checked = !!(fields & field);
+    });
+    setGroupProfileAutomationControls(profile);
+    const source = document.getElementById('dc-group-profile-source');
+    if (source) source.value = '';
+    const renameInput = document.getElementById('dc-group-profile-rename');
+    if (renameInput) renameInput.value = '';
+    refreshGroupProfileControls();
+}
+
+export function refreshGroupProfileControls() {
+    const nameInput = document.getElementById('dc-group-profile-name');
+    const datalist = document.getElementById('dc-group-profile-labels');
+    const sourceSelect = document.getElementById('dc-group-profile-source');
+    if (!nameInput || !datalist || !sourceSelect) return;
+
+    const labels = new Map();
+    Object.values(groupProfiles).forEach(profile => labels.set(normalizeGroupKey(profile.name), profile.name));
+    Object.values(characterColors).forEach(entry => {
+        const name = normalizeGroupName(entry?.group);
+        if (name && !labels.has(normalizeGroupKey(name))) labels.set(normalizeGroupKey(name), name);
+    });
+    datalist.innerHTML = [...labels.values()]
+        .sort((left, right) => left.localeCompare(right))
+        .map(name => `<option value="${escapeAttr(name)}"></option>`)
+        .join('');
+
+    const previousSource = sourceSelect.value;
+    sourceSelect.innerHTML = '<option value="">Keep saved style</option>' + Object.entries(characterColors)
+        .sort((left, right) => left[1].name.localeCompare(right[1].name))
+        .map(([key, entry]) => `<option value="${escapeAttr(key)}">${escapeHtml(entry.name)}</option>`)
+        .join('');
+    if (previousSource && characterColors[previousSource]) sourceSelect.value = previousSource;
+
+    const name = getGroupProfileEditorName();
+    const profile = getGroupProfile(groupProfiles, name);
+    const targetCount = getCharacterKeysForGroup(name).length;
+    const status = document.getElementById('dc-group-profile-status');
+    const saveButton = document.getElementById('dc-group-profile-save');
+    const applyButton = document.getElementById('dc-group-profile-apply');
+    const renameButton = document.getElementById('dc-group-profile-rename-button');
+    const deleteButton = document.getElementById('dc-group-profile-delete');
+    if (status) status.textContent = profile
+        ? `Saved profile; ${targetCount} current group member${targetCount === 1 ? '' : 's'}.`
+        : name ? `No saved profile; ${targetCount} current group member${targetCount === 1 ? '' : 's'}.` : 'Choose or enter a group label.';
+    if (saveButton) saveButton.textContent = profile ? 'Save profile' : 'Create profile';
+    if (applyButton) {
+        applyButton.textContent = `Apply to existing (${targetCount})`;
+        applyButton.disabled = !profile || targetCount === 0;
+    }
+    if (renameButton) renameButton.disabled = !profile;
+    if (deleteButton) deleteButton.disabled = !profile;
+}
+
+function saveGroupProfileFromEditor() {
+    const name = getGroupProfileEditorName();
+    if (!name) { toast.warning('Enter a group label.'); return; }
+    const existing = getGroupProfile(groupProfiles, name);
+    const sourceKey = document.getElementById('dc-group-profile-source')?.value || '';
+    const source = characterColors[sourceKey];
+    if (!source && !existing) {
+        toast.warning('Choose a character whose current style should be saved.');
+        return;
+    }
+    const fields = getGroupProfileFieldMask();
+    const style = captureCharacterStyle(source || existing.style, fields);
+    const automation = {};
+    for (const key of GROUP_PROFILE_AUTOMATION_KEYS) {
+        const value = document.getElementById(`dc-group-profile-${key}`)?.value;
+        automation[key] = value === 'true' ? true : value === 'false' ? false : null;
+    }
+    setGroupProfiles(setGroupProfile(groupProfiles, name, { name, style, automation }));
+    saveHistory();
+    saveData();
+    refreshGroupProfileControls();
+    toast.success(`Group profile "${escapeHtml(name)}" saved.`);
+}
+
+function renameGroupProfileFromEditor() {
+    const currentName = getGroupProfileEditorName();
+    const nextName = normalizeGroupName(document.getElementById('dc-group-profile-rename')?.value);
+    if (!currentName || !nextName) { toast.warning('Choose a profile and enter its new group label.'); return; }
+    const renamed = renameGroupProfile(groupProfiles, currentName, nextName);
+    if (!renamed) { toast.warning('That profile cannot be renamed. The destination may already exist.'); return; }
+    setGroupProfiles(renamed);
+    saveHistory();
+    saveData();
+    document.getElementById('dc-group-profile-name').value = nextName;
+    syncGroupProfileEditor();
+    toast.success(`Group profile renamed to "${escapeHtml(nextName)}".`);
+}
+
+async function deleteGroupProfileFromEditor(opener) {
+    const name = getGroupProfileEditorName();
+    const profile = getGroupProfile(groupProfiles, name);
+    if (!profile) { toast.info('Choose a saved group profile.'); return; }
+    if (!await confirmReviewedAction({
+        title: 'Delete group profile?',
+        description: `“${profile.name}” will be removed. Existing character styles and group labels will not change.`,
+        confirmLabel: 'Delete profile',
+        danger: true,
+        opener,
+    })) return;
+    setGroupProfiles(deleteGroupProfile(groupProfiles, name));
+    saveHistory();
+    saveData();
+    syncGroupProfileEditor();
+    document.getElementById('dc-group-profile-name')?.focus({ preventScroll: true });
+    toast.success(`Group profile "${escapeHtml(profile.name)}" deleted.`);
+}
+
+async function applyGroupProfileToExisting(opener) {
+    const name = getGroupProfileEditorName();
+    const profile = getGroupProfile(groupProfiles, name);
+    const keys = getCharacterKeysForGroup(name);
+    if (!profile || !keys.length) { toast.info('This saved profile has no current group members.'); return; }
+    const confirmed = await confirmReviewedAction({
+        title: `Apply profile to ${keys.length} character${keys.length === 1 ? '' : 's'}?`,
+        description: `The selected fields from “${profile.name}” will be copied into every current member of that group. Later profile edits will not alter them.`,
+        detailsHtml: `<p class="dc-review-names">${keys.slice(0, 12).map(key => escapeHtml(characterColors[key].name)).join(', ')}${keys.length > 12 ? `, and ${keys.length - 12} more` : ''}</p>`,
+        confirmLabel: 'Apply profile',
+        opener,
+    });
+    if (!confirmed) return;
+    const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
+    const result = applyGroupProfileToKeys(keys, profile);
+    if (!result.changedKeys.length) { toast.info('All group members already match the saved fields.'); return; }
+    applyLiveColorChangesFromSnapshot(snapshot, result.changedKeys, { saveImmediately: true, repaintStyles: true });
+    commit();
+    toast.success(`Applied the profile to ${result.changedKeys.length} character${result.changedKeys.length === 1 ? '' : 's'}.`);
+}
+
+function getBulkStyleFieldMask() {
+    const primary = document.getElementById('dc-bulk-style-primary');
+    const gradient = document.getElementById('dc-bulk-style-gradient');
+    const font = document.getElementById('dc-bulk-style-font');
+    const textStyle = document.getElementById('dc-bulk-style-text');
+    if (!primary && !gradient && !font && !textStyle) return DEFAULT_CHARACTER_STYLE_FIELD_MASK;
+    return (primary?.checked ? CHARACTER_STYLE_FIELD_MASKS.BASE_COLOR : 0)
+        | (gradient?.checked ? CHARACTER_STYLE_FIELD_MASKS.GRADIENT : 0)
+        | (font?.checked ? CHARACTER_STYLE_FIELD_MASKS.FONT : 0)
+        | (textStyle?.checked ? CHARACTER_STYLE_FIELD_MASKS.STYLE : 0);
+}
+
+function updateBulkToolbar(visibleEntries = getSortedEntries()) {
+    const toolbar = document.getElementById('dc-bulk-toolbar');
+    if (!toolbar) return;
+    const selectedKeys = getSelectedCharacterKeys();
+    const visibleKeys = visibleEntries.map(([key]) => key);
+    const visibleSet = new Set(visibleKeys);
+    const hiddenCount = selectedKeys.filter(key => !visibleSet.has(key)).length;
+    const selectionCount = toolbar.querySelector('#dc-selection-count');
+    const selectVisible = toolbar.querySelector('#dc-select-visible');
+    const clearSelection = toolbar.querySelector('#dc-clear-selection');
+    const clipboardStatus = toolbar.querySelector('#dc-style-clipboard-status');
+    const clipboard = getCharacterStyleClipboard();
+    toolbar.hidden = Object.keys(characterColors).length === 0;
+    if (selectionCount) selectionCount.textContent = `${selectedKeys.length} selected${hiddenCount ? ` (${hiddenCount} hidden)` : ''}`;
+    if (selectVisible) {
+        selectVisible.disabled = visibleKeys.length === 0;
+        selectVisible.textContent = `Select visible (${visibleKeys.length})`;
+    }
+    if (clearSelection) clearSelection.disabled = selectedKeys.length === 0;
+    toolbar.querySelectorAll('[data-dc-selection-required]').forEach(control => {
+        control.disabled = selectedKeys.length === 0;
+    });
+    const copyButton = toolbar.querySelector('#dc-copy-character-style');
+    const pasteButton = toolbar.querySelector('#dc-paste-character-style');
+    const styleFieldMask = getBulkStyleFieldMask();
+    if (copyButton) copyButton.disabled = selectedKeys.length !== 1 || styleFieldMask === 0;
+    if (pasteButton) pasteButton.disabled = !selectedKeys.length || !clipboard || styleFieldMask === 0;
+    if (clipboardStatus) clipboardStatus.textContent = clipboard
+        ? `Style copied from ${clipboard.sourceName}`
+        : 'No style copied';
+    const gallerySelectedTarget = document.querySelector('#dc-gradient-gallery-target option[value="selected"]');
+    if (gallerySelectedTarget) gallerySelectedTarget.textContent = `Selected rows (${selectedKeys.length})`;
+}
+
 export function updateCharList() {
     const list = document.getElementById('dc-char-list'); if (!list) return;
+    const masterSeedInput = document.getElementById('dc-gradient-master-seed');
+    if (masterSeedInput) masterSeedInput.value = settings.gradientRandomMasterSeed || 'Generated on first randomization';
     installCharListDelegation(list);
     list.setAttribute('role', 'list');
     list.setAttribute('aria-label', 'Tracked characters');
@@ -1795,6 +2792,8 @@ export function updateCharList() {
     const entries = getSortedEntries();
     const countEl = document.getElementById('dc-count');
     if (countEl) countEl.textContent = Object.keys(characterColors).length;
+    updateBulkToolbar(entries);
+    refreshGroupProfileControls();
 
     if (!entries.length) {
         list.innerHTML = searchTerm
@@ -1809,6 +2808,9 @@ export function updateCharList() {
         });
         applyControlHelpText(list);
         updateLegend();
+        if (!document.getElementById('dc-gradient-gallery')?.contains(document.activeElement)) renderGradientPresetGallery();
+        registerGradientAnimationRoot(document.getElementById('dc-ext'));
+        refreshGradientAnimationState();
         return;
     }
 
@@ -1818,10 +2820,12 @@ export function updateCharList() {
     let lastGroup = null;
     for (const [k, v] of entries) {
         if (settings.sortMode === 'group') {
-            const g = v.group || '(ungrouped)';
-            if (g !== lastGroup) {
-                lastGroup = g;
-                desired.push({ blockKey: '__group__:' + g, sig: 'h:' + g, html: `<div class="dc-group-header" role="listitem"><span role="heading" aria-level="3">${escapeHtml(g)}</span></div>` });
+            const groupValue = normalizeGroupName(v.group);
+            const g = groupValue || '(ungrouped)';
+            const groupKey = groupValue ? `named:${normalizeGroupKey(groupValue)}` : 'ungrouped';
+            if (groupKey !== lastGroup) {
+                lastGroup = groupKey;
+                desired.push({ blockKey: `__group__:${groupKey}`, sig: `h:${groupKey}`, html: `<div class="dc-group-header" role="listitem"><span role="heading" aria-level="3">${escapeHtml(g)}</span></div>` });
             }
         }
         desired.push({ blockKey: 'row:' + k, sig: buildCharRowSignature(k, v), html: buildCharRowHtml(k, v) });
@@ -1859,6 +2863,9 @@ export function updateCharList() {
 
     applyControlHelpText(list);
     updateLegend();
+    registerGradientAnimationRoot(document.getElementById('dc-ext'));
+    refreshGradientAnimationState();
+    if (!document.getElementById('dc-gradient-gallery')?.contains(document.activeElement)) renderGradientPresetGallery();
     if (focusState?.key && focusState.id) {
         list.querySelector(`.dc-char[data-key="${CSS.escape(focusState.key)}"] [data-focus-id="${CSS.escape(focusState.id)}"]`)?.focus({ preventScroll: true });
     }
@@ -1926,8 +2933,8 @@ async function handleStorageScopeChange(select) {
     if (nextScope === previousScope) return;
     const source = getStorageScopeDescriptor(previousScope);
     const target = getStorageScopeDescriptor(nextScope);
-    const detailsHtml = `<dl class="dc-review-list"><div><dt>Current</dt><dd>${escapeHtml(formatScopeName(previousScope))}, ${source.characterCount} characters</dd></div><div><dt>Destination</dt><dd>${escapeHtml(formatScopeName(nextScope))}, ${target.characterCount} characters</dd></div><div><dt>Last saved</dt><dd>${escapeHtml(formatDate(target.updatedAt))}</dd></div></dl><p class="dc-section-note">If Auto-recolor is enabled, changing assignments can also update saved LLM font tags.</p>`;
-    const targetIsEmpty = !target.exists || target.characterCount === 0;
+    const detailsHtml = `<dl class="dc-review-list"><div><dt>Current</dt><dd>${escapeHtml(formatScopeName(previousScope))}, ${source.characterCount} characters, ${source.groupProfileCount || 0} group profiles</dd></div><div><dt>Destination</dt><dd>${escapeHtml(formatScopeName(nextScope))}, ${target.characterCount} characters, ${target.groupProfileCount || 0} group profiles</dd></div><div><dt>Last saved</dt><dd>${escapeHtml(formatDate(target.updatedAt))}</dd></div></dl><p class="dc-section-note">If Auto-recolor is enabled, changing assignments can also update saved LLM font tags.</p>`;
+    const targetIsEmpty = !target.exists || (target.characterCount === 0 && (target.groupProfileCount || 0) === 0);
     const decision = await openDecisionDialog({
         title: `Switch to ${formatScopeName(nextScope)} colors?`,
         description: targetIsEmpty
@@ -1966,6 +2973,7 @@ async function handleStorageScopeChange(select) {
 function buildImportReviewDetails(preview) {
     const rows = [];
     if (Number.isFinite(preview.characterCount)) rows.push(`<div><dt>Characters</dt><dd>${preview.characterCount}</dd></div>`);
+    if (Number.isFinite(preview.groupProfileCount)) rows.push(`<div><dt>Group profiles</dt><dd>${preview.groupProfileCount}</dd></div>`);
     if (preview.settingsPresent) rows.push(`<div><dt>Settings</dt><dd>${preview.settingsCount} recognized values</dd></div>`);
     if (preview.customGradientPresetCount) rows.push(`<div><dt>Gradient presets</dt><dd>${preview.customGradientPresetCount}</dd></div>`);
     if (preview.requestedStorageScope) rows.push(`<div><dt>Saved scope</dt><dd>${escapeHtml(formatScopeName(preview.requestedStorageScope))}</dd></div>`);
@@ -2016,6 +3024,252 @@ async function reviewAndApplyImport(analysis, kind, opener) {
     return result;
 }
 
+function announceStylePack(message) {
+    const status = document.getElementById('dc-style-pack-status');
+    if (status) status.textContent = message;
+}
+
+function stylePackCheckbox(value, label, checked = false, note = '') {
+    return `<label class="checkbox_label dc-style-pack-choice"><input type="checkbox" class="dc-dialog-select" data-value="${escapeAttr(value)}"${checked ? ' checked' : ''}><span>${escapeHtml(label)}${note ? ` <small>${escapeHtml(note)}</small>` : ''}</span></label>`;
+}
+
+function selectedStylePackNames(selected, category) {
+    const prefix = `${category}:`;
+    return selected
+        .filter(value => typeof value === 'string' && value.startsWith(prefix))
+        .map(value => value.slice(prefix.length));
+}
+
+function downloadStylePackJson(json, filename) {
+    const blob = new Blob([json], { type: 'application/json' });
+    const anchor = document.createElement('a');
+    anchor.href = URL.createObjectURL(blob);
+    anchor.download = filename;
+    anchor.click();
+    setTimeout(() => URL.revokeObjectURL(anchor.href), 1000);
+    return blob;
+}
+
+async function deliverStylePack(pack, opener) {
+    const json = JSON.stringify(pack, null, 2);
+    const filename = `dialogue-colors-style-pack-${Date.now()}.json`;
+    const blob = new Blob([json], { type: 'application/json' });
+    const navigatorApi = globalThis.navigator;
+    const file = typeof File === 'function' ? new File([blob], filename, { type: blob.type }) : null;
+    const canShare = !!file && typeof navigatorApi?.canShare === 'function'
+        && navigatorApi.canShare({ files: [file] });
+    const canCopy = json.length <= STYLE_PACK_COPY_LIMIT && typeof navigatorApi?.clipboard?.writeText === 'function';
+    const decision = await openDecisionDialog({
+        title: 'Style pack ready',
+        description: `${(new Blob([json])).size.toLocaleString()} bytes. It contains only the selections you reviewed.`,
+        detailsHtml: `<p class="dc-section-note">Style packs are local JSON. No upload, remote lookup, CSS, or font file is included.</p>${json.length > STYLE_PACK_COPY_LIMIT ? `<p class="dc-section-note">Copy JSON is unavailable above ${(STYLE_PACK_COPY_LIMIT / 1024).toFixed(0)} KiB.</p>` : ''}`,
+        opener,
+        choices: [
+            { value: 'download', label: 'Download JSON', primary: true },
+            ...(canShare ? [{ value: 'share', label: 'Share file' }] : []),
+            ...(canCopy ? [{ value: 'copy', label: 'Copy JSON' }] : []),
+            { value: 'cancel', label: 'Close' },
+        ],
+    });
+    if (decision.value === 'download') {
+        downloadStylePackJson(json, filename);
+        announceStylePack('Style pack downloaded.');
+        toast.success('Style pack downloaded.');
+    } else if (decision.value === 'share') {
+        try {
+            await navigatorApi.share({ files: [file], title: pack.metadata.name });
+            announceStylePack('Style pack shared.');
+            toast.success('Style pack shared.');
+        } catch {
+            downloadStylePackJson(json, filename);
+            announceStylePack('Sharing was unavailable, so the style pack was downloaded.');
+            toast.info('Sharing was unavailable, so the style pack was downloaded.');
+        }
+    } else if (decision.value === 'copy') {
+        try {
+            await navigatorApi.clipboard.writeText(json);
+            announceStylePack('Style pack JSON copied.');
+            toast.success('Style pack JSON copied.');
+        } catch {
+            toast.error('Could not copy the style pack JSON. Download it instead.');
+        }
+    }
+}
+
+async function buildStylePackExport(opener) {
+    const palettes = getCustomPalettes();
+    const gradients = getCustomGradientPresets();
+    const assignments = getPresets();
+    const paletteChoices = Object.keys(palettes).sort((left, right) => left.localeCompare(right));
+    const gradientChoices = Object.keys(gradients).sort((left, right) => left.localeCompare(right));
+    const assignmentChoices = Object.keys(assignments).sort((left, right) => left.localeCompare(right));
+    const selectionHtml = `
+        <fieldset class="dc-style-pack-selection"><legend>Include</legend>
+            <div class="dc-style-pack-choice-list">
+                ${paletteChoices.length ? paletteChoices.map(name => stylePackCheckbox(`palettes:${name}`, `Palette: ${name}`, true)).join('') : '<p class="dc-section-note">No custom palettes saved.</p>'}
+                ${gradientChoices.length ? gradientChoices.map(name => stylePackCheckbox(`gradientPresets:${name}`, `Gradient preset: ${name}`, true)).join('') : '<p class="dc-section-note">No custom gradient presets saved.</p>'}
+                ${stylePackCheckbox('appearance:current', 'Appearance: theme, palette, brightness, narration color, highlights, legend, and gradient drift', true)}
+                ${assignmentChoices.length ? assignmentChoices.map(name => stylePackCheckbox(`assignmentPresets:${name}`, `Assignment preset: ${name}`, false, 'Optional, may include character names and font family names.')).join('') : '<p class="dc-section-note">No assignment presets saved.</p>'}
+            </div>
+        </fieldset>`;
+    const formHtml = `
+        <div class="dc-style-pack-form">
+            <label>Pack name <input class="text_pole" type="text" maxlength="120" data-dialog-field="name" data-dialog-autofocus value="My Dialogue Colors" required></label>
+            <label>Identifier <input class="text_pole" type="text" maxlength="120" data-dialog-field="id" placeholder="Optional"></label>
+            <label>Version <input class="text_pole" type="text" maxlength="80" data-dialog-field="version" placeholder="Optional"></label>
+            <label>Author <input class="text_pole" type="text" maxlength="160" data-dialog-field="author" placeholder="Optional"></label>
+            <label>License <input class="text_pole" type="text" maxlength="160" data-dialog-field="license" placeholder="Optional"></label>
+            <label class="dc-style-pack-form-wide">Description <textarea class="text_pole" maxlength="4000" data-dialog-field="description" placeholder="Optional"></textarea></label>
+        </div>`;
+    const decision = await openDecisionDialog({
+        title: 'Build a style pack',
+        description: 'Choose library items to share. Assignment presets are intentionally unchecked.',
+        detailsHtml: `${selectionHtml}<p class="dc-style-pack-privacy">Font family names can reveal preferences. Packs contain names only, never font files, URLs, CSS, storage scopes, connection IDs, prompts, automation, or UI positions.</p>`,
+        formHtml,
+        opener,
+        choices: [
+            { value: 'build', label: 'Build pack', primary: true },
+            { value: 'cancel', label: 'Cancel' },
+        ],
+    });
+    if (decision.value !== 'build') return;
+    const name = String(decision.formValues.name || '').trim();
+    if (!name) {
+        announceStylePack('A style-pack name is required.');
+        toast.warning('Enter a style-pack name.');
+        return;
+    }
+    try {
+        const selectedPalettes = selectedStylePackNames(decision.selected, 'palettes');
+        const selectedGradients = selectedStylePackNames(decision.selected, 'gradientPresets');
+        const selectedAssignments = selectedStylePackNames(decision.selected, 'assignmentPresets');
+        const includeAppearance = decision.selected.includes('appearance:current');
+        const pack = buildStylePackEnvelope({
+            customPalettes: palettes,
+            customPaletteMeta: getCustomPaletteMeta(),
+            customGradientPresets: gradients,
+            presets: assignments,
+            settings,
+        }, {
+            metadata: {
+                name,
+                id: decision.formValues.id,
+                version: decision.formValues.version,
+                author: decision.formValues.author,
+                license: decision.formValues.license,
+                description: decision.formValues.description,
+            },
+            selectedPalettes,
+            selectedGradientPresets: selectedGradients,
+            selectedAssignmentPresets: selectedAssignments,
+            includeAssignmentPresets: selectedAssignments.length > 0,
+            includeAppearance,
+        });
+        await deliverStylePack(pack, opener);
+    } catch (error) {
+        console.warn('[Dialogue Colors] Could not build style pack:', error);
+        toast.error(error?.message || 'Could not build the style pack. Select at least one item.');
+    }
+}
+
+function stylePackConflictSummary(analysis, category) {
+    const result = analysis.conflicts?.categories?.[category];
+    if (!result) return 'No items';
+    return `${result.conflicts.length} conflict${result.conflicts.length === 1 ? '' : 's'}, ${result.additions.length} new`;
+}
+
+function buildStylePackImportDetails(analysis) {
+    const { pack, catalog, source } = analysis;
+    const metadata = pack.metadata || {};
+    const rows = [
+        ['Format', `${pack.format} v${pack.formatVersion}`],
+        ['Name', metadata.name || 'Unnamed'],
+        ['Author', metadata.author || 'Not provided'],
+        ['Digest', analysis.digest],
+        ['Source', `${Number(source?.byteLength || 0).toLocaleString()} bytes`],
+        ['Palettes', `${catalog.totals.palettes} (${stylePackConflictSummary(analysis, 'palettes')})`],
+        ['Gradient presets', `${catalog.totals.gradientPresets} (${stylePackConflictSummary(analysis, 'gradientPresets')})`],
+        ['Assignment presets', `${catalog.totals.assignmentPresets} (${stylePackConflictSummary(analysis, 'assignmentPresets')})`],
+        ['Appearance values', String(catalog.totals.appearanceSettings)],
+        ['Unknown/dropped fields', analysis.droppedFields.length ? analysis.droppedFields.slice(0, 8).join(', ') : 'None'],
+    ];
+    const fontNote = analysis.fontNames.length
+        ? `Font family names: ${analysis.fontNames.join(', ')}. They are data only; this import does not download or install font files.`
+        : 'No font family names were found.';
+    return `<dl class="dc-review-list dc-style-pack-review">${rows.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join('')}</dl><p class="dc-style-pack-privacy">${escapeHtml(fontNote)} No URLs, CSS, profile IDs, storage scope, auto-sync, prompts, automation, attribution settings, or UI positions are accepted from a style pack.</p>`;
+}
+
+async function reviewAndApplyStylePack(analysis, opener) {
+    if (!analysis.ok) {
+        announceStylePack(analysis.message || 'The selected style pack is not valid.');
+        toast.error(analysis.message || 'The selected style pack is not valid.');
+        return analysis;
+    }
+    const hasAssignments = analysis.catalog.totals.assignmentPresets > 0;
+    const hasAppearance = analysis.catalog.totals.appearanceSettings > 0;
+    const strategySelect = (category, label) => `<label>${escapeHtml(label)}<select class="text_pole" data-dialog-field="strategy-${category}"><option value="keep">Keep existing (default)</option><option value="rename">Rename imported</option><option value="replace">Replace existing</option></select></label>`;
+    const formHtml = `
+        <fieldset class="dc-style-pack-selection"><legend>Conflict handling</legend>
+            <div class="dc-style-pack-strategies">
+                ${strategySelect('palettes', `Palettes, ${stylePackConflictSummary(analysis, 'palettes')}`)}
+                ${strategySelect('gradientPresets', `Gradient presets, ${stylePackConflictSummary(analysis, 'gradientPresets')}`)}
+                ${hasAssignments ? strategySelect('assignmentPresets', `Assignment presets, ${stylePackConflictSummary(analysis, 'assignmentPresets')}`) : ''}
+            </div>
+        </fieldset>
+        <div class="dc-style-pack-apply-options">
+            ${hasAssignments ? '<label class="checkbox_label"><input type="checkbox" data-dialog-field="installAssignments"><span>Install assignment presets into the library</span></label><label class="checkbox_label"><input type="checkbox" data-dialog-field="applyAssignments"><span>Also apply imported assignments to the active color table</span></label><label>Assignment apply mode <select class="text_pole" data-dialog-field="assignmentApplyMode"><option value="merge">Keep current same-name assignments</option><option value="replace">Replace table with selected preset entries</option></select></label>' : ''}
+            ${hasAppearance ? '<label class="checkbox_label"><input type="checkbox" data-dialog-field="applyAppearance"><span>Apply appearance to the active color scope</span></label>' : ''}
+        </div>`;
+    const decision = await openDecisionDialog({
+        title: 'Review style pack',
+        description: 'Nothing changes until you choose Install. Library-only installation does not need the active chat or card.',
+        detailsHtml: buildStylePackImportDetails(analysis),
+        formHtml,
+        opener,
+        choices: [
+            { value: 'install', label: 'Install reviewed pack', primary: true },
+            { value: 'cancel', label: 'Cancel' },
+        ],
+    });
+    if (decision.value !== 'install') return { ok: false, cancelled: true };
+    const fields = decision.formValues;
+    const result = await applyStylePackImport(analysis, {
+        categoryStrategies: {
+            palettes: fields['strategy-palettes'],
+            gradientPresets: fields['strategy-gradientPresets'],
+            assignmentPresets: fields['strategy-assignmentPresets'],
+        },
+        installAssignmentPresets: fields.installAssignments === true,
+        applyAssignments: fields.applyAssignments === true,
+        assignmentApplyMode: fields.assignmentApplyMode,
+        applyAppearance: fields.applyAppearance === true,
+    });
+    if (result.ok) {
+        renderStylePackRegistry();
+        const message = result.unchanged
+            ? 'No library items changed because existing conflicts were kept.'
+            : `Installed ${result.installed} style-library item${result.installed === 1 ? '' : 's'}.`;
+        announceStylePack(message);
+        toast.success(message);
+    } else {
+        announceStylePack(result.message || 'The reviewed style pack could not be installed.');
+        toast.error(result.message || 'The reviewed style pack could not be installed.');
+    }
+    return result;
+}
+
+export function renderStylePackRegistry() {
+    const host = document.getElementById('dc-style-pack-registry');
+    if (!host) return;
+    const entries = Object.entries(getStylePackRegistry()).sort(([left], [right]) => left.localeCompare(right));
+    host.innerHTML = entries.length
+        ? entries.map(([key, entry]) => {
+            const mapped = Object.values(entry.itemMappings || {}).reduce((count, values) => count + Object.keys(values).length, 0);
+            return `<div class="dc-style-pack-registry-entry"><strong>${escapeHtml(key)}</strong><small>${escapeHtml(formatDate(entry.installedAt))}, ${mapped} mapped item${mapped === 1 ? '' : 's'}</small></div>`;
+        }).join('')
+        : '<p class="dc-section-note">No style packs have been installed.</p>';
+}
+
 async function confirmCharacterRemoval(keys, options = {}) {
     const candidates = [...new Set(keys)].filter(key => characterColors[key]);
     const pinned = candidates.filter(key => characterColors[key]?.keep);
@@ -2032,6 +3286,48 @@ async function confirmCharacterRemoval(keys, options = {}) {
     });
     if (!confirmed) return false;
     return removeCharacterKeys(candidates, options);
+}
+
+function runSelectedCharacterMutation(mutator, options = {}) {
+    const result = executeSelectedCharacterMutation(mutator);
+    if (result.noSelection) {
+        toast.info('Select at least one character.');
+        return result;
+    }
+    if (!result.applied) {
+        if (options.noChangeMessage) toast.info(options.noChangeMessage);
+        return result;
+    }
+    const message = typeof options.successMessage === 'function'
+        ? options.successMessage(result)
+        : options.successMessage;
+    if (message) toast.success(message);
+    return result;
+}
+
+async function deleteSelectedCharacters(opener) {
+    const selectedKeys = getSelectedCharacterKeys();
+    const keptKeys = selectedKeys.filter(key => characterColors[key]?.keep);
+    const removableKeys = selectedKeys.filter(key => characterColors[key] && !characterColors[key].keep);
+    if (!selectedKeys.length) { toast.info('Select at least one character.'); return; }
+    if (!removableKeys.length) { toast.info('All selected characters are kept. Unkeep them before deleting.'); return; }
+    const confirmed = await confirmReviewedAction({
+        title: `Delete ${removableKeys.length} selected character${removableKeys.length === 1 ? '' : 's'}?`,
+        description: `${removableKeys.length} selected character${removableKeys.length === 1 ? '' : 's'} will be deleted. ${keptKeys.length ? `${keptKeys.length} kept ${keptKeys.length === 1 ? 'character is' : 'characters are'} protected.` : 'No kept characters are affected.'}`,
+        detailsHtml: `<p class="dc-review-names">${removableKeys.slice(0, 12).map(key => escapeHtml(characterColors[key].name)).join(', ')}${removableKeys.length > 12 ? `, and ${removableKeys.length - 12} more` : ''}</p>`,
+        confirmLabel: 'Delete selected',
+        danger: true,
+        opener,
+    });
+    if (!confirmed) return;
+    const restore = createRestoreSnapshot();
+    const result = runSelectedCharacterMutation(deleteCharacterKeys);
+    if (!result.removedKeys?.length) return;
+    const keptText = result.keptKeys.length
+        ? ` Kept ${result.keptKeys.length} pinned character${result.keptKeys.length === 1 ? '' : 's'}.`
+        : '';
+    showUndoToast(`Deleted ${result.removedKeys.length} selected character${result.removedKeys.length === 1 ? '' : 's'}.${keptText}`, restore);
+    requestAnimationFrame(() => document.getElementById('dc-select-visible')?.focus({ preventScroll: true }));
 }
 
 export function syncUIWithSettings() {
@@ -2055,7 +3351,6 @@ export function syncUIWithSettings() {
     if ($('dc-stealth-colors')) $('dc-stealth-colors').checked = settings.domStealthColors !== false;
     if ($('dc-right-click')) $('dc-right-click').checked = settings.enableRightClick;
     if ($('dc-legend')) $('dc-legend').checked = settings.showLegend;
-    if ($('dc-disable-narration')) $('dc-disable-narration').checked = settings.disableNarration !== false;
     if ($('dc-disable-toasts')) $('dc-disable-toasts').checked = settings.disableToasts || false;
     if ($('dc-engine')) $('dc-engine').value = settings.coloringEngine || 'llm';
     if ($('dc-llm-profile')) $('dc-llm-profile').value = settings.llmConnectionProfile || '';
@@ -2064,21 +3359,125 @@ export function syncUIWithSettings() {
     if ($('dc-palette')) $('dc-palette').value = settings.colorTheme || 'pastel';
     if ($('dc-brightness')) $('dc-brightness').value = settings.brightness || 0;
     if ($('dc-bright-val')) $('dc-bright-val').textContent = settings.brightness || 0;
-    if ($('dc-narrator')) $('dc-narrator').value = settings.narratorColor || '#888888';
+    if ($('dc-cvd-mode')) $('dc-cvd-mode').value = settings.colorVisionPreviewMode || 'none';
+    if ($('dc-cvd-severity')) $('dc-cvd-severity').value = settings.colorVisionPreviewSeverity ?? 100;
+    if ($('dc-cvd-severity-value')) $('dc-cvd-severity-value').textContent = `${settings.colorVisionPreviewSeverity ?? 100}%`;
+    if ($('dc-cvd-target')) $('dc-cvd-target').value = settings.colorVisionPreviewTarget || 'all';
+    if ($('dc-gradient-animation-mode')) $('dc-gradient-animation-mode').value = settings.gradientAnimationMode || 'auto';
+    if ($('dc-gradient-master-seed')) $('dc-gradient-master-seed').value = settings.gradientRandomMasterSeed || 'Generated on first randomization';
     if ($('dc-thought-symbols')) $('dc-thought-symbols').value = settings.thoughtSymbols || '';
     if ($('dc-prompt-depth')) $('dc-prompt-depth').value = settings.promptDepth ?? 1;
     if ($('dc-prompt-role')) $('dc-prompt-role').value = settings.promptRole || 'system';
     if ($('dc-prompt-mode')) $('dc-prompt-mode').value = settings.promptMode || 'inject';
     if ($('dc-sort')) $('dc-sort').value = settings.sortMode || 'name';
-    if ($('dc-narrator')) $('dc-narrator').disabled = settings.disableNarration !== false;
     syncProcessControlState();
+    refreshAttributionReviewStatus();
     refreshPresetDropdown();
     refreshPaletteDropdown();
+    refreshGradientPresetControls();
+    renderStylePackRegistry();
+    refreshGroupProfileControls();
+    renderNarratorEditor();
     updateSystemPromptDisplay();
     updateEngineVisibility();
     updateAutoSyncUI();
     updateStorageScopeStatus();
+    updateColorVisionPreviewStatus();
+    setGradientAnimationMode(settings.gradientAnimationMode);
+    const previewSignature = getColorVisionPreviewSignature();
+    if (lastColorVisionPreviewSignature && previewSignature !== lastColorVisionPreviewSignature) {
+        scheduleDomRefreshSeries(0);
+        scheduleCustomFontRefresh(0);
+        updateLegend();
+        renderGradientPresetGallery();
+    }
+    lastColorVisionPreviewSignature = previewSignature;
     applyControlHelpText();
+}
+
+function formatColorVisionMode(mode) {
+    if (mode === 'none') return 'None';
+    return String(mode || '').charAt(0).toUpperCase() + String(mode || '').slice(1);
+}
+
+function updateColorVisionPreviewStatus() {
+    const status = document.getElementById('dc-cvd-preview-status');
+    if (!status) return;
+    const severity = Math.max(0, Math.min(100, Number(settings.colorVisionPreviewSeverity) || 0));
+    const active = settings.colorVisionPreviewMode !== 'none' && severity > 0;
+    status.classList.toggle('dc-preview-active', active);
+    status.textContent = active
+        ? `Preview: ${formatColorVisionMode(settings.colorVisionPreviewMode)}, ${severity}%, ${settings.colorVisionPreviewTarget === 'ui' ? 'extension only' : settings.colorVisionPreviewTarget === 'chat' ? 'chat and cards only' : 'extension and chat'}`
+        : 'Preview off (stored colors are unchanged)';
+}
+
+function getColorVisionPreviewSignature() {
+    return JSON.stringify([
+        settings.colorVisionPreviewMode,
+        settings.colorVisionPreviewSeverity,
+        settings.colorVisionPreviewTarget,
+    ]);
+}
+
+function refreshColorVisionPreview() {
+    lastColorVisionPreviewSignature = getColorVisionPreviewSignature();
+    updateColorVisionPreviewStatus();
+    updateCharList();
+    updateLegend();
+    renderGradientPresetGallery();
+    renderNarratorEditor();
+    scheduleDomRefreshSeries(0);
+    scheduleCustomFontRefresh(0);
+}
+
+function formatConflictMode(mode, severity) {
+    return mode === 'none' ? 'Normal color vision' : `${formatColorVisionMode(mode)} at ${Math.round(severity * 100)}%`;
+}
+
+function buildConflictReportHtml(report) {
+    if (!report.conflicts.length) return `<p class="dc-conflict-empty">No conflicts were found across ${report.itemCount} active visuals and all color-vision modes.</p>`;
+    const visibleConflicts = report.conflicts.slice(0, 120);
+    const rows = visibleConflicts.map(conflict => {
+        const leftReadability = conflict.readability?.left;
+        const rightReadability = conflict.readability?.right;
+        const readability = leftReadability && rightReadability
+            ? `${conflict.left.label} ${leftReadability.minimumRatio}:1 (${leftReadability.level}); ${conflict.right.label} ${rightReadability.minimumRatio}:1 (${rightReadability.level})`
+            : 'Readability not available';
+        const repairable = [conflict.left.id, conflict.right.id].filter(key => {
+            const entry = characterColors[key];
+            return entry && !entry.locked && !entry.keep && String(entry.name || key).toLowerCase() !== 'narrator';
+        }).map(key => characterColors[key].name);
+        const involvesNarrator = conflict.left.kind === 'narrator' || conflict.right.kind === 'narrator';
+        const repairStatus = involvesNarrator
+            ? 'Unresolved; change Narration explicitly in Engine settings'
+            : repairable.length ? `Can recolor ${repairable.join(' or ')}` : 'Protected by Lock or Keep';
+        return `<article class="dc-conflict-row"><h3>${escapeHtml(conflict.left.label)} and ${escapeHtml(conflict.right.label)}</h3><dl><div><dt>Severity</dt><dd>${conflict.level === 'strong' ? 'Strong' : 'Potential'} (Delta E ${conflict.deltaE})</dd></div><div><dt>Mode</dt><dd>${escapeHtml(formatConflictMode(conflict.mode, conflict.severity))}</dd></div><div><dt>Reason</dt><dd>${(conflict.reasons || [conflict.narration]).map(escapeHtml).join(' ')}</dd></div><div><dt>Readability</dt><dd>${escapeHtml(readability)}</dd></div><div><dt>Repair</dt><dd>${escapeHtml(repairStatus)}</dd></div></dl></article>`;
+    }).join('');
+    const omitted = report.conflicts.length - visibleConflicts.length;
+    return `<p class="dc-conflict-summary">${report.conflicts.length} mode-specific conflict${report.conflicts.length === 1 ? '' : 's'} from ${report.comparisonCountPerMode} visual pairs per mode.</p><div class="dc-conflict-list">${rows}</div>${omitted ? `<p>${omitted} additional results omitted from this view.</p>` : ''}`;
+}
+
+export async function showColorConflictReport(report = getPerceptualConflictReport(), options = {}) {
+    const canRepair = report.conflicts.some(conflict => [conflict.left.id, conflict.right.id].some(key => {
+        if (conflict.left.kind === 'narrator' || conflict.right.kind === 'narrator') return false;
+        const entry = characterColors[key];
+        return entry && !entry.locked && !entry.keep && String(entry.name || key).toLowerCase() !== 'narrator';
+    }));
+    const decision = await openDecisionDialog({
+        title: options.afterRepair ? 'Conflict repair result' : 'Perceptual color conflicts',
+        description: options.afterRepair
+            ? `${options.changedCount} character${options.changedCount === 1 ? '' : 's'} recolored in one saved change. Locked, kept, and Narration visuals were not modified; Narration conflicts remain unresolved.`
+            : 'Every primary color and gradient is sampled under normal vision and four color-vision simulations. Readability is measured against the current chat surface.',
+        detailsHtml: buildConflictReportHtml(report),
+        choices: [
+            ...(!options.afterRepair && report.conflicts.length && canRepair ? [{ value: 'repair', label: 'Repair safe targets', primary: true }] : []),
+            { value: 'close', label: 'Close', primary: !report.conflicts.length || options.afterRepair },
+        ],
+    });
+    if (decision.value !== 'repair') return report;
+    const result = repairPerceptualConflicts();
+    await showColorConflictReport(result.report, { afterRepair: true, changedCount: result.changedKeys.length });
+    return result.report;
 }
 
 function buildSettingsPanelHtml() {
@@ -2106,17 +3505,34 @@ function buildSettingsPanelHtml() {
                     <div class="dc-action-block"><span><strong>Discover</strong><small>Read the entire chat and update tracked speakers.</small></span><button id="dc-scan" class="menu_button">Scan entire chat</button></div>
                     <div class="dc-action-block dc-llm-only"><span><strong>Colorize missing</strong><small>Add font tags only where dialogue is uncolored.</small></span><div class="dc-action-control"><select id="dc-colorize-target" class="text_pole" aria-label="Colorize target"><option value="last">Latest message</option><option value="all">Entire chat</option></select><button id="dc-colorize" class="menu_button">Colorize</button></div></div>
                     <div class="dc-action-block dc-dom-only" style="display:none;"><span><strong>Verify attribution</strong><small>Ask the selected LLM profile to review local assignments.</small></span><div class="dc-action-control"><select id="dc-verify-target" class="text_pole" aria-label="Verification target"><option value="latest">Latest message</option><option value="visible">Visible messages</option></select><button id="dc-verify-attr" class="menu_button">Verify</button></div></div>
+                    <div class="dc-action-block dc-dom-only" style="display:none;"><span><strong>Review suggestions</strong><small>Review verifier changes one dialogue segment at a time.</small></span><div class="dc-action-control"><button id="dc-review-attr" class="menu_button">Review suggestions (0)</button><span id="dc-review-attr-status" class="dc-visually-hidden" role="status" aria-live="polite">0 review suggestions.</span></div></div>
                     <div class="dc-action-block"><span><strong class="dc-llm-only">Recolor saved tags</strong><strong class="dc-dom-only" style="display:none;">Refresh local colors</strong><small class="dc-llm-only">Rewrite existing color tags across the entire chat.</small><small class="dc-dom-only" style="display:none;">Reapply current styles to rendered dialogue.</small></span><button id="dc-recolor" class="menu_button">Recolor entire chat</button></div>
                     <div class="dc-action-block"><span><strong>List tools</strong><small>Inspect activity or clear every unpinned entry.</small></span><div class="dc-action-control"><button id="dc-stats" class="menu_button">Statistics</button><button id="dc-clear" class="menu_button dc-danger-button">Clear unpinned</button></div></div>
                 </div>
             </details>
             <details class="dc-section" open>
                 <summary>Characters</summary>
-                <p class="dc-section-note">Keep pins important entries. Edit reveals color, lock, type, aliases, and gradients.</p>
+                <p class="dc-section-note">Use row checkboxes for bulk actions. Keep pins important entries; Edit reveals color, lock, type, aliases, and gradients.</p>
                 <div class="dc-stack">
                     <div class="dc-field-row dc-field-row-wrap"><label class="dc-visually-hidden" for="dc-search">Search characters</label><input type="search" id="dc-search" placeholder="Search names, aliases, groups…" class="text_pole"><select id="dc-sort" class="text_pole" aria-label="Character sort"><option value="name">Sort: Name</option><option value="count">Sort: Dialogue activity</option><option value="group">Sort: Group</option></select></div>
-                    <div class="dc-field-row dc-field-row-wrap"><label class="dc-visually-hidden" for="dc-add-name">New character name</label><input type="text" id="dc-add-name" placeholder="Character name" class="text_pole" aria-describedby="dc-add-error"><button id="dc-add-btn" class="menu_button">Add</button><button id="dc-card" class="menu_button">Add current card</button><button id="dc-avatar-color" class="menu_button">Avatar color</button><span id="dc-add-error" class="dc-field-error" aria-live="polite"></span></div>
+                    <div class="dc-field-row dc-field-row-wrap"><label class="dc-visually-hidden" for="dc-add-name">New character name</label><input type="text" id="dc-add-name" placeholder="Character name" class="text_pole" aria-describedby="dc-add-error"><label class="dc-visually-hidden" for="dc-add-group">Initial group</label><input type="text" id="dc-add-group" placeholder="Initial group (optional)" class="text_pole" list="dc-group-profile-labels" maxlength="80"><button id="dc-add-btn" class="menu_button">Add</button><button id="dc-card" class="menu_button">Add current card</button><button id="dc-avatar-color" class="menu_button">Avatar color</button><span id="dc-add-error" class="dc-field-error" aria-live="polite"></span></div>
                     <small><span id="dc-count">0</span> tracked characters</small>
+                    <section id="dc-bulk-toolbar" class="dc-bulk-toolbar" aria-label="Selected character actions" hidden>
+                        <div class="dc-bulk-toolbar-head">
+                            <output id="dc-selection-count" role="status" aria-live="polite">0 selected</output>
+                            <div class="dc-bulk-selection-actions"><button type="button" id="dc-select-visible" class="menu_button" aria-controls="dc-char-list">Select visible (0)</button><button type="button" id="dc-clear-selection" class="menu_button" aria-controls="dc-char-list" disabled>Clear selection</button></div>
+                        </div>
+                        <div class="dc-bulk-actions" role="group" aria-label="Bulk state actions">
+                            <button type="button" id="dc-bulk-lock" class="menu_button" data-dc-selection-required>Lock</button><button type="button" id="dc-bulk-unlock" class="menu_button" data-dc-selection-required>Unlock</button><button type="button" id="dc-bulk-keep" class="menu_button" data-dc-selection-required>Keep</button><button type="button" id="dc-bulk-unkeep" class="menu_button" data-dc-selection-required>Unkeep</button><button type="button" id="dc-bulk-randomize" class="menu_button" data-dc-selection-required>Randomize colors</button><button type="button" id="dc-bulk-delete" class="menu_button dc-danger-button" data-dc-selection-required>Delete</button>
+                        </div>
+                        <div class="dc-bulk-group-actions" role="group" aria-label="Bulk group actions">
+                            <label class="dc-visually-hidden" for="dc-bulk-group-name">Group for selected characters</label><input type="text" id="dc-bulk-group-name" class="text_pole" maxlength="80" placeholder="Group selected…" data-dc-selection-required><button type="button" id="dc-bulk-set-group" class="menu_button" data-dc-selection-required>Set group</button><button type="button" id="dc-bulk-clear-group" class="menu_button" data-dc-selection-required>Clear group</button>
+                        </div>
+                        <div class="dc-bulk-style-actions">
+                            <div class="dc-bulk-style-buttons" role="group" aria-label="Style copy and paste"><button type="button" id="dc-copy-character-style" class="menu_button" disabled>Copy style</button><button type="button" id="dc-paste-character-style" class="menu_button" disabled>Paste style</button><span id="dc-style-clipboard-status" class="dc-status-text" role="status" aria-live="polite">No style copied</span></div>
+                            <details class="dc-bulk-style-fields"><summary>Style fields</summary><div class="dc-bulk-style-options"><label class="checkbox_label"><input type="checkbox" id="dc-bulk-style-primary"><span>Primary color</span></label><label class="checkbox_label"><input type="checkbox" id="dc-bulk-style-gradient" checked><span>Gradient</span></label><label class="checkbox_label"><input type="checkbox" id="dc-bulk-style-font" checked><span>Font</span></label><label class="checkbox_label"><input type="checkbox" id="dc-bulk-style-text" checked><span>Text style</span></label></div></details>
+                        </div>
+                    </section>
                     <div id="dc-char-list" class="dc-char-list"></div>
                 </div>
             </details>
@@ -2127,6 +3543,14 @@ function buildSettingsPanelHtml() {
                     <div class="dc-field-row"><label class="dc-inline-label" for="dc-palette">New-color palette</label><select id="dc-palette" class="text_pole"></select></div>
                     <div class="dc-field-row"><label class="dc-inline-label" for="dc-brightness">Current color brightness</label><input type="range" id="dc-brightness" min="-100" max="100" value="0"><span id="dc-bright-val" class="dc-inline-value">0</span></div>
                     <small>The value previews while dragging; colors update when released.</small>
+                    <div class="dc-appearance-grid">
+                        <div class="dc-field-row"><label class="dc-inline-label" for="dc-cvd-mode">Color-vision preview</label><select id="dc-cvd-mode" class="text_pole"><option value="none">None</option><option value="protanopia">Protanopia</option><option value="deuteranopia">Deuteranopia</option><option value="tritanopia">Tritanopia</option><option value="achromatopsia">Achromatopsia</option></select></div>
+                        <div class="dc-field-row"><label class="dc-inline-label" for="dc-cvd-severity">Severity</label><input type="range" id="dc-cvd-severity" min="0" max="100" value="100"><span id="dc-cvd-severity-value" class="dc-inline-value">100%</span></div>
+                        <div class="dc-field-row"><label class="dc-inline-label" for="dc-cvd-target">Preview target</label><select id="dc-cvd-target" class="text_pole"><option value="all">Extension and chat</option><option value="ui">Extension only</option><option value="chat">Chat and cards only</option></select></div>
+                        <div class="dc-field-row"><label class="dc-inline-label" for="dc-gradient-animation-mode">Gradient motion</label><select id="dc-gradient-animation-mode" class="text_pole"><option value="auto">Auto (visible only)</option><option value="full">Full</option><option value="static">Static</option></select></div>
+                    </div>
+                    <div id="dc-cvd-preview-status" class="dc-preview-status" role="status" aria-live="polite">Preview off</div>
+                    <div class="dc-field-row dc-gradient-seed-control"><label class="dc-inline-label" for="dc-gradient-master-seed">Random gradient seed</label><input id="dc-gradient-master-seed" class="text_pole" type="text" readonly aria-describedby="dc-gradient-seed-note"><button type="button" id="dc-gradient-new-seed" class="menu_button">New seed</button><small id="dc-gradient-seed-note">Changes future deterministic randomizations; current gradients stay unchanged.</small></div>
                     <div class="dc-toggle-grid"><label class="checkbox_label"><input type="checkbox" id="dc-highlight"><span>Highlight dialogue</span></label><label class="checkbox_label"><input type="checkbox" id="dc-legend"><span>Show floating legend</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-recolor"><span>Auto-recolor after changes</span></label></div>
                 </div>
             </details>
@@ -2144,8 +3568,7 @@ function buildSettingsPanelHtml() {
                         <label class="checkbox_label"><input type="checkbox" id="dc-stealth-colors"><span>Ask for hidden speaker color blocks</span></label><label class="checkbox_label"><input type="checkbox" id="dc-llm-attr-check"><span>Verify attribution automatically</span></label><label class="checkbox_label"><input type="checkbox" id="dc-llm-attr-parallel"><span>Verify during streaming pauses</span></label><label class="checkbox_label"><input type="checkbox" id="dc-attr-conservative"><span>Only fill unknown attribution</span></label>
                         <div class="dc-field-row"><label class="dc-inline-label" for="dc-attr-profile">Verify profile</label><select id="dc-attr-profile" class="text_pole"><option value="">Use main chat AI</option></select></div><div class="dc-field-row"><label class="dc-inline-label" for="dc-attr-max-tokens">Verify token limit</label><input type="number" id="dc-attr-max-tokens" min="256" max="32768" value="4096" class="text_pole"></div>
                     </div>
-                    <div class="dc-field-row"><label class="dc-inline-label" for="dc-narrator">Narrator color</label><input type="color" id="dc-narrator" value="#888888"><button id="dc-narrator-clear" class="menu_button">Use default</button></div>
-                    <label class="checkbox_label"><input type="checkbox" id="dc-disable-narration"><span>Disable narration coloring</span></label>
+                    <section id="dc-narrator-editor" class="dc-narrator-editor" aria-label="Narration style"></section>
                     <div class="dc-field-row dc-field-row-wrap"><label class="dc-inline-label" for="dc-thought-symbols">Thought delimiters</label><input type="text" id="dc-thought-symbols" placeholder="*" class="text_pole"><button id="dc-thought-clear" class="menu_button">Clear</button></div>
                 </div>
             </details>
@@ -2156,8 +3579,11 @@ function buildSettingsPanelHtml() {
             <details class="dc-section">
                 <summary>Style library</summary>
                 <div class="dc-stack">
+                    <details class="dc-subsection" open><summary>Group profiles</summary><div class="dc-group-profile-manager dc-stack"><p class="dc-section-note">Profiles are scoped with the active color table. Applying one copies its selected fields; later profile edits do not change characters.</p><div class="dc-field-row"><label class="dc-inline-label" for="dc-group-profile-name">Group label</label><input type="text" id="dc-group-profile-name" class="text_pole" list="dc-group-profile-labels" maxlength="80" autocomplete="off" placeholder="Choose or enter a group"><datalist id="dc-group-profile-labels"></datalist></div><div class="dc-field-row"><label class="dc-inline-label" for="dc-group-profile-source">Copy style from</label><select id="dc-group-profile-source" class="text_pole"><option value="">Keep saved style</option></select></div><fieldset class="dc-profile-fieldset"><legend>Saved style fields</legend><div class="dc-profile-options"><label class="checkbox_label"><input type="checkbox" id="dc-group-profile-primary"><span>Primary color</span></label><label class="checkbox_label"><input type="checkbox" id="dc-group-profile-gradient" checked><span>Gradient</span></label><label class="checkbox_label"><input type="checkbox" id="dc-group-profile-font" checked><span>Font</span></label><label class="checkbox_label"><input type="checkbox" id="dc-group-profile-text" checked><span>Text style</span></label></div></fieldset><fieldset class="dc-profile-fieldset"><legend>Automation</legend><div class="dc-profile-automation"><label>Style on assignment<select id="dc-group-profile-applyStyleOnAssign" class="text_pole"><option value="null">Default (off)</option><option value="true">On</option><option value="false">Off</option></select></label><label>Style on creation<select id="dc-group-profile-applyStyleOnCreate" class="text_pole"><option value="null">Default (off)</option><option value="true">On</option><option value="false">Off</option></select></label><label>Lock on creation<select id="dc-group-profile-autoLock" class="text_pole"><option value="null">Use global</option><option value="true">On</option><option value="false">Off</option></select></label><label>Random gradient on creation<select id="dc-group-profile-randomGradient" class="text_pole"><option value="null">Use global</option><option value="true">On</option><option value="false">Off</option></select></label></div></fieldset><div class="dc-button-row"><button type="button" id="dc-group-profile-save" class="menu_button">Create profile</button><button type="button" id="dc-group-profile-apply" class="menu_button" disabled>Apply to existing (0)</button><button type="button" id="dc-group-profile-delete" class="menu_button dc-danger-button" disabled>Delete</button></div><div class="dc-field-row"><label class="dc-visually-hidden" for="dc-group-profile-rename">New group label</label><input type="text" id="dc-group-profile-rename" class="text_pole" maxlength="80" placeholder="New group label"><button type="button" id="dc-group-profile-rename-button" class="menu_button" disabled>Rename profile</button></div><span id="dc-group-profile-status" class="dc-status-text" role="status" aria-live="polite">Choose or enter a group label.</span></div></details>
+                    <details class="dc-subsection" open><summary>Gradient presets</summary><div id="dc-gradient-gallery" class="dc-gradient-gallery" aria-label="Gradient preset gallery"></div></details>
                     <details class="dc-subsection"><summary>Assignment presets</summary><div class="dc-stack"><div class="dc-field-row dc-field-row-wrap"><label class="dc-visually-hidden" for="dc-preset-name">Preset name</label><input type="text" id="dc-preset-name" placeholder="Preset name" class="text_pole"><button id="dc-save-preset" class="menu_button">Save current</button></div><div class="dc-field-row dc-field-row-wrap"><select id="dc-preset-select" class="text_pole" aria-label="Assignment preset"><option value="">Select preset</option></select><button id="dc-load-preset" class="menu_button">Load</button><button id="dc-delete-preset" class="menu_button dc-danger-button">Delete</button></div></div></details>
                     <details class="dc-subsection"><summary>Custom palettes</summary><div class="dc-stack"><div class="dc-field-row dc-field-row-wrap"><label class="dc-visually-hidden" for="dc-palette-name-input">Palette name</label><input type="text" id="dc-palette-name-input" placeholder="Palette name" class="text_pole"><label class="dc-visually-hidden" for="dc-palette-notes-input">Palette notes</label><input type="text" id="dc-palette-notes-input" placeholder="Notes or mood words" class="text_pole"></div><label class="checkbox_label"><input type="checkbox" id="dc-overwrite-existing"><span>Allow replacing an existing palette</span></label><div class="dc-button-row"><button id="dc-gen-palette" class="menu_button">Generate</button><button id="dc-save-palette" class="menu_button">Save current colors</button><button id="dc-del-palette" class="menu_button dc-danger-button">Delete selected</button></div></div></details>
+                    <details class="dc-subsection"><summary>Style packs</summary><div class="dc-stack dc-style-pack-library"><p class="dc-section-note">Portable format: dialogue-colors-style-pack v1. Builds stay local and import always opens a review.</p><div class="dc-button-row"><button type="button" id="dc-style-pack-export" class="menu_button">Build style pack</button><button type="button" id="dc-style-pack-import" class="menu_button">Import style pack</button></div><input type="file" id="dc-style-pack-file" accept=".json,application/json" hidden><span id="dc-style-pack-status" class="dc-status-text" role="status" aria-live="polite"></span><div id="dc-style-pack-registry" class="dc-style-pack-registry" aria-live="polite"></div></div></details>
                 </div>
             </details>
             <details class="dc-section">
@@ -2171,7 +3597,7 @@ function buildSettingsPanelHtml() {
             </details>
             <details class="dc-section">
                 <summary>Maintenance</summary>
-                <div class="dc-stack"><div class="dc-button-row"><button id="dc-undo" class="menu_button">Undo</button><button id="dc-redo" class="menu_button">Redo</button><button id="dc-fix-conflicts" class="menu_button">Fix similar colors</button></div><div class="dc-button-row"><button id="dc-regen" class="menu_button">Regenerate unlocked</button><button id="dc-flip-theme" class="menu_button">Flip for theme</button><button id="dc-restore-defaults" class="menu_button dc-danger-button">Restore setting defaults</button></div></div>
+                <div class="dc-stack"><div class="dc-button-row"><button id="dc-undo" class="menu_button">Undo</button><button id="dc-redo" class="menu_button">Redo</button><button id="dc-fix-conflicts" class="menu_button">Check color conflicts</button></div><div class="dc-button-row"><button id="dc-regen" class="menu_button">Regenerate unlocked</button><button id="dc-flip-theme" class="menu_button">Flip for theme</button><button id="dc-restore-defaults" class="menu_button dc-danger-button">Restore setting defaults</button></div></div>
             </details>
             <details class="dc-section dc-danger-zone">
                 <summary>Danger zone</summary>
@@ -2215,6 +3641,7 @@ function bindSettingsPanelControls($) {
         settings.driftAllGradientColors = e.target.checked;
         saveData();
         refreshGradientVisualSurfaces();
+        renderNarratorEditor();
         repaintDomAfterCharacterDataChange(0);
     };
     $('dc-auto-recolor').onchange = e => { settings.autoRecolor = e.target.checked; saveData(); };
@@ -2246,7 +3673,6 @@ function bindSettingsPanelControls($) {
     $('dc-stealth-colors').onchange = e => { settings.domStealthColors = e.target.checked; saveData(); injectPrompt(); };
     $('dc-right-click').onchange = e => { settings.enableRightClick = e.target.checked; saveData(); };
     $('dc-legend').onchange = e => { settings.showLegend = e.target.checked; saveData(); updateLegend(); };
-    $('dc-disable-narration').onchange = e => { settings.disableNarration = e.target.checked; $('dc-narrator').disabled = e.target.checked; saveData(); injectPrompt(); scheduleDomRefreshSeries(0); };
     $('dc-storage-scope').onchange = e => { handleStorageScopeChange(e.target); };
     $('dc-disable-toasts').onchange = e => { settings.disableToasts = e.target.checked; saveData(); };
     $('dc-engine').onchange = e => {
@@ -2275,7 +3701,7 @@ function bindSettingsPanelControls($) {
     $('dc-attr-profile').onchange = e => { settings.attributionConnectionProfile = e.target.value || null; saveData(); };
     $('dc-theme').onchange = e => {
         applyThemeOrBrightnessChange(() => { settings.themeMode = e.target.value; }, { saveImmediately: true });
-        updateCharList(); injectPrompt(); flushChatSave();
+        updateCharList(); renderNarratorEditor(); injectPrompt(); flushChatSave();
     };
     $('dc-palette').onchange = e => { settings.colorTheme = e.target.value; saveData(); injectPrompt(); };
     $('dc-brightness').oninput = e => {
@@ -2285,11 +3711,51 @@ function bindSettingsPanelControls($) {
     $('dc-brightness').onchange = e => {
         const brightness = parseInt(e.target.value, 10) || 0;
         applyThemeOrBrightnessChange(() => { settings.brightness = brightness; }, { saveImmediately: true });
+        renderNarratorEditor();
         flushColorStateSave();
         flushChatSave();
     };
-    $('dc-narrator').oninput = e => { settings.narratorColor = e.target.value; saveData(); injectPrompt(); scheduleDomRefreshSeries(); };
-    $('dc-narrator-clear').onclick = () => { settings.narratorColor = ''; $('dc-narrator').value = '#888888'; saveData(); injectPrompt(); scheduleDomRefreshSeries(0); };
+    $('dc-cvd-mode').onchange = e => {
+        settings.colorVisionPreviewMode = e.target.value;
+        saveData({ preserveEffectiveColors: true });
+        refreshColorVisionPreview();
+    };
+    $('dc-cvd-severity').oninput = e => {
+        $('dc-cvd-severity-value').textContent = `${Math.max(0, Math.min(100, Number(e.target.value) || 0))}%`;
+    };
+    $('dc-cvd-severity').onchange = e => {
+        settings.colorVisionPreviewSeverity = Math.max(0, Math.min(100, Math.round(Number(e.target.value) || 0)));
+        saveData({ preserveEffectiveColors: true });
+        refreshColorVisionPreview();
+    };
+    $('dc-cvd-target').onchange = e => {
+        settings.colorVisionPreviewTarget = e.target.value;
+        saveData({ preserveEffectiveColors: true });
+        refreshColorVisionPreview();
+    };
+    $('dc-gradient-animation-mode').onchange = e => {
+        setGradientAnimationMode(e.target.value);
+        saveData({ preserveEffectiveColors: true });
+        renderNarratorEditor();
+    };
+    $('dc-gradient-new-seed').onclick = async e => {
+        const confirmed = await confirmReviewedAction({
+            title: 'Start a new gradient sequence?',
+            description: 'Existing gradients stay exactly as shown. Their generator links are cleared, and each future randomization starts at variation 0 using a new master seed.',
+            confirmLabel: 'Use new seed',
+            opener: e.currentTarget,
+        });
+        if (!confirmed) return;
+        settings.gradientRandomMasterSeed = createGradientRandomMasterSeed();
+        Object.values(characterColors).forEach(entry => { entry.gradientGenerator = null; });
+        setNarratorStyle(settings, { ...normalizeNarratorStyle(settings.narratorStyle, { legacy: settings }), gradientGenerator: null }, applyThemeReadabilityAndBrightness);
+        saveHistory();
+        saveData({ preserveEffectiveColors: true });
+        $('dc-gradient-master-seed').value = settings.gradientRandomMasterSeed;
+        updateCharList();
+        renderNarratorEditor();
+        toast.success('New deterministic gradient seed is active.');
+    };
     $('dc-thought-symbols').oninput = e => { settings.thoughtSymbols = e.target.value; saveData(); injectPrompt(); scheduleDomRefreshSeries(); };
     $('dc-thought-clear').onclick = () => { settings.thoughtSymbols = ''; $('dc-thought-symbols').value = ''; saveData(); injectPrompt(); scheduleDomRefreshSeries(0); };
     $('dc-prompt-depth').oninput = e => { settings.promptDepth = parseInt(e.target.value, 10) || 0; saveData(); injectPrompt(); };
@@ -2316,6 +3782,92 @@ function bindSettingsPanelControls($) {
             opener: e.currentTarget,
         });
     };
+    $('dc-select-visible').onclick = () => {
+        selectCharacterKeys(getSortedEntries().map(([key]) => key));
+        updateCharList();
+        $('dc-clear-selection').focus({ preventScroll: true });
+    };
+    $('dc-clear-selection').onclick = () => {
+        clearCharacterSelection();
+        updateCharList();
+        $('dc-select-visible').focus({ preventScroll: true });
+    };
+    $('dc-bulk-lock').onclick = () => runSelectedCharacterMutation(keys => setCharacterLock(keys, true), {
+        noChangeMessage: 'All selected characters are already locked.',
+        successMessage: result => `Locked ${result.changedKeys.length} character${result.changedKeys.length === 1 ? '' : 's'}.`,
+    });
+    $('dc-bulk-unlock').onclick = () => runSelectedCharacterMutation(keys => setCharacterLock(keys, false), {
+        noChangeMessage: 'All selected characters are already unlocked.',
+        successMessage: result => `Unlocked ${result.changedKeys.length} character${result.changedKeys.length === 1 ? '' : 's'}.`,
+    });
+    $('dc-bulk-keep').onclick = () => runSelectedCharacterMutation(keys => setCharacterKeep(keys, true), {
+        noChangeMessage: 'All selected characters are already kept.',
+        successMessage: result => `Kept ${result.changedKeys.length} character${result.changedKeys.length === 1 ? '' : 's'}.`,
+    });
+    $('dc-bulk-unkeep').onclick = () => runSelectedCharacterMutation(keys => setCharacterKeep(keys, false), {
+        noChangeMessage: 'All selected characters are already unkept.',
+        successMessage: result => `Unkept ${result.changedKeys.length} character${result.changedKeys.length === 1 ? '' : 's'}.`,
+    });
+    $('dc-bulk-randomize').onclick = () => runSelectedCharacterMutation(randomizeCharacterColors, {
+        noChangeMessage: 'No selected colors changed. Locked characters were skipped.',
+        successMessage: result => `Randomized ${result.changedKeys.length} unlocked color${result.changedKeys.length === 1 ? '' : 's'}${result.skippedLockedKeys.length ? `; skipped ${result.skippedLockedKeys.length} locked` : ''}.`,
+    });
+    $('dc-bulk-delete').onclick = e => { deleteSelectedCharacters(e.currentTarget); };
+    const setSelectedGroup = () => {
+        const group = $('dc-bulk-group-name').value.trim();
+        if (!group) { toast.info('Enter a group name, or use Clear group.'); return; }
+        runSelectedCharacterMutation(keys => setCharacterGroup(keys, group), {
+            noChangeMessage: 'All selected characters already use that group.',
+            successMessage: result => `Set group for ${result.changedKeys.length} character${result.changedKeys.length === 1 ? '' : 's'}${result.profileAppliedKeys.length ? `; applied its profile to ${result.profileAppliedKeys.length}` : ''}.`,
+        });
+    };
+    $('dc-bulk-set-group').onclick = setSelectedGroup;
+    $('dc-bulk-clear-group').onclick = () => runSelectedCharacterMutation(keys => setCharacterGroup(keys, ''), {
+        noChangeMessage: 'The selected characters do not have a group.',
+        successMessage: result => `Cleared group for ${result.changedKeys.length} character${result.changedKeys.length === 1 ? '' : 's'}.`,
+    });
+    $('dc-bulk-group-name').onkeydown = e => {
+        if (e.key !== 'Enter') return;
+        e.preventDefault();
+        setSelectedGroup();
+    };
+    $('dc-copy-character-style').onclick = () => {
+        const selectedKeys = getSelectedCharacterKeys();
+        if (selectedKeys.length !== 1) { toast.info('Select exactly one character to copy a style.'); return; }
+        const fieldMask = getBulkStyleFieldMask();
+        if (!fieldMask) { toast.info('Choose at least one style field.'); return; }
+        const copied = copyCharacterStyle(selectedKeys[0], fieldMask);
+        if (!copied) return;
+        copiedGradientGenerator = fieldMask & CHARACTER_STYLE_FIELD_MASKS.GRADIENT
+            ? normalizeEntryGradientGenerator(characterColors[selectedKeys[0]]?.gradientGenerator, characterColors[selectedKeys[0]]?.gradient)
+            : null;
+        updateBulkToolbar();
+        toast.success(`Copied style from ${escapeHtml(copied.sourceName)}.`);
+    };
+    $('dc-paste-character-style').onclick = () => {
+        const fieldMask = getBulkStyleFieldMask();
+        if (!fieldMask) { toast.info('Choose at least one paste field.'); return; }
+        runSelectedCharacterMutation(keys => {
+            const result = pasteCharacterStyle(keys, fieldMask);
+            if (!(fieldMask & CHARACTER_STYLE_FIELD_MASKS.GRADIENT)) return result;
+            const changedKeys = new Set(result.changedKeys || []);
+            keys.forEach(key => {
+                const entry = characterColors[key];
+                if (!entry) return;
+                const nextGenerator = copiedGradientGenerator ? { ...copiedGradientGenerator } : null;
+                if (JSON.stringify(entry.gradientGenerator ?? null) === JSON.stringify(nextGenerator)) return;
+                entry.gradientGenerator = nextGenerator;
+                changedKeys.add(key);
+            });
+            return { ...result, changedKeys: [...changedKeys] };
+        }, {
+            noChangeMessage: 'The selected characters already match the copied style fields.',
+            successMessage: result => `Pasted style to ${result.changedKeys.length} character${result.changedKeys.length === 1 ? '' : 's'}.`,
+        });
+    };
+    ['dc-bulk-style-primary', 'dc-bulk-style-gradient', 'dc-bulk-style-font', 'dc-bulk-style-text'].forEach(id => {
+        $(id).onchange = () => updateBulkToolbar();
+    });
     $('dc-stats').onclick = showStatsPopup;
     $('dc-recolor').onclick = async e => {
         if (isDomEngine()) { scheduleDomRefreshSeries(0); scheduleCustomFontRefresh(0); return; }
@@ -2343,7 +3895,8 @@ function bindSettingsPanelControls($) {
         const verify = target === 'visible' ? verifyVisibleAttributionsWithLLM : verifyLatestAttributionsWithLLM;
         runAttributionVerification(() => verify({ manual: true }), { manual: true });
     };
-    $('dc-fix-conflicts').onclick = autoResolveConflicts;
+    $('dc-review-attr').onclick = e => { void showAttributionReviewDialog(e.currentTarget); };
+    $('dc-fix-conflicts').onclick = () => { void showColorConflictReport(); };
     $('dc-regen').onclick = async e => {
         const unlockedCount = Object.values(characterColors).filter(entry => !entry.locked).length;
         if (!unlockedCount) { toast.info('No unlocked colors to regenerate'); return; }
@@ -2365,6 +3918,16 @@ function bindSettingsPanelControls($) {
             danger: true,
             opener: e.currentTarget,
         })) restoreAllSettingsToDefaults();
+    };
+    $('dc-group-profile-name').onchange = syncGroupProfileEditor;
+    $('dc-group-profile-save').onclick = saveGroupProfileFromEditor;
+    $('dc-group-profile-rename-button').onclick = renameGroupProfileFromEditor;
+    $('dc-group-profile-delete').onclick = e => { deleteGroupProfileFromEditor(e.currentTarget); };
+    $('dc-group-profile-apply').onclick = e => { applyGroupProfileToExisting(e.currentTarget); };
+    $('dc-group-profile-rename').onkeydown = e => {
+        if (e.key !== 'Enter') return;
+        e.preventDefault();
+        renameGroupProfileFromEditor();
     };
     $('dc-save-preset').onclick = async e => {
         const name = $('dc-preset-name').value.trim();
@@ -2396,6 +3959,19 @@ function bindSettingsPanelControls($) {
         const name = value.slice(7);
         if (await confirmReviewedAction({ title: 'Delete custom palette?', description: `“${name}” will be removed. Existing character colors are not changed.`, confirmLabel: 'Delete palette', danger: true, opener: e.currentTarget })) deleteCustomPalette();
     };
+    $('dc-style-pack-export').onclick = e => { void buildStylePackExport(e.currentTarget); };
+    $('dc-style-pack-import').onclick = () => $('dc-style-pack-file').click();
+    $('dc-style-pack-file').onchange = async e => {
+        const file = e.target.files?.[0];
+        e.target.value = '';
+        if (!file) return;
+        if (Number.isFinite(file.size) && file.size > STYLE_PACK_FILE_LIMIT) {
+            announceStylePack('Style packs are limited to 1 MiB. The file was not read.');
+            toast.error('Style packs are limited to 1 MiB.');
+            return;
+        }
+        await reviewAndApplyStylePack(await analyzeStylePackImport(file), $('dc-style-pack-import'));
+    };
     $('dc-card').onclick = autoAssignFromCard;
     $('dc-avatar-color').onclick = async () => {
         try {
@@ -2412,7 +3988,7 @@ function bindSettingsPanelControls($) {
                 setEntryFromBaseColor(characterColors[key], color);
                 applyLiveColorChangesFromSnapshot(snapshot, [key]);
             } else {
-                const built = buildCharacterEntry(char.name, { color, colorMode: 'base', locked: false, dialogueCount: 0 });
+                const built = buildCharacterEntry(char.name, { color, colorMode: 'base', origin: 'avatar', dialogueCount: 0 });
                 if (!built.entry) return;
                 characterColors[key] = built.entry;
                 needsDomRepaint = true;
@@ -2564,9 +4140,11 @@ function bindSettingsPanelControls($) {
     $('dc-add-btn').onclick = () => {
         const input = $('dc-add-name');
         const error = $('dc-add-error');
-        const result = addCharacter(input.value);
+        const groupInput = $('dc-add-group');
+        const result = addCharacter(input.value, undefined, { group: normalizeGroupName(groupInput?.value), origin: 'manual' });
         if (result?.added || result?.existing) {
             input.value = '';
+            if (groupInput) groupInput.value = '';
             input.removeAttribute('aria-invalid');
             if (error) error.textContent = '';
         } else {

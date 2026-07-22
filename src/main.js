@@ -10,7 +10,7 @@ import { populateProfileDropdown } from './llm.js';
 import { detectTheme, getReadableSurfaceSignature, invalidateThemeCache } from './palettes.js';
 import { buildMinimalPromptInstruction, injectPrompt } from './prompts.js';
 import { eventSource, event_types, getContext } from './st-api.js';
-import { attributionChatGeneration, autoSyncPendingRecord, characterColors, expandedCharacterRows, isDomEngine, isStreamingGenerationActive, lastCharKey, lastProcessedMessageSignature, pendingAttributionVerifications, runtimeState, setAttributionChatGeneration, setIsStreamingGenerationActive, setLastCharKey, setLastProcessedMessageSignature, setPendingAttributionVerifications, setSwapMode, settings, streamingHeuristicCache, swapMode } from './state.js';
+import { attributionChatGeneration, autoSyncPendingRecord, characterColors, expandedCharacterRows, isDomEngine, isStreamingGenerationActive, lastCharKey, lastProcessedMessageSignature, pendingAttributionVerifications, runtimeState, selectedCharacterKeys, setAttributionChatGeneration, setIsStreamingGenerationActive, setLastCharKey, setLastProcessedMessageSignature, setPendingAttributionVerifications, setSwapMode, settings, streamingHeuristicCache, swapMode } from './state.js';
 import { confirmAutoSyncRecord, doAutoSyncMarkersMatch, ensureRegexScript, getAutoSyncRecord, getCharKey, getStorageKey, initAutoSync, loadData, migrateLegacyLocalStorageIfNeeded, migrateRenamedCharacterStorage, tryLoadFromCard, updateAutoSyncUI } from './storage.js';
 import { applyThemeOrBrightnessChange, clearAutoColorizeIndicators, createUI, syncUIWithSettings, updateCharList } from './ui.js';
 import { cancelStreamingAttributionVerification, clearAutoAttributionVerificationQueue, queueAutoAttributionVerificationForRenderedMessages, scheduleStreamingAttributionVerification } from './verify.js';
@@ -49,6 +49,7 @@ export function resetDialogueCountsForNewChat() {
 }
 
 export function handleChatChanged() {
+    selectedCharacterKeys.clear();
     setAttributionChatGeneration(attributionChatGeneration + 1);
     setIsStreamingGenerationActive(false);
     cancelStreamingAttributionVerification({ clearOverrides: true });
