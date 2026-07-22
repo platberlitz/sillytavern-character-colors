@@ -18,6 +18,9 @@
 
 #dc-ext .inline-drawer-content {
     font-size: 0.9em;
+    max-height: 80vh;
+    max-height: 80dvh;
+    overflow-y: auto;
 }
 
 #dc-ext .text_pole,
