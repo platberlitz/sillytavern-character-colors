@@ -1552,7 +1552,7 @@
     --dc-danger-soft: rgba(194, 85, 85, 0.16);
     position: fixed;
     inset: 0;
-    z-index: 10000;
+    z-index: 999999;
     display: grid;
     place-items: center;
     padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
@@ -1678,7 +1678,7 @@
 #dc-harmony-popup {
     --dc-accent: var(--SmartThemeQuoteColor, #5a9);
     position: fixed;
-    z-index: 10001;
+    z-index: 999999;
     display: grid;
     grid-template-columns: repeat(3, minmax(72px, 1fr));
     gap: 7px;
@@ -1709,6 +1709,8 @@
 
 #dc-context-menu {
     --dc-accent: var(--SmartThemeQuoteColor, #5a9);
+    position: fixed;
+    z-index: 999999;
     box-sizing: border-box;
     width: min(320px, calc(100vw - 24px));
     min-width: 0 !important;
@@ -2167,14 +2169,20 @@
     }
 
     .dc-dialog-backdrop {
-        align-items: end;
-        padding: max(8px, env(safe-area-inset-top)) max(8px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: max(12px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+        overflow-y: auto;
+        -webkit-overflow-scrolling: touch;
     }
 
     .dc-dialog {
         width: 100%;
-        max-height: min(92vh, 760px);
-        max-height: min(92dvh, 760px);
+        max-height: min(90dvh, calc(100dvh - max(24px, env(safe-area-inset-top) + env(safe-area-inset-bottom))));
+        max-height: min(90vh, calc(100vh - max(24px, env(safe-area-inset-top) + env(safe-area-inset-bottom))));
+        margin: auto;
         padding: 14px;
     }
 

@@ -461,7 +461,7 @@ export function createLegend() {
         const left = Number.isFinite(savedPos.left) ? savedPos.left : undefined;
         const right = Number.isFinite(savedPos.right) ? savedPos.right : 10;
 
-        legend.style.cssText = `position:fixed;top:${top}px;${left !== undefined ? `left:${left}px;` : `right:${right}px;`}background:var(--SmartThemeBlurTintColor);border:1px solid var(--SmartThemeBorderColor);border-radius:8px;padding:8px;z-index:9999;font-size:0.8em;max-width:180px;max-height:60vh;overflow-y:auto;display:none;user-select:none;`;
+        legend.style.cssText = `position:fixed;top:${top}px;${left !== undefined ? `left:${left}px;` : `right:${right}px;`}background:var(--SmartThemeBlurTintColor);border:1px solid var(--SmartThemeBorderColor);border-radius:8px;padding:8px;z-index:99998;font-size:0.8em;max-width:180px;max-height:60vh;overflow-y:auto;display:none;user-select:none;`;
 
         let isDragging = false;
         let startX, startY, startLeft, startTop;

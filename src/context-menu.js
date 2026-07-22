@@ -200,7 +200,7 @@ function showMenu(e, fontTag, qElement = null) {
     menu.setAttribute('aria-labelledby', 'dc-ctx-title');
     menu.setAttribute('aria-describedby', 'dc-ctx-preview');
     const { x, y } = getMenuPosition(e, targetEl);
-    menu.style.cssText = `position:fixed;left:${x}px;top:${y}px;background:var(--SmartThemeBlurTintColor);border:1px solid var(--SmartThemeBorderColor);border-radius:6px;padding:8px;z-index:10001;min-width:180px;color:var(--SmartThemeTextColor);box-shadow:0 4px 12px rgba(0,0,0,0.5);`;
+    menu.style.cssText = `position:fixed;left:${x}px;top:${y}px;background:var(--SmartThemeBlurTintColor);border:1px solid var(--SmartThemeBorderColor);border-radius:6px;padding:8px;z-index:999999;min-width:180px;color:var(--SmartThemeTextColor);box-shadow:0 4px 12px rgba(0,0,0,0.5);`;
     menu.innerHTML = `
         <div id="dc-ctx-title" style="font-weight:600;margin-bottom:4px;">Assign dialogue manually</div>
         <div id="dc-ctx-preview" style="font-size:0.8em;opacity:0.7;margin-bottom:6px;">${isDomSegment ? '<em style="font-size:0.9em;">(DOM override)</em><br>' : isBareQuote ? '<em style="font-size:0.9em;">(uncolored quote)</em><br>' : ''}"${escapeHtml(text)}"</div>
@@ -425,7 +425,7 @@ function showSelectionMenu(e, selection, range, selectedText, mesEl) {
     menu.setAttribute('aria-labelledby', 'dc-ctx-title');
     menu.setAttribute('aria-describedby', 'dc-ctx-preview');
     const { x, y } = getMenuPosition(e, mesEl);
-    menu.style.cssText = `position:fixed;left:${x}px;top:${y}px;background:var(--SmartThemeBlurTintColor);border:1px solid var(--SmartThemeBorderColor);border-radius:6px;padding:8px;z-index:10001;min-width:180px;color:var(--SmartThemeTextColor);box-shadow:0 4px 12px rgba(0,0,0,0.5);`;
+    menu.style.cssText = `position:fixed;left:${x}px;top:${y}px;background:var(--SmartThemeBlurTintColor);border:1px solid var(--SmartThemeBorderColor);border-radius:6px;padding:8px;z-index:999999;min-width:180px;color:var(--SmartThemeTextColor);box-shadow:0 4px 12px rgba(0,0,0,0.5);`;
     menu.innerHTML = `
         <div id="dc-ctx-title" style="font-weight:600;margin-bottom:4px;">Assign selected dialogue manually</div>
         <div id="dc-ctx-preview" style="font-size:0.8em;opacity:0.7;margin-bottom:6px;"><em style="font-size:0.9em;">(selected text)</em><br>"${escapeHtml(preview)}"</div>

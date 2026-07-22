@@ -952,11 +952,20 @@ export function showHarmonyPopup(key, anchorEl) {
     popup.style.left = `${rect.left - originRect.left}px`;
     popup.style.top = `${rect.bottom + 4 - originRect.top}px`;
     const popupRect = popup.getBoundingClientRect();
-    if (popupRect.right > window.innerWidth - 8) {
-        popup.style.left = `${parseFloat(popup.style.left) - (popupRect.right - window.innerWidth + 8)}px`;
+    const vpWidth = window.visualViewport?.width || window.innerWidth;
+    const vpHeight = window.visualViewport?.height || window.innerHeight;
+    if (popupRect.right > vpWidth - 8) {
+        popup.style.left = `${parseFloat(popup.style.left) - (popupRect.right - vpWidth + 8)}px`;
     }
-    if (popupRect.bottom > window.innerHeight - 8) {
-        popup.style.top = `${parseFloat(popup.style.top) - (popupRect.bottom - window.innerHeight + 8)}px`;
+    if (popupRect.bottom > vpHeight - 8) {
+        popup.style.top = `${parseFloat(popup.style.top) - (popupRect.bottom - vpHeight + 8)}px`;
+    }
+    const finalRect = popup.getBoundingClientRect();
+    if (finalRect.left < 8) {
+        popup.style.left = `${parseFloat(popup.style.left) + (8 - finalRect.left)}px`;
+    }
+    if (finalRect.top < 8) {
+        popup.style.top = `${parseFloat(popup.style.top) + (8 - finalRect.top)}px`;
     }
     let closed = false;
     const close = ({ restoreFocus = true } = {}) => {
