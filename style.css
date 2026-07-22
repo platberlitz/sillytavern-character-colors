@@ -49,24 +49,6 @@
     cursor: pointer;
 }
 
-[data-dc-speaker-name]::before {
-    content: attr(data-dc-speaker-name) ": ";
-    color: var(--dc-gradient-fallback, currentColor);
-    font-size: 0.78em;
-    font-style: normal;
-    font-weight: 700;
-    unicode-bidi: isolate;
-    -webkit-text-fill-color: var(--dc-gradient-fallback, currentColor);
-}
-
-q[data-dc-speaker-name]::before {
-    content: open-quote attr(data-dc-speaker-name) ": ";
-}
-
-q[data-dc-speaker-name]::after {
-    content: close-quote;
-}
-
 #dc-ext input[type="number"] {
     padding: 4px 6px !important;
     min-height: 0 !important;
@@ -930,12 +912,6 @@ q[data-dc-speaker-name]::after {
 }
 
 @media (forced-colors: active) {
-    [data-dc-speaker-name]::before {
-        color: CanvasText;
-        font-weight: 700;
-        -webkit-text-fill-color: CanvasText;
-    }
-
     .dc-gradient-text {
         color: CanvasText !important;
         background: none !important;

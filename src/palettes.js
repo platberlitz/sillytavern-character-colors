@@ -795,44 +795,74 @@ export function showHarmonyPopup(key, anchorEl) {
     popup.setAttribute('aria-modal', 'false');
     popup.setAttribute('aria-label', `Color harmony suggestions for ${char.name}`);
     const rect = anchorEl.getBoundingClientRect();
-    popup.style.left = `${rect.left}px`;
-    popup.style.top = `${rect.bottom + 4}px`;
+    popup.style.left = '0px';
+    popup.style.top = '0px';
     popup.innerHTML = suggestions.map(s => `<button type="button" class="dc-harmony-swatch" data-color="${s.color}" aria-label="Use ${s.label} color ${s.color}" title="${s.label}: ${s.color}" style="--dc-harmony-color:${s.color};"><span>${s.label}</span></button>`).join('');
-    document.body.appendChild(popup);
+    const popupHost = anchorEl.closest('#dc-ext') || document.body;
+    popupHost.appendChild(popup);
+    const originRect = popup.getBoundingClientRect();
+    popup.style.left = `${rect.left - originRect.left}px`;
+    popup.style.top = `${rect.bottom + 4 - originRect.top}px`;
     const popupRect = popup.getBoundingClientRect();
-    if (popupRect.right > window.innerWidth) popup.style.left = (window.innerWidth - popupRect.width - 8) + 'px';
-    if (popupRect.bottom > window.innerHeight) popup.style.top = (window.innerHeight - popupRect.height - 8) + 'px';
+    if (popupRect.right > window.innerWidth - 8) {
+        popup.style.left = `${parseFloat(popup.style.left) - (popupRect.right - window.innerWidth + 8)}px`;
+    }
+    if (popupRect.bottom > window.innerHeight - 8) {
+        popup.style.top = `${parseFloat(popup.style.top) - (popupRect.bottom - window.innerHeight + 8)}px`;
+    }
     let closed = false;
     const close = ({ restoreFocus = true } = {}) => {
         if (closed) return;
         closed = true;
         document.removeEventListener('pointerdown', onOutsidePointer, true);
         document.removeEventListener('keydown', onKeyDown, true);
-        document.removeEventListener('focusin', onFocusIn, true);
         popup.remove();
         if (closeActiveHarmonyPopup === close) closeActiveHarmonyPopup = null;
         if (restoreFocus && anchorEl?.isConnected) anchorEl.focus({ preventScroll: true });
     };
     closeActiveHarmonyPopup = close;
     const onOutsidePointer = event => { if (!popup.contains(event.target) && event.target !== anchorEl) close({ restoreFocus: false }); };
-    const onFocusIn = event => { if (!popup.contains(event.target) && event.target !== anchorEl) close({ restoreFocus: false }); };
     const onKeyDown = event => {
-        if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(); }
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            event.stopPropagation();
+            close();
+            return;
+        }
+        if (event.key !== 'Tab') return;
+        const swatches = [...popup.querySelectorAll('.dc-harmony-swatch')];
+        if (!swatches.length) return;
+        const first = swatches[0];
+        const last = swatches[swatches.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+            event.preventDefault();
+            last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+            event.preventDefault();
+            first.focus();
+        }
     };
     popup.querySelectorAll('.dc-harmony-swatch').forEach(swatch => {
-        swatch.onclick = () => {
+        swatch.onclick = event => {
+            event.preventDefault();
+            event.stopPropagation();
             const nextColor = swatch.dataset.color;
-            close();
             const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
             setEntryFromBaseColor(char, nextColor);
             applyLiveColorChangesFromSnapshot(snapshot, [key]);
             commit();
+            const restoreKeyboardFocus = event.detail === 0;
+            close({ restoreFocus: false });
+            if (restoreKeyboardFocus) {
+                requestAnimationFrame(() => {
+                    document.querySelector(`.dc-char[data-key="${CSS.escape(key)}"] .dc-harmony`)?.focus({ preventScroll: true });
+                });
+            }
         };
     });
     setTimeout(() => {
         document.addEventListener('pointerdown', onOutsidePointer, true);
         document.addEventListener('keydown', onKeyDown, true);
-        document.addEventListener('focusin', onFocusIn, true);
     }, 0);
     popup.querySelector('.dc-harmony-swatch')?.focus({ preventScroll: true });
 }

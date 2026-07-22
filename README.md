@@ -79,7 +79,7 @@ Adding an existing canonical name or alias reveals its current row instead of si
 - Select an Auto, Dark, or Light target surface and a palette for newly generated colors.
 - Adjust the current table's brightness; the value previews while dragging and applies when released.
 - Enable dialogue highlights, the floating legend, or automatic recoloring after edits.
-- Effective colors are adjusted against the rendered chat surface for at least 4.5:1 text contrast, and attributed dialogue includes a compact visible speaker prefix so identity is not conveyed by color alone.
+- Effective colors are adjusted against the rendered chat surface for at least 4.5:1 text contrast. Speaker metadata remains available to assistive technology without adding visible name tags to dialogue.
 - Scan on load only when the current character list is empty, or scan each new message.
 - Automatically lock detected speakers or assign random gradients to new NPCs.
 - Enable manual dialogue reassignment by pointer, long press, or keyboard.

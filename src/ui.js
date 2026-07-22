@@ -2080,7 +2080,7 @@ export function syncUIWithSettings() {
 function buildSettingsPanelHtml() {
     return `
     <div id="dc-ext" class="inline-drawer">
-        <div class="inline-drawer-toggle inline-drawer-header"><h2>Dialogue Colors</h2><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
+        <div class="inline-drawer-toggle inline-drawer-header"><b>Dialogue Colors</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
         <div class="inline-drawer-content dc-panel-content">
             <details class="dc-section" open>
                 <summary>Current setup</summary>
