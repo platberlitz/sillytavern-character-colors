@@ -18,6 +18,8 @@ A SillyTavern extension that gives each character's dialogue a consistent visual
 - **Compact character editor**: Keep and Edit stay visible; color, lock, typography, aliases, groups, deletion, and gradients are disclosed on demand.
 - **Custom gradients**: create linear or radial gradients with 2–5 stops, animation, exact positions, 16 built-in presets, custom presets, and one-click randomization.
 - **Automatic NPC gradients**: optionally randomize gradients for newly discovered NPCs while excluding the current card, group cards, and user persona. Off by default.
+- **Automatic gradients for every new character**: a separate default-off override can randomize gradients for every newly created entry.
+- **Global gradient drift**: optionally animate every gradient without changing each character's individual Drift setting. Off by default.
 - **Fonts and text styles**: assign a Google Font and Normal, Bold, Italic, or Bold Italic styling per character.
 - **Safer maintenance**: destructive actions review their targets, skip kept characters, and use recovery where available.
 - **Accessible interaction**: keyboard assignment, focus-managed dialogs, visible focus, speaker labels for assistive technology, reduced-motion support, forced-color fallbacks, and responsive touch targets.
@@ -81,7 +83,7 @@ Adding an existing canonical name or alias reveals its current row instead of si
 - Enable dialogue highlights, the floating legend, or automatic recoloring after edits.
 - Effective colors are adjusted against the rendered chat surface for at least 4.5:1 text contrast. Speaker metadata remains available to assistive technology without adding visible name tags to dialogue.
 - Scan on load only when the current character list is empty, or scan each new message.
-- Automatically lock detected speakers or assign random gradients to new NPCs.
+- Automatically lock detected speakers, assign random gradients to new NPCs or every new character, and optionally drift every gradient.
 - Enable manual dialogue reassignment by pointer, long press, or keyboard.
 - Reduce routine success notifications without suppressing required validation and safety feedback.
 

@@ -1,5 +1,6 @@
 // gradient-rendering.js - shared DOM markers and CSS variables for gradient text.
 import { buildGradientCss, getGradientSignature, normalizeGradient } from './gradients.js';
+import { settings } from './state.js';
 
 export const GRADIENT_TEXT_CLASS = 'dc-gradient-text';
 export const GRADIENT_ANIMATED_CLASS = 'dc-gradient-animated';
@@ -52,14 +53,15 @@ export function getGradientRenderState(entry) {
     const gradient = normalizeGradient(entry?.gradient);
     const css = buildGradientCss(entry);
     if (!gradient || !css) return null;
+    const animationEnabled = gradient.animation.enabled || settings.driftAllGradientColors === true;
     return {
         css,
         fallbackColor: normalizeFallbackColor(entry),
         type: gradient.type,
-        animationEnabled: gradient.animation.enabled,
+        animationEnabled,
         durationSeconds: gradient.animation.duration,
         reverse: gradient.animation.reverse,
-        signature: getGradientSignature(entry),
+        signature: `${getGradientSignature(entry)}:${animationEnabled ? 1 : 0}`,
     };
 }
 

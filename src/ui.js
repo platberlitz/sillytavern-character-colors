@@ -155,7 +155,7 @@ function getGradientPresentation(entry) {
     return {
         gradient,
         ...state,
-        classes: `dc-has-gradient dc-gradient-${gradient.type}${gradient.animation.enabled ? ' dc-gradient-animated' : ''}${gradient.animation.reverse ? ' dc-gradient-reverse' : ''}`,
+        classes: `dc-has-gradient dc-gradient-${gradient.type}${state.animationEnabled ? ' dc-gradient-animated' : ''}${gradient.animation.reverse ? ' dc-gradient-reverse' : ''}`,
         dataAttributes: `data-dc-gradient="${state.type}" data-dc-gradient-animation="${state.animationEnabled ? 'on' : 'off'}" data-dc-gradient-reverse="${state.reverse}" data-gradient="${state.type}" data-gradient-type="${state.type}" data-gradient-animated="${state.animationEnabled}" data-gradient-reverse="${state.reverse}"`,
     };
 }
@@ -180,7 +180,7 @@ function setGradientPresentation(element, entry, { text = false } = {}) {
     element.classList.toggle('dc-has-gradient', !!presentation);
     element.classList.toggle('dc-gradient-linear', presentation?.gradient.type === 'linear');
     element.classList.toggle('dc-gradient-radial', presentation?.gradient.type === 'radial');
-    element.classList.toggle('dc-gradient-animated', !!presentation?.gradient.animation.enabled);
+    element.classList.toggle('dc-gradient-animated', !!presentation?.animationEnabled);
     element.classList.toggle('dc-gradient-reverse', !!presentation?.gradient.animation.reverse);
     element.style.color = color;
     element.style.backgroundColor = text ? '' : color;
@@ -209,7 +209,7 @@ function setGradientPresentation(element, entry, { text = false } = {}) {
     }
     element.dataset.gradient = presentation.gradient.type;
     element.dataset.gradientType = presentation.gradient.type;
-    element.dataset.gradientAnimated = String(presentation.gradient.animation.enabled);
+    element.dataset.gradientAnimated = String(presentation.animationEnabled);
     element.dataset.gradientReverse = String(presentation.gradient.animation.reverse);
     element.setAttribute('data-dc-gradient', presentation.type);
     element.setAttribute('data-dc-gradient-animation', presentation.animationEnabled ? 'on' : 'off');
@@ -488,6 +488,7 @@ export function updateLegend() {
     const entries = Object.entries(characterColors);
     const signature = JSON.stringify({
         visible: !!settings.showLegend,
+        driftAll: settings.driftAllGradientColors === true,
         entries: entries.map(([key, entry]) => [
             key,
             entry.name,
@@ -929,12 +930,12 @@ function refreshGradientVisualSurfaces(keys = Object.keys(characterColors)) {
         row.classList.toggle('dc-has-gradient', !!presentation);
         row.classList.toggle('dc-gradient-linear', presentation?.gradient.type === 'linear');
         row.classList.toggle('dc-gradient-radial', presentation?.gradient.type === 'radial');
-        row.classList.toggle('dc-gradient-animated', !!presentation?.gradient.animation.enabled);
+        row.classList.toggle('dc-gradient-animated', !!presentation?.animationEnabled);
         row.classList.toggle('dc-gradient-reverse', !!presentation?.gradient.animation.reverse);
         if (presentation) {
             row.dataset.gradient = presentation.gradient.type;
             row.dataset.gradientType = presentation.gradient.type;
-            row.dataset.gradientAnimated = String(presentation.gradient.animation.enabled);
+            row.dataset.gradientAnimated = String(presentation.animationEnabled);
             row.dataset.gradientReverse = String(presentation.gradient.animation.reverse);
             row.setAttribute('data-dc-gradient', presentation.type);
             row.setAttribute('data-dc-gradient-animation', presentation.animationEnabled ? 'on' : 'off');
@@ -959,12 +960,12 @@ function refreshGradientVisualSurfaces(keys = Object.keys(characterColors)) {
         if (editor) {
             editor.dataset.gradientEnabled = String(!!presentation);
             editor.classList.toggle('dc-has-gradient', !!presentation);
-            editor.classList.toggle('dc-gradient-animated', !!presentation?.gradient.animation.enabled);
+            editor.classList.toggle('dc-gradient-animated', !!presentation?.animationEnabled);
             editor.classList.toggle('dc-gradient-reverse', !!presentation?.gradient.animation.reverse);
             if (presentation) {
                 editor.dataset.gradient = presentation.gradient.type;
                 editor.dataset.gradientType = presentation.gradient.type;
-                editor.dataset.gradientAnimated = String(presentation.gradient.animation.enabled);
+                editor.dataset.gradientAnimated = String(presentation.animationEnabled);
                 editor.dataset.gradientReverse = String(presentation.gradient.animation.reverse);
                 editor.setAttribute('data-dc-gradient', presentation.type);
                 editor.setAttribute('data-dc-gradient-animation', presentation.animationEnabled ? 'on' : 'off');
@@ -997,7 +998,6 @@ export function buildCharRowHtml(k, v) {
     if (fontFamily) loadGoogleFont(fontName);
     const fontStyle = fontFamily ? `font-family:${escapeAttr(fontFamily)};` : '';
     const statusBadges = [
-        v.keep ? '<span class="dc-status-chip dc-status-chip-keep">Kept</span>' : '',
         v.locked ? '<span class="dc-status-chip dc-status-chip-lock">Locked</span>' : '',
         v.group ? `<span class="dc-status-chip">${escapeHtml(v.group)}</span>` : '',
         v.style ? `<span class="dc-status-chip">${escapeHtml(styleLabel)}</span>` : '',
@@ -1059,6 +1059,7 @@ export function buildCharRowSignature(k, v) {
         normalizeGoogleFontName(v.font),
         v.dialogueCount || 0,
         swapMode === k ? 1 : 0,
+        settings.driftAllGradientColors ? 1 : 0,
         getGradientSignature(v),
         (v.aliases || []).join('\u0001'),
         v.name || ''
@@ -2042,6 +2043,9 @@ export function syncUIWithSettings() {
     if ($('dc-autoscan-new')) $('dc-autoscan-new').checked = settings.autoScanNewMessages !== false;
     if ($('dc-auto-lock')) $('dc-auto-lock').checked = settings.autoLockDetected !== false;
     if ($('dc-auto-random-gradients')) $('dc-auto-random-gradients').checked = settings.autoRandomNpcGradients === true;
+    if ($('dc-auto-random-all-gradients')) $('dc-auto-random-all-gradients').checked = settings.autoRandomAllGradients === true;
+    if ($('dc-auto-random-gradients')) $('dc-auto-random-gradients').disabled = settings.autoRandomAllGradients === true;
+    if ($('dc-drift-all-gradients')) $('dc-drift-all-gradients').checked = settings.driftAllGradientColors === true;
     if ($('dc-auto-recolor')) $('dc-auto-recolor').checked = settings.autoRecolor !== false;
     if ($('dc-auto-colorize')) $('dc-auto-colorize').checked = settings.autoColorize || false;
     if ($('dc-llm-attr-check')) $('dc-llm-attr-check').checked = settings.llmAttributionCheck || false;
@@ -2147,7 +2151,7 @@ function buildSettingsPanelHtml() {
             </details>
             <details class="dc-section">
                 <summary>Automation</summary>
-                <div class="dc-toggle-grid"><label class="checkbox_label"><input type="checkbox" id="dc-autoscan"><span>Scan when the character list is empty</span></label><label class="checkbox_label"><input type="checkbox" id="dc-autoscan-new"><span>Scan new messages</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-lock"><span>Lock new characters</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-random-gradients"><span>Random gradients for new NPCs</span></label><label class="checkbox_label dc-llm-only"><input type="checkbox" id="dc-auto-colorize"><span>Colorize missing tags automatically</span></label><label class="checkbox_label"><input type="checkbox" id="dc-right-click"><span>Manual dialogue reassignment</span></label><label class="checkbox_label"><input type="checkbox" id="dc-disable-toasts"><span>Reduce routine notifications</span></label></div>
+                <div class="dc-toggle-grid"><label class="checkbox_label"><input type="checkbox" id="dc-autoscan"><span>Scan when the character list is empty</span></label><label class="checkbox_label"><input type="checkbox" id="dc-autoscan-new"><span>Scan new messages</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-lock"><span>Lock new characters</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-random-gradients"><span>Random gradients for new NPCs</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-random-all-gradients"><span>Random gradients for every new character</span></label><label class="checkbox_label"><input type="checkbox" id="dc-drift-all-gradients"><span>Drift every gradient color</span></label><label class="checkbox_label dc-llm-only"><input type="checkbox" id="dc-auto-colorize"><span>Colorize missing tags automatically</span></label><label class="checkbox_label"><input type="checkbox" id="dc-right-click"><span>Manual dialogue reassignment</span></label><label class="checkbox_label"><input type="checkbox" id="dc-disable-toasts"><span>Reduce routine notifications</span></label></div>
             </details>
             <details class="dc-section">
                 <summary>Style library</summary>
@@ -2202,6 +2206,17 @@ function bindSettingsPanelControls($) {
     $('dc-autoscan-new').onchange = e => { settings.autoScanNewMessages = e.target.checked; saveData(); };
     $('dc-auto-lock').onchange = e => { settings.autoLockDetected = e.target.checked; saveData(); };
     $('dc-auto-random-gradients').onchange = e => { settings.autoRandomNpcGradients = e.target.checked; saveData(); };
+    $('dc-auto-random-all-gradients').onchange = e => {
+        settings.autoRandomAllGradients = e.target.checked;
+        $('dc-auto-random-gradients').disabled = e.target.checked;
+        saveData();
+    };
+    $('dc-drift-all-gradients').onchange = e => {
+        settings.driftAllGradientColors = e.target.checked;
+        saveData();
+        refreshGradientVisualSurfaces();
+        repaintDomAfterCharacterDataChange(0);
+    };
     $('dc-auto-recolor').onchange = e => { settings.autoRecolor = e.target.checked; saveData(); };
     $('dc-auto-colorize').onchange = e => { settings.autoColorize = e.target.checked; saveData(); };
     $('dc-llm-attr-check').onchange = e => {

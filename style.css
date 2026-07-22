@@ -1333,6 +1333,50 @@
 }
 
 @container dialogue-colors (max-width: 560px) {
+    #dc-ext .dc-panel-content {
+        padding: 6px;
+    }
+
+    #dc-ext .dc-section + .dc-section {
+        margin-top: 8px;
+        padding-top: 6px;
+    }
+
+    #dc-ext .dc-section > summary {
+        padding: 7px 0;
+    }
+
+    #dc-ext .dc-section > summary + * {
+        padding-bottom: 6px;
+    }
+
+    #dc-ext .dc-stack {
+        gap: 5px;
+    }
+
+    #dc-ext .dc-action-block {
+        gap: 6px;
+        padding: 6px 7px;
+    }
+
+    #dc-ext .dc-char {
+        padding: 4px 5px;
+    }
+
+    #dc-ext .dc-char-main {
+        gap: 4px;
+    }
+
+    #dc-ext .dc-char-meta {
+        gap: 3px;
+        margin-top: 2px;
+    }
+
+    #dc-ext .dc-status-chip {
+        padding: 1px 5px;
+        font-size: 0.72em;
+    }
+
     #dc-ext .dc-setup-strip,
     #dc-ext .dc-process-grid {
         grid-template-columns: 1fr;
@@ -1384,15 +1428,6 @@
 }
 
 @container dialogue-colors (max-width: 390px) {
-    #dc-ext .dc-char-main {
-        grid-template-columns: auto minmax(0, 1fr) auto;
-    }
-
-    #dc-ext .dc-char-main > .dc-more {
-        grid-column: 2 / -1;
-        justify-self: stretch;
-    }
-
     #dc-ext .dc-field-row > .dc-inline-label {
         flex-basis: 100%;
     }

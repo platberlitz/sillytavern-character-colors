@@ -1107,6 +1107,10 @@ export function shouldAutoRandomizeNpcGradient(name) {
     return settings.autoRandomNpcGradients === true && !isPrimaryConversationIdentity(name);
 }
 
+export function shouldAutoRandomizeGradient(name) {
+    return settings.autoRandomAllGradients === true || shouldAutoRandomizeNpcGradient(name);
+}
+
 export function applyGradientPreset(entry, preset) {
     const applied = applyGradientPresetToEntry(entry, preset, applyThemeReadabilityAndBrightness);
     if (!applied) return null;
@@ -1249,7 +1253,7 @@ export function buildCharacterEntry(name, options = {}) {
         gradient: suppliedGradient,
     };
     if (!entry.gradient && options.randomGradient !== false
-        && (options.randomGradient === true || shouldAutoRandomizeNpcGradient(trimmedName))) {
+        && (options.randomGradient === true || shouldAutoRandomizeGradient(trimmedName))) {
         entry.gradient = createRandomGradient(entry, { preserveAnimation: false });
     }
 
