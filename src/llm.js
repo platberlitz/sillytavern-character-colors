@@ -2,6 +2,20 @@
 import { generateQuietPrompt, getContext } from './st-api.js';
 import { settings } from './state.js';
 
+function isLlmErrorResponse(res) {
+    if (!res) return false;
+    const text = typeof res === 'string' ? res : String(res?.content ?? res);
+    const lower = text.trim().toLowerCase();
+    return lower.startsWith('error:')
+        || lower.startsWith('[api error]')
+        || lower.includes('400 bad request')
+        || lower.includes('502 bad gateway')
+        || lower.includes('500 internal')
+        || lower.includes('503 service')
+        || lower.includes('429 rate limit')
+        || lower.includes('quota exceeded');
+}
+
 export async function callLLMWithProfile(instruction, options = {}) {
     const profileId = options.profileId ?? settings.llmConnectionProfile;
     const quietOptions = {
@@ -12,10 +26,12 @@ export async function callLLMWithProfile(instruction, options = {}) {
     };
 
     if (!profileId) {
-        return await generateQuietPrompt({
+        const quietRes = await generateQuietPrompt({
             quietPrompt: instruction,
             ...quietOptions,
         });
+        if (isLlmErrorResponse(quietRes)) throw new Error(`Main AI returned error response: ${String(quietRes).slice(0, 100)}`);
+        return quietRes;
     }
 
     let CMRS = null;
@@ -24,10 +40,12 @@ export async function callLLMWithProfile(instruction, options = {}) {
     } catch { /* pre-1.15.0 */ }
 
     if (!CMRS) {
-        return await generateQuietPrompt({
+        const quietRes = await generateQuietPrompt({
             quietPrompt: instruction,
             ...quietOptions,
         });
+        if (isLlmErrorResponse(quietRes)) throw new Error(`Main AI returned error response: ${String(quietRes).slice(0, 100)}`);
+        return quietRes;
     }
 
     try {
@@ -38,14 +56,17 @@ export async function callLLMWithProfile(instruction, options = {}) {
             options.maxTokens || 2000,
             { extractData: true, includePreset: true, stream: false }
         );
-        if (typeof response === 'string') return response;
-        return response?.content || response?.toString() || '';
+        const resultText = typeof response === 'string' ? response : (response?.content || response?.toString() || '');
+        if (isLlmErrorResponse(resultText)) throw new Error(`Profile ${profileId} returned error response: ${resultText.slice(0, 100)}`);
+        return resultText;
     } catch (e) {
         console.warn('[DC] CMRS request failed, falling back to main AI:', e);
-        return await generateQuietPrompt({
+        const quietRes = await generateQuietPrompt({
             quietPrompt: instruction,
             ...quietOptions,
         });
+        if (isLlmErrorResponse(quietRes)) throw new Error(`Fallback AI returned error response: ${String(quietRes).slice(0, 100)}`);
+        return quietRes;
     }
 }
 

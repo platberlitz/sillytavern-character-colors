@@ -92,6 +92,20 @@ export function getAutoAttributionMessageId(msg) {
     return id === null || id === undefined ? '' : String(id);
 }
 
+const MAX_FAILED_ATTRIBUTION_VERIFY_RETRIES = 2;
+const FAILED_ATTRIBUTION_VERIFY_BACKOFF_MS = 600000; // 10 minutes backoff on failure/error
+const failedAutoAttributionVerifyAttempts = new Map(); // verify key -> { count, at }
+
+function recordAutoAttributionVerifyFailure(key) {
+    if (!key) return;
+    const current = failedAutoAttributionVerifyAttempts.get(key) || { count: 0, at: Date.now() };
+    const newCount = current.count + 1;
+    failedAutoAttributionVerifyAttempts.set(key, { count: newCount, at: Date.now() });
+    if (newCount >= MAX_FAILED_ATTRIBUTION_VERIFY_RETRIES) {
+        console.warn(`[Dialogue Colors] Auto attribution verification suspended for message (${key}) after ${newCount} failed/invalid attempts.`);
+    }
+}
+
 export function pruneRecentAutoAttributionVerifyAttempts(now = Date.now()) {
     const maxAge = AUTO_ATTRIBUTION_VERIFY_RETRY_DELAY_MS * 2;
     for (const [key, timestamp] of recentAutoAttributionVerifyAttempts.entries()) {
@@ -99,6 +113,9 @@ export function pruneRecentAutoAttributionVerifyAttempts(now = Date.now()) {
     }
     for (const [key, record] of stabilityVerifyRetries.entries()) {
         if (now - record.at > maxAge) stabilityVerifyRetries.delete(key);
+    }
+    for (const [key, record] of failedAutoAttributionVerifyAttempts.entries()) {
+        if (now - record.at > FAILED_ATTRIBUTION_VERIFY_BACKOFF_MS) failedAutoAttributionVerifyAttempts.delete(key);
     }
 }
 
@@ -110,6 +127,7 @@ export function clearAutoAttributionVerificationQueue(options = {}) {
     if (options.clearCooldown) {
         recentAutoAttributionVerifyAttempts.clear();
         stabilityVerifyRetries.clear();
+        failedAutoAttributionVerifyAttempts.clear();
     }
 }
 
@@ -120,8 +138,15 @@ export function shouldQueueAutoAttributionVerification(mesIndex, msg, options = 
     if (suspendMessageDomWorkForEdit(getMessageElementByIndex(mesIndex), mesIndex)) return false;
     if (!isMessageEligibleForAttributionVerification(msg) || isMessageAttributionVerified(mesIndex, msg)) return false;
 
+    const key = getAutoAttributionVerifyKey(mesIndex, msg);
+    if (!options.manual) {
+        const failureRecord = failedAutoAttributionVerifyAttempts.get(key);
+        if (failureRecord && failureRecord.count >= MAX_FAILED_ATTRIBUTION_VERIFY_RETRIES) {
+            if (Date.now() - failureRecord.at < FAILED_ATTRIBUTION_VERIFY_BACKOFF_MS) return false;
+        }
+    }
+
     if (!options.force) {
-        const key = getAutoAttributionVerifyKey(mesIndex, msg);
         const lastAttempt = recentAutoAttributionVerifyAttempts.get(key) || 0;
         if (Date.now() - lastAttempt < AUTO_ATTRIBUTION_VERIFY_RETRY_DELAY_MS) return false;
     }
@@ -314,11 +339,16 @@ export function collectJsonObjectCandidates(text) {
 
 export function parseAttributionVerifierResponse(responseText) {
     if (!responseText || typeof responseText !== 'string' || responseText.length > MAX_ATTRIBUTION_VERIFIER_RESPONSE_CHARS) return null;
+    const lower = responseText.toLowerCase();
+    if (lower.startsWith('error:') || lower.startsWith('[api error]') || lower.includes('400 bad request') || lower.includes('500 internal') || lower.includes('502 bad gateway') || lower.includes('503 service') || lower.includes('429 rate limit') || lower.includes('quota exceeded')) {
+        return null;
+    }
     // Strip common reasoning/thinking wrappers so we can find the final JSON.
     let cleaned = responseText
         .replace(/<think>[\s\S]*?<\/think>/gi, '')
         .replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, '')
-        .replace(/### Reasoning:[\s\S]*?(?=###|(?=\{)|$)/gi, '')
+        .replace(/<thought>[\s\S]*?<\/thought>/gi, '')
+        .replace(/###\s*(?:Reasoning|Thought|Analysis):[\s\S]*?(?=###|(?=\{)|$)/gi, '')
         .replace(/\[thinking\][\s\S]*?\[\/thinking\]/gi, '');
     const fencedBlocks = [];
     cleaned.replace(/```(?:json|javascript|js|text|txt)?\s*([\s\S]*?)\s*```/gi, (_, body) => {
@@ -602,6 +632,9 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
         additionalProperties: false,
     };
 
+    const verifyKey = getAutoAttributionVerifyKey(mesIndex, msg);
+    if (options.manual) failedAutoAttributionVerifyAttempts.delete(verifyKey);
+
     let corrections = null;
     try {
         const response = await callLLMWithProfile(buildAttributionVerifierPrompt(msg, mesIndex, segments, lookup), {
@@ -613,15 +646,23 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
         corrections = parseAttributionVerifierResponse(response);
     } catch (e) {
         console.warn('[Dialogue Colors] LLM attribution verification failed:', e);
+        if (!skipMarkVerified && !useTransientOverrides) {
+            recordAutoAttributionVerifyFailure(verifyKey);
+        }
         if (!quiet) toast.warning('Color verification failed (see console).');
         return { checked: false, corrections: 0, createdCharacters: false };
     }
 
     if (!Array.isArray(corrections)) {
         console.warn('[Dialogue Colors] LLM attribution verification returned invalid JSON.');
+        if (!skipMarkVerified && !useTransientOverrides) {
+            recordAutoAttributionVerifyFailure(verifyKey);
+        }
         if (!quiet) toast.warning('Color verification failed (see console).');
         return { checked: false, corrections: 0, createdCharacters: false };
     }
+
+    failedAutoAttributionVerifyAttempts.delete(verifyKey);
 
     // A verifier response is only valid for the exact message object, stable
     // message ID, and text snapshot it was generated from. Streaming previews
