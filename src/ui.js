@@ -105,10 +105,10 @@ function openDecisionDialog({ title, description = '', detailsHtml = '', choices
                     ${choices.map(choice => `<button type="button" class="menu_button${choice.primary ? ' dc-primary-button' : ''}${choice.danger ? ' dc-danger-button' : ''}" data-dialog-value="${escapeAttr(choice.value)}"${choice.initial ? ' data-dialog-initial="true"' : ''}${choice.disabled ? ' disabled' : ''}>${escapeHtml(choice.label)}</button>`).join('')}
                 </div>
             </div>`;
-        document.body.appendChild(backdrop);
+        (document.body || document.documentElement).appendChild(backdrop);
         const dialog = backdrop.querySelector('.dc-dialog');
         registerGradientAnimationRoot(dialog);
-        const inertSiblings = [...document.body.children]
+        const inertSiblings = [...((document.body?.children) ? document.body.children : [])]
             .filter(element => element !== backdrop && !element.inert)
             .map(element => { element.inert = true; return element; });
         let closed = false;

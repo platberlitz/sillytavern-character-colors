@@ -1552,20 +1552,35 @@
     --dc-danger-soft: rgba(194, 85, 85, 0.16);
     position: fixed;
     inset: 0;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: 100vw;
+    width: 100dvw;
+    height: 100vh;
+    height: 100dvh;
     z-index: 999999;
-    display: grid;
-    place-items: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
     padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
     background: rgba(8, 10, 12, 0.58);
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    box-sizing: border-box;
 }
 
 .dc-dialog {
     box-sizing: border-box;
     width: min(520px, 100%);
-    max-height: min(82vh, 720px);
-    max-height: min(82dvh, 720px);
+    max-height: calc(100dvh - max(32px, env(safe-area-inset-top) + env(safe-area-inset-bottom)));
+    max-height: calc(100vh - max(32px, env(safe-area-inset-top) + env(safe-area-inset-bottom)));
     overflow: auto;
     overscroll-behavior: contain;
+    margin: auto 0;
+    margin-top: 0;
     padding: 18px;
     border: 1px solid var(--dc-border);
     border-radius: 12px;
@@ -2172,17 +2187,21 @@
         display: flex;
         flex-direction: column;
         align-items: center;
-        justify-content: center;
-        padding: max(12px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+        justify-content: flex-start;
+        padding-top: max(16px, env(safe-area-inset-top));
+        padding-bottom: max(16px, env(safe-area-inset-bottom));
+        padding-left: max(12px, env(safe-area-inset-left));
+        padding-right: max(12px, env(safe-area-inset-right));
         overflow-y: auto;
         -webkit-overflow-scrolling: touch;
     }
 
     .dc-dialog {
         width: 100%;
-        max-height: min(90dvh, calc(100dvh - max(24px, env(safe-area-inset-top) + env(safe-area-inset-bottom))));
-        max-height: min(90vh, calc(100vh - max(24px, env(safe-area-inset-top) + env(safe-area-inset-bottom))));
-        margin: auto;
+        max-height: calc(100dvh - max(32px, env(safe-area-inset-top) + env(safe-area-inset-bottom)));
+        max-height: calc(100vh - max(32px, env(safe-area-inset-top) + env(safe-area-inset-bottom)));
+        margin: auto 0;
+        margin-top: 0;
         padding: 14px;
     }
 
