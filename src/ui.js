@@ -1047,6 +1047,31 @@ async function acceptAllHighConfidenceAttributionReviews(opener) {
     return accepted;
 }
 
+async function acceptAllProposedAttributionReviews(opener) {
+    const candidates = getPendingAttributionReviews()
+        .map(getAttributionReviewPresentation)
+        .filter(presentation => !presentation.stale
+            && !!getKnownReviewSpeakerName(presentation.review.proposedSpeaker));
+    if (!candidates.length) {
+        toast.info('No current known-speaker suggestions to accept.');
+        return 0;
+    }
+    const confirmed = await confirmReviewedAction({
+        title: `Accept all ${candidates.length} proposed suggestion${candidates.length === 1 ? '' : 's'}?`,
+        description: 'All pending proposed suggestions for known speakers will be applied to local dialogue colors.',
+        detailsHtml: `<p class="dc-review-names">${candidates.slice(0, 12).map(presentation => `Message ${presentation.messageIndex}: ${escapeHtml(getKnownReviewSpeakerName(presentation.review.proposedSpeaker))}`).join('<br>')}${candidates.length > 12 ? `<br>and ${candidates.length - 12} more` : ''}</p>`,
+        confirmLabel: 'Accept all proposed',
+        opener,
+    });
+    if (!confirmed) return 0;
+    let accepted = 0;
+    for (const presentation of candidates) {
+        if (await acceptAttributionReviewFromUi(presentation, '', { quiet: true })) accepted++;
+    }
+    if (accepted > 0) toast.success(`Accepted ${accepted} proposed suggestion${accepted !== 1 ? 's' : ''}.`);
+    return accepted;
+}
+
 async function showAttributionReviewDialog(opener) {
     let nextReviewId = '';
     while (true) {
@@ -1079,6 +1104,7 @@ async function showAttributionReviewDialog(opener) {
                 { value: 'reject', label: 'Keep current/reject', disabled: presentation.stale },
                 { value: 'jump', label: 'Jump to message', disabled: presentation.messageIndex < 0 },
                 { value: 'next', label: 'Next' },
+                { value: 'accept-all', label: 'Accept all proposed' },
                 { value: 'accept-high', label: 'Accept all high-confidence' },
                 ...(presentation.stale ? [{ value: 'dismiss', label: 'Dismiss stale', primary: true }] : []),
                 { value: 'close', label: 'Close', initial: !canAccept && !presentation.stale },
@@ -1091,6 +1117,11 @@ async function showAttributionReviewDialog(opener) {
         }
         if (decision.value === 'next') {
             nextReviewId = reviews[reviewIndex + 1]?.id || reviews[0]?.id || '';
+            continue;
+        }
+        if (decision.value === 'accept-all') {
+            await acceptAllProposedAttributionReviews(opener);
+            nextReviewId = reviews[reviewIndex + 1]?.id || '';
             continue;
         }
         if (decision.value === 'accept-high') {
@@ -3362,6 +3393,7 @@ export function syncUIWithSettings() {
     if ($('dc-auto-colorize')) $('dc-auto-colorize').checked = settings.autoColorize || false;
     if ($('dc-llm-attr-check')) $('dc-llm-attr-check').checked = settings.llmAttributionCheck || false;
     if ($('dc-llm-attr-parallel')) $('dc-llm-attr-parallel').checked = settings.llmAttributionParallel || false;
+    if ($('dc-attr-accept-all')) $('dc-attr-accept-all').checked = settings.attributionReviewPolicy !== 'review';
     if ($('dc-attr-conservative')) $('dc-attr-conservative').checked = settings.attributionConservativeOnly || false;
     if ($('dc-attr-max-tokens')) $('dc-attr-max-tokens').value = Number.isFinite(settings.attributionMaxTokens) && settings.attributionMaxTokens > 0 ? settings.attributionMaxTokens : 4096;
     if ($('dc-stealth-colors')) $('dc-stealth-colors').checked = settings.domStealthColors !== false;
@@ -3586,7 +3618,7 @@ function buildSettingsPanelHtml() {
                         <div id="dc-system-prompt-container" style="display:none;"><label for="dc-system-prompt-text" class="dc-inline-label">Macro text</label><textarea id="dc-system-prompt-text" readonly class="text_pole dc-macro-text">{{dialoguecolors}}</textarea><button id="dc-copy-system-prompt" class="menu_button">Copy macro</button></div>
                     </div>
                     <div class="dc-dom-only dc-stack" style="display:none;">
-                        <label class="checkbox_label"><input type="checkbox" id="dc-stealth-colors"><span>Ask for hidden speaker color blocks</span></label><label class="checkbox_label"><input type="checkbox" id="dc-llm-attr-check"><span>Verify attribution automatically</span></label><label class="checkbox_label"><input type="checkbox" id="dc-llm-attr-parallel"><span>Verify during streaming pauses</span></label><label class="checkbox_label"><input type="checkbox" id="dc-attr-conservative"><span>Only fill unknown attribution</span></label>
+                        <label class="checkbox_label"><input type="checkbox" id="dc-stealth-colors"><span>Ask for hidden speaker color blocks</span></label><label class="checkbox_label"><input type="checkbox" id="dc-llm-attr-check"><span>Verify attribution automatically</span></label><label class="checkbox_label"><input type="checkbox" id="dc-llm-attr-parallel"><span>Verify during streaming pauses</span></label><label class="checkbox_label"><input type="checkbox" id="dc-attr-accept-all" checked><span>Accept proposed corrections automatically</span></label><label class="checkbox_label"><input type="checkbox" id="dc-attr-conservative"><span>Only fill unknown attribution</span></label>
                         <div class="dc-field-row"><label class="dc-inline-label" for="dc-attr-profile">Verify profile</label><select id="dc-attr-profile" class="text_pole"><option value="">Use main chat AI</option></select></div><div class="dc-field-row"><label class="dc-inline-label" for="dc-attr-max-tokens">Verify token limit</label><input type="number" id="dc-attr-max-tokens" min="256" max="32768" value="4096" class="text_pole"></div>
                     </div>
                     <section id="dc-narrator-editor" class="dc-narrator-editor" aria-label="Narration style"></section>
@@ -3683,6 +3715,12 @@ function bindSettingsPanelControls($) {
         }
         saveData();
     };
+    if ($('dc-attr-accept-all')) {
+        $('dc-attr-accept-all').onchange = e => {
+            settings.attributionReviewPolicy = e.target.checked ? 'legacy-auto' : 'review';
+            saveData();
+        };
+    }
     $('dc-attr-conservative').onchange = e => { settings.attributionConservativeOnly = e.target.checked; saveData(); };
     $('dc-attr-max-tokens').oninput = e => {
         // Clamp to the input's declared range; sub-minimum values truncate the

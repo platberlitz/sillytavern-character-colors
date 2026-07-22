@@ -27,7 +27,7 @@ export function normalizeToggleSettings() {
     const attributionReviewPolicy = String(settings.attributionReviewPolicy ?? '').trim().toLowerCase();
     settings.attributionReviewPolicy = ['review', 'auto-high', 'legacy-auto'].includes(attributionReviewPolicy)
         ? attributionReviewPolicy
-        : 'review';
+        : 'legacy-auto';
     settings.gradientRandomMasterSeed = String(settings.gradientRandomMasterSeed ?? '')
         .replace(/[\u0000-\u001f\u007f]/g, '')
         .slice(0, 128);
@@ -2920,7 +2920,7 @@ export function restoreAllSettingsToDefaults() {
     settings.gradientAnimationMode = 'auto';
     settings.llmConnectionProfile = null;
     settings.attributionConnectionProfile = null;
-    settings.attributionReviewPolicy = 'review';
+    settings.attributionReviewPolicy = 'legacy-auto';
     settings.attributionMaxTokens = 4096;
     settings.colorSchemaVersion = COLOR_SCHEMA_VERSION;
 
