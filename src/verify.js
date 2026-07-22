@@ -353,6 +353,16 @@ export function parseAttributionVerifierResponse(responseText) {
     return null;
 }
 
+function getSegmentSurroundingSnippet(fullText, start, end, pad = 35) {
+    if (!fullText || typeof fullText !== 'string' || !Number.isFinite(start) || !Number.isFinite(end)) return '';
+    const sliceStart = Math.max(0, start - pad);
+    const sliceEnd = Math.min(fullText.length, end + pad);
+    const prefix = sliceStart > 0 ? '...' : '';
+    const suffix = sliceEnd < fullText.length ? '...' : '';
+    const rawSnippet = fullText.slice(sliceStart, sliceEnd);
+    return prefix + rawSnippet.replace(/\s+/g, ' ') + suffix;
+}
+
 export function buildAttributionVerifierPrompt(msg, mesIndex, segments, lookup) {
     const thoughtSymbols = getThoughtDelimiterSymbols();
     const thoughtSymbolList = thoughtSymbols.map(formatPromptLiteralSymbol).join(', ');
@@ -372,8 +382,42 @@ export function buildAttributionVerifierPrompt(msg, mesIndex, segments, lookup) 
     for (const assignment of lookup.values()) addKnownName(assignment.name);
     addKnownName(msg?.name);
 
+    const ctx = getContext();
+    if (ctx?.user) addKnownName(ctx.user);
+    if (ctx?.name1) addKnownName(ctx.name1);
+    if (ctx?.name2) addKnownName(ctx.name2);
+
+    const chat = ctx?.chat || [];
+    if (Number.isFinite(mesIndex) && mesIndex >= 0) {
+        for (let i = Math.max(0, mesIndex - 3); i < mesIndex; i++) {
+            const pastMsg = chat[i];
+            if (pastMsg?.name) addKnownName(pastMsg.name);
+        }
+    }
+
+    const precedingContextLines = [];
+    if (Number.isFinite(mesIndex) && mesIndex >= 0) {
+        for (let i = Math.max(0, mesIndex - 2); i < mesIndex; i++) {
+            const pastMsg = chat[i];
+            if (pastMsg) {
+                const pastSpeaker = pastMsg.name || 'Unknown';
+                const pastText = String(pastMsg.mes || '').trim().replace(/\s+/g, ' ');
+                const pastSnippet = pastText.length > 120 ? pastText.slice(0, 120) + '...' : pastText;
+                precedingContextLines.push(`- Message ${i} (${pastSpeaker}): "${pastSnippet}"`);
+            }
+        }
+    }
+    const precedingContextSection = precedingContextLines.length
+        ? `\nPreceding chat context:\n${precedingContextLines.join('\n')}\n`
+        : '';
+
     const quoteList = segments
-        .map(seg => `${seg.index}. current=${seg.assignment?.name || 'Uncolored/Unknown'} delimiter=${JSON.stringify(seg.delimiter)} text=${JSON.stringify(seg.text)}`)
+        .map(seg => {
+            const snippet = getSegmentSurroundingSnippet(msg?.mes, seg.start, seg.end);
+            const currentName = seg.assignment?.name || 'Uncolored/Unknown';
+            const contextStr = snippet ? ` surrounding_text=${JSON.stringify(snippet)}` : '';
+            return `${seg.index}. current=${currentName} delimiter=${JSON.stringify(seg.delimiter)} text=${JSON.stringify(seg.text)}${contextStr}`;
+        })
         .join('\n');
     const knownList = knownNames.length ? knownNames.join(', ') : '(none)';
     const conservativeLine = settings.attributionConservativeOnly
@@ -394,19 +438,21 @@ If there are no corrections, return exactly:
 
 Rules:
 1. ${conservativeLine}
-2. If the current speaker is already correct, omit that segment.
-3. If the speaker is unclear or only a guess, omit that segment.
-4. Use one speaker name only, preferably from the known speakers and aliases.
-5. Include a numeric confidence from 0 to 1 and a short evidence-based reason for every correction.
-6. If an explicitly named speaker is not known, it may be proposed for review but will not be applied automatically.
-7. Do not use Unknown, Unclear, None, N/A, Narrator, or a group/composite name as a speaker correction.
-8. Correction indexes must match the numbered segment list exactly.
+2. IMPORTANT: The \`current\` speaker label for each segment was assigned by basic heuristics and is FREQUENTLY INCORRECT or MISATTRIBUTED. Do NOT assume \`current\` is correct. Carefully evaluate the full message text, surrounding text / dialogue tags (e.g. "said X", "X asked", "X replied"), and conversation flow.
+3. If the narrative text, speech verb, action tag, or dialogue flow indicates a different speaker than \`current\`, return a correction for that segment index.
+4. If a segment is currently correct based on the narrative text, omit that segment.
+5. If the speaker is completely unclear even with context, omit that segment.
+6. Use one speaker name only, preferably from the known speakers and aliases.
+7. Include a numeric confidence from 0 to 1 and a short evidence-based reason for every correction.
+8. If an explicitly named speaker is not in known speakers, it may be proposed for review but will not be applied automatically.
+9. Do not use Unknown, Unclear, None, N/A, Narrator, or a group/composite name as a speaker correction.
+10. Correction indexes must match the numbered segment list exactly.
 
 Context:
 - Message index: ${mesIndex}
 - Message speaker/fallback: ${msg?.name || 'Unknown'}
 - Known speakers and aliases: ${knownList}${thoughtLine}
-
+${precedingContextSection}
 Full message text:
 ${msg?.mes || ''}
 
@@ -698,8 +744,17 @@ export async function verifyLatestAttributionsWithLLM(options = {}) {
     }
     toast.info('Verifying dialogue colors with LLM...');
     const result = await verifyAttributionsWithLLM(lastIdx, options);
-    if (result.checked && result.corrections > 0) toast.info(`Verified DOM colors: applied ${result.corrections} correction${result.corrections !== 1 ? 's' : ''}.`);
-    else if (result.checked && result.corrections === 0) toast.info('Verified colors: no corrections needed.');
+    if (result.checked && (result.corrections > 0 || result.queuedReviews > 0)) {
+        if (result.corrections > 0 && result.queuedReviews > 0) {
+            toast.info(`Verified DOM colors: applied ${result.corrections} correction${result.corrections !== 1 ? 's' : ''}, queued ${result.queuedReviews} suggestion${result.queuedReviews !== 1 ? 's' : ''} for review.`);
+        } else if (result.queuedReviews > 0) {
+            toast.info(`Verified DOM colors: queued ${result.queuedReviews} suggestion${result.queuedReviews !== 1 ? 's' : ''} for review.`);
+        } else {
+            toast.info(`Verified DOM colors: applied ${result.corrections} correction${result.corrections !== 1 ? 's' : ''}.`);
+        }
+    } else if (result.checked && result.corrections === 0) {
+        toast.info('Verified colors: no corrections needed.');
+    }
     return result;
 }
 
@@ -711,6 +766,7 @@ export async function verifyVisibleAttributionsWithLLM(options = {}) {
         .reverse();
     let checked = 0;
     let corrections = 0;
+    let queuedReviews = 0;
     toast.info('Verifying visible messages with LLM...');
     for (const index of indices) {
         const msg = chat[index];
@@ -718,11 +774,22 @@ export async function verifyVisibleAttributionsWithLLM(options = {}) {
         const result = await verifyAttributionsWithLLM(index, options);
         if (result.checked) checked++;
         corrections += result.corrections || 0;
+        queuedReviews += result.queuedReviews || 0;
     }
-    if (corrections > 0) toast.info(`Verified DOM colors: applied ${corrections} correction${corrections !== 1 ? 's' : ''}.`);
-    else if (options.manual && !checked) toast.info('No unverified visible DOM messages to check.');
-    else if (options.manual && checked) toast.info('Verified visible colors: no corrections needed.');
-    return { checked: checked > 0, corrections, createdCharacters: false };
+    if (corrections > 0 || queuedReviews > 0) {
+        if (corrections > 0 && queuedReviews > 0) {
+            toast.info(`Verified DOM colors: applied ${corrections} correction${corrections !== 1 ? 's' : ''}, queued ${queuedReviews} suggestion${queuedReviews !== 1 ? 's' : ''} for review.`);
+        } else if (queuedReviews > 0) {
+            toast.info(`Verified DOM colors: queued ${queuedReviews} suggestion${queuedReviews !== 1 ? 's' : ''} for review.`);
+        } else {
+            toast.info(`Verified DOM colors: applied ${corrections} correction${corrections !== 1 ? 's' : ''}.`);
+        }
+    } else if (options.manual && !checked) {
+        toast.info('No unverified visible DOM messages to check.');
+    } else if (options.manual && checked) {
+        toast.info('Verified visible colors: no corrections needed.');
+    }
+    return { checked: checked > 0, corrections, queuedReviews, createdCharacters: false };
 }
 
 export async function runAttributionVerification(action, options = {}) {
