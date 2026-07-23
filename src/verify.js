@@ -1,9 +1,10 @@
 // verify.js - extracted from index.js (mechanical split)
-import { attributeDialogueSegments } from './attribution.js';
+import { attributeDialogueSegments, clearSpeakerRegexCache, ensureCharacterEntry } from './attribution.js';
 import { ATTRIBUTION_SOURCE, ATTRIBUTION_VERIFICATION_STATUS, normalizeAttributionConfidence } from './attribution-store.js';
 import { buildNameColorLookup, collectFontColorsFromText, parseNamedColorAssignmentsFromText, resolveCharacterKeyByNameOrAlias } from './color-blocks.js';
 import { cancelMessageDomFollowupRepairs, clearMessageDomRepairTimer, clearStreamingAttributionOverrides, decorateMessageDomFromCurrentRender, decorateObservedMessages, getMessageQuoteOverrideEntry, getMessageQuoteOverrideOptions, isMessageAttributionVerified, markMessageAttributionVerified, scheduleMessageDomFollowupRepair, setMessageQuoteOverride, setStreamingAttributionOverride, suspendMessageDomWorkForEdit, upsertAttributionReview } from './dom-engine.js';
 import { callLLMWithProfile } from './llm.js';
+import { commit, repaintDomAfterCharacterDataChange } from './live-colors.js';
 import { formatPromptLiteralSymbol, getThoughtDelimiterSymbols } from './prompts.js';
 import { getContext } from './st-api.js';
 import { AUTO_ATTRIBUTION_VERIFY_DELAY_MS, AUTO_ATTRIBUTION_VERIFY_RENDERED_LIMIT, AUTO_ATTRIBUTION_VERIFY_RETRY_DELAY_MS, AUTO_ATTRIBUTION_VERIFY_STABLE_RETRY_DELAY_MS, MAX_PENDING_AUTO_ATTRIBUTION_VERIFICATIONS, STREAMING_ATTRIBUTION_VERIFY_DELAY_MS, attributionChatGeneration, autoAttributionVerifyTimer, autoAttributionVerifyTimerDue, characterColors, isDomEngine, isStreamingGenerationActive, isVerifyingAttribution, lastStreamingAttributionVerifyKey, pendingAttributionVerifications, pendingAutoAttributionVerifyIndices, recentAutoAttributionVerifyAttempts, setAutoAttributionVerifyTimer, setAutoAttributionVerifyTimerDue, setIsVerifyingAttribution, setLastStreamingAttributionVerifyKey, setStreamingAttributionGeneration, setStreamingAttributionVerifyTimer, settings, streamingAttributionGeneration, streamingAttributionVerifyTimer } from './state.js';
@@ -482,7 +483,7 @@ Rules:
 5. If the speaker is completely unclear even with context, omit that segment.
 6. Use one speaker name only, preferably from the known speakers and aliases.
 7. Include a numeric confidence from 0 to 1 and a short evidence-based reason for every correction.
-8. If an explicitly named speaker is not in known speakers, it may be proposed for review but will not be applied automatically.
+8. If an explicitly named speaker is not in known speakers, use its exact single name. It may be added to the character list and then handled by the current review or auto-apply policy.
 9. Do not use Unknown, Unclear, None, N/A, Narrator, or a group/composite name as a speaker correction.
 10. Correction indexes must match the numbered segment list exactly.
 
@@ -501,8 +502,6 @@ ${quoteList}`;
 export function resolveVerifierSpeakerName(rawName, lookup) {
     const speakerName = normalizeAttributionVerifierSpeaker(rawName);
     if (!speakerName) return { assignment: null, created: false };
-    // Verifier output may only reuse a configured character or alias. A model
-    // suggestion must never create a new character entry on its own.
     const key = resolveCharacterKeyByNameOrAlias(speakerName);
     if (!key || !characterColors[key]) return { assignment: null, created: false };
     const assignment = lookup.get(speakerName.toLowerCase())
@@ -600,8 +599,8 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
     }
 
     const attribution = attributeDialogueSegments(msg.mes, msg.name, {
-        // A verifier pass must not create characters just because the model or
-        // message speaker names someone not already configured.
+        // Only validated corrections may create missing speakers below. The
+        // initial heuristic pass must not create the message speaker itself.
         autoAddMessageSpeaker: false,
         ...getMessageQuoteOverrideOptions(mesIndex, msg),
         mesIndex,
@@ -692,13 +691,23 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
     }
 
     const segmentByIndex = new Map(currentAttribution.segments.map(segment => [segment.index, segment]));
-    const currentLookup = buildNameColorLookup(parseNamedColorAssignmentsFromText(msg.mes));
+    const currentLocalAssignments = parseNamedColorAssignmentsFromText(msg.mes);
+    let currentLookup = buildNameColorLookup(currentLocalAssignments);
     const policy = getAttributionReviewPolicy();
     let appliedCorrections = 0;
     let queuedReviews = 0;
+    let createdCharacters = false;
     for (const correction of validCorrections) {
         const seg = segmentByIndex.get(correction.index);
-        const { assignment } = resolveVerifierSpeakerName(correction.speaker, currentLookup);
+        let { assignment } = resolveVerifierSpeakerName(correction.speaker, currentLookup);
+        if (!assignment && !useTransientOverrides) {
+            const created = ensureCharacterEntry(correction.speaker);
+            if (created.created) {
+                createdCharacters = true;
+                currentLookup = buildNameColorLookup(currentLocalAssignments);
+                ({ assignment } = resolveVerifierSpeakerName(correction.speaker, currentLookup));
+            }
+        }
         if (assignment?.key === seg.assignment?.key) continue;
 
         const latestEntry = getMessageQuoteOverrideEntry(mesIndex, msg, !useTransientOverrides);
@@ -748,6 +757,12 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
         }
     }
 
+    if (createdCharacters) {
+        clearSpeakerRegexCache();
+        commit();
+        repaintDomAfterCharacterDataChange(0);
+    }
+
     if (!skipMarkVerified && !useTransientOverrides) {
         const verificationStatus = queuedReviews > 0
             ? ATTRIBUTION_VERIFICATION_STATUS.PENDING_REVIEW
@@ -755,7 +770,7 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
                 ? ATTRIBUTION_VERIFICATION_STATUS.AUTO_APPLIED
                 : ATTRIBUTION_VERIFICATION_STATUS.CLEAN;
         if (!isAttributionVerificationTargetCurrent(target)) {
-            return { checked: false, corrections: 0, createdCharacters: false };
+            return { checked: false, corrections: 0, createdCharacters };
         }
         markMessageAttributionVerified(mesIndex, msg, verificationStatus);
         clearStreamingAttributionOverrides(mesIndex);
@@ -778,7 +793,7 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
         }
     }
 
-    return { checked: true, corrections: appliedCorrections, createdCharacters: false, queuedReviews };
+    return { checked: true, corrections: appliedCorrections, createdCharacters, queuedReviews };
 }
 
 export async function verifyLatestAttributionsWithLLM(options = {}) {
@@ -818,6 +833,7 @@ export async function verifyVisibleAttributionsWithLLM(options = {}) {
     let checked = 0;
     let corrections = 0;
     let queuedReviews = 0;
+    let createdCharacters = false;
     toast.info('Verifying visible messages with LLM...');
     for (const index of indices) {
         const msg = chat[index];
@@ -826,6 +842,7 @@ export async function verifyVisibleAttributionsWithLLM(options = {}) {
         if (result.checked) checked++;
         corrections += result.corrections || 0;
         queuedReviews += result.queuedReviews || 0;
+        createdCharacters = createdCharacters || result.createdCharacters === true;
     }
     if (corrections > 0 || queuedReviews > 0) {
         if (corrections > 0 && queuedReviews > 0) {
@@ -840,7 +857,7 @@ export async function verifyVisibleAttributionsWithLLM(options = {}) {
     } else if (options.manual && checked) {
         toast.info('Verified visible colors: no corrections needed.');
     }
-    return { checked: checked > 0, corrections, queuedReviews, createdCharacters: false };
+    return { checked: checked > 0, corrections, queuedReviews, createdCharacters };
 }
 
 export async function runAttributionVerification(action, options = {}) {
