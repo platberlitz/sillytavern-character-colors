@@ -1,7 +1,7 @@
 // context-menu.js - extracted from index.js (mechanical split)
 import { attributeDialogueSegments } from './attribution.js';
 import { resolveCharacterKeyByNameOrAlias } from './color-blocks.js';
-import { cancelMessageDomFollowupRepairs, clearMessageDomRepairTimer, clearStreamingAttributionOverrides, decorateMessageDomFromCurrentRender, deleteMessageQuoteOverride, getMessageIndexFromElement, getMessageQuoteOverrideEntry, getMessageQuoteOverrideOptions, matchSegmentsToElements, refreshMessageDom, resolveDomSegmentIndexForElement, restoreMessageQuoteOverrideEntry, scheduleMessageDomFollowupRepair, setMessageQuoteOverride } from './dom-engine.js';
+import { cancelMessageDomFollowupRepairs, clearMessageDomRepairTimer, clearStreamingAttributionOverrides, decorateMessageDomFromCurrentRender, deleteMessageQuoteOverride, getMessageIndexFromElement, getMessageQuoteOverrideEntry, getMessageQuoteOverrideOptions, matchSegmentsToElements, refreshAndDecorateMessageDom, refreshMessageDom, resolveDomSegmentIndexForElement, restoreMessageQuoteOverrideEntry, scheduleMessageDomFollowupRepair, setMessageQuoteOverride } from './dom-engine.js';
 import { scheduleCustomFontRefresh } from './fonts.js';
 import { applyLiveColorChangesFromSnapshot, captureEffectiveColorSnapshot, commit, flushChatSave, queueChatSave, updateTextColorReferences, updateVisibleMessageColors } from './live-colors.js';
 import { buildCharacterEntry, getEntryEffectiveColor, setEntryFromEffectiveColor } from './palettes.js';
@@ -69,6 +69,8 @@ function getDomAttributionDetails(targetEl) {
         hasOverride: !!override?.segments && Object.prototype.hasOwnProperty.call(override.segments, String(segmentIndex)),
         segmentText: segment.text,
         segmentDelimiter: segment.delimiter,
+        speakerKey: segment.assignment?.key || '',
+        speakerColor: segment.assignment?.color || null,
     };
 }
 
@@ -89,21 +91,17 @@ function captureDomAssignmentTarget(targetEl, details) {
         segmentIndex: details.segmentIndex,
         segmentText: details.segmentText,
         segmentDelimiter: details.segmentDelimiter,
+        speakerKey: details.speakerKey,
         elementText: normalizeSegmentText(targetEl.textContent),
         tagName: targetEl.tagName,
     };
 }
 
-function isDomAssignmentTargetCurrent(target) {
-    if (!target?.element?.isConnected || target.element.tagName !== target.tagName
-        || normalizeSegmentText(target.element.textContent) !== target.elementText) return false;
-    if (getMessageIndexFromElement(target.element) !== target.messageIndex) return false;
-
+function isDomAssignmentSourceCurrent(target) {
+    if (!target) return false;
     const message = getContext()?.chat?.[target.messageIndex];
     if (message !== target.message || getDomAssignmentMessageId(message) !== target.messageId
         || hashMessageText(message?.mes) !== target.messageHash) return false;
-    if (resolveDomSegmentIndexForElement(target.element, target.messageIndex, message) !== target.segmentIndex) return false;
-
     const attribution = attributeDialogueSegments(message.mes, message.name, {
         autoAddMessageSpeaker: false,
         ...getMessageQuoteOverrideOptions(target.messageIndex, message),
@@ -111,6 +109,18 @@ function isDomAssignmentTargetCurrent(target) {
     });
     const segment = attribution.segments.find(item => item.index === target.segmentIndex);
     return !!segment && segment.text === target.segmentText && segment.delimiter === target.segmentDelimiter;
+}
+
+function isDomAssignmentTargetCurrent(target) {
+    if (!isDomAssignmentSourceCurrent(target) || !target.element?.isConnected
+        || target.element.tagName !== target.tagName
+        || normalizeSegmentText(target.element.textContent) !== target.elementText) return false;
+    if (getMessageIndexFromElement(target.element) !== target.messageIndex) return false;
+    const message = getContext()?.chat?.[target.messageIndex];
+    if (resolveDomSegmentIndexForElement(target.element, target.messageIndex, message) !== target.segmentIndex) return false;
+    if (target.element.getAttribute('data-dc-seg') !== String(target.segmentIndex)) return false;
+    if (target.speakerKey && target.element.getAttribute('data-dc-speaker') !== target.speakerKey) return false;
+    return true;
 }
 
 function getMenuPosition(e, targetEl) {
@@ -217,14 +227,18 @@ function showMenu(e, fontTag, qElement = null) {
     const isBareQuote = !isDomSegment && !fontTag && !!qElement;
     const targetEl = (isDomSegment || isBareQuote) ? qElement : fontTag;
     const opener = e.type === 'keydown' ? targetEl : document.activeElement;
-    const domSpeakerKey = isDomSegment ? targetEl.getAttribute('data-dc-speaker') : '';
-    const domSpeakerColor = domSpeakerKey && characterColors[domSpeakerKey] ? getEntryEffectiveColor(characterColors[domSpeakerKey]) : null;
+    const attributionDetails = isDomSegment ? getDomAttributionDetails(targetEl) : null;
+    const domSpeakerKey = isDomSegment
+        ? targetEl.getAttribute('data-dc-speaker') || attributionDetails?.speakerKey || ''
+        : '';
+    const domSpeakerColor = domSpeakerKey && characterColors[domSpeakerKey]
+        ? getEntryEffectiveColor(characterColors[domSpeakerKey])
+        : attributionDetails?.speakerColor;
     const quoteFallbackColor = normalizeHexColor(power_user.quote_text_color, '#888888');
     const color = isDomSegment
         ? normalizeHexColor(domSpeakerColor, quoteFallbackColor)
         : isBareQuote ? quoteFallbackColor : normalizeHexColor(fontTag.getAttribute('color'));
     const text = targetEl.textContent.substring(0, 30) + (targetEl.textContent.length > 30 ? '...' : '');
-    const attributionDetails = isDomSegment ? getDomAttributionDetails(targetEl) : null;
     const domAssignmentTarget = isDomSegment ? captureDomAssignmentTarget(targetEl, attributionDetails) : null;
     const attributionStatus = attributionDetails?.source
         ? `<div class="dc-context-attribution">Source: ${escapeHtml(formatAttributionSource(attributionDetails.source))}${Number.isFinite(attributionDetails.confidence) ? `; Confidence: ${Math.round(Math.max(0, Math.min(1, attributionDetails.confidence)) * 100)}%` : ''}</div>`
@@ -266,10 +280,11 @@ function showMenu(e, fontTag, qElement = null) {
 
     menu.querySelector('#dc-ctx-use-automatic')?.addEventListener('click', async () => {
         try {
-            if (!isDomAssignmentTargetCurrent(domAssignmentTarget)) {
+            if (!isDomAssignmentSourceCurrent(domAssignmentTarget)) {
                 toast.warning('Message changed; reopen the assignment menu.');
                 return;
             }
+            const recoverDom = !isDomAssignmentTargetCurrent(domAssignmentTarget);
             const messageIndex = domAssignmentTarget.messageIndex;
             const segmentIndex = domAssignmentTarget.segmentIndex;
             const message = domAssignmentTarget.message;
@@ -284,10 +299,12 @@ function showMenu(e, fontTag, qElement = null) {
             clearMessageDomRepairTimer(messageIndex);
             cancelMessageDomFollowupRepairs(messageIndex);
             clearStreamingAttributionOverrides(messageIndex);
-            const repainted = await decorateMessageDomFromCurrentRender(messageIndex, message, {
-                queueVerification: false,
-                renderFallback: false,
-            });
+            const repainted = recoverDom
+                ? await refreshAndDecorateMessageDom(messageIndex, message, { queueVerification: false })
+                : await decorateMessageDomFromCurrentRender(messageIndex, message, {
+                    queueVerification: false,
+                    renderFallback: false,
+                });
             scheduleMessageDomFollowupRepair(messageIndex, repainted);
             updateLegend();
             toast.success('Automatic attribution restored.');
@@ -367,11 +384,12 @@ function showMenu(e, fontTag, qElement = null) {
             }
 
             if (isDomSegment) {
-                if (!isDomAssignmentTargetCurrent(domAssignmentTarget)) {
+                if (!isDomAssignmentSourceCurrent(domAssignmentTarget)) {
                     toast.warning('Message changed; reopen the assignment menu.');
                     closeMenu();
                     return;
                 }
+                const recoverDom = !isDomAssignmentTargetCurrent(domAssignmentTarget);
                 const mesIndex = domAssignmentTarget.messageIndex;
                 const msg = domAssignmentTarget.message;
                 const segmentIndex = domAssignmentTarget.segmentIndex;
@@ -388,7 +406,7 @@ function showMenu(e, fontTag, qElement = null) {
                 cancelMessageDomFollowupRepairs(mesIndex);
                 clearStreamingAttributionOverrides(mesIndex);
                 assignmentSucceeded = true;
-                domRepaintTarget = { mesIndex, msg };
+                domRepaintTarget = { mesIndex, msg, recoverDom };
             } else if (isBareQuote) {
                 textUpdated = wrapQElementWithFontTag(qElement, finalColor);
                 assignmentSucceeded = textUpdated;
@@ -440,12 +458,12 @@ function showMenu(e, fontTag, qElement = null) {
             if (domRepaintTarget) {
                 let repainted = false;
                 try {
-                    // Override-only change: decorate SillyTavern's current DOM
-                    // in place, without a fallback innerHTML write.
-                    repainted = await decorateMessageDomFromCurrentRender(domRepaintTarget.mesIndex, domRepaintTarget.msg, {
-                        queueVerification: false,
-                        renderFallback: false,
-                    });
+                    repainted = domRepaintTarget.recoverDom
+                        ? await refreshAndDecorateMessageDom(domRepaintTarget.mesIndex, domRepaintTarget.msg, { queueVerification: false })
+                        : await decorateMessageDomFromCurrentRender(domRepaintTarget.mesIndex, domRepaintTarget.msg, {
+                            queueVerification: false,
+                            renderFallback: false,
+                        });
                 } catch (error) {
                     refreshPending = true;
                     console.warn('[Dialogue Colors] Assignment saved, but immediate DOM repaint failed:', error);
