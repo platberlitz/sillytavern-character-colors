@@ -8,7 +8,7 @@ import { buildCharacterEntry, getEntryEffectiveColor, setEntryFromEffectiveColor
 import { escapeHtml, eventSource, event_types, getContext, power_user } from './st-api.js';
 import { characterColors, isDomEngine, runtimeState, settings } from './state.js';
 import { getSortedEntries, updateLegend } from './ui.js';
-import { escapeAttr, normalizeHexColor, normalizeSegmentText, toast } from './utils.js';
+import { escapeAttr, hashMessageText, normalizeHexColor, normalizeSegmentText, toast } from './utils.js';
 
 const INVALID_CHARACTER_NAME_RE = /[\r\n\t\[\]=,()]/;
 const CONTEXT_FOCUS_ATTRIBUTE = 'data-dc-context-focus';
@@ -58,6 +58,7 @@ function getDomAttributionDetails(targetEl) {
         mesIndex: messageIndex,
     });
     const segment = attribution.segments.find(item => item.index === segmentIndex);
+    if (!segment) return null;
     const override = getMessageQuoteOverrideEntry(messageIndex, message, false);
     return {
         messageIndex,
@@ -66,7 +67,50 @@ function getDomAttributionDetails(targetEl) {
         source: segment?.provenance?.source || '',
         confidence: Number(segment?.confidence),
         hasOverride: !!override?.segments && Object.prototype.hasOwnProperty.call(override.segments, String(segmentIndex)),
+        segmentText: segment.text,
+        segmentDelimiter: segment.delimiter,
     };
+}
+
+function getDomAssignmentMessageId(message) {
+    const id = message?.id ?? message?.send_date ?? '';
+    return id === null || id === undefined ? '' : String(id);
+}
+
+function captureDomAssignmentTarget(targetEl, details) {
+    if (!targetEl?.isConnected || !details?.message || !Number.isInteger(details.messageIndex)
+        || !Number.isFinite(details.segmentIndex)) return null;
+    return {
+        element: targetEl,
+        messageIndex: details.messageIndex,
+        message: details.message,
+        messageId: getDomAssignmentMessageId(details.message),
+        messageHash: hashMessageText(details.message.mes),
+        segmentIndex: details.segmentIndex,
+        segmentText: details.segmentText,
+        segmentDelimiter: details.segmentDelimiter,
+        elementText: normalizeSegmentText(targetEl.textContent),
+        tagName: targetEl.tagName,
+    };
+}
+
+function isDomAssignmentTargetCurrent(target) {
+    if (!target?.element?.isConnected || target.element.tagName !== target.tagName
+        || normalizeSegmentText(target.element.textContent) !== target.elementText) return false;
+    if (getMessageIndexFromElement(target.element) !== target.messageIndex) return false;
+
+    const message = getContext()?.chat?.[target.messageIndex];
+    if (message !== target.message || getDomAssignmentMessageId(message) !== target.messageId
+        || hashMessageText(message?.mes) !== target.messageHash) return false;
+    if (resolveDomSegmentIndexForElement(target.element, target.messageIndex, message) !== target.segmentIndex) return false;
+
+    const attribution = attributeDialogueSegments(message.mes, message.name, {
+        autoAddMessageSpeaker: false,
+        ...getMessageQuoteOverrideOptions(target.messageIndex, message),
+        mesIndex: target.messageIndex,
+    });
+    const segment = attribution.segments.find(item => item.index === target.segmentIndex);
+    return !!segment && segment.text === target.segmentText && segment.delimiter === target.segmentDelimiter;
 }
 
 function getMenuPosition(e, targetEl) {
@@ -181,6 +225,7 @@ function showMenu(e, fontTag, qElement = null) {
         : isBareQuote ? quoteFallbackColor : normalizeHexColor(fontTag.getAttribute('color'));
     const text = targetEl.textContent.substring(0, 30) + (targetEl.textContent.length > 30 ? '...' : '');
     const attributionDetails = isDomSegment ? getDomAttributionDetails(targetEl) : null;
+    const domAssignmentTarget = isDomSegment ? captureDomAssignmentTarget(targetEl, attributionDetails) : null;
     const attributionStatus = attributionDetails?.source
         ? `<div class="dc-context-attribution">Source: ${escapeHtml(formatAttributionSource(attributionDetails.source))}${Number.isFinite(attributionDetails.confidence) ? `; Confidence: ${Math.round(Math.max(0, Math.min(1, attributionDetails.confidence)) * 100)}%` : ''}</div>`
         : '';
@@ -221,9 +266,13 @@ function showMenu(e, fontTag, qElement = null) {
 
     menu.querySelector('#dc-ctx-use-automatic')?.addEventListener('click', async () => {
         try {
-            const messageIndex = attributionDetails?.messageIndex;
-            const segmentIndex = attributionDetails?.segmentIndex;
-            const message = Number.isInteger(messageIndex) ? getContext()?.chat?.[messageIndex] : null;
+            if (!isDomAssignmentTargetCurrent(domAssignmentTarget)) {
+                toast.warning('Message changed; reopen the assignment menu.');
+                return;
+            }
+            const messageIndex = domAssignmentTarget.messageIndex;
+            const segmentIndex = domAssignmentTarget.segmentIndex;
+            const message = domAssignmentTarget.message;
             if (!message || !Number.isFinite(segmentIndex)) {
                 toast.error('Could not map this dialogue segment.');
                 return;
@@ -268,12 +317,14 @@ function showMenu(e, fontTag, qElement = null) {
 
     menu.querySelector('#dc-ctx-assign').onclick = async () => {
         const assignButton = menu.querySelector('#dc-ctx-assign');
-        const targetMesIndex = getMessageIndexFromElement(targetEl);
+        const targetMesIndex = isDomSegment ? domAssignmentTarget?.messageIndex : getMessageIndexFromElement(targetEl);
         const targetMessage = getContext()?.chat?.[targetMesIndex];
         const originalMessageText = targetMessage?.mes;
         let installedKey = null;
         let previousEntry = null;
         let overrideRollback = null;
+        let assignmentPersisted = false;
+        let domRepaintTarget = null;
         assignButton.disabled = true;
         try {
             const nameInput = menu.querySelector('#dc-ctx-name');
@@ -316,15 +367,14 @@ function showMenu(e, fontTag, qElement = null) {
             }
 
             if (isDomSegment) {
-                const mesIndex = getMessageIndexFromElement(targetEl);
-                const ctx = getContext();
-                const msg = ctx?.chat?.[mesIndex];
-                const segmentIndex = resolveDomSegmentIndexForElement(targetEl, mesIndex, msg);
-                if (!msg || !Number.isFinite(segmentIndex)) {
-                    toast.error('Could not map this dialogue segment.');
+                if (!isDomAssignmentTargetCurrent(domAssignmentTarget)) {
+                    toast.warning('Message changed; reopen the assignment menu.');
                     closeMenu();
                     return;
                 }
+                const mesIndex = domAssignmentTarget.messageIndex;
+                const msg = domAssignmentTarget.message;
+                const segmentIndex = domAssignmentTarget.segmentIndex;
                 overrideRollback = {
                     mesIndex,
                     snapshot: JSON.parse(JSON.stringify(getMessageQuoteOverrideEntry(mesIndex, msg, false) || null)),
@@ -338,11 +388,7 @@ function showMenu(e, fontTag, qElement = null) {
                 cancelMessageDomFollowupRepairs(mesIndex);
                 clearStreamingAttributionOverrides(mesIndex);
                 assignmentSucceeded = true;
-                // Override-only change: the visible DOM is already rendered by
-                // SillyTavern, so decorate in place without an innerHTML fallback
-                // write (which would trigger an observer re-decoration cascade).
-                const repainted = await decorateMessageDomFromCurrentRender(mesIndex, msg, { queueVerification: false, renderFallback: false });
-                scheduleMessageDomFollowupRepair(mesIndex, repainted);
+                domRepaintTarget = { mesIndex, msg };
             } else if (isBareQuote) {
                 textUpdated = wrapQElementWithFontTag(qElement, finalColor);
                 assignmentSucceeded = textUpdated;
@@ -371,26 +417,94 @@ function showMenu(e, fontTag, qElement = null) {
                 applyLiveColorChangesFromSnapshot(existingSnapshot, [key], { saveImmediately: true });
             }
 
-            commit();
-            scheduleCustomFontRefresh(0);
+            // Persist the character table before any best-effort DOM/UI work.
+            // A detached or temporarily unready render must not roll back a
+            // valid semantic assignment.
+            commit({ inject: false, updateList: false, legend: false });
+            assignmentPersisted = true;
 
-            if (isDomSegment) {
-                updateLegend();
-            } else if (textUpdated) {
-                queueChatSave();
-                flushChatSave();
+            let refreshPending = false;
+            try {
+                commit({ history: false, data: false });
+            } catch (error) {
+                refreshPending = true;
+                console.warn('[Dialogue Colors] Assignment saved, but panel refresh failed:', error);
+            }
+            try {
+                scheduleCustomFontRefresh(0);
+            } catch (error) {
+                refreshPending = true;
+                console.warn('[Dialogue Colors] Assignment saved, but font refresh failed:', error);
             }
 
-            toast.success(`Assigned to ${escapeHtml(name)}`);
+            if (domRepaintTarget) {
+                let repainted = false;
+                try {
+                    // Override-only change: decorate SillyTavern's current DOM
+                    // in place, without a fallback innerHTML write.
+                    repainted = await decorateMessageDomFromCurrentRender(domRepaintTarget.mesIndex, domRepaintTarget.msg, {
+                        queueVerification: false,
+                        renderFallback: false,
+                    });
+                } catch (error) {
+                    refreshPending = true;
+                    console.warn('[Dialogue Colors] Assignment saved, but immediate DOM repaint failed:', error);
+                }
+                if (!repainted) refreshPending = true;
+                try {
+                    scheduleMessageDomFollowupRepair(domRepaintTarget.mesIndex, repainted);
+                    updateLegend();
+                } catch (error) {
+                    refreshPending = true;
+                    console.warn('[Dialogue Colors] Assignment saved, but follow-up DOM refresh failed:', error);
+                }
+            } else if (textUpdated) {
+                try {
+                    queueChatSave();
+                    flushChatSave();
+                } catch (error) {
+                    refreshPending = true;
+                    console.warn('[Dialogue Colors] Assignment saved, but chat save scheduling failed:', error);
+                }
+            }
+
+            if (refreshPending) toast.warning(`Assigned to ${escapeHtml(name)}; visual refresh is pending.`);
+            else toast.success(`Assigned to ${escapeHtml(name)}`);
             }
         } catch (error) {
+            if (assignmentPersisted) {
+                try {
+                    if (domRepaintTarget) scheduleMessageDomFollowupRepair(domRepaintTarget.mesIndex, false);
+                    toast.warning('The assignment was saved, but visual refresh is pending.');
+                } catch (refreshError) {
+                    console.error('[Dialogue Colors] Failed to schedule post-assignment repair:', refreshError);
+                }
+                console.error('[Dialogue Colors] Post-assignment refresh failed:', error);
+                return;
+            }
+            if (overrideRollback) {
+                clearMessageDomRepairTimer(overrideRollback.mesIndex);
+                cancelMessageDomFollowupRepairs(overrideRollback.mesIndex);
+            }
             if (installedKey) {
                 if (previousEntry) characterColors[installedKey] = previousEntry;
                 else delete characterColors[installedKey];
             }
             if (overrideRollback) restoreMessageQuoteOverrideEntry(overrideRollback.mesIndex, overrideRollback.snapshot);
             if (targetMessage && originalMessageText !== undefined) targetMessage.mes = originalMessageText;
-            scheduleCustomFontRefresh(0);
+            try {
+                if (installedKey) commit({ history: false });
+                scheduleCustomFontRefresh(0);
+                if (overrideRollback && targetMessage) {
+                    const repainted = await decorateMessageDomFromCurrentRender(overrideRollback.mesIndex, targetMessage, {
+                        queueVerification: false,
+                        renderFallback: false,
+                    });
+                    scheduleMessageDomFollowupRepair(overrideRollback.mesIndex, repainted);
+                }
+            } catch (rollbackError) {
+                console.error('[Dialogue Colors] Failed to refresh the rolled-back assignment:', rollbackError);
+            }
             toast.error('The dialogue assignment failed and was rolled back.');
             console.error('[Dialogue Colors] Failed to assign dialogue:', error);
         } finally {

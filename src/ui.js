@@ -2082,29 +2082,23 @@ function bindNarratorEditorControls(host) {
 
 function captureScrollPositions(container) {
     const positions = [];
+    const boundary = container?.closest?.('#dc-ext > .dc-panel-content')
+        || container?.closest?.('#dc-ext');
     let current = container;
     while (current) {
         if (current.scrollTop !== undefined && (current.scrollTop > 0 || current.scrollHeight > current.clientHeight || current.scrollLeft > 0)) {
             positions.push({ element: current, top: current.scrollTop, left: current.scrollLeft });
         }
+        if (current === boundary) break;
         current = current.parentElement;
     }
-    if (document.documentElement) {
-        positions.push({ element: document.documentElement, top: document.documentElement.scrollTop, left: document.documentElement.scrollLeft });
-    }
-    if (document.body) {
-        positions.push({ element: document.body, top: document.body.scrollTop, left: document.body.scrollLeft });
-    }
-    positions.push({ element: window, top: window.scrollY || window.pageYOffset || 0, left: window.scrollX || window.pageXOffset || 0 });
     return positions;
 }
 
 function restoreScrollPositions(positions) {
     if (!positions || !positions.length) return;
     for (const pos of positions) {
-        if (pos.element === window) {
-            window.scrollTo(pos.left, pos.top);
-        } else if (pos.element && pos.element.isConnected) {
+        if (pos.element && pos.element.isConnected) {
             pos.element.scrollTop = pos.top;
             pos.element.scrollLeft = pos.left;
         }
@@ -2893,6 +2887,8 @@ export function updateCharList() {
         if (!document.getElementById('dc-gradient-gallery')?.contains(document.activeElement)) renderGradientPresetGallery();
         registerGradientAnimationRoot(document.getElementById('dc-ext'));
         refreshGradientAnimationState();
+        restoreScrollPositions(scrollPositions);
+        requestAnimationFrame(() => restoreScrollPositions(scrollPositions));
         return;
     }
 
@@ -3704,6 +3700,38 @@ function buildSettingsPanelHtml() {
     </div>`;
 }
 
+function bindSettingsPanelDrawer() {
+    const panel = document.getElementById('dc-ext');
+    const toggle = panel?.querySelector(':scope > .inline-drawer-toggle');
+    const content = panel?.querySelector(':scope > .dc-panel-content');
+    const hostScroller = panel?.closest('#rm_extensions_block');
+    if (!toggle || !content || !hostScroller) return;
+
+    const hostClass = 'dc-dialogue-colors-expanded';
+    const isExpanded = () => getComputedStyle(content).display !== 'none';
+    const syncHostClass = () => hostScroller.classList.toggle(hostClass, isExpanded());
+
+    toggle.addEventListener('click', () => {
+        const opening = !isExpanded();
+        // Set this before SillyTavern starts slideToggle so browser anchoring
+        // cannot move the outer extensions drawer during expansion/collapse.
+        hostScroller.classList.add(hostClass);
+        if (!opening) return;
+        content.scrollTop = 0;
+        content.scrollLeft = 0;
+        requestAnimationFrame(() => {
+            content.scrollTop = 0;
+            content.scrollLeft = 0;
+        });
+    });
+
+    if (typeof MutationObserver === 'function') {
+        const observer = new MutationObserver(syncHostClass);
+        observer.observe(content, { attributes: true, attributeFilter: ['class', 'hidden', 'style'] });
+    }
+    syncHostClass();
+}
+
 function bindSettingsPanelControls($) {
     $('dc-enabled').onchange = e => {
         settings.enabled = e.target.checked;
@@ -4272,6 +4300,7 @@ export function createUI() {
 
     const $ = id => document.getElementById(id);
 
+    bindSettingsPanelDrawer();
     syncUIWithSettings();
     bindSettingsPanelControls($);
 

@@ -4,7 +4,7 @@ import { settings } from './state.js';
 
 function isLlmErrorResponse(res) {
     if (!res) return false;
-    const text = typeof res === 'string' ? res : String(res?.content ?? res);
+    const text = normalizeLlmResponse(res);
     const lower = text.trim().toLowerCase();
     return lower.startsWith('error:')
         || lower.startsWith('[api error]')
@@ -16,13 +16,30 @@ function isLlmErrorResponse(res) {
         || lower.includes('quota exceeded');
 }
 
+function normalizeLlmResponse(response) {
+    const content = response?.content ?? response;
+    if (typeof content === 'string') return content;
+    if (content === null || content === undefined) return '';
+    try {
+        return JSON.stringify(content);
+    } catch {
+        return String(content);
+    }
+}
+
 export async function callLLMWithProfile(instruction, options = {}) {
     const profileId = options.profileId ?? settings.llmConnectionProfile;
+    const schemaSpec = options.jsonSchema ? {
+        name: 'dialogue_colors_result',
+        description: 'Dialogue Colors structured result',
+        value: options.jsonSchema,
+        strict: true,
+    } : null;
     const quietOptions = {
         skipWIAN: true,
         quietName: options.quietName || `DC_${Date.now()}`,
         quietToLoud: false,
-        ...(options.jsonSchema ? { jsonSchema: options.jsonSchema } : {}),
+        ...(schemaSpec ? { jsonSchema: schemaSpec } : {}),
     };
 
     if (!profileId) {
@@ -30,8 +47,9 @@ export async function callLLMWithProfile(instruction, options = {}) {
             quietPrompt: instruction,
             ...quietOptions,
         });
-        if (isLlmErrorResponse(quietRes)) throw new Error(`Main AI returned error response: ${String(quietRes).slice(0, 100)}`);
-        return quietRes;
+        const resultText = normalizeLlmResponse(quietRes);
+        if (isLlmErrorResponse(resultText)) throw new Error(`Main AI returned error response: ${resultText.slice(0, 100)}`);
+        return resultText;
     }
 
     let CMRS = null;
@@ -39,34 +57,30 @@ export async function callLLMWithProfile(instruction, options = {}) {
         CMRS = getContext().ConnectionManagerRequestService;
     } catch { /* pre-1.15.0 */ }
 
-    if (!CMRS) {
-        const quietRes = await generateQuietPrompt({
-            quietPrompt: instruction,
-            ...quietOptions,
-        });
-        if (isLlmErrorResponse(quietRes)) throw new Error(`Main AI returned error response: ${String(quietRes).slice(0, 100)}`);
-        return quietRes;
-    }
+    if (!CMRS) throw new Error(`Selected Connection Manager profile ${profileId} is unavailable.`);
 
     try {
         const messages = [{ role: 'user', content: instruction }];
+        const profile = typeof CMRS.getProfile === 'function' ? CMRS.getProfile(profileId) : null;
+        const apiMap = profile && typeof CMRS.validateProfile === 'function'
+            ? CMRS.validateProfile(profile)
+            : profile ? getContext()?.CONNECT_API_MAP?.[profile.api] : null;
+        const overridePayload = schemaSpec && apiMap?.selected === 'openai'
+            ? { json_schema: schemaSpec }
+            : {};
         const response = await CMRS.sendRequest(
             profileId,
             messages,
-            options.maxTokens || 2000,
-            { extractData: true, includePreset: true, stream: false }
+            options.maxTokens ?? 2000,
+            { extractData: true, includePreset: true, includeInstruct: true, stream: false },
+            overridePayload,
         );
-        const resultText = typeof response === 'string' ? response : (response?.content || response?.toString() || '');
+        const resultText = normalizeLlmResponse(response);
         if (isLlmErrorResponse(resultText)) throw new Error(`Profile ${profileId} returned error response: ${resultText.slice(0, 100)}`);
         return resultText;
     } catch (e) {
-        console.warn('[DC] CMRS request failed, falling back to main AI:', e);
-        const quietRes = await generateQuietPrompt({
-            quietPrompt: instruction,
-            ...quietOptions,
-        });
-        if (isLlmErrorResponse(quietRes)) throw new Error(`Fallback AI returned error response: ${String(quietRes).slice(0, 100)}`);
-        return quietRes;
+        console.warn(`[DC] Connection Manager profile ${profileId} request failed:`, e);
+        throw e;
     }
 }
 

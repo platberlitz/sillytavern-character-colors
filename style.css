@@ -21,6 +21,11 @@
     max-height: 80vh;
     max-height: 80dvh;
     overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+#rm_extensions_block.dc-dialogue-colors-expanded {
+    overflow-anchor: none;
 }
 
 #dc-ext .text_pole,

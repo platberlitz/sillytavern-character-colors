@@ -136,7 +136,8 @@ export function shouldQueueAutoAttributionVerification(mesIndex, msg, options = 
     if (isStreamingGenerationActive && !options.allowDuringStreaming) return false;
     if (!Number.isFinite(mesIndex) || mesIndex < 0) return false;
     if (suspendMessageDomWorkForEdit(getMessageElementByIndex(mesIndex), mesIndex)) return false;
-    if (!isMessageEligibleForAttributionVerification(msg) || isMessageAttributionVerified(mesIndex, msg)) return false;
+    if (!isMessageEligibleForAttributionVerification(msg)
+        || (!options.bypassVerified && isMessageAttributionVerified(mesIndex, msg))) return false;
 
     const key = getAutoAttributionVerifyKey(mesIndex, msg);
     if (!options.manual) {
@@ -189,6 +190,7 @@ export function queueAutoAttributionVerificationForMessage(mesIndex, options = {
         messageId: getAutoAttributionMessageId(msg),
         chatGeneration: attributionChatGeneration,
         force: options.force === true || existing?.force === true,
+        bypassVerified: options.bypassVerified === true || existing?.bypassVerified === true,
     });
     boundPendingAutoAttributionVerifications();
     scheduleAutoAttributionVerificationDrain(options.delay ?? AUTO_ATTRIBUTION_VERIFY_DELAY_MS);
@@ -230,6 +232,7 @@ export function queueAutoAttributionVerificationAfterCorrections(mesIndex, resul
     stabilityVerifyRetries.set(key, { count: count + 1, at: Date.now() });
     return queueAutoAttributionVerificationForMessage(index, {
         force: true,
+        bypassVerified: true,
         delay: options.delay ?? AUTO_ATTRIBUTION_VERIFY_STABLE_RETRY_DELAY_MS,
     });
 }
@@ -268,7 +271,8 @@ export async function drainAutoAttributionVerificationQueue() {
             deferredItems.push(item);
             continue;
         }
-        if (!isMessageEligibleForAttributionVerification(msg) || isMessageAttributionVerified(item.mesIndex, msg)) continue;
+        if (!isMessageEligibleForAttributionVerification(msg)
+            || (!item.bypassVerified && isMessageAttributionVerified(item.mesIndex, msg))) continue;
         const currentKey = getAutoAttributionVerifyKey(item.mesIndex, msg);
         if (currentKey !== item.key) continue;
         const currentMessageId = getAutoAttributionMessageId(msg);
@@ -283,7 +287,11 @@ export async function drainAutoAttributionVerificationQueue() {
         try {
             await runAttributionVerification(
                 async () => {
-                    const result = await verifyAttributionsWithLLM(item.mesIndex, { manual: false, quiet: true });
+                    const result = await verifyAttributionsWithLLM(item.mesIndex, {
+                        manual: false,
+                        quiet: true,
+                        bypassVerified: item.bypassVerified === true,
+                    });
                     queueAutoAttributionVerificationAfterCorrections(item.mesIndex, result);
                     return result;
                 },
@@ -587,7 +595,9 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
     const skipMarkVerified = options.skipMarkVerified === true;
     const useTransientOverrides = options.transientOverrides === true;
     const quiet = options.quiet === true;
-    if (!options.manual && isMessageAttributionVerified(mesIndex, msg)) return { checked: false, corrections: 0, createdCharacters: false };
+    if (!options.manual && !options.bypassVerified && isMessageAttributionVerified(mesIndex, msg)) {
+        return { checked: false, corrections: 0, createdCharacters: false };
+    }
 
     const attribution = attributeDialogueSegments(msg.mes, msg.name, {
         // A verifier pass must not create characters just because the model or
