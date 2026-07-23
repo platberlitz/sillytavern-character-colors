@@ -22,8 +22,8 @@ export const runtimeState = {
     // external agent (e.g. Prose Polisher) rebuilds .mes_text innerHTML.
     // Keyed by the .mes element; value is { observer, mesText }.
     decoratedWatchers: new Map(),
-    // Coalesced post-mutation repairs keyed by message index. These force
-    // a repaint before decoration when agents rewrite msg.mes after gen.
+    // Coalesced post-mutation repairs keyed by message index. Host lifecycle
+    // events supersede observer repairs so stale callbacks cannot redecorate.
     messageDomRepairTimers: new Map(),
     pendingObservedMessages: new Set(),
 };

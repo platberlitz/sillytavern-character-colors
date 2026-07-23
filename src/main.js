@@ -110,7 +110,13 @@ export function handleChatChanged() {
 export function handleMessageUpdated(mesIndex) {
     const index = Number(mesIndex);
     if (Number.isFinite(index) && index >= 0) {
-        scheduleMessageDomRepair(index, { forceVerify: true, verifyDelay: 250 });
+        scheduleMessageDomRepair(index, {
+            delay: 0,
+            source: 'lifecycle',
+            forceVerify: true,
+            verifyDelay: 250,
+            renderFallback: false,
+        });
         scheduleCustomFontRefresh(100);
         return;
     }

@@ -134,7 +134,7 @@ export function getMessageDomReadiness(mesElement, msg, mesIndex) {
     };
 }
 
-export function waitForMessageDomReadyForDecoration(messageIndex, msg, timeoutMs = 1600) {
+export function waitForMessageDomReadyForDecoration(messageIndex, msg, timeoutMs = 1600, isCurrent = null) {
     if (!msg) return Promise.resolve({ ready: false, mesElement: getMessageElementByIndex(messageIndex), readiness: null });
     return new Promise(resolve => {
         const started = Date.now();
@@ -161,6 +161,10 @@ export function waitForMessageDomReadyForDecoration(messageIndex, msg, timeoutMs
         };
 
         const check = () => {
+            if (isCurrent && !isCurrent()) {
+                finish({ ready: false, mesElement: getMessageElementByIndex(messageIndex), readiness: null, stale: true });
+                return;
+            }
             const mesElement = getMessageElementByIndex(messageIndex);
             if (suspendMessageDomWorkForEdit(mesElement, messageIndex)) {
                 finish({ ready: false, mesElement, readiness: null, edited: true });
@@ -213,13 +217,18 @@ export async function decorateMessageDomFromCurrentRender(messageIndex, message,
     const msg = message ?? getContext()?.chat?.[messageIndex];
     const mesElement = getMessageElementByIndex(messageIndex);
     if (suspendMessageDomWorkForEdit(mesElement, messageIndex)) return false;
-    let { ready, mesElement: readyMesElement, edited } = await waitForMessageDomReadyForDecoration(messageIndex, msg, options.timeoutMs ?? 400);
+    if (options.isCurrent && !options.isCurrent()) return false;
+    let { ready, mesElement: readyMesElement, edited } = await waitForMessageDomReadyForDecoration(messageIndex, msg, options.timeoutMs ?? 400, options.isCurrent);
     if (edited) return false;
+    if (options.isCurrent && !options.isCurrent()) return false;
     if (!ready && options.renderFallback !== false && renderMessageDomFallback(messageIndex, msg)) {
         await waitForDomFrame();
+        if (options.isCurrent && !options.isCurrent()) return false;
         ({ mesElement: readyMesElement, edited } = await waitForMessageDomReadyForDecoration(messageIndex, msg, 300));
         if (edited) return false;
     }
+    if (!ready && options.renderFallback === false) return false;
+    if (options.isCurrent && !options.isCurrent()) return false;
     const effectiveMesElement = readyMesElement || getMessageElementByIndex(messageIndex);
     if (!effectiveMesElement) return false;
     decorateObservedMessages([effectiveMesElement], { queueVerification: options.queueVerification !== false });
@@ -288,15 +297,36 @@ export function clearMessageDomRepairTimer(mesIndex) {
     const timer = runtimeState.messageDomRepairTimers.get(index);
     if (timer) clearTimeout(timer);
     runtimeState.messageDomRepairTimers.delete(index);
+    messageDomRepairTokens.delete(index);
+    messageDomRepairSources.delete(index);
 }
 
 export function clearMessageDomRepairTimers() {
     for (const timer of runtimeState.messageDomRepairTimers.values()) clearTimeout(timer);
     runtimeState.messageDomRepairTimers.clear();
+    messageDomRepairTokens.clear();
+    messageDomRepairSources.clear();
     // Also clear all per-message follow-up repair timers.
     for (const timers of messageDomFollowupTimers.values()) timers.forEach(clearTimeout);
     messageDomFollowupTimers.clear();
     healthRefreshAttempts.clear();
+}
+
+const messageDomRepairTokens = new Map();
+const messageDomRepairSources = new Map();
+let nextMessageDomRepairToken = 0;
+
+function clearPendingObservedMessage(index) {
+    const pending = runtimeState.pendingObservedMessages;
+    if (!pending?.size) return;
+    for (const mesElement of pending) {
+        if (Number(mesElement?.getAttribute?.('mesid')) === index) pending.delete(mesElement);
+    }
+    if (!pending.size && runtimeState.chatObserverTimer) {
+        clearTimeout(runtimeState.chatObserverTimer);
+        runtimeState.chatObserverTimer = null;
+        observedDecorationFirstCallTime = 0;
+    }
 }
 
 export function scheduleMessageDomRepair(mesIndex, options = {}) {
@@ -305,14 +335,24 @@ export function scheduleMessageDomRepair(mesIndex, options = {}) {
 
     if (suspendMessageDomWorkForEdit(getMessageElementByIndex(index), index)) return false;
 
+    const source = options.source || 'fallback';
+    if (source === 'observer' && messageDomRepairSources.has(index)) return false;
+
+    if (source === 'lifecycle') clearPendingObservedMessage(index);
+
     clearMessageDomRepairTimer(index);
 
     const chatGeneration = attributionChatGeneration;
+    const token = ++nextMessageDomRepairToken;
+    messageDomRepairTokens.set(index, token);
+    messageDomRepairSources.set(index, source);
+    const isCurrent = () => messageDomRepairTokens.get(index) === token
+        && chatGeneration === attributionChatGeneration;
     const delay = Math.max(0, Number(options.delay ?? POST_MUTATION_DOM_REPAIR_DELAY_MS) || 0);
     const timer = setTimeout(async () => {
         try {
             if (!settings.enabled || !isDomEngine()) return;
-            if (chatGeneration !== attributionChatGeneration) return;
+            if (!isCurrent()) return;
 
             const msg = getContext()?.chat?.[index];
             if (!msg || msg.is_system) return;
@@ -322,9 +362,10 @@ export function scheduleMessageDomRepair(mesIndex, options = {}) {
                 queueVerification: options.queueVerification !== false,
                 timeoutMs: options.timeoutMs ?? 700,
                 renderFallback: options.renderFallback,
+                isCurrent,
             });
 
-            if (chatGeneration !== attributionChatGeneration) return;
+            if (!isCurrent()) return;
 
             if (options.verify !== false) {
                 queueAutoAttributionVerificationForMessage(index, {
@@ -334,11 +375,16 @@ export function scheduleMessageDomRepair(mesIndex, options = {}) {
             }
         } catch (e) {
             console.warn('[Dialogue Colors] Post-update DOM repair failed:', e);
+            if (!isCurrent()) return;
             const mesElement = getMessageElementByIndex(index);
-            if (mesElement) decorateObservedMessages([mesElement], { queueVerification: options.queueVerification !== false });
+            if (mesElement && options.renderFallback !== false) {
+                decorateObservedMessages([mesElement], { queueVerification: options.queueVerification !== false });
+            }
         } finally {
             if (runtimeState.messageDomRepairTimers.get(index) === timer) {
                 runtimeState.messageDomRepairTimers.delete(index);
+                messageDomRepairTokens.delete(index);
+                messageDomRepairSources.delete(index);
             }
         }
     }, delay);
@@ -1071,49 +1117,20 @@ export const MESSAGE_SETTLE_MAX_WAIT_MS = 3000;
 
 /**
  * Attach a self-terminating MutationObserver to a single .mes element.
- * Re-tries decoration whenever child nodes are added or removed inside the
- * message element. Disconnects as soon as decoration succeeds (no
- * needsRetry) or after MESSAGE_SETTLE_MAX_WAIT_MS, whichever comes first.
+ * Queues a coalesced repair whenever child nodes change inside the message.
+ * Disconnects after MESSAGE_SETTLE_MAX_WAIT_MS.
  */
 
 export function attachMessageSettleObserver(mesElement, mesIndex) {
     if (!mesElement?.isConnected) return;
     if (suspendMessageDomWorkForEdit(mesElement, mesIndex)) return;
-    // Remove any existing watcher for this element.
+    // Keep the original deadline bounded. Reattaching after every failed
+    // decoration would restart the timeout forever on permanently mismatched
+    // markup.
     const existing = runtimeState.messageSettleObservers.get(mesElement);
-    if (existing) {
-        try { existing.observer.disconnect(); } catch (_) { /* ignored */ }
-        clearTimeout(existing.fallbackTimer);
-        existing.retryTimers?.forEach?.(clearTimeout);
-        runtimeState.messageSettleObservers.delete(mesElement);
-    }
+    if (existing) return;
 
     let retryTimers = [];
-
-    const attempt = () => {
-        if (!mesElement.isConnected || !settings.enabled || !isDomEngine()) {
-            cleanup();
-            return;
-        }
-        // Re-read the index: ST renumbers mesid attributes after deletions, so a
-        // closed-over mesIndex may now point at a different message.
-        const currentMesIndex = Number(mesElement.getAttribute('mesid'));
-        const effectiveIndex = Number.isFinite(currentMesIndex) ? currentMesIndex : mesIndex;
-        const msg = getContext()?.chat?.[effectiveIndex];
-        if (!msg) { cleanup(); return; }
-        if (suspendMessageDomWorkForEdit(mesElement, effectiveIndex)) { cleanup(); return; }
-        const result = decorateMessageDom(mesElement, msg, effectiveIndex);
-        if (result.createdCharacters) {
-            queueColorStateSave({ history: false, injectPrompt: false });
-        }
-        updateLegend();
-        if (!result.needsRetry) {
-            cleanup();
-            // Decoration succeeded: arm the long-lived watcher so a later
-            // external re-render (e.g. Prose Polisher) re-decorates.
-            if (result.decorated) watchDecoratedMessage(mesElement, effectiveIndex);
-        }
-    };
 
     const cleanup = () => {
         const entry = runtimeState.messageSettleObservers.get(mesElement);
@@ -1124,12 +1141,13 @@ export function attachMessageSettleObserver(mesElement, mesIndex) {
         runtimeState.messageSettleObservers.delete(mesElement);
     };
 
-    const observer = new MutationObserver(() => attempt());
+    const queueAttempt = () => queueObservedMessageDecoration(mesElement);
+    const observer = new MutationObserver(queueAttempt);
     observer.observe(mesElement, { childList: true, subtree: true });
 
     retryTimers = DOM_RETRY_REFRESH_DELAYS
         .filter(delay => Number(delay) > 0 && Number(delay) < MESSAGE_SETTLE_MAX_WAIT_MS)
-        .map(delay => setTimeout(() => attempt(), Number(delay)));
+        .map(delay => setTimeout(queueAttempt, Number(delay)));
 
     const fallbackTimer = setTimeout(() => {
         cleanup();
@@ -1142,9 +1160,8 @@ export function attachMessageSettleObserver(mesElement, mesIndex) {
  * Attach a long-lived MutationObserver that watches for external re-renders
  * of an already-decorated message (e.g. a post-gen agent editing msg.mes and
  * calling updateMessageBlock(), which rebuilds .mes_text innerHTML, wiping DC
- * inline styles). When .mes_text childList changes and all data-dc-colored
- * elements have disappeared, we trigger attachMessageSettleObserver so
- * decoration is re-applied once <q>/<em> elements re-appear.
+ * inline styles). When .mes_text childList changes and its decoration health
+ * no longer matches the message, queue a repair after the DOM settles.
  *
  * Unlike attachMessageSettleObserver (which is self-terminating), this watcher
  * lives for the lifetime of the decorated message and is only torn down when
@@ -1177,16 +1194,12 @@ export function watchDecoratedMessage(mesElement, mesIndex) {
         // Re-query .mes_text: external agents may replace the node entirely.
         const currentMesText = mesElement.querySelector('.mes_text');
         if (!currentMesText || !currentMesText.isConnected) return;
-        // Skip messages with LLM-emitted font[color] tags.
-        if (currentMesText.querySelector('font[color]')) return;
-        // If all applicable decorations are still present, the rebuild did not wipe them.
-        const narrator = getNarratorVisual(settings, applyThemeReadabilityAndBrightness);
-        const narratorMissing = narrator && !currentMesText.querySelector('[data-dc-narrator]')
-            && hasNarratorTextNodesToDecorate(currentMesText);
-        if ((currentMesText.querySelector('[data-dc-colored]') || currentMesText.querySelector('[data-dc-narrator]')) && !narratorMissing) return;
         const msg = getContext()?.chat?.[repairIndex];
         if (!msg || msg.is_system) return;
-        decorateObservedMessages([mesElement]);
+        if (!getMessageDomHealthRepairType(mesElement, msg, repairIndex, { bootstrap: true })
+            && !currentMesText.querySelector('font[color]')
+            && !collectFontColorsFromText(msg.mes).size) return;
+        queueObservedMessageDecoration(mesElement);
     });
 
     // Observe mesElement subtree so we catch .mes_text replacement itself.
@@ -1264,7 +1277,7 @@ export function collectDomHealthCheckMessages() {
 const DOM_HEALTH_REFRESH_MAX_ATTEMPTS = 4;
 const healthRefreshAttempts = new Map();
 
-export function getMessageDomHealthRepairType(mesElement, msg, mesIndex) {
+export function getMessageDomHealthRepairType(mesElement, msg, mesIndex, options = {}) {
     const mesText = mesElement?.querySelector?.('.mes_text');
     if (!mesText || !msg || msg.is_system) return '';
     if (suspendMessageDomWorkForEdit(mesElement, mesIndex)) return '';
@@ -1277,6 +1290,8 @@ export function getMessageDomHealthRepairType(mesElement, msg, mesIndex) {
         return narratorMissing ? 'decorate' : '';
     }
     if (!readiness.ready) return 'refresh';
+    if (options.bootstrap === true && readiness.expectedDecorations === 0
+        && !mesText.querySelector('[data-dc-seg]')) return 'decorate';
     return readiness.expectedDecorations > readiness.correctDecorations || narratorMissing ? 'decorate' : '';
 }
 
@@ -1307,7 +1322,12 @@ export function runDomHealthCheck() {
         if (suspendMessageDomWorkForEdit(mesElement, repairIndex)) continue;
         if (watcher?.mesText !== currentMesText) {
             clearDecoratedWatcher(mesElement);
-            scheduleMessageDomRepair(repairIndex, { delay: 0, verify: false });
+            scheduleMessageDomRepair(repairIndex, {
+                delay: 0,
+                source: 'observer',
+                verify: false,
+                renderFallback: false,
+            });
         }
     }
 
@@ -1552,17 +1572,27 @@ export function queueObservedMessageDecoration(mesElement) {
         observedDecorationFirstCallTime = 0;
         const pending = Array.from(runtimeState.pendingObservedMessages || []);
         runtimeState.pendingObservedMessages.clear();
-        decorateObservedMessages(pending);
+        if (!settings.enabled || !isDomEngine()) return;
+        for (const pendingElement of pending) {
+            const pendingIndex = Number(pendingElement?.getAttribute?.('mesid'));
+            if (!Number.isFinite(pendingIndex) || pendingIndex < 0) continue;
+            const msg = getContext()?.chat?.[pendingIndex];
+            const mesText = pendingElement?.querySelector?.('.mes_text');
+            if (!mesText || !msg || msg.is_system) continue;
+            if (mesText.querySelector('font[color]') || collectFontColorsFromText(msg.mes).size) {
+                applyCustomFontsToFontTags(mesText, msg.mes);
+                continue;
+            }
+            if (!getMessageDomHealthRepairType(pendingElement, msg, pendingIndex, { bootstrap: true })) continue;
+            scheduleMessageDomRepair(pendingIndex, {
+                delay: 0,
+                source: 'observer',
+                verify: false,
+                queueVerification: false,
+                renderFallback: false,
+            });
+        }
     }, effectiveDelay);
-}
-
-export function shouldDecorateObservedMessageImmediately(mesElement) {
-    if (!mesElement || !settings.enabled || !isDomEngine()) return false;
-    const mesIndex = Number(mesElement.getAttribute('mesid'));
-    if (!Number.isFinite(mesIndex) || mesIndex < 0) return false;
-    if (suspendMessageDomWorkForEdit(mesElement, mesIndex)) return false;
-    const msg = getContext()?.chat?.[mesIndex];
-    return hasMessageQuoteOverridesForDecoration(mesIndex, msg);
 }
 
 export function collectMutatedMessageElements(mutation) {
@@ -1597,8 +1627,7 @@ export function setupChatObserver() {
             return;
         }
         if (isDecoratingDom) { pendingDeferredMutations = true; return; }
-        const immediate = new Set();
-        const delayed = new Set();
+        const observed = new Set();
         const fontTargets = new Set();
         for (const mutation of mutations) {
             if (mutation.type === 'attributes' && mutation.attributeName === 'class'
@@ -1610,19 +1639,14 @@ export function setupChatObserver() {
                 if (suspendMessageDomWorkForEdit(mesElement, mesIndex)) continue;
                 fontTargets.add(mesElement);
                 if (!isDomEngine()) continue;
-                if (shouldDecorateObservedMessageImmediately(mesElement)) immediate.add(mesElement);
-                else delayed.add(mesElement);
+                observed.add(mesElement);
             }
         }
         if (!isDomEngine()) {
             applyCustomFontsToMessageElements(fontTargets);
             return;
         }
-        if (immediate.size) {
-            for (const mesElement of immediate) runtimeState.pendingObservedMessages.delete(mesElement);
-            decorateObservedMessages(Array.from(immediate));
-        }
-        for (const mesElement of delayed) queueObservedMessageDecoration(mesElement);
+        for (const mesElement of observed) queueObservedMessageDecoration(mesElement);
     });
     runtimeState.chatObserver.observe(chatEl, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'mesid'] });
 }
