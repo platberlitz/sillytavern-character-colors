@@ -431,28 +431,31 @@ function showMenu(e, fontTag, qElement = null) {
             installedKey = key;
             previousEntry = existingEntry ? JSON.parse(JSON.stringify(existingEntry)) : null;
             characterColors[key] = nextEntry;
-            if (existingColorChanged) {
-                applyLiveColorChangesFromSnapshot(existingSnapshot, [key], { saveImmediately: true });
-            }
-
-            // Persist the character table before any best-effort DOM/UI work.
-            // A detached or temporarily unready render must not roll back a
-            // valid semantic assignment.
-            commit({ inject: false, updateList: false, legend: false });
             assignmentPersisted = true;
 
             let refreshPending = false;
+            // Both semantic mutations are now installed. Persistence and UI
+            // failures are recoverable and must not unwind the assignment.
             try {
-                commit({ history: false, data: false });
+                commit({ history: false, inject: false, updateList: false, legend: false });
+            } catch (error) {
+                refreshPending = true;
+                console.warn('[Dialogue Colors] Assignment installed, but immediate persistence failed:', error);
+            }
+            try {
+                commit({ data: false });
             } catch (error) {
                 refreshPending = true;
                 console.warn('[Dialogue Colors] Assignment saved, but panel refresh failed:', error);
             }
             try {
+                if (existingColorChanged) {
+                    applyLiveColorChangesFromSnapshot(existingSnapshot, [key], { saveImmediately: true });
+                }
                 scheduleCustomFontRefresh(0);
             } catch (error) {
                 refreshPending = true;
-                console.warn('[Dialogue Colors] Assignment saved, but font refresh failed:', error);
+                console.warn('[Dialogue Colors] Assignment saved, but global color refresh failed:', error);
             }
 
             if (domRepaintTarget) {

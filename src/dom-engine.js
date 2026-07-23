@@ -435,8 +435,16 @@ export function getChatMetadataStore() {
 
 export function saveChatMetadata() {
     const ctx = getContext();
-    if (typeof ctx?.saveMetadataDebounced === 'function') ctx.saveMetadataDebounced();
-    else if (typeof ctx?.saveMetadata === 'function') ctx.saveMetadata();
+    try {
+        const result = typeof ctx?.saveMetadataDebounced === 'function'
+            ? ctx.saveMetadataDebounced()
+            : typeof ctx?.saveMetadata === 'function'
+                ? ctx.saveMetadata()
+                : null;
+        result?.catch?.(error => console.warn('[Dialogue Colors] Failed to save chat metadata:', error));
+    } catch (error) {
+        console.warn('[Dialogue Colors] Failed to save chat metadata:', error);
+    }
 }
 
 export function getQuoteOverridesMap(create = false) {
