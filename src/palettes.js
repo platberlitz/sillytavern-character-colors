@@ -1537,10 +1537,12 @@ export function resolveUniqueAssignedColor(preferredColor, excludeKeys = []) {
 // Phase 2B: Prefer characterId over avatar, use ?? for 0-safety
 
 export function buildCharacterEntry(name, options = {}) {
-    const trimmedName = String(name ?? '').trim();
+    // Key on the same normalized identity the registry uses, otherwise the entry is
+    // re-keyed or dropped by normalizeCharacterColors and recreated on the next pass.
+    const trimmedName = normalizeRegistryIdentityName(String(name ?? ''));
     if (!trimmedName || trimmedName.toLowerCase() === 'narrator') return { key: '', entry: null, remapped: false };
 
-    const key = trimmedName.toLowerCase();
+    const key = normalizeRegistryIdentity(trimmedName);
     const colorMode = options.colorMode === 'effective' ? 'effective' : 'base';
     const normalizedSourceColor = normalizeHexColor(options.color, null);
     const fallbackBaseColor = normalizeHexColor(suggestColorForName(trimmedName) || getNextColor());

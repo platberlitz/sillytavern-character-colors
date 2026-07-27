@@ -2,6 +2,7 @@
 import { buildDialogueRegex, buildNameColorLookup, parseNamedColorAssignmentsFromText, registerLookupAssignment, resolveCharacterKeyByNameOrAlias, resolveSingleSpeakerAssignment } from './color-blocks.js';
 import { ATTRIBUTION_SOURCE, normalizeAttributionConfidence, normalizeAttributionEvidence, normalizeAttributionSource } from './attribution-store.js';
 import { buildCharacterEntry, getEntryEffectiveColor } from './palettes.js';
+import { normalizeRegistryIdentity, normalizeRegistryIdentityName } from './group-profiles.js';
 import { formatColorBlockPair } from './prompts.js';
 import { escapeRegex, getContext } from './st-api.js';
 import { characterColors, isStreamingGenerationActive, streamingHeuristicCache } from './state.js';
@@ -194,14 +195,14 @@ export function findClosestMentionedSpeakerInContext(maskedText, windowStart, wi
 }
 
 export function ensureCharacterEntry(name, color) {
-    const trimmedName = String(name ?? '').trim();
+    const trimmedName = normalizeRegistryIdentityName(String(name ?? ''));
     if (!trimmedName) return { key: '', entry: null, created: false };
     // Names containing [COLORS:] block delimiters or control characters would
     // corrupt the color block on the next ingest round-trip; refuse to create them.
     if (/[\r\n\t\[\]=,()]/.test(trimmedName)) return { key: '', entry: null, created: false };
     const existingKey = resolveCharacterKeyByNameOrAlias(trimmedName);
     if (existingKey) return { key: existingKey, entry: characterColors[existingKey], created: false };
-    const key = trimmedName.toLowerCase();
+    const key = normalizeRegistryIdentity(trimmedName);
     if (characterColors[key]) return { key, entry: characterColors[key], created: false };
     const built = buildCharacterEntry(trimmedName, {
         color,

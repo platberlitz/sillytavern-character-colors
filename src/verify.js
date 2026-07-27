@@ -1,9 +1,10 @@
 // verify.js - extracted from index.js (mechanical split)
-import { attributeDialogueSegments } from './attribution.js';
+import { attributeDialogueSegments, clearSpeakerRegexCache, ensureCharacterEntry } from './attribution.js';
 import { ATTRIBUTION_SOURCE, ATTRIBUTION_VERIFICATION_STATUS, normalizeAttributionConfidence } from './attribution-store.js';
 import { buildNameColorLookup, collectFontColorsFromText, parseNamedColorAssignmentsFromText, resolveCharacterKeyByNameOrAlias } from './color-blocks.js';
 import { cancelMessageDomFollowupRepairs, clearMessageDomRepairTimer, clearStreamingAttributionOverrides, decorateMessageDomFromCurrentRender, decorateObservedMessages, getMessageQuoteOverrideEntry, getMessageQuoteOverrideOptions, isMessageAttributionVerified, markMessageAttributionVerified, scheduleMessageDomFollowupRepair, setMessageQuoteOverride, setStreamingAttributionOverride, suspendMessageDomWorkForEdit, upsertAttributionReview } from './dom-engine.js';
 import { callLLMWithProfile, classifyLlmRequestError } from './llm.js';
+import { commit, repaintDomAfterCharacterDataChange } from './live-colors.js';
 import { formatPromptLiteralSymbol, getThoughtDelimiterSymbols } from './prompts.js';
 import { getContext } from './st-api.js';
 import { AUTO_ATTRIBUTION_VERIFY_DELAY_MS, AUTO_ATTRIBUTION_VERIFY_RENDERED_LIMIT, AUTO_ATTRIBUTION_VERIFY_RETRY_DELAY_MS, AUTO_ATTRIBUTION_VERIFY_STABLE_RETRY_DELAY_MS, MAX_PENDING_AUTO_ATTRIBUTION_VERIFICATIONS, STREAMING_ATTRIBUTION_VERIFY_DELAY_MS, attributionChatGeneration, attributionVerificationEpoch, autoAttributionVerifyTimer, autoAttributionVerifyTimerDue, characterColors, isDomEngine, isStreamingGenerationActive, isVerifyingAttribution, lastStreamingAttributionVerifyKey, pendingAttributionVerifications, pendingAutoAttributionVerifyIndices, recentAutoAttributionVerifyAttempts, setAttributionVerificationEpoch, setAutoAttributionVerifyTimer, setAutoAttributionVerifyTimerDue, setIsVerifyingAttribution, setLastStreamingAttributionVerifyKey, setStreamingAttributionGeneration, setStreamingAttributionVerifyTimer, settings, streamingAttributionGeneration, streamingAttributionVerifyTimer } from './state.js';
@@ -579,7 +580,7 @@ Rules:
 2. The current speaker labels came from heuristics and may be wrong. Evaluate message text, surrounding text, explicit dialogue/action tags, and conversation flow.
 3. Omit a segment when its current speaker is supported by the evidence or when the speaker remains unclear.
 4. Use exactly one safe speaker name per correction, preferably a supplied known speaker or alias. Never invent a name.
-5. An explicitly named speaker absent from the known-speaker table may be proposed using its exact single name, but it is review-only and must not be treated as an existing identity.
+5. An explicitly named speaker absent from the known-speaker table may be proposed using its exact single name, but must not be treated as an existing identity.
 6. Never use Unknown, Unclear, None, N/A, Narrator, a prototype-reserved identity, or a group/composite name.
 7. Include a numeric confidence from 0 to 1 and a short evidence-based reason for every correction.
 8. Correction indexes must exactly match the supplied segment indexes.`;
@@ -900,14 +901,25 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
 
     const segmentByIndex = new Map(currentAttribution.segments.map(segment => [segment.index, segment]));
     const currentLocalAssignments = parseNamedColorAssignmentsFromText(msg.mes);
-    const currentLookup = buildNameColorLookup(currentLocalAssignments);
+    let currentLookup = buildNameColorLookup(currentLocalAssignments);
     const policy = getAttributionReviewPolicy();
     let appliedCorrections = 0;
     let queuedReviews = 0;
+    let createdCharacters = false;
     for (const correction of validCorrections) {
         if (!isAttributionVerificationTargetCurrent(target, { allowAppendedText: useTransientOverrides })) return unchecked;
         const seg = segmentByIndex.get(correction.index);
-        const { assignment } = resolveVerifierSpeakerName(correction.speaker, currentLookup);
+        let { assignment } = resolveVerifierSpeakerName(correction.speaker, currentLookup);
+        // Under full auto-accept the user opted out of review, so an unconfigured
+        // named speaker is created instead of being parked in the review queue.
+        if (!assignment && !useTransientOverrides && policy === 'legacy-auto') {
+            const created = ensureCharacterEntry(correction.speaker);
+            if (created.created) {
+                createdCharacters = true;
+                currentLookup = buildNameColorLookup(currentLocalAssignments);
+                ({ assignment } = resolveVerifierSpeakerName(correction.speaker, currentLookup));
+            }
+        }
         if (assignment?.key === seg.assignment?.key) continue;
 
         const latestEntry = getMessageQuoteOverrideEntry(mesIndex, msg, false);
@@ -959,6 +971,12 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
         }
     }
 
+    if (createdCharacters) {
+        clearSpeakerRegexCache();
+        commit();
+        repaintDomAfterCharacterDataChange(0);
+    }
+
     if (!skipMarkVerified && !useTransientOverrides) {
         const verificationStatus = queuedReviews > 0
             ? ATTRIBUTION_VERIFICATION_STATUS.PENDING_REVIEW
@@ -993,7 +1011,7 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
         }
     }
 
-    return { checked: true, corrections: appliedCorrections, createdCharacters: false, queuedReviews };
+    return { checked: true, corrections: appliedCorrections, createdCharacters, queuedReviews };
 }
 
 export async function verifyLatestAttributionsWithLLM(options = {}) {

@@ -97,7 +97,7 @@ export const GLOBAL_TOGGLE_KEYS = Object.freeze(Object.keys(TOGGLE_SETTING_DEFAU
 
 export const GLOBAL_VISUAL_KEYS = Object.freeze(['thoughtSymbols', 'themeMode', 'colorTheme', 'brightness', 'promptDepth', 'promptRole', 'promptMode', 'coloringEngine', 'gradientRandomMasterSeed', 'colorVisionPreviewMode', 'colorVisionPreviewSeverity', 'colorVisionPreviewTarget', 'gradientAnimationMode']);
 
-export const GLOBAL_SETTINGS_V2_KEYS = Object.freeze([...new Set([...GLOBAL_VISUAL_KEYS, ...GLOBAL_TOGGLE_KEYS, 'narratorStyle', 'narratorColor', 'colorStorageScope'])]);
+export const GLOBAL_SETTINGS_V2_KEYS = Object.freeze([...new Set([...GLOBAL_VISUAL_KEYS, ...GLOBAL_TOGGLE_KEYS, 'narratorStyle', 'narratorColor', 'colorStorageScope', 'attributionReviewPolicy'])]);
 
 export const ACTIVE_SETTING_KEYS = Object.freeze([...new Set([...GLOBAL_SETTINGS_V2_KEYS, 'llmConnectionProfile', 'attributionConnectionProfile', 'attributionConservativeOnly', 'attributionReviewPolicy', 'attributionMaxTokens', 'colorSchemaVersion', 'sortMode'])]);
 

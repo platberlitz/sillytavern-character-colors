@@ -4005,6 +4005,9 @@ function bindSettingsPanelControls($) {
     if ($('dc-attr-accept-all')) {
         $('dc-attr-accept-all').onchange = e => {
             settings.attributionReviewPolicy = e.target.checked ? 'legacy-auto' : 'review';
+            if (settings.attributionReviewPolicy === 'legacy-auto' && settings.llmAttributionCheck) {
+                queueAutoAttributionVerificationForRenderedMessages({ force: true, delay: 0 });
+            }
             saveData();
         };
     }
