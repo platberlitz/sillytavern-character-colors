@@ -14,6 +14,7 @@ import {
     normalizeGradientPreset,
     normalizeGradientPresetName,
 } from './gradients.js';
+import { isDangerousRegistryIdentity, normalizeGroupName, normalizeRegistryIdentity } from './group-profiles.js';
 
 export const STYLE_PACK_FORMAT = 'dialogue-colors-style-pack';
 export const STYLE_PACK_FORMAT_VERSION = 1;
@@ -53,7 +54,6 @@ export const AESTHETIC_APPEARANCE_KEYS = Object.freeze([
     'driftAllGradientColors',
 ]);
 
-const RESERVED_NAMES = new Set(['__proto__', 'prototype', 'constructor']);
 const TOP_LEVEL_KEYS = new Set(['format', 'formatVersion', 'metadata', ...STYLE_PACK_CATEGORIES]);
 const METADATA_TEXT_LIMITS = Object.freeze({
     id: 120,
@@ -99,7 +99,7 @@ function compareText(left, right) {
 }
 
 function normalizedLookupName(value) {
-    return String(value).normalize('NFKC').replace(/\s+/g, ' ').trim().toLowerCase();
+    return normalizeRegistryIdentity(value);
 }
 
 function fail(code, message, details) {
@@ -131,7 +131,7 @@ function normalizeString(value, field, maximum, { required = false, multiline = 
 
 function normalizeDictionaryName(value, field) {
     const name = normalizeString(value, field, STYLE_PACK_LIMITS.maxNameLength, { required: true });
-    if (RESERVED_NAMES.has(name)) fail('reserved_key', `Reserved name "${name}" is not allowed.`, { field, name });
+    if (isDangerousRegistryIdentity(name)) fail('reserved_key', `Reserved name "${name}" is not allowed.`, { field, name });
     return name;
 }
 
@@ -296,18 +296,38 @@ function normalizeAliases(value, field, totals) {
     if (totals.aliases > STYLE_PACK_LIMITS.maxAliasesTotal) {
         fail('too_many_aliases', `A pack may contain at most ${STYLE_PACK_LIMITS.maxAliasesTotal} aliases.`);
     }
-    return [...new Set(value.map((alias, index) => normalizeString(
-        alias,
-        `${field}[${index}]`,
-        STYLE_PACK_LIMITS.maxCharacterNameLength,
-        { required: true },
-    )))].sort(compareText);
+    const aliases = [];
+    const seen = new Set();
+    value.forEach((alias, index) => {
+        const aliasField = `${field}[${index}]`;
+        const normalized = normalizeString(
+            alias,
+            aliasField,
+            STYLE_PACK_LIMITS.maxCharacterNameLength,
+            { required: true },
+        );
+        if (isDangerousRegistryIdentity(normalized)) {
+            fail('reserved_key', `Reserved assignment identity "${normalized}" is not allowed.`, { field: aliasField, name: normalized });
+        }
+        const lookup = normalizedLookupName(normalized);
+        if (!lookup) fail('invalid_string', `${aliasField} is not a valid assignment identity.`, { field: aliasField });
+        if (seen.has(lookup)) return;
+        seen.add(lookup);
+        aliases.push(normalized);
+    });
+    return aliases.sort(compareText);
 }
 
 function normalizeAssignment(value, field, totals) {
     assertRecord(value, field);
     const assignment = dictionary();
     assignment.name = normalizeString(value.name, `${field}.name`, STYLE_PACK_LIMITS.maxCharacterNameLength, { required: true });
+    if (isDangerousRegistryIdentity(assignment.name)) {
+        fail('reserved_key', `Reserved assignment identity "${assignment.name}" is not allowed.`, {
+            field: `${field}.name`,
+            name: assignment.name,
+        });
+    }
     assignment.color = normalizeHex(value.color, `${field}.color`);
     assignment.baseColor = value.baseColor === undefined
         ? assignment.color
@@ -315,7 +335,12 @@ function normalizeAssignment(value, field, totals) {
     assignment.style = VALID_STYLES.has(value.style) ? value.style : '';
     assignment.font = normalizeFont(value.font, `${field}.font`);
     assignment.aliases = normalizeAliases(value.aliases, `${field}.aliases`, totals);
-    assignment.group = normalizeString(value.group, `${field}.group`, STYLE_PACK_LIMITS.maxCharacterNameLength);
+    const group = normalizeString(value.group, `${field}.group`, STYLE_PACK_LIMITS.maxNameLength);
+    if (group && isDangerousRegistryIdentity(group)) {
+        fail('reserved_key', `Reserved group identity "${group}" is not allowed.`, { field: `${field}.group`, name: group });
+    }
+    assignment.group = group ? normalizeGroupName(group) : '';
+    if (group && !assignment.group) fail('invalid_string', `${field}.group is not a valid group identity.`, { field: `${field}.group` });
     assignment.locked = value.locked === true;
     assignment.keep = value.keep === true;
     if (value.gradient !== undefined && value.gradient !== null) {
@@ -331,6 +356,97 @@ function normalizeAssignment(value, field, totals) {
         fail('too_many_fonts', `A pack may reference at most ${STYLE_PACK_LIMITS.maxUniqueFonts} fonts.`);
     }
     return assignment;
+}
+
+export function assertStylePackAssignmentIdentities(assignments, field = 'assignments') {
+    if (!Array.isArray(assignments)) fail('invalid_assignment_preset', `${field} must be an array.`);
+    const identities = new Map();
+    assignments.forEach((assignment, assignmentIndex) => {
+        assertRecord(assignment, `${field}[${assignmentIndex}]`);
+        if (assignment.aliases !== undefined && !Array.isArray(assignment.aliases)) {
+            fail('invalid_aliases', `${field}[${assignmentIndex}].aliases must be an array.`);
+        }
+        const identityValues = [
+            { value: assignment?.name, field: `${field}[${assignmentIndex}].name` },
+            ...(Array.isArray(assignment?.aliases)
+                ? assignment.aliases.map((alias, aliasIndex) => ({
+                    value: alias,
+                    field: `${field}[${assignmentIndex}].aliases[${aliasIndex}]`,
+                }))
+                : []),
+        ];
+        for (const identity of identityValues) {
+            if (typeof identity.value !== 'string') {
+                fail('invalid_string', `${identity.field} must be a string.`, { field: identity.field });
+            }
+            if (isDangerousRegistryIdentity(identity.value)) {
+                fail('reserved_key', `Reserved assignment identity "${identity.value}" is not allowed.`, {
+                    field: identity.field,
+                    name: identity.value,
+                });
+            }
+            const lookup = normalizedLookupName(identity.value);
+            if (!lookup) fail('missing_field', `${identity.field} is required.`, { field: identity.field });
+            const existing = identities.get(lookup);
+            if (existing && existing.assignmentIndex !== assignmentIndex) {
+                fail('duplicate_assignment_identity', `Assignment identity "${identity.value}" collides with ${existing.field}.`, {
+                    field: identity.field,
+                    existingField: existing.field,
+                    identity: identity.value,
+                });
+            }
+            if (!existing) identities.set(lookup, { ...identity, assignmentIndex });
+        }
+    });
+    return true;
+}
+
+function appendAssignmentNameSuffix(name, field, occupied) {
+    for (let index = 2; index <= 10000; index++) {
+        const ending = ` (${index})`;
+        const candidate = `${name.slice(0, STYLE_PACK_LIMITS.maxCharacterNameLength - ending.length).trimEnd()}${ending}`;
+        const lookup = normalizedLookupName(candidate);
+        if (lookup && !occupied.has(lookup)) return candidate;
+    }
+    fail('rename_exhausted', `Could not disambiguate assignment name "${name}".`, { field });
+}
+
+/**
+ * Version 1 packs predate globally unique assignment identities. Keep parsing
+ * them safely: primary names are retained (with a suffix when necessary),
+ * primary names beat aliases, and the first remaining alias wins.
+ */
+function resolveV1AssignmentIdentities(assignments, field) {
+    const resolved = assignments.map(assignment => {
+        const copy = Object.assign(dictionary(), assignment);
+        copy.aliases = [...assignment.aliases];
+        return copy;
+    });
+    const primaryIdentities = new Set();
+    resolved.forEach((assignment, assignmentIndex) => {
+        const lookup = normalizedLookupName(assignment.name);
+        if (!primaryIdentities.has(lookup)) {
+            primaryIdentities.add(lookup);
+            return;
+        }
+        assignment.name = appendAssignmentNameSuffix(
+            assignment.name,
+            `${field}[${assignmentIndex}].name`,
+            primaryIdentities,
+        );
+        primaryIdentities.add(normalizedLookupName(assignment.name));
+    });
+
+    const claimedAliases = new Set();
+    for (const assignment of resolved) {
+        assignment.aliases = assignment.aliases.filter(alias => {
+            const lookup = normalizedLookupName(alias);
+            if (primaryIdentities.has(lookup) || claimedAliases.has(lookup)) return false;
+            claimedAliases.add(lookup);
+            return true;
+        });
+    }
+    return resolved;
 }
 
 function normalizeAssignmentPresets(value) {
@@ -355,11 +471,139 @@ function normalizeAssignmentPresets(value) {
         if (totals.assignments > STYLE_PACK_LIMITS.maxAssignmentsTotal) {
             fail('too_many_assignments', `A pack may contain at most ${STYLE_PACK_LIMITS.maxAssignmentsTotal} assignments.`);
         }
-        presets[name] = rawAssignments
-            .map((assignment, index) => normalizeAssignment(assignment, `assignmentPresets.${name}[${index}]`, totals))
+        const assignments = resolveV1AssignmentIdentities(
+            rawAssignments.map((assignment, index) => normalizeAssignment(
+                assignment,
+                `assignmentPresets.${name}[${index}]`,
+                totals,
+            )),
+            `assignmentPresets.${name}`,
+        );
+        assertStylePackAssignmentIdentities(assignments, `assignmentPresets.${name}`);
+        presets[name] = assignments
             .sort((left, right) => compareText(normalizedLookupName(left.name), normalizedLookupName(right.name)));
     }
     return presets;
+}
+
+function createAssignmentOverrideDiagnostic(kind, identity, previous, current, resolution) {
+    const diagnostic = dictionary();
+    diagnostic.kind = kind;
+    diagnostic.resolution = resolution;
+    diagnostic.identities = [identity];
+    diagnostic.previousPreset = previous.presetName;
+    diagnostic.previousAssignment = previous.assignment.name;
+    diagnostic.previousAssignmentIndex = previous.assignmentIndex;
+    diagnostic.overridingPreset = current.presetName;
+    diagnostic.overridingAssignment = current.assignment.name;
+    diagnostic.overridingAssignmentIndex = current.assignmentIndex;
+    return diagnostic;
+}
+
+function removeActiveAssignment(item, active, primaryOwners, aliasOwners) {
+    active.delete(item.token);
+    if (primaryOwners.get(item.primary) === item) primaryOwners.delete(item.primary);
+    for (const alias of item.aliases) {
+        if (aliasOwners.get(alias) === item) aliasOwners.delete(alias);
+    }
+}
+
+function removeAssignmentAlias(item, identity, aliasOwners) {
+    item.aliases.delete(identity);
+    item.assignment.aliases = item.assignment.aliases.filter(alias => normalizedLookupName(alias) !== identity);
+    if (aliasOwners.get(identity) === item) aliasOwners.delete(identity);
+}
+
+/** Flatten independent presets with later selected presets taking precedence. */
+export function flattenStylePackAssignmentPresets(presets, selectedPresetNames = undefined) {
+    assertRecord(presets, 'assignmentPresets');
+    const presetNames = selectionNames(selectedPresetNames, Object.keys(presets), 'assignmentPresets');
+    const active = new Map();
+    const primaryOwners = new Map();
+    const aliasOwners = new Map();
+    const overrides = [];
+    let token = 0;
+
+    for (const presetName of presetNames) {
+        const assignments = presets[presetName];
+        assertStylePackAssignmentIdentities(assignments, `assignmentPresets.${presetName}`);
+        assignments.forEach((assignment, assignmentIndex) => {
+            const assignmentCopy = Object.assign(dictionary(), assignment);
+            assignmentCopy.aliases = [];
+            const current = {
+                token: token++,
+                presetName,
+                assignment: assignmentCopy,
+                assignmentIndex,
+                primary: normalizedLookupName(assignment.name),
+                aliases: new Set(),
+            };
+            const previousPrimary = primaryOwners.get(current.primary);
+            if (previousPrimary) {
+                overrides.push(createAssignmentOverrideDiagnostic(
+                    'primary-replacement',
+                    current.primary,
+                    previousPrimary,
+                    current,
+                    'replace-assignment',
+                ));
+                removeActiveAssignment(previousPrimary, active, primaryOwners, aliasOwners);
+            }
+            const previousAlias = aliasOwners.get(current.primary);
+            if (previousAlias) {
+                overrides.push(createAssignmentOverrideDiagnostic(
+                    'primary-over-alias',
+                    current.primary,
+                    previousAlias,
+                    current,
+                    'remove-previous-alias',
+                ));
+                removeAssignmentAlias(previousAlias, current.primary, aliasOwners);
+            }
+
+            active.set(current.token, current);
+            primaryOwners.set(current.primary, current);
+            for (const alias of assignment.aliases || []) {
+                const identity = normalizedLookupName(alias);
+                if (identity === current.primary || current.aliases.has(identity)) continue;
+                const primaryOwner = primaryOwners.get(identity);
+                if (primaryOwner) {
+                    overrides.push(createAssignmentOverrideDiagnostic(
+                        'alias-versus-primary',
+                        identity,
+                        primaryOwner,
+                        current,
+                        'drop-overriding-alias',
+                    ));
+                    continue;
+                }
+                const previousOwner = aliasOwners.get(identity);
+                if (previousOwner) {
+                    overrides.push(createAssignmentOverrideDiagnostic(
+                        'alias-reassignment',
+                        identity,
+                        previousOwner,
+                        current,
+                        'reassign-alias',
+                    ));
+                    removeAssignmentAlias(previousOwner, identity, aliasOwners);
+                }
+                current.assignment.aliases.push(alias);
+                current.aliases.add(identity);
+                aliasOwners.set(identity, current);
+            }
+        });
+    }
+
+    const primaryOverrides = overrides.filter(diagnostic => diagnostic.kind === 'primary-replacement');
+    const aliasResolutions = overrides.filter(diagnostic => diagnostic.kind !== 'primary-replacement');
+    return {
+        presetNames,
+        assignments: [...active.values()].map(item => item.assignment),
+        overrides: primaryOverrides,
+        aliasResolutions,
+        diagnostics: overrides,
+    };
 }
 
 function normalizeAppearance(value) {
@@ -442,13 +686,21 @@ function selectionNames(selection, available, field) {
     if (selection === undefined || selection === null) return available.slice().sort(compareText);
     const values = selection instanceof Set ? [...selection] : selection;
     if (!Array.isArray(values)) fail('invalid_selection', `${field} selection must be an array or Set.`);
-    const requested = [...new Set(values.map((name, index) => normalizeDictionaryName(name, `${field}[${index}]`)))];
+    const requested = [];
+    const requestedLookups = new Set();
+    values.forEach((value, index) => {
+        const name = normalizeDictionaryName(value, `${field}[${index}]`);
+        const lookup = normalizedLookupName(name);
+        if (requestedLookups.has(lookup)) return;
+        requestedLookups.add(lookup);
+        requested.push(name);
+    });
     const byLookup = new Map(available.map(name => [normalizedLookupName(name), name]));
     return requested.map(name => {
         const actual = byLookup.get(normalizedLookupName(name));
         if (!actual) fail('missing_selection', `${field} selection "${name}" does not exist.`);
         return actual;
-    }).sort(compareText);
+    });
 }
 
 function pickDictionary(source, selection, field) {
@@ -638,6 +890,8 @@ export function analyzeStylePackConflicts(input, installed = {}, options = {}) {
     result.categories = dictionary();
     result.totalConflicts = 0;
     result.totalAdditions = 0;
+    result.totalOverrides = 0;
+    result.totalAliasResolutions = 0;
     for (const category of INSTALLABLE_CATEGORIES) {
         const incoming = Object.keys(pack[category] || {}).sort(compareText);
         const existing = installedNames(safeInstalled, category).sort(compareText);
@@ -659,6 +913,18 @@ export function analyzeStylePackConflicts(input, installed = {}, options = {}) {
         categoryResult.existing = existing;
         categoryResult.additions = additions;
         categoryResult.conflicts = conflicts;
+        if (category === 'assignmentPresets') {
+            const flattened = flattenStylePackAssignmentPresets(
+                pack.assignmentPresets || dictionary(),
+                options.selected?.assignmentPresets,
+            );
+            categoryResult.overrides = flattened.overrides;
+            categoryResult.aliasResolutions = flattened.aliasResolutions;
+            categoryResult.identityResolutions = flattened.diagnostics;
+            categoryResult.presetOrder = flattened.presetNames;
+            result.totalOverrides = flattened.overrides.length;
+            result.totalAliasResolutions = flattened.aliasResolutions.length;
+        }
         result.categories[category] = categoryResult;
         result.totalConflicts += conflicts.length;
         result.totalAdditions += additions.length;
@@ -770,6 +1036,7 @@ export function buildStylePackInstallationPlan(input, installed = {}, options = 
     }
     plan.conflicts = analyzeStylePackConflicts(pack, safeInstalled, {
         includeAssignmentPresets: options.includeAssignmentPresets === true,
+        selected: selections,
     });
     return plan;
 }

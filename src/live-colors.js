@@ -4,17 +4,338 @@ import { collectFontColorsFromText, countFontColorStatsFromKnownColors, parseCol
 import { DOM_RETRY_REFRESH_DELAYS, decorateAllMessages, refreshMessageDom, scheduleDomRefreshSeries, scheduleDomSettleRefresh } from './dom-engine.js';
 import { scheduleCustomFontRefresh } from './fonts.js';
 import { saveHistory } from './history.js';
-import { callLLMWithProfile } from './llm.js';
+import { callLLMWithProfile, classifyLlmRequestError } from './llm.js';
 import { getNarratorVisual } from './narrator-style.js';
 import { applyThemeReadabilityAndBrightness, getBaseColor, getEntryEffectiveColor, invalidateThemeCache, syncAllEffectiveColors } from './palettes.js';
-import { buildColorMetadataPromptLines, buildLLMColorizeRules, buildThoughtSymbolColorPromptRule, formatColorBlockPair, getThoughtDelimiterSymbols, injectPrompt } from './prompts.js';
+import { buildColorMetadataPromptLines, buildLLMColorizeRules, buildThoughtSymbolColorPromptRule, getThoughtDelimiterSymbols, injectPrompt } from './prompts.js';
 import { generateQuietPrompt, getContext } from './st-api.js';
-import { COLOR_STATE_SAVE_DELAY_MS, LIVE_CHAT_SAVE_DELAY_MS, characterColors, colorStateSaveTimer, isAutoColorizing, isColorizing, isDomEngine, isRecoloring, lastProcessedMessageSignature, liveChatSaveTimer, pendingColorStateHistory, pendingColorStateInjectPrompt, pendingColorStateSaveData, pendingColorStateUpdateList, pendingLiveChatSave, setColorStateSaveTimer, setIsAutoColorizing, setIsColorizing, setIsRecoloring, setLastProcessedMessageSignature, setLiveChatSaveTimer, setPendingColorStateHistory, setPendingColorStateInjectPrompt, setPendingColorStateSaveData, setPendingColorStateUpdateList, setPendingLiveChatSave, settings } from './state.js';
+import { COLOR_STATE_SAVE_DELAY_MS, LIVE_CHAT_SAVE_DELAY_MS, attributionChatGeneration, characterColors, colorStateSaveTimer, isAutoColorizing, isColorizing, isDomEngine, isRecoloring, lastProcessedMessageSignature, liveChatSaveTimer, pendingColorStateHistory, pendingColorStateInjectPrompt, pendingColorStateSaveData, pendingColorStateUpdateList, setColorStateSaveTimer, setIsAutoColorizing, setIsColorizing, setIsRecoloring, setLastProcessedMessageSignature, setLiveChatSaveTimer, setPendingColorStateHistory, setPendingColorStateInjectPrompt, setPendingColorStateSaveData, setPendingColorStateUpdateList, setPendingLiveChatSave, settings } from './state.js';
 import { getStorageKey, saveData } from './storage.js';
 import { clearAutoColorizeIndicators, hideAutoColorizeIndicator, setColorizeButtonBusy, setRecolorButtonBusy, showAutoColorizeIndicator, updateCharList, updateLegend, updateStorageScopeStatus } from './ui.js';
-import { isCompositeSpeakerLabel, normalizeHexColor, stripColorBlocks, stripFontTags, toast, unwrapCodeFence } from './utils.js';
+import { hashMessageText, isCompositeSpeakerLabel, normalizeHexColor, toast } from './utils.js';
 
 let pendingAutoColorizeRetry = false;
+let chatSaveInFlight = null;
+let colorizeRunSequence = 0;
+let activeColorizeRun = null;
+
+const chatSaveRecords = new Set();
+const CHAT_SAVE_MAX_AUTO_RETRIES = 2;
+const CHAT_SAVE_RETRY_BASE_DELAY_MS = 1000;
+const CHAT_SAVE_OPERATION_TIMEOUT_MS = 15000;
+const CHAT_SAVE_UNCERTAIN_RETRY_DELAY_MS = 30000;
+const COLORIZE_BATCH_MAX_MESSAGES = 6;
+const COLORIZE_BATCH_MAX_CHARACTERS = 6000;
+const COLORIZE_BATCH_MAX_ATTEMPTS = 2;
+const COLORIZE_MAX_INDIVIDUAL_LLM_FALLBACKS = 2;
+const COLORIZE_RUN_MAX_LLM_REQUESTS = 4;
+const COLORIZE_RUN_MAX_LLM_RETRIES = 1;
+
+function normalizeContextId(value) {
+    if (typeof value === 'string') return value.trim() || null;
+    if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+    return null;
+}
+
+export function captureChatBinding(context = getContext()) {
+    const chat = context?.chat;
+    if (!Array.isArray(chat)) return null;
+    let chatId = normalizeContextId(context?.chatId) ?? normalizeContextId(context?.chat_id);
+    if (chatId === null && typeof context?.getCurrentChatId === 'function') {
+        try { chatId = normalizeContextId(context.getCurrentChatId()); } catch { /* unavailable on older hosts */ }
+    }
+    const groupId = normalizeContextId(context?.groupId) ?? normalizeContextId(context?.group_id);
+    const characterIndex = context?.characterId ?? context?.character_id;
+    const character = groupId === null ? context?.characters?.[characterIndex] : null;
+    const ownerId = groupId === null
+        ? normalizeContextId(character?.avatar ?? character?.characterId ?? character?.character_id ?? characterIndex)
+        : null;
+    const durableId = chatId !== null && (groupId !== null || ownerId !== null)
+        ? `chat:${chatId}\u0000group:${groupId ?? ''}\u0000owner:${ownerId ?? ''}`
+        : null;
+    return {
+        chat,
+        chatId,
+        groupId,
+        ownerId,
+        durableId,
+    };
+}
+
+export function areChatBindingsEqual(left, right) {
+    if (!left || !right) return false;
+    if (left.durableId || right.durableId) {
+        return !!left.durableId && left.durableId === right.durableId;
+    }
+    return left.chat === right.chat
+        && left.chatId === right.chatId
+        && left.groupId === right.groupId
+        && left.ownerId === right.ownerId;
+}
+
+function isChatBindingCurrent(binding, context = getContext()) {
+    return areChatBindingsEqual(binding, captureChatBinding(context));
+}
+
+function isCapturedChatBindingCurrent(binding, context = getContext()) {
+    const current = captureChatBinding(context);
+    return areChatBindingsEqual(binding, current) && binding?.chat === current?.chat;
+}
+
+function syncPendingChatSaveState() {
+    setPendingLiveChatSave([...chatSaveRecords].some(record => record.dirty));
+}
+
+function clearChatSaveTimer() {
+    if (!liveChatSaveTimer) return;
+    clearTimeout(liveChatSaveTimer);
+    setLiveChatSaveTimer(null);
+}
+
+function scheduleChatSave(record, delay = LIVE_CHAT_SAVE_DELAY_MS) {
+    clearChatSaveTimer();
+    const numericDelay = Number(delay);
+    if (!Number.isFinite(numericDelay)) return;
+    const wait = Math.max(0, numericDelay || 0);
+    setLiveChatSaveTimer(setTimeout(() => {
+        setLiveChatSaveTimer(null);
+        void saveChatRecord(record, false);
+    }, wait));
+}
+
+export function resumePendingChatSave(context = getContext()) {
+    clearChatSaveTimer();
+    const binding = captureChatBinding(context);
+    if (!binding) return false;
+    const record = [...chatSaveRecords].find(candidate => candidate.dirty
+        && areChatBindingsEqual(candidate.binding, binding));
+    if (!record) {
+        syncPendingChatSaveState();
+        return false;
+    }
+    // A host may replace the chat array when reactivating the same durable
+    // chat. Rebind only after its stable identity matches the current context.
+    record.binding = binding;
+    const dueAt = Math.max(record.nextAttemptAt || 0, record.uncertainUntil || 0);
+    if (Number.isFinite(dueAt)) scheduleChatSave(record, Math.max(0, dueAt - Date.now()));
+    syncPendingChatSaveState();
+    return true;
+}
+
+function createColorizeRequestBudget() {
+    return { requests: 0, retries: 0, stopped: false };
+}
+
+function reserveColorizeRequest(budget, { retry = false } = {}) {
+    if (!budget || budget.stopped || budget.requests >= COLORIZE_RUN_MAX_LLM_REQUESTS) return false;
+    if (retry && budget.retries >= COLORIZE_RUN_MAX_LLM_RETRIES) return false;
+    budget.requests++;
+    if (retry) budget.retries++;
+    return true;
+}
+
+function recordColorizeRequestFailure(budget, errorOrClassification) {
+    const classification = errorOrClassification
+        && typeof errorOrClassification.retryable === 'boolean'
+        && typeof errorOrClassification.category === 'string'
+        ? errorOrClassification
+        : classifyLlmRequestError(errorOrClassification);
+    if (!classification.retryable) budget.stopped = true;
+    return classification;
+}
+
+function markChatDirty(binding = captureChatBinding()) {
+    if (!binding) return null;
+    let record = [...chatSaveRecords].find(candidate => areChatBindingsEqual(candidate.binding, binding));
+    if (!record) {
+        record = {
+            binding,
+            version: 0,
+            dirty: false,
+            failureCount: 0,
+            nextAttemptAt: 0,
+            uncertainUntil: 0,
+            completedVersion: 0,
+            unsettledOperations: new Set(),
+        };
+        chatSaveRecords.add(record);
+    }
+    record.binding = binding;
+    record.version++;
+    record.dirty = true;
+    const now = Date.now();
+    if (!record.unsettledOperations.size && !Number.isFinite(record.nextAttemptAt)) {
+        record.failureCount = 0;
+        record.uncertainUntil = 0;
+    }
+    record.nextAttemptAt = Math.max(
+        now + LIVE_CHAT_SAVE_DELAY_MS,
+        record.uncertainUntil || 0,
+        record.failureCount > 0 ? record.nextAttemptAt : 0,
+    );
+    syncPendingChatSaveState();
+    return record;
+}
+
+function classifyHostSaveResult(value, asynchronous) {
+    if (value === false || value?.ok === false || value?.saved === false) {
+        return { accepted: false, confirmed: false, uncertain: false, error: new Error('Host reported that the chat was not saved.') };
+    }
+    if (value === true || value?.ok === true || value?.saved === true) {
+        return { accepted: true, confirmed: true, uncertain: false };
+    }
+    if (asynchronous) {
+        // SillyTavern's public saveChat Promise resolves void and does not
+        // expose durable success. Settlement confirms dispatch completion only.
+        return { accepted: true, confirmed: false, uncertain: false };
+    }
+    return { accepted: false, confirmed: false, uncertain: true, error: new Error('Host saveChat returned without a completion confirmation.') };
+}
+
+function finishChatSaveRecordIfClean(record) {
+    if (!record.dirty && !record.unsettledOperations.size) chatSaveRecords.delete(record);
+    syncPendingChatSaveState();
+}
+
+function completeChatSaveOperation(record, operation) {
+    record.completedVersion = Math.max(record.completedVersion || 0, operation.savedVersion);
+    record.failureCount = 0;
+    if (!record.unsettledOperations.size) record.uncertainUntil = 0;
+    if (record.version === operation.savedVersion
+        && areChatBindingsEqual(record.binding, operation.binding)) {
+        record.dirty = false;
+        record.nextAttemptAt = 0;
+    } else if (record.dirty && !record.unsettledOperations.size) {
+        record.nextAttemptAt = Date.now() + LIVE_CHAT_SAVE_DELAY_MS;
+        if (isChatBindingCurrent(record.binding)) scheduleChatSave(record, LIVE_CHAT_SAVE_DELAY_MS);
+    }
+    finishChatSaveRecordIfClean(record);
+}
+
+function deferUnconfirmedChatSave(record, operation, outcome) {
+    if (operation.failureRecorded || (record.completedVersion || 0) >= operation.savedVersion) return;
+    operation.failureRecorded = true;
+    record.dirty = true;
+    record.failureCount++;
+    const retryDelay = outcome.uncertain
+        ? CHAT_SAVE_UNCERTAIN_RETRY_DELAY_MS
+        : CHAT_SAVE_RETRY_BASE_DELAY_MS * (2 ** Math.max(0, record.failureCount - 1));
+    if (outcome.uncertain) record.uncertainUntil = Math.max(record.uncertainUntil || 0, Date.now() + retryDelay);
+    if (record.failureCount <= CHAT_SAVE_MAX_AUTO_RETRIES) {
+        record.nextAttemptAt = Math.max(Date.now() + retryDelay, record.uncertainUntil || 0);
+        if (isChatBindingCurrent(record.binding)) scheduleChatSave(record, record.nextAttemptAt - Date.now());
+    } else {
+        record.nextAttemptAt = Number.POSITIVE_INFINITY;
+    }
+    if (outcome.uncertain) {
+        console.warn('[Dialogue Colors] Failed to confirm chat save; changes remain queued:', outcome.error);
+    } else {
+        console.error('[Dialogue Colors] Failed to confirm chat save; changes remain queued:', outcome.error);
+    }
+    syncPendingChatSaveState();
+}
+
+async function saveChatRecord(record, forceRetry) {
+    if (!record?.dirty) return true;
+
+    if (chatSaveInFlight) {
+        await chatSaveInFlight;
+        return saveChatRecord(record, forceRetry);
+    }
+
+    const saveBinding = record.binding;
+    const context = getContext();
+    if (!isChatBindingCurrent(saveBinding, context) || typeof context?.saveChat !== 'function') {
+        syncPendingChatSaveState();
+        return false;
+    }
+
+    const now = Date.now();
+    if (record.uncertainUntil > now) {
+        scheduleChatSave(record, record.uncertainUntil - now);
+        return false;
+    }
+    if ((!forceRetry || record.failureCount > 0) && record.nextAttemptAt > now) {
+        if (!Number.isFinite(record.nextAttemptAt)) return false;
+        scheduleChatSave(record, record.nextAttemptAt - now);
+        return false;
+    }
+
+    const savedVersion = record.version;
+    const operation = {
+        binding: saveBinding,
+        savedVersion,
+        failureRecorded: false,
+    };
+    record.unsettledOperations.add(operation);
+    let releaseGlobalGate;
+    const globalGate = new Promise(resolve => { releaseGlobalGate = resolve; });
+    chatSaveInFlight = globalGate;
+
+    const hostSettlement = new Promise(resolve => {
+        const saveContext = getContext();
+        if (!isChatBindingCurrent(saveBinding, saveContext) || typeof saveContext?.saveChat !== 'function') {
+            resolve({ accepted: false, confirmed: false, uncertain: false, error: new Error('Captured chat is no longer current.') });
+            return;
+        }
+        try {
+            const result = saveContext.saveChat.call(saveContext);
+            if (result && typeof result.then === 'function') {
+                Promise.resolve(result).then(
+                    value => resolve(classifyHostSaveResult(value, true)),
+                    error => resolve({ accepted: false, confirmed: false, uncertain: false, error }),
+                );
+            } else {
+                resolve(classifyHostSaveResult(result, false));
+            }
+        } catch (error) {
+            resolve({ accepted: false, confirmed: false, uncertain: false, error });
+        }
+    });
+    hostSettlement.then(outcome => {
+        record.unsettledOperations.delete(operation);
+        if (outcome.accepted) completeChatSaveOperation(record, operation);
+        else deferUnconfirmedChatSave(record, operation, outcome);
+        finishChatSaveRecordIfClean(record);
+    });
+
+    let timeoutId = null;
+    const timeout = new Promise(resolve => {
+        timeoutId = setTimeout(() => resolve({
+            accepted: false,
+            confirmed: false,
+            uncertain: true,
+            timeout: true,
+            error: new Error(`Host saveChat did not settle within ${CHAT_SAVE_OPERATION_TIMEOUT_MS}ms.`),
+        }), CHAT_SAVE_OPERATION_TIMEOUT_MS);
+    });
+    let outcome;
+    try {
+        outcome = await Promise.race([hostSettlement, timeout]);
+        if (outcome.timeout) deferUnconfirmedChatSave(record, operation, outcome);
+    } finally {
+        if (timeoutId) clearTimeout(timeoutId);
+        releaseGlobalGate();
+        if (chatSaveInFlight === globalGate) chatSaveInFlight = null;
+    }
+    if (outcome?.accepted && record.dirty
+        && areChatBindingsEqual(record.binding, saveBinding)
+        && isChatBindingCurrent(saveBinding)) {
+        return saveChatRecord(record, false);
+    }
+    return outcome?.accepted === true && !record.dirty;
+}
+
+function queueCapturedChatSave(binding, { immediate = true } = {}) {
+    const record = markChatDirty(binding);
+    if (!record) return Promise.resolve(false);
+    if (immediate) {
+        clearChatSaveTimer();
+        return saveChatRecord(record, true);
+    }
+    scheduleChatSave(record, LIVE_CHAT_SAVE_DELAY_MS);
+    return Promise.resolve(true);
+}
 
 export function normalizeColorReplacementMap(replacements) {
     const normalized = {};
@@ -79,30 +400,16 @@ export function updateVisibleMessageColors(messageIndex, replacements) {
 }
 
 export function queueChatSave() {
-    setPendingLiveChatSave(true);
-    if (liveChatSaveTimer) clearTimeout(liveChatSaveTimer);
-    setLiveChatSaveTimer(setTimeout(() => {
-        setLiveChatSaveTimer(null);
-        if (!pendingLiveChatSave) return;
-        setPendingLiveChatSave(false);
-        const ctx = getContext();
-        if (typeof ctx?.saveChat === 'function') {
-            ctx.saveChat().catch(err => console.error('[Dialogue Colors] Failed to save chat:', err));
-        }
-    }, LIVE_CHAT_SAVE_DELAY_MS));
+    void queueCapturedChatSave(captureChatBinding());
 }
 
 export function flushChatSave() {
-    if (liveChatSaveTimer) {
-        clearTimeout(liveChatSaveTimer);
-        setLiveChatSaveTimer(null);
-    }
-    if (!pendingLiveChatSave) return;
-    setPendingLiveChatSave(false);
-    const ctx = getContext();
-    if (typeof ctx?.saveChat === 'function') {
-        ctx.saveChat().catch(err => console.error('[Dialogue Colors] Failed to save chat:', err));
-    }
+    clearChatSaveTimer();
+    const binding = captureChatBinding();
+    const record = binding
+        ? [...chatSaveRecords].find(candidate => areChatBindingsEqual(candidate.binding, binding))
+        : null;
+    return record ? saveChatRecord(record, true) : Promise.resolve(false);
 }
 
 export function buildGlobalColorAssignmentLookup(chat) {
@@ -154,6 +461,7 @@ export function applyLiveColorReplacements(replacements, options = {}) {
     if (!Object.keys(fallbackReplacements).length && !Object.keys(nameToNewColor).length) return 0;
     const ctx = getContext();
     const chat = ctx?.chat || [];
+    const chatBinding = captureChatBinding(ctx);
     const globalAssignments = Object.keys(nameToNewColor).length ? buildGlobalColorAssignmentLookup(chat) : null;
     let changedCount = 0;
     for (let i = 0; i < chat.length; i++) {
@@ -169,9 +477,7 @@ export function applyLiveColorReplacements(replacements, options = {}) {
         updateVisibleMessageColors(i, messageReplacements);
     }
     if (changedCount) {
-        setPendingLiveChatSave(true);
-        if (options.saveImmediately) flushChatSave();
-        else queueChatSave();
+        void queueCapturedChatSave(chatBinding, { immediate: true });
     }
     return changedCount;
 }
@@ -345,7 +651,121 @@ export function commit(options = {}) {
 }
 
 export function normalizeColorizedTextForComparison(text) {
-    return stripColorBlocks(stripFontTags(String(text ?? '').replace(/\r\n?/g, '\n'))).trim();
+    const source = stripLLMColorMetadata(text);
+    return parseCanonicalFontMarkup(source)?.projection ?? source;
+}
+
+function stripLLMColorMetadata(text) {
+    return String(text ?? '').replace(/(?:\r\n?|\n)?\[COLORS?:[^\]\r\n]*\][ \t]*(?:\r\n?|\n)?$/i, '');
+}
+
+function unwrapLLMColorizeResponse(text) {
+    const source = String(text ?? '');
+    const match = source.match(/^[ \t]*```(?:html|xml|markdown|md|text|txt)?[ \t]*(?:\r\n?|\n)([\s\S]*?)(?:\r\n?|\n)```[ \t]*(?:\r\n?|\n)?$/i);
+    return match ? match[1] : source;
+}
+
+function parseCanonicalFontMarkup(text) {
+    const source = String(text ?? '');
+    const colors = [];
+    let canonicalText = '';
+    let projection = '';
+    let openColor = null;
+    let openProjectionLength = 0;
+    let sawFont = false;
+    let cursor = 0;
+
+    while (cursor < source.length) {
+        const tagStart = source.indexOf('<', cursor);
+        if (tagStart === -1) {
+            const remainder = source.slice(cursor);
+            canonicalText += remainder;
+            projection += remainder;
+            break;
+        }
+
+        const plainText = source.slice(cursor, tagStart);
+        canonicalText += plainText;
+        projection += plainText;
+        const remainder = source.slice(tagStart);
+        const isOpeningFont = /^<font(?=\s|>|$)/i.test(remainder);
+        const isClosingFont = /^<\/font(?=\s|>|$)/i.test(remainder);
+
+        if (isOpeningFont || isClosingFont) {
+            const tagEnd = source.indexOf('>', tagStart + 1);
+            if (tagEnd === -1) return null;
+            const tag = source.slice(tagStart, tagEnd + 1);
+
+            if (isOpeningFont) {
+                if (openColor) return null;
+                const match = tag.match(/^<font color="(#[0-9a-fA-F]{6})">$/);
+                if (!match) return null;
+                openColor = match[1].toLowerCase();
+                openProjectionLength = projection.length;
+                canonicalText += `<font color="${openColor}">`;
+                colors.push(openColor);
+                sawFont = true;
+            } else {
+                if (!openColor || tag !== '</font>' || projection.length === openProjectionLength) return null;
+                canonicalText += '</font>';
+                openColor = null;
+            }
+
+            cursor = tagEnd + 1;
+            continue;
+        }
+
+        // Every non-font byte, including existing source markup, belongs to the
+        // projection and must compare exactly with the original message.
+        canonicalText += '<';
+        projection += '<';
+        cursor = tagStart + 1;
+    }
+
+    if (openColor) return null;
+    return { canonicalText, projection, colors, sawFont };
+}
+
+function getSafeMetadataName(value) {
+    const name = String(value ?? '').trim();
+    if (!name || name.length > 128 || /[\u0000-\u001f\u007f-\u009f\u2028\u2029\[\]=,()<>]/.test(name)) return '';
+    return name;
+}
+
+function getValidatedAssignmentsForColors(colors, narratorColor = null) {
+    const candidatesByColor = new Map();
+    const register = (name, color) => {
+        const safeName = getSafeMetadataName(name);
+        const safeColor = normalizeHexColor(color, null);
+        if (!safeName || !safeColor) return;
+        if (!candidatesByColor.has(safeColor)) candidatesByColor.set(safeColor, new Map());
+        candidatesByColor.get(safeColor).set(safeName.toLowerCase(), { name: safeName, color: safeColor });
+    };
+
+    for (const entry of Object.values(characterColors)) {
+        if (!entry) continue;
+        register(entry.name, getEntryEffectiveColor(entry));
+    }
+    if (narratorColor) register('Narrator', narratorColor);
+
+    const assignments = [];
+    const seenColors = new Set();
+    for (const rawColor of colors || []) {
+        const color = normalizeHexColor(rawColor, null);
+        if (!color || seenColors.has(color)) continue;
+        seenColors.add(color);
+        const candidates = [...(candidatesByColor.get(color)?.values() || [])];
+        if (candidates.length === 1) assignments.push(candidates[0]);
+    }
+    return assignments;
+}
+
+function formatValidatedColorMetadata(assignments) {
+    return (assignments || []).map(({ name, color }) => {
+        const safeName = getSafeMetadataName(name);
+        const safeColor = normalizeHexColor(color, null);
+        return safeName && safeColor ? `${safeName}=${safeColor}` : '';
+    }).filter(Boolean).join(',');
 }
 
 export function detectLLMQuoteArtifacts(originalText, candidateText) {
@@ -364,62 +784,60 @@ export function detectLLMQuoteArtifacts(originalText, candidateText) {
 }
 
 export function extractUsedAssignmentsFromColorizedText(text, narratorColor = null) {
-    const usedAssignments = [];
-    const usedColors = new Set();
-    const fontColorRegex = /<font\b[^>]*\bcolor\s*=\s*["']?(#[0-9a-fA-F]{6})["']?/gi;
-    let match;
-    while ((match = fontColorRegex.exec(text)) !== null) {
-        const color = match[1].toLowerCase();
-        if (usedColors.has(color)) continue;
-
-        usedColors.add(color);
-        for (const entry of Object.values(characterColors)) {
-            if (getEntryEffectiveColor(entry).toLowerCase() === color) {
-                usedAssignments.push({ name: entry.name, color: getEntryEffectiveColor(entry) });
-                break;
-            }
-        }
-        if (narratorColor && color === narratorColor.toLowerCase() && !usedAssignments.some(a => a.name === 'Narrator')) {
-            usedAssignments.push({ name: 'Narrator', color: narratorColor });
-        }
-    }
-
-    return usedAssignments;
+    const parsed = parseCanonicalFontMarkup(stripLLMColorMetadata(text));
+    return parsed ? getValidatedAssignmentsForColors(parsed.colors, narratorColor) : [];
 }
 
-export function finalizeLLMColorizedText(rawText, responseText, narratorColor = null) {
+export function finalizeLLMColorizedText(rawText, responseText, narratorColor = null, options = {}) {
     if (!responseText || typeof responseText !== 'string') return null;
 
-    const cleaned = unwrapCodeFence(responseText);
-    if (!cleaned || !/<font\b/i.test(cleaned)) return null;
-
-    const originalBody = normalizeColorizedTextForComparison(rawText);
-    const candidateBody = normalizeColorizedTextForComparison(cleaned);
-    const quoteIssues = detectLLMQuoteArtifacts(originalBody, candidateBody);
-    if (quoteIssues.length || candidateBody !== originalBody) {
-        console.warn('[Dialogue Colors] Rejected LLM colorize output due to text drift:', {
-            issues: quoteIssues,
-            originalSample: originalBody.slice(0, 200),
-            candidateSample: candidateBody.slice(0, 200),
-        });
+    const cleaned = unwrapLLMColorizeResponse(responseText);
+    const candidateWithoutMetadata = stripLLMColorMetadata(cleaned);
+    const parsedCandidate = parseCanonicalFontMarkup(candidateWithoutMetadata);
+    if (!parsedCandidate) {
+        if (!options.silent) console.warn('[Dialogue Colors] Rejected malformed LLM colorize markup.');
         return null;
     }
 
-    const usedAssignments = extractUsedAssignmentsFromColorizedText(cleaned, narratorColor);
-    let finalText = cleaned;
-    if (usedAssignments.length && !/\[COLORS?:([^\]]*)\]/i.test(finalText)) {
-        finalText += `\n[COLORS:${usedAssignments.map(({ name, color }) => formatColorBlockPair(name, color)).filter(Boolean).join(',')}]`;
+    const originalWithoutMetadata = stripLLMColorMetadata(rawText);
+    const parsedOriginal = parseCanonicalFontMarkup(originalWithoutMetadata);
+    if (!parsedOriginal) return null;
+    const quoteIssues = detectLLMQuoteArtifacts(parsedOriginal.projection, parsedCandidate.projection);
+    if (quoteIssues.length || parsedCandidate.projection !== parsedOriginal.projection) {
+        if (!options.silent) {
+            console.warn('[Dialogue Colors] Rejected LLM colorize output due to text drift:', {
+                issues: quoteIssues,
+                originalSample: parsedOriginal.projection.slice(0, 200),
+                candidateSample: parsedCandidate.projection.slice(0, 200),
+            });
+        }
+        return null;
     }
+
+    if (!parsedCandidate.sawFont) {
+        if (candidateWithoutMetadata !== originalWithoutMetadata) return null;
+        return { updatedText: rawText, changed: false, colorized: false, usedAssignments: [] };
+    }
+
+    const usedAssignments = getValidatedAssignmentsForColors(parsedCandidate.colors, narratorColor);
+    const metadata = formatValidatedColorMetadata(usedAssignments);
+    const finalText = `${parsedCandidate.canonicalText}${metadata ? `\n[COLORS:${metadata}]` : ''}`;
 
     return {
         updatedText: finalText,
         changed: finalText !== rawText,
+        colorized: true,
         usedAssignments,
     };
 }
 
+export function shouldUseLocalColorizeFallback(llmResult) {
+    return !llmResult || llmResult.colorized !== true;
+}
+
 export async function colorizeMessageWithLLM(rawText, messageSpeakerName = '') {
     if (typeof generateQuietPrompt !== 'function') return null;
+    if (String(rawText ?? '').length > COLORIZE_BATCH_MAX_CHARACTERS) return null;
 
     // Build character-color list from known entries
     const charList = [];
@@ -469,15 +887,60 @@ export async function colorizeMessageWithLLM(rawText, messageSpeakerName = '') {
         });
     } catch (e) {
         console.warn('[Dialogue Colors] LLM colorize failed:', e);
+        throw e;
+    }
+    if (typeof response !== 'string' || response.length > String(rawText ?? '').length * 4 + 4096) {
+        console.warn('[Dialogue Colors] Rejected oversized LLM colorize response.');
         return null;
     }
 
     return finalizeLLMColorizedText(rawText, response, narratorColor);
 }
 
+function finalizeBatchColorizedBlock(rawText, blockText, narratorColor) {
+    const candidates = new Set([String(blockText ?? '')]);
+    for (const candidate of [...candidates]) {
+        const leadingBreak = candidate.match(/^(?:\r\n?|\n)/)?.[0];
+        if (leadingBreak) candidates.add(candidate.slice(leadingBreak.length));
+    }
+    for (const candidate of [...candidates]) {
+        let withoutTrailingBreak = candidate;
+        for (let count = 0; count < 2; count++) {
+            const trailingBreak = withoutTrailingBreak.match(/(?:\r\n?|\n)$/)?.[0];
+            if (!trailingBreak) break;
+            withoutTrailingBreak = withoutTrailingBreak.slice(0, -trailingBreak.length);
+            candidates.add(withoutTrailingBreak);
+        }
+    }
+    for (const candidate of candidates) {
+        const finalized = finalizeLLMColorizedText(rawText, candidate, narratorColor, { silent: true });
+        if (finalized) return finalized;
+    }
+    return null;
+}
+
+function createBatchColorizeResult(results, status, details = {}) {
+    Object.defineProperties(results, {
+        status: { value: status, enumerable: false },
+        ...(details.error ? { error: { value: details.error, enumerable: false } } : {}),
+        ...(details.errorClassification ? {
+            errorClassification: { value: details.errorClassification, enumerable: false },
+        } : {}),
+    });
+    return results;
+}
+
 export async function colorizeMultipleMessagesWithLLM(messageBatch) {
     // messageBatch = [{ rawText, speakerName, msgIndex }, ...]
-    if (!messageBatch.length || typeof generateQuietPrompt !== 'function') return [];
+    if (!Array.isArray(messageBatch) || !messageBatch.length || typeof generateQuietPrompt !== 'function') {
+        return createBatchColorizeResult([], 'invalid-input');
+    }
+    const inputCharacterCount = messageBatch.reduce((total, entry) => total + String(entry?.rawText ?? '').length, 0);
+    if (messageBatch.length > COLORIZE_BATCH_MAX_MESSAGES
+        || inputCharacterCount > COLORIZE_BATCH_MAX_CHARACTERS
+        || messageBatch.some(entry => String(entry?.rawText ?? '').length > COLORIZE_BATCH_MAX_CHARACTERS)) {
+        return createBatchColorizeResult([], 'invalid-input');
+    }
 
     // Build character-color list
     const charList = [];
@@ -487,7 +950,7 @@ export async function colorizeMultipleMessagesWithLLM(messageBatch) {
     }
     const narratorColor = getNarratorVisual(settings, applyThemeReadabilityAndBrightness)?.color || null;
     if (narratorColor) charList.push(`Narrator=${narratorColor}`);
-    if (!charList.length) return [];
+    if (!charList.length) return createBatchColorizeResult([], 'invalid-input');
 
     const thoughtSymbols = getThoughtDelimiterSymbols();
 
@@ -520,36 +983,52 @@ export async function colorizeMultipleMessagesWithLLM(messageBatch) {
         });
     } catch (e) {
         console.warn('[Dialogue Colors] Batch LLM colorize failed:', e);
-        return [];
+        return createBatchColorizeResult([], 'request-error', {
+            error: e,
+            errorClassification: classifyLlmRequestError(e),
+        });
     }
 
-    if (!response || typeof response !== 'string') return [];
+    if (!response || typeof response !== 'string') return createBatchColorizeResult([], 'validation-error');
+    const maxResponseCharacters = inputCharacterCount * 4 + messageBatch.length * 1024 + 4096;
+    if (response.length > maxResponseCharacters) {
+        console.warn('[Dialogue Colors] Rejected oversized batch colorize response.');
+        return createBatchColorizeResult([], 'validation-error');
+    }
 
-    // Parse response - split by [MSG:N] markers
+    // Parse marker lines as framing only; message content is validated separately.
     const results = [];
-    const msgBlocks = response.split(/\[MSG:(\d+)\]/);
+    const cleanedResponse = unwrapLLMColorizeResponse(response);
+    const markerRegex = /^\[MSG:(\d+)\][ \t]*\r?$/gm;
+    const markers = [...cleanedResponse.matchAll(markerRegex)];
+    if (markers.length !== messageBatch.length || cleanedResponse.slice(0, markers[0]?.index ?? 0).trim()) {
+        return createBatchColorizeResult([], 'validation-error');
+    }
 
-    for (let i = 1; i < msgBlocks.length; i += 2) {
-        const msgIdx = parseInt(msgBlocks[i], 10);
-        const colorizedText = msgBlocks[i + 1]?.trim();
-
-        if (isNaN(msgIdx) || msgIdx >= messageBatch.length) continue;
-        const finalized = finalizeLLMColorizedText(messageBatch[msgIdx].rawText, colorizedText, narratorColor);
-        if (!finalized || !finalized.changed) continue;
+    for (let i = 0; i < markers.length; i++) {
+        const msgIdx = Number.parseInt(markers[i][1], 10);
+        if (msgIdx !== i) return createBatchColorizeResult([], 'validation-error');
+        const blockStart = markers[i].index + markers[i][0].length;
+        const blockEnd = i + 1 < markers.length ? markers[i + 1].index : cleanedResponse.length;
+        const colorizedText = cleanedResponse.slice(blockStart, blockEnd);
+        const finalized = finalizeBatchColorizedBlock(messageBatch[msgIdx].rawText, colorizedText, narratorColor);
+        if (!finalized) return createBatchColorizeResult([], 'validation-error');
 
         results.push({
             msgIndex: messageBatch[msgIdx].msgIndex,
             updatedText: finalized.updatedText,
             changed: finalized.changed,
+            colorized: finalized.colorized,
         });
     }
 
-    return results;
+    return createBatchColorizeResult(results, 'valid');
 }
 
 export async function recolorAllMessages() {
     const ctx = getContext();
     const chat = ctx?.chat || [];
+    const chatBinding = captureChatBinding(ctx);
     if (!chat.length) { toast.info('No messages to recolor.'); return; }
     if (isDomEngine()) {
         syncAllEffectiveColors();
@@ -663,8 +1142,11 @@ export async function recolorAllMessages() {
 
         // Step 4: Persist; DOM font attributes were already updated above.
         if (recoloredCount > 0) {
-            if (typeof ctx?.saveChat === 'function') await ctx.saveChat();
-            toast.info(`Recolored ${recoloredCount} message${recoloredCount !== 1 ? 's' : ''}.`);
+            const saved = await queueCapturedChatSave(chatBinding, { immediate: true });
+            if (isCapturedChatBindingCurrent(chatBinding)) {
+                if (saved) toast.info(`Recolored ${recoloredCount} message${recoloredCount !== 1 ? 's' : ''}.`);
+                else toast.warning(`Recolored ${recoloredCount} message${recoloredCount !== 1 ? 's' : ''}; saving is pending.`);
+            }
         } else if (ambiguousSkippedCount > 0) {
             toast.info(`No messages recolored; skipped ${ambiguousSkippedCount} ambiguous legacy color mapping${ambiguousSkippedCount !== 1 ? 's' : ''}.`);
         } else {
@@ -674,6 +1156,49 @@ export async function recolorAllMessages() {
         setIsRecoloring(false);
         setRecolorButtonBusy(false);
     }
+}
+
+function partitionColorizeEntries(entries) {
+    const batches = [];
+    const directFallback = [];
+    let batch = [];
+    let batchCharacters = 0;
+
+    for (const entry of entries) {
+        const characterCount = String(entry.rawText ?? '').length;
+        if (characterCount > COLORIZE_BATCH_MAX_CHARACTERS) {
+            directFallback.push(entry);
+            continue;
+        }
+        if (batch.length && (batch.length >= COLORIZE_BATCH_MAX_MESSAGES
+            || batchCharacters + characterCount > COLORIZE_BATCH_MAX_CHARACTERS)) {
+            batches.push(batch);
+            batch = [];
+            batchCharacters = 0;
+        }
+        batch.push(entry);
+        batchCharacters += characterCount;
+    }
+    if (batch.length) batches.push(batch);
+    return { batches, directFallback };
+}
+
+function isColorizeRunCurrent(run) {
+    return activeColorizeRun === run
+        && run?.chatGeneration === attributionChatGeneration
+        && isCapturedChatBindingCurrent(run?.binding);
+}
+
+function isColorizeMessageCurrent(chat, entry, expectedText = entry.rawText) {
+    const message = chat?.[entry.msgIndex];
+    return message === entry.message
+        && message?.mes === expectedText
+        && hashMessageText(message?.mes) === (expectedText === entry.rawText ? entry.messageHash : hashMessageText(expectedText))
+        && message?.name === entry.speakerName
+        && (message?.id ?? null) === entry.messageId
+        && (message?.send_date ?? null) === entry.sendDate
+        && (message?.swipe_id ?? null) === entry.swipeId
+        && entry.chatGeneration === attributionChatGeneration;
 }
 
 export async function colorizeMessages(targetMode = 'all') {
@@ -686,7 +1211,17 @@ export async function colorizeMessages(targetMode = 'all') {
         toast.info('Refreshed DOM colors without editing chat text.');
         return;
     }
-    if (isColorizing) { toast.info('Colorize is already running.'); return; }
+    if (isColorizing && (!activeColorizeRun || isColorizeRunCurrent(activeColorizeRun))) {
+        toast.info('Colorize is already running.');
+        return;
+    }
+    const run = {
+        id: ++colorizeRunSequence,
+        binding: captureChatBinding(ctx),
+        chatGeneration: attributionChatGeneration,
+    };
+    if (!run.binding) return;
+    activeColorizeRun = run;
     setIsColorizing(true);
     setColorizeButtonBusy(true);
 
@@ -710,8 +1245,8 @@ export async function colorizeMessages(targetMode = 'all') {
 
         let colorizedCount = 0;
         let skippedNoColor = 0;
-        const updatedMessageIndices = new Set();
-        const eligibleIndices = [];
+        const updatedMessages = new Map();
+        const eligibleEntries = [];
         for (let i = startIdx; i < chat.length; i++) {
             const msg = chat[i];
             if (!msg || msg.is_user) continue;
@@ -719,61 +1254,143 @@ export async function colorizeMessages(targetMode = 'all') {
             if (!rawText) continue;
             const existingFontColors = collectFontColorsFromText(rawText);
             if (existingFontColors.size > 0) continue;
-            eligibleIndices.push(i);
+            eligibleEntries.push({
+                rawText,
+                speakerName: msg.name,
+                msgIndex: i,
+                message: msg,
+                messageHash: hashMessageText(rawText),
+                messageId: msg.id ?? null,
+                sendDate: msg.send_date ?? null,
+                swipeId: msg.swipe_id ?? null,
+                chatGeneration: run.chatGeneration,
+            });
         }
-        // Batch colorize with LLM first
-        if (eligibleIndices.length > 0) {
-            const messageBatch = eligibleIndices.map(i => ({
-                rawText: chat[i].mes || '',
-                speakerName: chat[i].name,
-                msgIndex: i
-            }));
+        if (eligibleEntries.length > 0) {
+            toast.info(`Colorizing ${eligibleEntries.length} message${eligibleEntries.length !== 1 ? 's' : ''} in batches...`, '', { timeOut: 3000 });
+            const { batches, directFallback } = partitionColorizeEntries(eligibleEntries);
+            const fallbackEntries = [...directFallback];
+            const skipIndividualLlm = new Set(directFallback);
+            const llmBudget = createColorizeRequestBudget();
 
-            toast.info(`Colorizing ${messageBatch.length} message${messageBatch.length !== 1 ? 's' : ''} in batch...`, '', { timeOut: 3000 });
+            for (const batch of batches) {
+                if (!isColorizeRunCurrent(run)) return;
+                const resultsByIndex = new Map();
+                let pendingBatch = batch;
+                let deterministicValidationFailure = false;
+                let permanentRequestFailure = llmBudget.stopped;
 
-            let batchResults = [];
-            try {
-                batchResults = await colorizeMultipleMessagesWithLLM(messageBatch);
-            } catch (e) {
-                console.warn('[Dialogue Colors] Batch colorize failed:', e);
-            }
+                for (let attempt = 0; attempt < COLORIZE_BATCH_MAX_ATTEMPTS && pendingBatch.length; attempt++) {
+                    if (!reserveColorizeRequest(llmBudget, { retry: attempt > 0 })) break;
+                    let batchResults = [];
+                    let thrownRequestFailure = null;
+                    try {
+                        batchResults = await colorizeMultipleMessagesWithLLM(pendingBatch);
+                    } catch (error) {
+                        console.warn('[Dialogue Colors] Batch colorize failed:', error);
+                        thrownRequestFailure = recordColorizeRequestFailure(llmBudget, error);
+                    }
+                    if (!isColorizeRunCurrent(run)) return;
+                    if (thrownRequestFailure) {
+                        if (!thrownRequestFailure.retryable) {
+                            permanentRequestFailure = true;
+                            break;
+                        }
+                        continue;
+                    }
 
-            // Apply batch results
-            const capturedTextByIndex = new Map(messageBatch.map(entry => [entry.msgIndex, entry.rawText]));
-            const processedIndices = new Set();
-            for (const result of batchResults) {
-                if (result.changed && result.msgIndex != null) {
-                    const target = chat[result.msgIndex];
-                    // Skip if the message was deleted or edited while the LLM call ran.
-                    if (!target || target.mes !== capturedTextByIndex.get(result.msgIndex)) continue;
+                    if (batchResults?.status === 'validation-error' || batchResults?.status === 'invalid-input') {
+                        deterministicValidationFailure = true;
+                        llmBudget.stopped = true;
+                        break;
+                    }
+                    if (batchResults?.status === 'request-error') {
+                        const classification = recordColorizeRequestFailure(
+                            llmBudget,
+                            batchResults.errorClassification || batchResults.error,
+                        );
+                        if (!classification.retryable) {
+                            permanentRequestFailure = true;
+                            break;
+                        }
+                        continue;
+                    }
+                    if (batchResults?.status !== 'valid') {
+                        deterministicValidationFailure = true;
+                        llmBudget.stopped = true;
+                        break;
+                    }
+
+                    const pendingIndices = new Set(pendingBatch.map(entry => entry.msgIndex));
+                    for (const result of batchResults) {
+                        if (typeof result?.changed === 'boolean'
+                            && typeof result.updatedText === 'string'
+                            && pendingIndices.has(result.msgIndex)
+                            && !resultsByIndex.has(result.msgIndex)) {
+                            resultsByIndex.set(result.msgIndex, result);
+                        }
+                    }
+                    pendingBatch = pendingBatch.filter(entry => !resultsByIndex.has(entry.msgIndex)
+                        && isColorizeMessageCurrent(chat, entry));
+                }
+
+                for (const entry of batch) {
+                    const result = resultsByIndex.get(entry.msgIndex);
+                    if (!result) {
+                        fallbackEntries.push(entry);
+                        if (deterministicValidationFailure || permanentRequestFailure || llmBudget.stopped) {
+                            skipIndividualLlm.add(entry);
+                        }
+                        continue;
+                    }
+                    if (result.colorized !== true) {
+                        // A byte-identical no-font response is valid syntax but
+                        // did not complete colorization. Use local attribution
+                        // directly; another paid request cannot improve certainty.
+                        fallbackEntries.push(entry);
+                        skipIndividualLlm.add(entry);
+                        continue;
+                    }
+                    if (!result.changed) continue;
+                    if (!isColorizeRunCurrent(run)) return;
+                    const target = chat[entry.msgIndex];
+                    if (!isColorizeMessageCurrent(chat, entry)) continue;
                     target.mes = result.updatedText;
                     colorizedCount++;
-                    processedIndices.add(result.msgIndex);
-                    updatedMessageIndices.add(result.msgIndex);
+                    updatedMessages.set(entry.msgIndex, { message: target, text: result.updatedText });
+                    void queueCapturedChatSave(run.binding);
                 }
             }
 
-            // Fallback: process messages that failed in batch individually
-            for (let idx = 0; idx < eligibleIndices.length; idx++) {
-                const i = eligibleIndices[idx];
-                if (processedIndices.has(i)) continue;
+            let individualLLMFallbacks = 0;
+            for (const entry of fallbackEntries) {
+                if (!isColorizeRunCurrent(run)) return;
+                if (!isColorizeMessageCurrent(chat, entry)) continue;
 
-                const msg = chat[i];
-                const rawText = msg.mes || '';
-
-                // Try individual LLM, then regex fallback
-                let result = null;
-                try {
-                    result = await colorizeMessageWithLLM(rawText, msg.name);
-                } catch (e) {
-                    console.warn('[Dialogue Colors] Individual LLM colorize failed:', e);
+                let llmResult = null;
+                let attemptedIndividualLlm = false;
+                if (entry.rawText.length <= COLORIZE_BATCH_MAX_CHARACTERS
+                    && individualLLMFallbacks < COLORIZE_MAX_INDIVIDUAL_LLM_FALLBACKS
+                    && !skipIndividualLlm.has(entry)
+                    && reserveColorizeRequest(llmBudget)) {
+                    attemptedIndividualLlm = true;
+                    individualLLMFallbacks++;
+                    try {
+                        llmResult = await colorizeMessageWithLLM(entry.rawText, entry.speakerName);
+                    } catch (error) {
+                        console.warn('[Dialogue Colors] Individual LLM colorize failed:', error);
+                        recordColorizeRequestFailure(llmBudget, error);
+                    }
+                    if (!isColorizeRunCurrent(run)) return;
+                    if (!isColorizeMessageCurrent(chat, entry)) continue;
                 }
+                if (attemptedIndividualLlm && llmResult === null) llmBudget.stopped = true;
 
-                // Bail if the message was edited or deleted while the LLM call ran.
-                if (chat[i] !== msg || msg.mes !== rawText) continue;
-
-                if (!result || !result.changed) {
-                    result = colorizeMessageText(rawText, msg.name, { autoAddMessageSpeaker: true });
+                let result = llmResult;
+                if (shouldUseLocalColorizeFallback(llmResult)) {
+                    if (!isColorizeRunCurrent(run)
+                        || !isColorizeMessageCurrent(chat, entry)) continue;
+                    result = colorizeMessageText(entry.rawText, entry.speakerName, { autoAddMessageSpeaker: true });
                     if (result.createdCharacters) createdCharacters = true;
                 }
 
@@ -781,35 +1398,46 @@ export async function colorizeMessages(targetMode = 'all') {
                     if (result.hadDialogueMatches && !result.hadResolvableSpeaker) skippedNoColor++;
                     continue;
                 }
+                if (!isColorizeRunCurrent(run)
+                    || !isColorizeMessageCurrent(chat, entry)) continue;
 
-                msg.mes = result.updatedText;
+                entry.message.mes = result.updatedText;
                 colorizedCount++;
-                updatedMessageIndices.add(i);
+                updatedMessages.set(entry.msgIndex, { message: entry.message, text: result.updatedText });
+                void queueCapturedChatSave(run.binding);
             }
         }
 
-        if (createdCharacters) {
-            commit();
-        }
+        if (!isColorizeRunCurrent(run)) return;
+        if (createdCharacters) commit();
 
         // Persist and refresh only the affected message DOM nodes.
         if (colorizedCount > 0) {
-            if (typeof ctx?.saveChat === 'function') await ctx.saveChat();
-            for (const index of updatedMessageIndices) {
-                if (chat[index]) await refreshMessageDom(index, chat[index]);
+            const saved = await queueCapturedChatSave(run.binding, { immediate: true });
+            if (!isColorizeRunCurrent(run)) return;
+            for (const [index, updated] of updatedMessages) {
+                if (!isColorizeRunCurrent(run)) return;
+                if (chat[index] !== updated.message || updated.message.mes !== updated.text) continue;
+                await refreshMessageDom(index, updated.message);
             }
+            if (!isColorizeRunCurrent(run)) return;
             refreshTransientNarratorCount(chat);
             scheduleCustomFontRefresh(0);
             updateLegend();
-            toast.info(`Colorized ${colorizedCount} message${colorizedCount !== 1 ? 's' : ''}${skippedNoColor > 0 ? ` (${skippedNoColor} skipped — no speaker/color match)` : ''}.`);
+            const suffix = skippedNoColor > 0 ? ` (${skippedNoColor} skipped - no speaker/color match)` : '';
+            if (saved) toast.info(`Colorized ${colorizedCount} message${colorizedCount !== 1 ? 's' : ''}${suffix}.`);
+            else toast.warning(`Colorized ${colorizedCount} message${colorizedCount !== 1 ? 's' : ''}${suffix}; saving is pending.`);
         } else if (skippedNoColor > 0) {
             toast.info(`No uncolored dialogue found; ${skippedNoColor} message${skippedNoColor !== 1 ? 's' : ''} skipped (no known speaker/color could be resolved).`);
         } else {
             toast.info('No uncolored messages found.');
         }
     } finally {
-        setIsColorizing(false);
-        setColorizeButtonBusy(false);
+        if (activeColorizeRun === run) {
+            activeColorizeRun = null;
+            setIsColorizing(false);
+            setColorizeButtonBusy(false);
+        }
     }
 }
 
@@ -818,12 +1446,15 @@ export function onNewMessage() {
     const scheduledContext = getContext();
     const scheduledChat = scheduledContext?.chat;
     const scheduledStorageKey = getStorageKey();
+    const scheduledChatGeneration = attributionChatGeneration;
     setTimeout(async () => {
         const ctx = getContext();
         if (!settings.enabled || !settings.autoScanNewMessages
-            || ctx?.chat !== scheduledChat || getStorageKey() !== scheduledStorageKey) return;
+            || ctx?.chat !== scheduledChat || getStorageKey() !== scheduledStorageKey
+            || scheduledChatGeneration !== attributionChatGeneration) return;
         const chat = ctx?.chat || [];
         if (!chat.length) return;
+        const chatBinding = captureChatBinding(ctx);
         const lastMsg = chat[chat.length - 1];
         const text = lastMsg?.mes || '';
         const sigId = lastMsg?.id ?? lastMsg?.send_date ?? '';
@@ -877,6 +1508,7 @@ export function onNewMessage() {
                     lastMsg.mes = latestRemap.updatedText;
                     setLastProcessedMessageSignature(`${chat.length}|${sigId}|${lastMsg.mes}`);
                     latestRemapChanged = true;
+                    void queueCapturedChatSave(chatBinding);
                 }
                 updateVisibleMessageColors(chat.length - 1, remapReplacements);
             }
@@ -893,8 +1525,8 @@ export function onNewMessage() {
             scheduleDomRefreshSeries(0);
             return;
         }
-        if (latestRemapChanged && typeof ctx?.saveChat === 'function') {
-            await ctx.saveChat();
+        if (latestRemapChanged) {
+            await queueCapturedChatSave(chatBinding, { immediate: true });
         }
 
         // Auto-colorize fallback: if model produced no color output at all
@@ -915,6 +1547,18 @@ export function onNewMessage() {
                 const mesIndex = chat.length - 1;
                 const capturedChat = chat;
                 const colorizeInput = lastMsg.mes || text;
+                const autoColorizeBinding = chatBinding;
+                const autoColorizeEntry = {
+                    rawText: colorizeInput,
+                    speakerName: lastMsg.name,
+                    msgIndex: mesIndex,
+                    message: lastMsg,
+                    messageHash: hashMessageText(colorizeInput),
+                    messageId: lastMsg.id ?? null,
+                    sendDate: lastMsg.send_date ?? null,
+                    swipeId: lastMsg.swipe_id ?? null,
+                    chatGeneration: attributionChatGeneration,
+                };
                 try {
                     syncAllEffectiveColors();
                     // Pre-register all unique non-user speaker names for attribution
@@ -933,7 +1577,10 @@ export function onNewMessage() {
                     } catch (e) {
                         console.warn('[Dialogue Colors] LLM auto-colorize failed, falling back to regex:', e);
                     }
-                    if (!result || !result.changed) {
+                    if (shouldUseLocalColorizeFallback(result)) {
+                        const currentContext = getContext();
+                        if (!isCapturedChatBindingCurrent(autoColorizeBinding, currentContext)
+                            || !isColorizeMessageCurrent(capturedChat, autoColorizeEntry)) return;
                         result = colorizeMessageText(colorizeInput, lastMsg.name, { autoAddMessageSpeaker: true });
                         if (result.createdCharacters) {
                             commit();
@@ -943,18 +1590,18 @@ export function onNewMessage() {
                         // Revalidate: bail out rather than clobber a swiped/edited message
                         // or render into a DOM node that now belongs to a different message.
                         const ctx2 = getContext();
-                        if (ctx2?.chat !== capturedChat || capturedChat[mesIndex] !== lastMsg || lastMsg.mes !== colorizeInput) {
+                        if (!isCapturedChatBindingCurrent(autoColorizeBinding, ctx2)
+                            || !isColorizeMessageCurrent(capturedChat, autoColorizeEntry)) {
                             return;
                         }
                         lastMsg.mes = result.updatedText;
                         setLastProcessedMessageSignature(`${capturedChat.length}|${sigId}|${lastMsg.mes}`);
-
-                        if (typeof ctx2?.saveChat === 'function') {
-                            await ctx2.saveChat();
-                        }
-
+                        const saved = await queueCapturedChatSave(autoColorizeBinding, { immediate: true });
+                        if (!isCapturedChatBindingCurrent(autoColorizeBinding)
+                            || !isColorizeMessageCurrent(capturedChat, autoColorizeEntry, result.updatedText)) return;
                         await refreshMessageDom(mesIndex, lastMsg);
-                        toast.info('Auto-colorized latest message.');
+                        if (saved) toast.info('Auto-colorized latest message.');
+                        else toast.warning('Auto-colorized latest message; saving is pending.');
                     }
                 } finally {
                     setIsAutoColorizing(false);

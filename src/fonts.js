@@ -6,41 +6,223 @@ import { characterColors, loadedGoogleFonts, settings } from './state.js';
 import { applyTextStyle, clearTextStyle, TEXT_STYLE_MARKER_ATTRIBUTE } from './text-style-rendering.js';
 import { getGoogleFontFamily, normalizeGoogleFontName, normalizeHexColor } from './utils.js';
 
-const invalidGoogleFontNames = new Set(['']);
+export const REMOTE_FONT_REQUEST_LIMIT = 16;
+const REMOTE_FONT_LINK_SELECTOR = 'link[data-dc-google-font], link[data-dc-google-font-fallback]';
+const remoteFontRequests = new Set();
+let remoteFontTrackingInitialized = false;
+
+function getRemoteFontLinkKey(link) {
+    return normalizeGoogleFontName(link?.dataset?.dcGoogleFont || link?.dataset?.dcGoogleFontFallback).toLowerCase();
+}
+
+function initializeRemoteFontTracking() {
+    if (remoteFontTrackingInitialized || typeof document === 'undefined') return;
+    remoteFontTrackingInitialized = true;
+    loadedGoogleFonts.clear();
+    const linksByKey = new Map();
+    document.querySelectorAll(REMOTE_FONT_LINK_SELECTOR).forEach(link => {
+        const key = getRemoteFontLinkKey(link);
+        if (!key) {
+            link.remove();
+            return;
+        }
+        const existing = linksByKey.get(key);
+        if (existing) {
+            if (link.hasAttribute('data-dc-google-font-fallback')
+                && !existing.hasAttribute('data-dc-google-font-fallback')) {
+                existing.remove();
+                linksByKey.set(key, link);
+            } else {
+                link.remove();
+            }
+            return;
+        }
+        linksByKey.set(key, link);
+    });
+    let retainedCount = 0;
+    linksByKey.forEach((link, key) => {
+        if (retainedCount >= REMOTE_FONT_REQUEST_LIMIT) {
+            link.remove();
+            loadedGoogleFonts.delete(key);
+            return;
+        }
+        retainedCount++;
+        remoteFontRequests.add(key);
+        link.dataset.dcGoogleFont = key;
+        delete link.dataset.dcGoogleFontFallback;
+        link.onload = null;
+        link.onerror = null;
+        if (link.dataset.dcGoogleFontState !== 'failed') loadedGoogleFonts.add(key);
+    });
+}
+
+export function syncRemoteFontLoadingPolicy() {
+    if (typeof document === 'undefined') return false;
+    initializeRemoteFontTracking();
+    const enabled = settings.allowRemoteFonts === true;
+    document.querySelectorAll(REMOTE_FONT_LINK_SELECTOR).forEach(link => {
+        link.disabled = !enabled || link.dataset.dcGoogleFontState === 'failed';
+    });
+    return enabled;
+}
 
 export function loadGoogleFont(fontName) {
-    const rawName = String(fontName ?? '');
-    if (invalidGoogleFontNames.has(rawName)) return '';
-    const normalized = normalizeGoogleFontName(rawName);
-    if (!normalized) invalidGoogleFontNames.add(rawName);
-    if (!normalized || typeof document === 'undefined' || !document.head) return normalized;
+    const normalized = normalizeGoogleFontName(fontName);
+    if (!normalized || settings.allowRemoteFonts !== true || typeof document === 'undefined' || !document.head) return normalized;
+    initializeRemoteFontTracking();
     const key = normalized.toLowerCase();
-    if (loadedGoogleFonts.has(key)) return normalized;
+    const existing = [...document.querySelectorAll(REMOTE_FONT_LINK_SELECTOR)]
+        .find(link => getRemoteFontLinkKey(link) === key);
+    if (existing) {
+        existing.disabled = existing.dataset.dcGoogleFontState === 'failed';
+        return normalized;
+    }
+    if (remoteFontRequests.has(key) || remoteFontRequests.size >= REMOTE_FONT_REQUEST_LIMIT) return normalized;
+
+    remoteFontRequests.add(key);
     loadedGoogleFonts.add(key);
     const family = encodeURIComponent(normalized).replace(/%20/g, '+');
     const link = document.createElement('link');
     link.rel = 'stylesheet';
+    link.referrerPolicy = 'no-referrer';
     link.href = `https://fonts.googleapis.com/css2?family=${family}:ital,wght@0,400;0,700;1,400;1,700&display=swap`;
     link.dataset.dcGoogleFont = key;
-    link.onerror = () => {
-        const fallback = document.createElement('link');
-        fallback.rel = 'stylesheet';
-        fallback.href = `https://fonts.googleapis.com/css2?family=${family}&display=swap`;
-        fallback.dataset.dcGoogleFontFallback = key;
-        document.head.appendChild(fallback);
+    link.dataset.dcGoogleFontState = 'loading';
+    link.onload = () => {
+        link.dataset.dcGoogleFontState = 'loaded';
+        link.disabled = settings.allowRemoteFonts !== true;
+        link.onload = null;
+        link.onerror = null;
     };
-    document.head.appendChild(link);
+    link.onerror = () => {
+        loadedGoogleFonts.delete(key);
+        link.dataset.dcGoogleFontState = 'failed';
+        link.disabled = true;
+        link.onload = null;
+        link.onerror = null;
+        console.warn(`[Dialogue Colors] Google Font could not be loaded: ${normalized}`);
+    };
+    try {
+        document.head.appendChild(link);
+    } catch (error) {
+        loadedGoogleFonts.delete(key);
+        link.dataset.dcGoogleFontState = 'failed';
+        console.warn(`[Dialogue Colors] Google Font request could not be started: ${normalized}`, error);
+    }
     return normalized;
 }
 
 export let customFontRefreshTimer = null;
 
-function clearCustomFontOnly(fontEl) {
-    if (!fontEl?.hasAttribute?.('data-dc-font')) return false;
-    fontEl.style.fontFamily = '';
-    if (!fontEl.getAttribute('style')) fontEl.removeAttribute('style');
-    fontEl.removeAttribute('data-dc-font');
+const FONT_FAMILY_STATE_ATTRIBUTE = 'data-dc-font';
+const PREVIEW_COLOR_STATE_ATTRIBUTE = 'data-dc-preview-color';
+const ARIA_LABEL_STATE_ATTRIBUTE = 'data-dc-aria-label';
+const SPEAKER_NAME_STATE_ATTRIBUTE = 'data-dc-speaker-name-state';
+const CARD_COLOR_STATE_ATTRIBUTE = 'data-dc-card-color-state';
+const CARD_FONT_STATE_ATTRIBUTE = 'data-dc-card-font-state';
+const CARD_BORDER_STATE_ATTRIBUTE = 'data-dc-card-border-state';
+const CARD_SHADOW_STATE_ATTRIBUTE = 'data-dc-card-shadow-state';
+
+function readOwnedStyleState(element, attribute) {
+    try {
+        const state = JSON.parse(element.getAttribute(attribute) || '');
+        if (!state || typeof state !== 'object' || typeof state.applied !== 'string') return null;
+        return {
+            value: typeof state.value === 'string' ? state.value : '',
+            priority: typeof state.priority === 'string' ? state.priority : '',
+            applied: state.applied,
+            appliedPriority: typeof state.appliedPriority === 'string' ? state.appliedPriority : '',
+        };
+    } catch (_) {
+        return null;
+    }
+}
+
+function applyOwnedStyle(element, property, value, attribute) {
+    const currentValue = element.style.getPropertyValue(property);
+    const currentPriority = element.style.getPropertyPriority(property);
+    let state = readOwnedStyleState(element, attribute);
+    if (!state || currentValue !== state.applied || currentPriority !== state.appliedPriority) {
+        state = { value: currentValue, priority: currentPriority, applied: '', appliedPriority: '' };
+    }
+
+    element.style.setProperty(property, value);
+    state.applied = element.style.getPropertyValue(property);
+    state.appliedPriority = element.style.getPropertyPriority(property);
+    let changed = currentValue !== state.applied || currentPriority !== state.appliedPriority;
+    const encodedState = JSON.stringify(state);
+    if (element.getAttribute(attribute) !== encodedState) {
+        element.setAttribute(attribute, encodedState);
+        changed = true;
+    }
+    return changed;
+}
+
+function clearOwnedStyle(element, property, attribute) {
+    if (!element.hasAttribute(attribute)) return false;
+    const state = readOwnedStyleState(element, attribute);
+    if (state
+        && element.style.getPropertyValue(property) === state.applied
+        && element.style.getPropertyPriority(property) === state.appliedPriority) {
+        if (state.value) element.style.setProperty(property, state.value, state.priority);
+        else element.style.removeProperty(property);
+    }
+    element.removeAttribute(attribute);
+    if (!element.getAttribute('style')) element.removeAttribute('style');
     return true;
+}
+
+function readOwnedAttributeState(element, stateAttribute) {
+    try {
+        const state = JSON.parse(element.getAttribute(stateAttribute) || '');
+        if (!state || typeof state !== 'object' || typeof state.applied !== 'string') return null;
+        return {
+            hadValue: state.hadValue === true,
+            value: typeof state.value === 'string' ? state.value : '',
+            applied: state.applied,
+        };
+    } catch (_) {
+        return null;
+    }
+}
+
+function applyOwnedAttribute(element, name, value, stateAttribute) {
+    const hasValue = element.hasAttribute(name);
+    const currentValue = element.getAttribute(name) || '';
+    let state = readOwnedAttributeState(element, stateAttribute);
+    if (!state || !hasValue || currentValue !== state.applied) {
+        state = { hadValue: hasValue, value: currentValue, applied: value };
+    } else {
+        state.applied = value;
+    }
+
+    let changed = false;
+    if (!hasValue || currentValue !== value) {
+        element.setAttribute(name, value);
+        changed = true;
+    }
+    const encodedState = JSON.stringify(state);
+    if (element.getAttribute(stateAttribute) !== encodedState) {
+        element.setAttribute(stateAttribute, encodedState);
+        changed = true;
+    }
+    return changed;
+}
+
+function clearOwnedAttribute(element, name, stateAttribute) {
+    if (!element.hasAttribute(stateAttribute)) return false;
+    const state = readOwnedAttributeState(element, stateAttribute);
+    if (state && element.hasAttribute(name) && element.getAttribute(name) === state.applied) {
+        if (state.hadValue) element.setAttribute(name, state.value);
+        else element.removeAttribute(name);
+    }
+    element.removeAttribute(stateAttribute);
+    return true;
+}
+
+function clearCustomFontOnly(fontEl) {
+    if (!fontEl) return false;
+    return clearOwnedStyle(fontEl, 'font-family', FONT_FAMILY_STATE_ATTRIBUTE);
 }
 
 export function clearCustomFontTag(fontEl) {
@@ -48,26 +230,15 @@ export function clearCustomFontTag(fontEl) {
     let changed = clearGradientText(fontEl);
     if (clearTextStyle(fontEl)) changed = true;
     if (clearCustomFontOnly(fontEl)) changed = true;
-    if (fontEl.hasAttribute('data-dc-preview-color')) {
-        fontEl.style.color = '';
-        fontEl.removeAttribute('data-dc-preview-color');
-        changed = true;
-    }
-    if (fontEl.hasAttribute('data-dc-aria-label')) {
-        fontEl.removeAttribute('aria-label');
-        fontEl.removeAttribute('data-dc-aria-label');
-        changed = true;
-    }
-    if (fontEl.hasAttribute('data-dc-speaker-name')) {
-        fontEl.removeAttribute('data-dc-speaker-name');
-        changed = true;
-    }
+    if (clearOwnedStyle(fontEl, 'color', PREVIEW_COLOR_STATE_ATTRIBUTE)) changed = true;
+    if (clearOwnedAttribute(fontEl, 'aria-label', ARIA_LABEL_STATE_ATTRIBUTE)) changed = true;
+    if (clearOwnedAttribute(fontEl, 'data-dc-speaker-name', SPEAKER_NAME_STATE_ATTRIBUTE)) changed = true;
     return changed;
 }
 
 export function clearCustomFontsFromFontTags(root = document) {
     let changed = false;
-    root?.querySelectorAll?.(`font[data-dc-font], font[data-dc-gradient], font[${TEXT_STYLE_MARKER_ATTRIBUTE}], font[data-dc-aria-label], font[data-dc-speaker-name], font[data-dc-preview-color]`).forEach(fontEl => {
+    root?.querySelectorAll?.(`font[data-dc-font], font[data-dc-gradient], font[${TEXT_STYLE_MARKER_ATTRIBUTE}], font[data-dc-aria-label], font[data-dc-speaker-name-state], font[data-dc-preview-color]`).forEach(fontEl => {
         if (clearCustomFontTag(fontEl)) changed = true;
     });
     return changed;
@@ -86,14 +257,7 @@ export function applyCustomFontsToFontTags(mesText, rawText = '') {
         const family = getGoogleFontFamily(font);
         if (family) {
             loadGoogleFont(font);
-            if (fontEl.style.fontFamily !== family) {
-                fontEl.style.fontFamily = family;
-                changed = true;
-            }
-            if (!fontEl.hasAttribute('data-dc-font')) {
-                fontEl.setAttribute('data-dc-font', '1');
-                changed = true;
-            }
+            if (applyOwnedStyle(fontEl, 'font-family', family, FONT_FAMILY_STATE_ATTRIBUTE)) changed = true;
         } else if (clearCustomFontOnly(fontEl)) {
             changed = true;
         }
@@ -101,40 +265,25 @@ export function applyCustomFontsToFontTags(mesText, rawText = '') {
         if (textStyleResult.changed) changed = true;
         if (rendering?.entry) {
             const displayColor = getVisualRenderState(rendering.entry, { target: 'chat' }).fallbackColor;
-            if (fontEl.style.color !== displayColor) {
-                fontEl.style.color = displayColor;
-                changed = true;
-            }
-            fontEl.setAttribute('data-dc-preview-color', '1');
-        } else if (fontEl.hasAttribute('data-dc-preview-color')) {
-            fontEl.style.color = '';
-            fontEl.removeAttribute('data-dc-preview-color');
+            if (applyOwnedStyle(fontEl, 'color', displayColor, PREVIEW_COLOR_STATE_ATTRIBUTE)) changed = true;
+        } else if (clearOwnedStyle(fontEl, 'color', PREVIEW_COLOR_STATE_ATTRIBUTE)) {
             changed = true;
         }
         const gradientResult = applyGradientText(fontEl, rendering?.entry, { target: 'chat' });
         if (gradientResult.changed) changed = true;
         const generatedLabel = rendering?.entry?.name ? `${rendering.entry.name}: ${fontEl.textContent.trim()}` : '';
         const generatedSpeakerName = rendering?.entry?.name || '';
-        if (generatedSpeakerName) {
-            if (fontEl.getAttribute('data-dc-speaker-name') !== generatedSpeakerName) {
-                fontEl.setAttribute('data-dc-speaker-name', generatedSpeakerName);
-                changed = true;
-            }
-        } else if (fontEl.hasAttribute('data-dc-speaker-name')) {
-            fontEl.removeAttribute('data-dc-speaker-name');
-            changed = true;
+        const ownsSpeakerName = fontEl.hasAttribute(SPEAKER_NAME_STATE_ATTRIBUTE);
+        if (generatedSpeakerName && (!fontEl.hasAttribute('data-dc-speaker-name') || ownsSpeakerName)) {
+            if (applyOwnedAttribute(fontEl, 'data-dc-speaker-name', generatedSpeakerName, SPEAKER_NAME_STATE_ATTRIBUTE)) changed = true;
+        } else if (!generatedSpeakerName && ownsSpeakerName) {
+            if (clearOwnedAttribute(fontEl, 'data-dc-speaker-name', SPEAKER_NAME_STATE_ATTRIBUTE)) changed = true;
         }
-        const ownsAriaLabel = fontEl.hasAttribute('data-dc-aria-label');
+        const ownsAriaLabel = fontEl.hasAttribute(ARIA_LABEL_STATE_ATTRIBUTE);
         if (generatedLabel && (!fontEl.hasAttribute('aria-label') || ownsAriaLabel)) {
-            if (fontEl.getAttribute('aria-label') !== generatedLabel) {
-                fontEl.setAttribute('aria-label', generatedLabel);
-                changed = true;
-            }
-            fontEl.setAttribute('data-dc-aria-label', '1');
+            if (applyOwnedAttribute(fontEl, 'aria-label', generatedLabel, ARIA_LABEL_STATE_ATTRIBUTE)) changed = true;
         } else if (!generatedLabel && ownsAriaLabel) {
-            fontEl.removeAttribute('aria-label');
-            fontEl.removeAttribute('data-dc-aria-label');
-            changed = true;
+            if (clearOwnedAttribute(fontEl, 'aria-label', ARIA_LABEL_STATE_ATTRIBUTE)) changed = true;
         }
     }
     return changed;
@@ -181,13 +330,13 @@ export function clearSingleCharacterCardStyles(card) {
         const nameEl = card.querySelector('.ch_name');
         if (nameEl) {
             clearGradientText(nameEl);
-            nameEl.style.color = '';
-            nameEl.style.fontFamily = '';
+            clearOwnedStyle(nameEl, 'color', CARD_COLOR_STATE_ATTRIBUTE);
+            clearOwnedStyle(nameEl, 'font-family', CARD_FONT_STATE_ATTRIBUTE);
         }
         const avatarImg = card.querySelector('.avatar img');
         if (avatarImg) {
-            avatarImg.style.boxShadow = '';
-            avatarImg.style.borderColor = '';
+            clearOwnedStyle(avatarImg, 'box-shadow', CARD_SHADOW_STATE_ATTRIBUTE);
+            clearOwnedStyle(avatarImg, 'border-color', CARD_BORDER_STATE_ATTRIBUTE);
         }
         card.removeAttribute('data-dc-card-styled');
     }
@@ -215,22 +364,23 @@ export function styleAllCharacterCards() {
             const color = getVisualRenderState(entry, { target: 'chat' }).fallbackColor;
             
             // Apply name color
-            nameEl.style.color = color;
+            applyOwnedStyle(nameEl, 'color', color, CARD_COLOR_STATE_ATTRIBUTE);
             applyGradientText(nameEl, entry, { target: 'chat' });
             
             // Apply custom font if set
-            if (entry.font) {
+            const fontFamily = getGoogleFontFamily(entry.font);
+            if (fontFamily) {
                 loadGoogleFont(entry.font);
-                nameEl.style.fontFamily = getGoogleFontFamily(entry.font);
+                applyOwnedStyle(nameEl, 'font-family', fontFamily, CARD_FONT_STATE_ATTRIBUTE);
             } else {
-                nameEl.style.fontFamily = '';
+                clearOwnedStyle(nameEl, 'font-family', CARD_FONT_STATE_ATTRIBUTE);
             }
             
             // Apply avatar border and shadow ring
             const avatarImg = card.querySelector('.avatar img');
             if (avatarImg) {
-                avatarImg.style.borderColor = color;
-                avatarImg.style.boxShadow = `0 0 6px ${color}`;
+                applyOwnedStyle(avatarImg, 'border-color', color, CARD_BORDER_STATE_ATTRIBUTE);
+                applyOwnedStyle(avatarImg, 'box-shadow', `0 0 6px ${color}`, CARD_SHADOW_STATE_ATTRIBUTE);
             }
             
             // Mark with a data attribute so we know it's styled by us

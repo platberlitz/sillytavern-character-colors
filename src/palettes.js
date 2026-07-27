@@ -2,7 +2,7 @@
 import { clearSpeakerRegexCache } from './attribution.js';
 import { simulateColorVision } from './color-vision.js';
 import { applyGradientPresetToEntry, cloneGradient, mapGradientStops, normalizeGradient, serializeGradient, synchronizeGradientEffectiveColors } from './gradients.js';
-import { applyGroupProfile, normalizeGroupName, normalizeGroupProfiles, resolveGroupAutomation, resolveGroupProfile } from './group-profiles.js';
+import { applyGroupProfile, migrateLegacyRegistryEntries, normalizeGroupName, normalizeGroupProfiles, normalizeRegistryIdentity, normalizeRegistryIdentityName, resolveGroupAutomation, resolveGroupProfile } from './group-profiles.js';
 import { createRestoreSnapshot, showUndoToast } from './history.js';
 import { applyLiveColorChangesFromSnapshot, captureEffectiveColorSnapshot, commit, repaintDomAfterCharacterDataChange } from './live-colors.js';
 import { callLLMWithProfile } from './llm.js';
@@ -192,7 +192,7 @@ export function getNextColor() {
 export function checkColorConflicts() {
     const report = getPerceptualConflictReport();
     const seen = new Set();
-    return report.conflicts.filter(conflict => {
+    return report.conflicts.filter(conflict => conflict.type !== 'readability').filter(conflict => {
         const key = [conflict.left.id, conflict.right.id].sort().join('\u0000');
         if (seen.has(key)) return false;
         seen.add(key);
@@ -205,27 +205,43 @@ function getConflictSurfaceColor() {
 }
 
 export function getPerceptualConflictReport(options = {}) {
-    const conflictVisuals = { ...characterColors };
     const narrator = getNarratorVisual(settings, applyThemeReadabilityAndBrightness);
-    if (narrator) conflictVisuals[NARRATOR_VISUAL_ID] = narrator;
+    const conflictVisuals = narrator ? [narrator] : [];
+    const characterKeys = Object.keys(characterColors).sort((left, right) => left.localeCompare(right));
+    for (const key of characterKeys) {
+        const entry = characterColors[key] && typeof characterColors[key] === 'object' ? characterColors[key] : {};
+        conflictVisuals.push({ ...entry, id: key, label: entry.name || key, kind: 'character' });
+    }
     const report = createPerceptualConflictReport(conflictVisuals, {
         modes: options.modes,
         cvdSeverity: options.cvdSeverity ?? 1,
         sampleCount: options.sampleCount,
         conflictDeltaE: options.conflictDeltaE,
         strongConflictDeltaE: options.strongConflictDeltaE,
+        comparisonLimit: options.comparisonLimit,
+        conflictLimit: options.conflictLimit,
+        signal: options.signal,
     });
     const surface = getConflictSurfaceColor();
     report.modes.forEach(mode => {
         const modeSurface = simulateColorVision(surface, mode);
         mode.readability = mode.items.map(item => {
-            const ratios = item.samples.map(sample => getContrastRatio(sample.color, modeSurface));
-            const minimumRatio = Math.min(...ratios);
+            let minimumRatio = Number.POSITIVE_INFINITY;
+            let minimumSample = item.samples[0] || { color: '#888888', position: 0, offset: 0 };
+            for (const sample of item.samples) {
+                const ratio = getContrastRatio(sample.color, modeSurface);
+                if (ratio < minimumRatio) {
+                    minimumRatio = ratio;
+                    minimumSample = sample;
+                }
+            }
             return {
                 id: item.id,
                 label: item.label,
+                kind: item.kind,
                 minimumRatio: Number(minimumRatio.toFixed(2)),
                 level: minimumRatio >= 4.5 ? 'pass' : minimumRatio >= 3 ? 'large-text-only' : 'low',
+                sample: { ...minimumSample },
             };
         });
         const readabilityById = new Map(mode.readability.map(item => [item.id, item]));
@@ -242,12 +258,43 @@ export function getPerceptualConflictReport(options = {}) {
                     : 'Primary colors are perceptually close.',
             ];
         });
+        const readabilityIssues = [];
+        for (const readability of mode.readability) {
+            if (readability.level === 'pass') continue;
+            if (readabilityIssues.length >= report.limits.conflictLimit) {
+                mode.truncated.readabilityIssues = true;
+                report.truncated.readabilityIssues = true;
+                continue;
+            }
+            readabilityIssues.push({
+                type: 'readability',
+                left: { id: readability.id, label: readability.label, kind: readability.kind },
+                right: { id: '__dc_chat_surface__', label: 'Chat surface', kind: 'surface' },
+                level: readability.level === 'low' ? 'strong' : 'potential',
+                deltaE: null,
+                samples: {
+                    left: { ...readability.sample },
+                    right: { offset: 0, position: 0, color: modeSurface },
+                },
+                narration: `${readability.label} does not meet normal-text contrast under ${mode.mode === 'none' ? 'normal color vision' : `${mode.mode} simulation`} (${readability.minimumRatio}:1).`,
+                readability: { left: readability, right: null },
+                reasons: [`Minimum text contrast is ${readability.minimumRatio}:1; normal text requires 4.5:1.`],
+            });
+        }
+        mode.readabilityIssues = readabilityIssues;
     });
-    report.conflicts = report.modes.flatMap(mode => mode.conflicts.map(conflict => ({
-        mode: mode.mode,
-        severity: mode.severity,
-        ...conflict,
-    })));
+    report.conflicts = [];
+    report.readabilityIssues = [];
+    for (const mode of report.modes) {
+        for (const conflict of mode.conflicts) {
+            report.conflicts.push({ mode: mode.mode, severity: mode.severity, ...conflict });
+        }
+        for (const issue of mode.readabilityIssues) {
+            report.readabilityIssues.push({ mode: mode.mode, severity: mode.severity, ...issue });
+        }
+    }
+    report.issues = [...report.conflicts, ...report.readabilityIssues];
+    report.partial = Object.values(report.truncated).some(Boolean);
     return report;
 }
 
@@ -290,7 +337,8 @@ export function regenerateAllColors() {
 // Phase 4B: Improved conflict resolution feedback listing pairs
 export function autoResolveConflicts() {
     const result = repairPerceptualConflicts();
-    if (!result.initialConflictCount) toast.info('No conflicts found');
+    if (result.partialAnalysis) toast.warning('Conflict repair was not run because the bounded analysis is partial. Review the report or reduce the active character set.');
+    else if (!result.initialConflictCount) toast.info('No conflicts found');
     else if (!result.changedKeys.length) toast.warning(`No safe repair was found; ${result.unresolvedCount} conflict${result.unresolvedCount === 1 ? '' : 's'} remain.`);
     else toast.success(`Recolored ${result.changedKeys.length} character${result.changedKeys.length === 1 ? '' : 's'}; ${result.unresolvedCount} conflict${result.unresolvedCount === 1 ? '' : 's'} remain.`);
     return result;
@@ -317,10 +365,23 @@ function buildRepairColor(entry, key, attempt) {
 }
 
 function scoreConflictReport(report) {
-    return report.conflicts.reduce((score, conflict) => {
+    return getPerceptualIssues(report).reduce((score, conflict) => {
+        if (conflict.type === 'readability') {
+            const ratio = Number(conflict.readability?.left?.minimumRatio) || 0;
+            return score + 1 + (Math.max(0, 4.5 - ratio) * 4) + (conflict.level === 'strong' ? 4.5 : 0);
+        }
         const deficit = Math.max(0, report.thresholds.conflictDeltaE - conflict.deltaE);
         return score + 1 + deficit + (conflict.level === 'strong' ? report.thresholds.conflictDeltaE : 0);
     }, 0);
+}
+
+function getPerceptualIssues(report) {
+    if (Array.isArray(report?.issues)) return report.issues;
+    return [...(report?.conflicts || []), ...(report?.readabilityIssues || [])];
+}
+
+function isPartialConflictReport(report) {
+    return report?.partial === true || Object.values(report?.truncated || {}).some(Boolean);
 }
 
 function canRepairConflictEntry(key) {
@@ -330,24 +391,49 @@ function canRepairConflictEntry(key) {
 
 export function repairPerceptualConflicts(options = {}) {
     let report = getPerceptualConflictReport(options);
-    const initialConflictCount = report.conflicts.length;
+    const initialConflictCount = getPerceptualIssues(report).length;
+    if (isPartialConflictReport(report)) {
+        return {
+            changedKeys: [],
+            initialConflictCount,
+            unresolvedCount: initialConflictCount,
+            candidateEvaluations: 0,
+            iterations: 0,
+            budgetExhausted: false,
+            cancelled: report.truncated?.cancelled === true,
+            partialAnalysis: true,
+            report,
+        };
+    }
     const changedKeys = new Set();
     const blockedPairs = new Set();
-    const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
-    const maxIterations = Math.max(1, Math.min(96, Number(options.maxIterations) || Math.max(12, Object.keys(characterColors).length * 2)));
-    const candidateLimit = Math.max(4, Math.min(32, Number(options.candidateLimit) || 20));
+    const repairKeys = (report.modes[0]?.items || []).map(item => item.id).filter(key => characterColors[key]);
+    const snapshot = captureEffectiveColorSnapshot(repairKeys);
+    const maxIterations = Math.max(1, Math.min(16, Number(options.maxIterations) || Math.min(12, Math.max(4, repairKeys.length))));
+    const candidateLimit = Math.max(2, Math.min(8, Number(options.candidateLimit) || 6));
+    const candidateBudget = Math.max(1, Math.min(48, Number(options.candidateBudget) || 24));
+    let candidateEvaluations = 0;
+    let iterations = 0;
+    let cancelled = options.signal?.aborted === true;
 
-    for (let iteration = 0; iteration < maxIterations && report.conflicts.length; iteration++) {
-        const conflict = report.conflicts.find(item => {
-            const pairKey = [item.left.id, item.right.id, item.mode].sort().join('\u0000');
-            const involvesNarrator = item.left.kind === 'narrator' || item.right.kind === 'narrator'
-                || item.left.id === NARRATOR_VISUAL_ID || item.right.id === NARRATOR_VISUAL_ID;
+    repairLoop:
+    for (let iteration = 0; iteration < maxIterations && getPerceptualIssues(report).length && candidateEvaluations < candidateBudget; iteration++) {
+        if (options.signal?.aborted) {
+            cancelled = true;
+            break;
+        }
+        iterations++;
+        const conflict = getPerceptualIssues(report).find(item => {
+            const identities = [item.left, item.right].filter(Boolean);
+            const pairKey = [...identities.map(identity => identity.id), item.mode, item.type || 'similarity'].sort().join('\u0000');
+            const involvesNarrator = identities.some(identity => identity.kind === 'narrator' || identity.id === NARRATOR_VISUAL_ID);
             return !involvesNarrator && !blockedPairs.has(pairKey)
-                && (canRepairConflictEntry(item.left.id) || canRepairConflictEntry(item.right.id));
+                && identities.some(identity => canRepairConflictEntry(identity.id));
         });
         if (!conflict) break;
-        const pairKey = [conflict.left.id, conflict.right.id, conflict.mode].sort().join('\u0000');
-        const candidates = [conflict.left.id, conflict.right.id]
+        const identities = [conflict.left, conflict.right].filter(Boolean);
+        const pairKey = [...identities.map(identity => identity.id), conflict.mode, conflict.type || 'similarity'].sort().join('\u0000');
+        const candidates = identities.map(identity => identity.id)
             .filter(canRepairConflictEntry)
             .sort((left, right) => (characterColors[left].dialogueCount || 0) - (characterColors[right].dialogueCount || 0)
                 || characterColors[left].name.localeCompare(characterColors[right].name));
@@ -361,10 +447,18 @@ export function repairPerceptualConflicts(options = {}) {
         const original = JSON.parse(JSON.stringify(entry));
         const currentScore = scoreConflictReport(report);
         let best = null;
-        for (let attempt = 0; attempt < candidateLimit; attempt++) {
+        for (let attempt = 0; attempt < candidateLimit && candidateEvaluations < candidateBudget; attempt++) {
+            if (options.signal?.aborted) {
+                cancelled = true;
+                Object.keys(entry).forEach(property => delete entry[property]);
+                Object.assign(entry, original);
+                break repairLoop;
+            }
             Object.assign(entry, JSON.parse(JSON.stringify(original)));
             setEntryFromBaseColor(entry, buildRepairColor(original, key, attempt));
+            candidateEvaluations++;
             const candidateReport = getPerceptualConflictReport(options);
+            if (isPartialConflictReport(candidateReport)) continue;
             const candidateScore = scoreConflictReport(candidateReport);
             if (!best || candidateScore < best.score) {
                 best = { score: candidateScore, entry: JSON.parse(JSON.stringify(entry)), report: candidateReport };
@@ -392,7 +486,12 @@ export function repairPerceptualConflicts(options = {}) {
     return {
         changedKeys: changed,
         initialConflictCount,
-        unresolvedCount: report.conflicts.length,
+        unresolvedCount: getPerceptualIssues(report).length,
+        candidateEvaluations,
+        iterations,
+        budgetExhausted: !cancelled && getPerceptualIssues(report).length > 0 && candidateEvaluations >= candidateBudget,
+        cancelled,
+        partialAnalysis: false,
         report,
     };
 }
@@ -532,14 +631,23 @@ export const CUSTOM_PALETTE_SIZE = 8;
 
 export function normalizeCustomPalettes(raw) {
     if (!isPlainObject(raw)) return {};
-    const cleaned = {};
-    for (const [name, colors] of Object.entries(raw)) {
+    const migrated = migrateLegacyRegistryEntries(raw, { maximum: 120, fallback: 'Custom palette' });
+    const cleaned = Object.create(null);
+    for (const [name, colors] of Object.entries(migrated.registry)) {
         const palette = Array.isArray(colors)
             ? colors.map(c => normalizeHexColor(c, null)).filter(Boolean)
             : [];
         if (palette.length) cleaned[String(name)] = [...new Set(palette)];
     }
     return cleaned;
+}
+
+function resolveCustomPaletteName(customs, rawName) {
+    const name = normalizeRegistryIdentityName(rawName, 120);
+    const identity = normalizeRegistryIdentity(name, 120);
+    if (!name || !identity) return { name: '', existingName: '' };
+    const existingName = Object.keys(customs).find(candidate => normalizeRegistryIdentity(candidate, 120) === identity) || '';
+    return { name: existingName || name, existingName };
 }
 
 export const PALETTE_STOPWORDS = new Set([
@@ -809,17 +917,18 @@ export async function enhancePaletteWithLLM(name, notes, basePalette, profile, c
 
 export async function generateCustomPaletteFromWords(inputName = '', inputNotes = '') {
     const inlineInputs = getInlinePaletteInputs();
-    const name = String(inputName || inlineInputs.name || '').trim();
+    const customs = getCustomPalettes();
+    const { name, existingName } = resolveCustomPaletteName(customs, inputName || inlineInputs.name || '');
     if (!name) {
         toast.warning('Enter a palette name first');
         return;
     }
     const notes = String(inputNotes || inlineInputs.notes || '');
-    const customs = getCustomPalettes();
-    if (customs[name] && !shouldOverwritePalette()) {
+    if (existingName && !shouldOverwritePalette()) {
         toast.warning(`Custom palette "${escapeHtml(name)}" exists. Enable "Allow replacing an existing palette" to replace it.`);
         return;
     }
+    const originalPalette = existingName ? JSON.stringify(customs[existingName]) : null;
 
     const { palette: basePalette, profile } = generateHeuristicPalette(name, notes);
     let finalPalette = basePalette;
@@ -834,24 +943,34 @@ export async function generateCustomPaletteFromWords(inputName = '', inputNotes 
         toast.info('LLM enhancement unavailable, used local palette');
     }
 
-    customs[name] = finalPalette;
-    saveCustomPalettes(customs);
-    setCustomPaletteMetaEntry(name, { source, notes: notes.trim(), createdAt: Date.now() });
+    const latestCustoms = getCustomPalettes();
+    const latestResolution = resolveCustomPaletteName(latestCustoms, name);
+    if ((!existingName && latestResolution.existingName)
+        || (existingName && (!latestResolution.existingName
+            || JSON.stringify(latestCustoms[latestResolution.existingName]) !== originalPalette))) {
+        toast.warning(`Custom palette "${escapeHtml(name)}" changed while it was being generated. Review it and try again.`);
+        return;
+    }
+    const targetName = latestResolution.existingName || latestResolution.name;
+    latestCustoms[targetName] = finalPalette;
+    saveCustomPalettes(latestCustoms);
+    setCustomPaletteMetaEntry(targetName, { source, notes: notes.trim(), createdAt: Date.now() });
     refreshPaletteDropdown();
     const label = source === 'llm' ? 'LLM-enhanced' : (source === 'hybrid-fallback' ? 'local fallback' : 'local');
-    toast.success(`Custom palette "${escapeHtml(name)}" saved (${label})`);
+    toast.success(`Custom palette "${escapeHtml(targetName)}" saved (${label})`);
 }
 
 export function saveCustomPalette() {
-    const { name } = getInlinePaletteInputs();
+    const { name: rawName } = getInlinePaletteInputs();
+    const customs = getCustomPalettes();
+    const { name, existingName } = resolveCustomPaletteName(customs, rawName);
     if (!name) {
         toast.warning('Enter a palette name first');
         return;
     }
     const colors = [...new Set(Object.values(characterColors).map(c => normalizeHexColor(getEntryEffectiveColor(c), null)).filter(Boolean))];
     if (!colors.length) { toast.warning('No characters to save palette from'); return; }
-    const customs = getCustomPalettes();
-    if (customs[name] && !shouldOverwritePalette()) {
+    if (existingName && !shouldOverwritePalette()) {
         toast.warning(`Custom palette "${escapeHtml(name)}" exists. Enable "Allow replacing an existing palette" to replace it.`);
         return;
     }

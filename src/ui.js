@@ -6,7 +6,7 @@ import { DEFAULT_CHARACTER_STYLE_FIELD_MASK, applyGroupProfileToKeys, clearChara
 import { CHARACTER_STYLE_FIELD_MASKS, captureCharacterStyle } from './character-style.js';
 import { resolveCharacterKeyByNameOrAlias, scanAllMessages } from './color-blocks.js';
 import { DOM_RETRY_REFRESH_DELAYS, acceptAttributionReview, cancelMessageDomFollowupRepairs, clearMessageDomRepairTimer, clearStreamingAttributionOverrides, decorateAllMessages, decorateMessageDomFromCurrentRender, dismissAttributionReview, getMessageQuoteOverrideOptions, listAttributionReviews, pruneAttributionReviews, refreshAndDecorateMessageDom, rejectAttributionReview, scheduleDomRefreshSeries, scheduleDomSettleRefresh, scheduleMessageDomFollowupRepair, setMessageQuoteOverride, setupChatObserver, setupChatRootObserver, startDomHealthCheck, stopDomHealthCheck, undecorateAllMessages } from './dom-engine.js';
-import { loadGoogleFont, scheduleCustomFontRefresh } from './fonts.js';
+import { loadGoogleFont, scheduleCustomFontRefresh, syncRemoteFontLoadingPolicy } from './fonts.js';
 import { getColorVisionSimulationForTarget, getGradientRenderState, getVisualRenderState } from './gradient-rendering.js';
 import { BUILTIN_GRADIENT_PRESETS, DEFAULT_GRADIENT_ANGLE, DEFAULT_GRADIENT_DURATION, DEFAULT_GRADIENT_POSITION, MAX_GRADIENT_STOPS, cloneGradient, getBuiltInGradientPreset, getGradientSignature, normalizeGradient, normalizeGradientPresetName } from './gradients.js';
 import { GROUP_PROFILE_AUTOMATION_KEYS, deleteGroupProfile, getGroupProfile, normalizeGroupKey, normalizeGroupName, renameGroupProfile, setGroupProfile } from './group-profiles.js';
@@ -17,7 +17,7 @@ import { getTransientNarratorCount, getNarratorVisual, normalizeNarratorStyle, s
 import { applyGradientPreset, applyThemeReadabilityAndBrightness, buildCharacterEntry, collectDuplicateColorKeys, createGradientRandomMasterSeed, createRandomGradient, deleteColorPreset, deleteCustomPalette, detectTheme, flipColorsForTheme, generateCustomPaletteFromWords, getBaseColor, getCustomPaletteMeta, getCustomPalettes, getEntryEffectiveColor, getNextColor, getPerceptualConflictReport, getPresets, invalidateThemeCache, loadColorPreset, refreshPaletteDropdown, refreshPresetDropdown, regenerateAllColors, removeCharacterKeys, repairPerceptualConflicts, saveColorPreset, saveCustomPalette, setEntryFromBaseColor, setEntryGradient, showHarmonyPopup, suggestColorForName, swapEntryColorData, syncAllEffectiveColors } from './palettes.js';
 import { injectPrompt, updateSystemPromptDisplay } from './prompts.js';
 import { escapeHtml, getContext } from './st-api.js';
-import { autoRecolorHintShown, characterColors, expandedCharacterRows, groupProfiles, isDomEngine, legendListeners, searchTerm, selectedCharacterKeys, setAutoRecolorHintShown, setCharacterColors, setGroupProfiles, setLegendListeners, setSearchTerm, setSwapMode, settings, swapMode } from './state.js';
+import { autoRecolorHintShown, characterColors, expandedCharacterRows, groupProfiles, isDomEngine, searchTerm, selectedCharacterKeys, setAutoRecolorHintShown, setCharacterColors, setGroupProfiles, setSearchTerm, setSwapMode, settings, swapMode } from './state.js';
 import { analyzeColorImport, analyzeSettingsImport, analyzeStylePackImport, applyCardData, applyColorImport, applySettingsImport, applyStylePackImport, archiveStoredColorData, deleteCustomGradientPreset, disableAutoSync, enableAutoSync, exportColors, exportSettings, getArchivedColorData, getCurrentStorageScope, getCustomGradientPresets, getLegendPosition, getStorageKey, getStorageLabelForKey, getStorageScopeDescriptor, getStylePackRegistry, getUserColorDataStore, normalizeColorDataEntry, normalizeToggleSettings, readCardData, renameCustomGradientPreset, restoreAllSettingsToDefaults, restoreArchivedColorData, saveCustomGradientPreset, saveData, saveLegendPosition, saveToCard, switchColorStorageScope, updateAutoSyncUI } from './storage.js';
 import { buildStylePackEnvelope } from './style-pack-adapter.js';
 import { escapeAttr, getGoogleFontFamily, htmlToNode, normalizeEntryGradientGenerator, normalizeGoogleFontName, normalizeHexColor, normalizeManualColorInput, toast } from './utils.js';
@@ -74,6 +74,11 @@ let gradientGalleryMotionActive = false;
 let lastColorVisionPreviewSignature = '';
 const STYLE_PACK_COPY_LIMIT = 100 * 1024;
 const STYLE_PACK_FILE_LIMIT = 1024 * 1024;
+const CHARACTER_LIST_RENDER_LIMIT = 500;
+const FLOATING_LEGEND_RENDER_LIMIT = 200;
+const DIALOG_LIST_RENDER_LIMIT = 500;
+const LEGEND_CANVAS_ENTRY_LIMIT = 500;
+const STYLE_PACK_OVERRIDE_DIAGNOSTIC_LIMIT = 12;
 
 function getEffectiveNarratorVisual() {
     return getNarratorVisual(settings, applyThemeReadabilityAndBrightness);
@@ -387,6 +392,11 @@ export async function extractAvatarColor(imgSrc) {
 
 // Phase 4A: Theme-aware PNG export
 export async function exportLegendPng() {
+    const characterCount = Object.keys(characterColors).length;
+    if (characterCount > LEGEND_CANVAS_ENTRY_LIMIT) {
+        toast.warning(`Legend image export is limited to ${LEGEND_CANVAS_ENTRY_LIMIT} characters; narrow the active table first.`);
+        return;
+    }
     const characterEntries = Object.values(characterColors).map(entry => ({ entry, label: entry.name, kind: 'character' }));
     const narrator = getEffectiveNarratorVisual();
     const entries = [...characterEntries, ...(narrator ? [{ entry: narrator, label: 'Narration', kind: 'narrator' }] : [])];
@@ -464,26 +474,30 @@ export function createLegend() {
         legend.style.cssText = `position:fixed;top:${top}px;${left !== undefined ? `left:${left}px;` : `right:${right}px;`}background:var(--SmartThemeBlurTintColor);border:1px solid var(--SmartThemeBorderColor);border-radius:8px;padding:8px;z-index:99998;font-size:0.8em;max-width:180px;max-height:60vh;overflow-y:auto;display:none;user-select:none;`;
 
         let isDragging = false;
+        let activePointerId = null;
         let startX, startY, startLeft, startTop;
 
-        const onMouseDown = (e) => {
+        const onPointerDown = (e) => {
             if (!e.target.closest('.dc-legend-handle') || e.target.closest('button, input')) return;
-            isDragging = true;
+            if (e.isPrimary === false || (e.button !== undefined && e.button !== 0)) return;
             const rect = legend.getBoundingClientRect();
-            startX = e.clientX ?? e.touches?.[0]?.clientX;
-            startY = e.clientY ?? e.touches?.[0]?.clientY;
+            startX = e.clientX;
+            startY = e.clientY;
             if (startX == null || startY == null) return;
+            isDragging = true;
+            activePointerId = e.pointerId;
             startLeft = rect.left;
             startTop = rect.top;
             legend.style.right = 'auto';
             legend.style.left = startLeft + 'px';
+            legend.setPointerCapture?.(activePointerId);
             e.preventDefault();
         };
 
-        const onMouseMove = (e) => {
-            if (!isDragging) return;
-            const clientX = e.clientX ?? e.touches?.[0]?.clientX;
-            const clientY = e.clientY ?? e.touches?.[0]?.clientY;
+        const onPointerMove = (e) => {
+            if (!isDragging || e.pointerId !== activePointerId) return;
+            const clientX = e.clientX;
+            const clientY = e.clientY;
             if (clientX == null || clientY == null) return;
             const dx = clientX - startX;
             const dy = clientY - startY;
@@ -496,12 +510,14 @@ export function createLegend() {
             legend.style.top = newTop + 'px';
         };
 
-        const onMouseUp = () => {
-            if (isDragging) {
-                isDragging = false;
-                const rect = legend.getBoundingClientRect();
-                saveLegendPosition({ top: rect.top, left: rect.left });
-            }
+        const onPointerEnd = (e) => {
+            if (!isDragging || e.pointerId !== activePointerId) return;
+            isDragging = false;
+            const pointerId = activePointerId;
+            activePointerId = null;
+            const rect = legend.getBoundingClientRect();
+            saveLegendPosition({ top: rect.top, left: rect.left });
+            if (legend.hasPointerCapture?.(pointerId)) legend.releasePointerCapture(pointerId);
         };
 
         const clampPosition = () => {
@@ -549,22 +565,11 @@ export function createLegend() {
         window.addEventListener('resize', clampPosition);
         window.visualViewport?.addEventListener('resize', clampPosition);
 
-        // Remove old document-level listeners before adding new ones
-        if (legendListeners) {
-            document.removeEventListener('mousemove', legendListeners.onMouseMove);
-            document.removeEventListener('touchmove', legendListeners.onMouseMove);
-            document.removeEventListener('mouseup', legendListeners.onMouseUp);
-            document.removeEventListener('touchend', legendListeners.onMouseUp);
-        }
-
-        legend.addEventListener('mousedown', onMouseDown);
-        legend.addEventListener('touchstart', onMouseDown, { passive: false });
-        document.addEventListener('mousemove', onMouseMove);
-        document.addEventListener('touchmove', onMouseMove, { passive: false });
-        document.addEventListener('mouseup', onMouseUp);
-        document.addEventListener('touchend', onMouseUp);
-
-        setLegendListeners({ onMouseMove, onMouseUp });
+        legend.addEventListener('pointerdown', onPointerDown);
+        legend.addEventListener('pointermove', onPointerMove);
+        legend.addEventListener('pointerup', onPointerEnd);
+        legend.addEventListener('pointercancel', onPointerEnd);
+        legend.addEventListener('lostpointercapture', onPointerEnd);
 
         document.body.appendChild(legend);
         registerGradientAnimationRoot(legend);
@@ -574,12 +579,16 @@ export function createLegend() {
 
 export function updateLegend() {
     const legend = createLegend();
-    const entries = Object.entries(characterColors);
+    const allEntries = Object.entries(characterColors);
+    const entries = allEntries.slice(0, FLOATING_LEGEND_RENDER_LIMIT);
+    const omittedEntryCount = allEntries.length - entries.length;
     const narrator = getEffectiveNarratorVisual();
     const narratorCount = getTransientNarratorCount(getContext()?.chat);
     const signature = JSON.stringify({
         visible: !!settings.showLegend,
+        remoteFonts: settings.allowRemoteFonts === true,
         driftAll: settings.driftAllGradientColors === true,
+        omittedEntryCount,
         colorVision: getColorVisionSimulationForTarget('ui'),
         entries: entries.map(([key, entry]) => [
             key,
@@ -591,13 +600,21 @@ export function updateLegend() {
         ]),
         narrator: narrator ? [narratorCount, getVisualRenderState(narrator, { target: 'ui' }).fallbackColor, getGradientSignature(narrator)] : null,
     });
-    if ((!entries.length && !narrator) || !settings.showLegend) {
+    if ((!allEntries.length && !narrator) || !settings.showLegend) {
         legend.style.display = 'none';
         lastLegendSignature = signature;
         return;
     }
     if (signature === lastLegendSignature && legend.style.display === 'block') return;
     lastLegendSignature = signature;
+    const focusedLegendControl = legend.contains(document.activeElement)
+        ? document.activeElement.closest('.dc-legend-reset, .dc-legend-hide, .dc-legend-handle')
+        : null;
+    const focusSelector = focusedLegendControl?.classList.contains('dc-legend-reset')
+        ? '.dc-legend-reset'
+        : focusedLegendControl?.classList.contains('dc-legend-hide')
+            ? '.dc-legend-hide'
+            : focusedLegendControl ? '.dc-legend-handle' : '';
     legend.innerHTML = '<div class="dc-legend-handle" tabindex="0" role="toolbar" aria-label="Move character legend with arrow keys"><strong>Characters</strong><span><button type="button" class="dc-legend-reset" aria-label="Reset legend position" title="Reset position">↺</button><button type="button" class="dc-legend-hide" aria-label="Hide character legend" title="Hide legend">×</button></span></div>' +
         entries.map(([, v]) => {
              const presentation = getGradientPresentation(v, { target: 'ui' });
@@ -613,17 +630,22 @@ export function updateLegend() {
             const gradientAttributes = presentation ? ` ${presentation.dataAttributes}` : '';
             const countLabel = narratorCount === null ? 'Visual only' : String(narratorCount);
             return `<div class="dc-legend-section-label">Narration</div><div class="dc-legend-character dc-legend-narration${gradientClasses}"${gradientAttributes} style="display:flex;align-items:center;gap:4px;"><span class="dc-legend-swatch${presentation ? ' dc-gradient-surface' : ''}"${gradientAttributes} style="width:8px;height:8px;border-radius:50%;${escapeAttr(buildGradientSurfaceStyle(narrator))}"></span><span class="dc-legend-name${presentation ? ' dc-gradient-text' : ''}"${gradientAttributes} style="${escapeAttr(buildGradientSurfaceStyle(narrator, { text: true }))}">Narration</span><span style="opacity:0.5;font-size:0.8em;">${escapeHtml(countLabel)}</span></div>`;
-        })() : '');
+        })() : '') + (omittedEntryCount
+        ? `<p class="dc-list-limit">${omittedEntryCount} additional character${omittedEntryCount === 1 ? '' : 's'} omitted from the floating legend.</p>`
+        : '');
     legend.style.display = settings.showLegend ? 'block' : 'none';
+    if (focusSelector && settings.showLegend) legend.querySelector(focusSelector)?.focus({ preventScroll: true });
     if (settings.showLegend) requestAnimationFrame(() => legend.__dcClampPosition?.());
     registerGradientAnimationRoot(legend);
     refreshGradientAnimationState();
 }
 
-export function getDialogueStats() {
+export function getDialogueStats(limit = Number.POSITIVE_INFINITY) {
     const entries = Object.entries(characterColors);
     const total = entries.reduce((s, [, v]) => s + (v.dialogueCount || 0), 0);
-    return entries.map(([, v]) => ({
+    entries.sort(([, left], [, right]) => (right.dialogueCount || 0) - (left.dialogueCount || 0));
+    const boundedLimit = Number.isFinite(limit) ? Math.max(0, Math.floor(limit)) : entries.length;
+    return entries.slice(0, boundedLimit).map(([, v]) => ({
         name: v.name,
         count: v.dialogueCount || 0,
         pct: total ? Math.round((v.dialogueCount || 0) / total * 100) : 0,
@@ -632,14 +654,17 @@ export function getDialogueStats() {
         baseColor: getBaseColor(v),
         gradient: cloneGradient(v.gradient),
         gradientCss: getVisualRenderState(v, { target: 'ui' }).gradientCss,
-    })).sort((a, b) => b.count - a.count);
+    }));
 }
 
 export async function showStatsPopup() {
-    const stats = getDialogueStats();
+    const totalStatsCount = Object.keys(characterColors).length;
+    const stats = getDialogueStats(DIALOG_LIST_RENDER_LIMIT);
+    const omittedCount = totalStatsCount - stats.length;
     const narrator = getEffectiveNarratorVisual();
     if (!stats.length && !narrator) { toast.info('No dialogue or narration data'); return; }
-    const maxCount = Math.max(...stats.map(s => s.count), 1);
+    let maxCount = 1;
+    for (const stat of stats) maxCount = Math.max(maxCount, stat.count);
     const dialogueHtml = stats.map(s => {
         const statEntry = { color: s.color, baseColor: s.baseColor, gradient: s.gradient };
         const fontFamily = getGoogleFontFamily(s.font);
@@ -662,7 +687,7 @@ export async function showStatsPopup() {
     await openDecisionDialog({
         title: 'Dialogue activity',
         description: 'Dialogue percentages exclude narration. Narration is shown separately and counted only when saved tags identify it safely.',
-        detailsHtml: `<div class="dc-stats-list">${html}</div>`,
+        detailsHtml: `<div class="dc-stats-list">${html}</div>${omittedCount ? `<p class="dc-list-limit">${omittedCount} additional character${omittedCount === 1 ? '' : 's'} omitted from this bounded view.</p>` : ''}`,
         choices: [{ value: 'close', label: 'Close', primary: true }],
     });
 }
@@ -936,7 +961,8 @@ function jumpToAttributionReviewMessage(presentation) {
         toast.info('This message is not currently rendered.');
         return;
     }
-    messageElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    const reduceMotion = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
+    messageElement.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'center' });
     const target = messageElement.querySelector(`[data-dc-seg="${presentation.review.segmentIndex}"]`) || messageElement.querySelector('.mes_text') || messageElement;
     if (!target.hasAttribute('tabindex')) target.setAttribute('tabindex', '-1');
     target.focus({ preventScroll: true });
@@ -993,23 +1019,10 @@ async function acceptAttributionReviewFromUi(presentation, speakerName = '', opt
         toast.warning('The proposed speaker is not configured. Edit the suggestion to a known speaker or reject it.');
         return false;
     }
-    const decision = acceptAttributionReview(review.id);
+    const decision = acceptAttributionReview(review.id, { speaker: acceptedName });
     if (!decision || decision.status !== ATTRIBUTION_REVIEW_STATUS.ACCEPTED) {
         toast.info('This suggestion is no longer current. Dismiss the stale suggestion instead.');
         return false;
-    }
-    if (speakerName && acceptedName !== review.proposedSpeaker) {
-        const messageIndex = Number(decision.messageIndex);
-        const message = Number.isInteger(messageIndex) ? getContext()?.chat?.[messageIndex] : null;
-        if (!message || !setMessageQuoteOverride(messageIndex, message, decision.segmentIndex, acceptedName, {
-            source: 'review',
-            confidence: decision.confidence,
-            evidence: decision.evidence,
-            reviewId: decision.id,
-        })) {
-            toast.warning('The review was accepted, but the edited speaker could not be applied.');
-            return false;
-        }
     }
     try {
         await repaintAcceptedAttributionReview(decision);
@@ -1549,6 +1562,7 @@ export function buildCharRowSignature(k, v) {
         v.group || '',
         v.style || '',
         normalizeGoogleFontName(v.font),
+        settings.allowRemoteFonts === true ? 1 : 0,
         v.dialogueCount || 0,
         swapMode === k ? 1 : 0,
         settings.driftAllGradientColors ? 1 : 0,
@@ -1748,7 +1762,7 @@ function handleFontClick(fontBtn) {
     const inputRow = document.createElement('div');
     inputRow.className = 'dc-inline-input';
     const inputId = buildCharacterControlId('dc-font-input', key);
-    inputRow.innerHTML = `<label class="dc-visually-hidden" for="${escapeAttr(inputId)}">Google Font for ${escapeHtml(characterColors[key]?.name || '')}</label><input id="${escapeAttr(inputId)}" type="text" class="text_pole" placeholder="Google Font name" value="${escapeAttr(current)}"><button type="button" class="menu_button dc-inline-submit">Set</button><button type="button" class="menu_button dc-inline-cancel">Cancel</button>`;
+    inputRow.innerHTML = `<label class="dc-visually-hidden" for="${escapeAttr(inputId)}">Font family for ${escapeHtml(characterColors[key]?.name || '')}</label><input id="${escapeAttr(inputId)}" type="text" class="text_pole" placeholder="Font family name" value="${escapeAttr(current)}" aria-describedby="dc-remote-fonts-note"><button type="button" class="menu_button dc-inline-submit">Set</button><button type="button" class="menu_button dc-inline-cancel">Cancel</button>`;
     row.appendChild(inputRow);
     const inp = inputRow.querySelector('input');
     inp.focus();
@@ -2266,7 +2280,8 @@ function formatGradientMotion(preset) {
 
 function getGradientGalleryTargets() {
     return Object.entries(characterColors)
-        .sort((left, right) => left[1].name.localeCompare(right[1].name));
+        .sort((left, right) => left[1].name.localeCompare(right[1].name))
+        .slice(0, DIALOG_LIST_RENDER_LIMIT);
 }
 
 function focusGradientGalleryControl(focusId) {
@@ -2564,7 +2579,7 @@ export function installCharListDelegation(list) {
         if (t.classList.contains('dc-char-select')) {
             setCharacterSelected(t.dataset.key, t.checked);
             t.closest('.dc-char')?.classList.toggle('dc-char-selected', t.checked);
-            updateBulkToolbar(getSortedEntries());
+            updateBulkToolbar(getVisibleCharacterEntries());
         } else if (t.classList.contains('dc-gradient-type')) {
             handleGradientEditorMutation(t, { commitImmediately: true, final: true });
         } else if (t.classList.contains('dc-gradient-primary-color')) {
@@ -2679,17 +2694,17 @@ export function refreshGroupProfileControls() {
         const name = normalizeGroupName(entry?.group);
         if (name && !labels.has(normalizeGroupKey(name))) labels.set(normalizeGroupKey(name), name);
     });
-    datalist.innerHTML = [...labels.values()]
+    const visibleGroupNames = [...labels.values()]
         .sort((left, right) => left.localeCompare(right))
+        .slice(0, DIALOG_LIST_RENDER_LIMIT);
+    datalist.innerHTML = visibleGroupNames
         .map(name => `<option value="${escapeAttr(name)}"></option>`)
         .join('');
 
     const bulkGroupSelect = document.getElementById('dc-bulk-group-select');
     if (bulkGroupSelect) {
         const previousBulkGroup = bulkGroupSelect.value;
-        const groupOptions = [...labels.values()]
-            .sort((left, right) => left.localeCompare(right));
-        bulkGroupSelect.innerHTML = '<option value="">Group selected…</option>' + groupOptions
+        bulkGroupSelect.innerHTML = '<option value="">Group selected…</option>' + visibleGroupNames
             .map(name => `<option value="${escapeAttr(name)}">${escapeHtml(name)}</option>`)
             .join('');
         if (previousBulkGroup && labels.has(normalizeGroupKey(previousBulkGroup))) {
@@ -2698,8 +2713,13 @@ export function refreshGroupProfileControls() {
     }
 
     const previousSource = sourceSelect.value;
-    sourceSelect.innerHTML = '<option value="">Keep saved style</option>' + Object.entries(characterColors)
+    const visibleSources = Object.entries(characterColors)
         .sort((left, right) => left[1].name.localeCompare(right[1].name))
+        .slice(0, DIALOG_LIST_RENDER_LIMIT);
+    if (previousSource && characterColors[previousSource] && !visibleSources.some(([key]) => key === previousSource)) {
+        visibleSources.push([previousSource, characterColors[previousSource]]);
+    }
+    sourceSelect.innerHTML = '<option value="">Keep saved style</option>' + visibleSources
         .map(([key, entry]) => `<option value="${escapeAttr(key)}">${escapeHtml(entry.name)}</option>`)
         .join('');
     if (previousSource && characterColors[previousSource]) sourceSelect.value = previousSource;
@@ -2814,7 +2834,7 @@ function getBulkStyleFieldMask() {
         | (textStyle?.checked ? CHARACTER_STYLE_FIELD_MASKS.STYLE : 0);
 }
 
-function updateBulkToolbar(visibleEntries = getSortedEntries()) {
+function updateBulkToolbar(visibleEntries = getVisibleCharacterEntries()) {
     const toolbar = document.getElementById('dc-bulk-toolbar');
     if (!toolbar) return;
     const selectedKeys = getSelectedCharacterKeys();
@@ -2851,6 +2871,10 @@ function updateBulkToolbar(visibleEntries = getSortedEntries()) {
     if (gallerySelectedTarget) gallerySelectedTarget.textContent = `Selected rows (${selectedKeys.length})`;
 }
 
+function getVisibleCharacterEntries() {
+    return getSortedEntries().slice(0, CHARACTER_LIST_RENDER_LIMIT);
+}
+
 export function updateCharList() {
     const list = document.getElementById('dc-char-list'); if (!list) return;
     const scrollPositions = captureScrollPositions(list);
@@ -2865,7 +2889,9 @@ export function updateCharList() {
         key: focusedControl.closest('.dc-char')?.dataset.key,
         id: focusedControl.dataset.focusId,
     } : null;
-    const entries = getSortedEntries();
+    const matchingEntries = getSortedEntries();
+    const entries = matchingEntries.slice(0, CHARACTER_LIST_RENDER_LIMIT);
+    const omittedEntryCount = matchingEntries.length - entries.length;
     const countEl = document.getElementById('dc-count');
     if (countEl) countEl.textContent = Object.keys(characterColors).length;
     updateBulkToolbar(entries);
@@ -2907,6 +2933,13 @@ export function updateCharList() {
             }
         }
         desired.push({ blockKey: 'row:' + k, sig: buildCharRowSignature(k, v), html: buildCharRowHtml(k, v) });
+    }
+    if (omittedEntryCount) {
+        desired.push({
+            blockKey: '__render_limit__',
+            sig: `limit:${omittedEntryCount}:${searchTerm}`,
+            html: `<p class="dc-list-limit" role="listitem">Showing the first ${CHARACTER_LIST_RENDER_LIMIT} matches. Refine the character search to reach ${omittedEntryCount} more.</p>`,
+        });
     }
 
     // Index currently-managed nodes by their block key; drop anything stray
@@ -3063,10 +3096,53 @@ function buildImportReviewDetails(preview) {
     return `<dl class="dc-review-list">${rows.join('')}</dl>${presetNote}`;
 }
 
+function getImportAnalysisError(analysis, kind) {
+    if (!analysis || typeof analysis !== 'object' || Array.isArray(analysis)) {
+        return `The ${kind} analyzer returned no usable review data.`;
+    }
+    if (analysis.ok !== true) return analysis.message || `The selected ${kind} data is not recognized.`;
+    const preview = analysis.preview;
+    const payload = analysis.payload;
+    const expectedKind = kind === 'settings' ? 'settings' : kind === 'card' ? 'card' : 'colors';
+    const validScope = preview?.requestedStorageScope === undefined
+        || ['chat', 'card', 'global'].includes(preview.requestedStorageScope);
+    const validPayload = payload && typeof payload === 'object' && !Array.isArray(payload)
+        && payload.kind === expectedKind
+        && (expectedKind === 'settings'
+            ? payload.settings && typeof payload.settings === 'object' && !Array.isArray(payload.settings)
+            : payload.colors && typeof payload.colors === 'object' && !Array.isArray(payload.colors));
+    const validPreview = preview && typeof preview === 'object' && !Array.isArray(preview)
+        && Number.isFinite(preview.characterCount)
+        && Number.isFinite(preview.settingsCount)
+        && validScope;
+    if (!validPreview || !validPayload) {
+        return `The ${kind} analyzer returned malformed review data; nothing was changed.`;
+    }
+    return '';
+}
+
+async function runImportAnalysis(task, label, onError = null) {
+    try {
+        return await task();
+    } catch (error) {
+        const message = `${label} could not be analyzed; nothing was changed.`;
+        if (typeof onError === 'function') onError(message);
+        toast.error(message);
+        console.warn(`[Dialogue Colors] ${label} analysis failed:`, error);
+        return null;
+    }
+}
+
+function buildRemoteFontImportDisclosure() {
+    const currentState = settings.allowRemoteFonts === true ? 'enabled' : 'disabled';
+    return `<p class="dc-import-font-disclosure">Reviewing or applying this import cannot grant remote-font permission. Remote Google Fonts are currently ${currentState}; saved family names can make capped requests only after “Allow remote Google Fonts” is enabled separately. Otherwise names are preserved and only locally available fonts are used.</p>`;
+}
+
 async function reviewAndApplyImport(analysis, kind, opener) {
-    if (!analysis.ok) {
-        toast.error(analysis.message || 'The selected data is not recognized.');
-        return analysis;
+    const analysisError = getImportAnalysisError(analysis, kind);
+    if (analysisError) {
+        toast.error(analysisError);
+        return analysis && typeof analysis === 'object' ? analysis : { ok: false, message: analysisError };
     }
     const isSettings = kind === 'settings';
     const hasRequestedScope = !!analysis.preview.requestedStorageScope;
@@ -3082,7 +3158,7 @@ async function reviewAndApplyImport(analysis, kind, opener) {
             : analysis.preview.characterCount === 0
                 ? 'This source contains 0 characters. Merge keeps current assignments; Replace clears the current character table.'
                 : 'Merge keeps current entries when names conflict. Replace uses only the incoming character table.',
-        detailsHtml: `${buildImportReviewDetails(analysis.preview)}${scopeDetails}${isSettings ? '' : '<p class="dc-section-note">If Auto-recolor is enabled, changed assignments can also update saved LLM font tags.</p>'}`,
+        detailsHtml: `${buildImportReviewDetails(analysis.preview)}${scopeDetails}${buildRemoteFontImportDisclosure()}${isSettings ? '' : '<p class="dc-section-note">If Auto-recolor is enabled, changed assignments can also update saved LLM font tags.</p>'}`,
         checkbox: hasRequestedScope ? { label: `Switch to ${formatScopeName(requestedScope)} first (${destination.characterCount} characters)` } : null,
         opener,
         choices: isSettings ? [
@@ -3096,7 +3172,14 @@ async function reviewAndApplyImport(analysis, kind, opener) {
     });
     if (!decision.value || decision.value === 'cancel') return { ok: false, cancelled: true };
     const apply = kind === 'settings' ? applySettingsImport : kind === 'card' ? applyCardData : applyColorImport;
-    const result = await apply(analysis.payload, { mode: decision.value, applyScope: decision.checked });
+    let result;
+    try {
+        result = await apply(analysis.payload, { mode: decision.value, applyScope: decision.checked });
+    } catch (error) {
+        console.error('[Dialogue Colors] Reviewed import failed before returning a result:', error);
+        result = { ok: false, message: 'The reviewed data could not be applied safely.' };
+    }
+    if (!result || typeof result !== 'object') result = { ok: false, message: 'The reviewed import returned an invalid result.' };
     if (result.ok) {
         updateStorageScopeStatus();
         toast.success(kind === 'card' ? 'Card data applied.' : `${isSettings ? 'Settings' : 'Colors'} imported.`);
@@ -3255,7 +3338,38 @@ async function buildStylePackExport(opener) {
 function stylePackConflictSummary(analysis, category) {
     const result = analysis.conflicts?.categories?.[category];
     if (!result) return 'No items';
-    return `${result.conflicts.length} conflict${result.conflicts.length === 1 ? '' : 's'}, ${result.additions.length} new`;
+    if (!Array.isArray(result.conflicts) || !Array.isArray(result.additions)) return 'Summary unavailable';
+    const identityResolutions = category === 'assignmentPresets' && Array.isArray(result.identityResolutions)
+        ? result.identityResolutions.length
+        : 0;
+    const overrideSummary = identityResolutions
+        ? `, ${identityResolutions} cross-preset identity resolution${identityResolutions === 1 ? '' : 's'}`
+        : '';
+    return `${result.conflicts.length} conflict${result.conflicts.length === 1 ? '' : 's'}, ${result.additions.length} new${overrideSummary}`;
+}
+
+function buildStylePackAssignmentOverrideDetails(analysis) {
+    const resolutions = analysis.conflicts?.categories?.assignmentPresets?.identityResolutions;
+    if (!Array.isArray(resolutions) || !resolutions.length) return '';
+    const visible = resolutions.slice(0, STYLE_PACK_OVERRIDE_DIAGNOSTIC_LIMIT);
+    const rows = visible.map(diagnostic => {
+        const identities = Array.isArray(diagnostic.identities) && diagnostic.identities.length
+            ? diagnostic.identities.join(', ')
+            : 'unspecified identity';
+        const previous = `${diagnostic.previousAssignment || 'unnamed assignment'} in ${diagnostic.previousPreset || 'an earlier preset'}`;
+        const current = `${diagnostic.overridingAssignment || 'an unnamed assignment'} in ${diagnostic.overridingPreset || 'a later preset'}`;
+        const action = diagnostic.resolution === 'replace-assignment'
+            ? `${previous} is replaced by ${current}`
+            : diagnostic.resolution === 'reassign-alias'
+                ? `${previous} cedes that alias to ${current}`
+                : diagnostic.resolution === 'remove-previous-alias'
+                    ? `${previous} drops that alias because ${current} uses it as a canonical name`
+                    : `${current} drops that alias because ${previous} already uses it as a canonical name`;
+        const description = `Identity/alias ${identities}: ${action}.`;
+        return `<li>${escapeHtml(description)}</li>`;
+    }).join('');
+    const omitted = resolutions.length - visible.length;
+    return `<section class="dc-style-pack-overrides"><h3>Cross-preset identity resolutions</h3><p>Later presets take precedence; canonical-name collisions replace assignments, while alias collisions reassign or drop only the alias.</p><ul>${rows}</ul>${omitted ? `<p>${omitted} additional resolution${omitted === 1 ? '' : 's'} omitted from this bounded review.</p>` : ''}</section>`;
 }
 
 function buildStylePackImportDetails(analysis) {
@@ -3274,16 +3388,41 @@ function buildStylePackImportDetails(analysis) {
         ['Unknown/dropped fields', analysis.droppedFields.length ? analysis.droppedFields.slice(0, 8).join(', ') : 'None'],
     ];
     const fontNote = analysis.fontNames.length
-        ? `Font family names: ${analysis.fontNames.join(', ')}. They are data only; this import does not download or install font files.`
+        ? `Font family names: ${analysis.fontNames.join(', ')}. Installing this reviewed pack cannot grant remote-font permission. Applying assignments can make capped Google Fonts requests only after “Allow remote Google Fonts” is enabled separately; otherwise these names remain local-only data.`
         : 'No font family names were found.';
-    return `<dl class="dc-review-list dc-style-pack-review">${rows.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join('')}</dl><p class="dc-style-pack-privacy">${escapeHtml(fontNote)} No URLs, CSS, profile IDs, storage scope, auto-sync, prompts, automation, attribution settings, or UI positions are accepted from a style pack.</p>`;
+    return `<dl class="dc-review-list dc-style-pack-review">${rows.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join('')}</dl>${buildStylePackAssignmentOverrideDetails(analysis)}<p class="dc-style-pack-privacy">${escapeHtml(fontNote)} No URLs, CSS, profile IDs, storage scope, auto-sync, prompts, automation, attribution settings, or UI positions are accepted from a style pack.</p>`;
 }
 
 async function reviewAndApplyStylePack(analysis, opener) {
-    if (!analysis.ok) {
-        announceStylePack(analysis.message || 'The selected style pack is not valid.');
-        toast.error(analysis.message || 'The selected style pack is not valid.');
-        return analysis;
+    const totals = analysis?.catalog?.totals;
+    const validTotals = totals && ['palettes', 'gradientPresets', 'assignmentPresets', 'appearanceSettings']
+        .every(key => Number.isFinite(totals[key]) && totals[key] >= 0);
+    const conflictCategories = analysis?.conflicts?.categories;
+    const validConflicts = conflictCategories && ['palettes', 'gradientPresets', 'assignmentPresets']
+        .every(category => Array.isArray(conflictCategories[category]?.conflicts)
+            && Array.isArray(conflictCategories[category]?.additions))
+        && Array.isArray(conflictCategories.assignmentPresets?.overrides)
+        && Array.isArray(conflictCategories.assignmentPresets?.identityResolutions)
+        && Array.isArray(conflictCategories.assignmentPresets?.presetOrder)
+        && conflictCategories.assignmentPresets.presetOrder.every(name => typeof name === 'string');
+    const validShape = analysis && typeof analysis === 'object' && !Array.isArray(analysis)
+        && analysis.ok === true
+        && analysis.pack && typeof analysis.pack === 'object' && !Array.isArray(analysis.pack)
+        && validTotals
+        && validConflicts
+        && typeof analysis.catalogFingerprint === 'string' && analysis.catalogFingerprint.length > 0
+        && typeof analysis.digest === 'string' && analysis.digest.length > 0
+        && Array.isArray(analysis.droppedFields)
+        && analysis.droppedFields.every(field => typeof field === 'string')
+        && Array.isArray(analysis.fontNames)
+        && analysis.fontNames.every(font => typeof font === 'string');
+    if (!validShape) {
+        const message = analysis?.ok === false && analysis.message
+            ? analysis.message
+            : 'The style-pack analyzer returned malformed review data; nothing was changed.';
+        announceStylePack(message);
+        toast.error(message);
+        return analysis && typeof analysis === 'object' ? analysis : { ok: false, message };
     }
     const hasAssignments = analysis.catalog.totals.assignmentPresets > 0;
     const hasAppearance = analysis.catalog.totals.appearanceSettings > 0;
@@ -3313,17 +3452,24 @@ async function reviewAndApplyStylePack(analysis, opener) {
     });
     if (decision.value !== 'install') return { ok: false, cancelled: true };
     const fields = decision.formValues;
-    const result = await applyStylePackImport(analysis, {
-        categoryStrategies: {
-            palettes: fields['strategy-palettes'],
-            gradientPresets: fields['strategy-gradientPresets'],
-            assignmentPresets: fields['strategy-assignmentPresets'],
-        },
-        installAssignmentPresets: fields.installAssignments === true,
-        applyAssignments: fields.applyAssignments === true,
-        assignmentApplyMode: fields.assignmentApplyMode,
-        applyAppearance: fields.applyAppearance === true,
-    });
+    let result;
+    try {
+        result = await applyStylePackImport(analysis, {
+            categoryStrategies: {
+                palettes: fields['strategy-palettes'],
+                gradientPresets: fields['strategy-gradientPresets'],
+                assignmentPresets: fields['strategy-assignmentPresets'],
+            },
+            installAssignmentPresets: fields.installAssignments === true,
+            applyAssignments: fields.applyAssignments === true,
+            assignmentApplyMode: fields.assignmentApplyMode,
+            applyAppearance: fields.applyAppearance === true,
+        });
+    } catch (error) {
+        console.error('[Dialogue Colors] Reviewed style-pack install failed before returning a result:', error);
+        result = { ok: false, message: 'The reviewed style pack could not be installed safely.' };
+    }
+    if (!result || typeof result !== 'object') result = { ok: false, message: 'The style-pack install returned an invalid result.' };
     if (result.ok) {
         renderStylePackRegistry();
         const message = result.unchanged
@@ -3422,11 +3568,12 @@ export function syncUIWithSettings() {
     if ($('dc-auto-random-all-gradients')) $('dc-auto-random-all-gradients').checked = settings.autoRandomAllGradients === true;
     if ($('dc-auto-random-gradients')) $('dc-auto-random-gradients').disabled = settings.autoRandomAllGradients === true;
     if ($('dc-drift-all-gradients')) $('dc-drift-all-gradients').checked = settings.driftAllGradientColors === true;
+    if ($('dc-allow-remote-fonts')) $('dc-allow-remote-fonts').checked = settings.allowRemoteFonts === true;
     if ($('dc-auto-recolor')) $('dc-auto-recolor').checked = settings.autoRecolor !== false;
     if ($('dc-auto-colorize')) $('dc-auto-colorize').checked = settings.autoColorize || false;
     if ($('dc-llm-attr-check')) $('dc-llm-attr-check').checked = settings.llmAttributionCheck || false;
     if ($('dc-llm-attr-parallel')) $('dc-llm-attr-parallel').checked = settings.llmAttributionParallel || false;
-    if ($('dc-attr-accept-all')) $('dc-attr-accept-all').checked = settings.attributionReviewPolicy !== 'review';
+    if ($('dc-attr-accept-all')) $('dc-attr-accept-all').checked = settings.attributionReviewPolicy === 'legacy-auto';
     if ($('dc-attr-conservative')) $('dc-attr-conservative').checked = settings.attributionConservativeOnly || false;
     if ($('dc-attr-max-tokens')) $('dc-attr-max-tokens').value = Number.isFinite(settings.attributionMaxTokens) && settings.attributionMaxTokens > 0 ? settings.attributionMaxTokens : 4096;
     if ($('dc-stealth-colors')) $('dc-stealth-colors').checked = settings.domStealthColors !== false;
@@ -3464,6 +3611,7 @@ export function syncUIWithSettings() {
     updateAutoSyncUI();
     updateStorageScopeStatus();
     updateColorVisionPreviewStatus();
+    syncRemoteFontLoadingPolicy();
     setGradientAnimationMode(settings.gradientAnimationMode);
     const previewSignature = getColorVisionPreviewSignature();
     if (lastColorVisionPreviewSignature && previewSignature !== lastColorVisionPreviewSignature) {
@@ -3515,44 +3663,94 @@ function formatConflictMode(mode, severity) {
     return mode === 'none' ? 'Normal color vision' : `${formatColorVisionMode(mode)} at ${Math.round(severity * 100)}%`;
 }
 
+function getConflictReportIssues(report) {
+    if (Array.isArray(report?.issues)) return report.issues;
+    return [...(report?.conflicts || []), ...(report?.readabilityIssues || [])];
+}
+
+function isConflictReportPartial(report) {
+    return report?.partial === true || Object.values(report?.truncated || {}).some(Boolean);
+}
+
+function describeConflictReportLimits(report, unexaminedPairs) {
+    const reasons = [];
+    if (unexaminedPairs > 0) reasons.push(`${unexaminedPairs} visual pair${unexaminedPairs === 1 ? '' : 's'} per mode remain unexamined`);
+    if (report.truncated?.modes) reasons.push('requested viewing modes were omitted');
+    if (report.truncated?.conflicts || report.truncated?.readabilityIssues) reasons.push('the finding limit was reached');
+    if (report.truncated?.cancelled) reasons.push('analysis was cancelled');
+    const omittedItems = Math.max(0, Number(report.omittedItemCount) || 0);
+    if (omittedItems > 0) reasons.push(`${omittedItems} visual${omittedItems === 1 ? ' was' : 's were'} omitted`);
+    else if (report.truncated?.items) reasons.push('visuals were omitted');
+    return reasons.join('; ') || 'an analysis limit was reached';
+}
+
 function buildConflictReportHtml(report) {
-    if (!report.conflicts.length) return `<p class="dc-conflict-empty">No conflicts were found across ${report.itemCount} active visuals and all color-vision modes.</p>`;
-    const visibleConflicts = report.conflicts.slice(0, 120);
+    const issues = getConflictReportIssues(report);
+    const partial = isConflictReportPartial(report);
+    const possiblePairs = Number(report.possibleComparisonCountPerMode) || 0;
+    const evaluatedPairs = Number(report.comparisonCountPerMode) || 0;
+    const unexaminedPairs = Math.max(0, Number(report.unexaminedComparisonCountPerMode) || (possiblePairs - evaluatedPairs));
+    const limitDescription = describeConflictReportLimits(report, unexaminedPairs);
+    if (!issues.length) {
+        if (partial) {
+            return `<p class="dc-conflict-empty">The bounded analysis found no reportable issues in ${evaluatedPairs} of ${possiblePairs} visual pairs per mode. This result is partial because ${escapeHtml(limitDescription)}.</p>`;
+        }
+        return `<p class="dc-conflict-empty">No similarity or readability conflicts were found across ${report.itemCount} active visuals and all evaluated color-vision modes.</p>`;
+    }
+    const visibleConflicts = issues.slice(0, 120);
     const rows = visibleConflicts.map(conflict => {
+        const isReadability = conflict.type === 'readability';
         const leftReadability = conflict.readability?.left;
         const rightReadability = conflict.readability?.right;
-        const readability = leftReadability && rightReadability
+        const readability = isReadability && leftReadability
+            ? `${conflict.left.label} ${leftReadability.minimumRatio}:1 (${leftReadability.level})`
+            : leftReadability && rightReadability
             ? `${conflict.left.label} ${leftReadability.minimumRatio}:1 (${leftReadability.level}); ${conflict.right.label} ${rightReadability.minimumRatio}:1 (${rightReadability.level})`
             : 'Readability not available';
-        const repairable = [conflict.left.id, conflict.right.id].filter(key => {
+        const identities = [conflict.left, conflict.right].filter(Boolean);
+        const repairable = identities.map(item => item.id).filter(key => {
             const entry = characterColors[key];
             return entry && !entry.locked && !entry.keep && String(entry.name || key).toLowerCase() !== 'narrator';
         }).map(key => characterColors[key].name);
-        const involvesNarrator = conflict.left.kind === 'narrator' || conflict.right.kind === 'narrator';
+        const involvesNarrator = identities.some(item => item.kind === 'narrator');
         const repairStatus = involvesNarrator
             ? 'Unresolved; change Narration explicitly in Engine settings'
             : repairable.length ? `Can recolor ${repairable.join(' or ')}` : 'Protected by Lock or Keep';
-        return `<article class="dc-conflict-row"><h3>${escapeHtml(conflict.left.label)} and ${escapeHtml(conflict.right.label)}</h3><dl><div><dt>Severity</dt><dd>${conflict.level === 'strong' ? 'Strong' : 'Potential'} (Delta E ${conflict.deltaE})</dd></div><div><dt>Mode</dt><dd>${escapeHtml(formatConflictMode(conflict.mode, conflict.severity))}</dd></div><div><dt>Reason</dt><dd>${(conflict.reasons || [conflict.narration]).map(escapeHtml).join(' ')}</dd></div><div><dt>Readability</dt><dd>${escapeHtml(readability)}</dd></div><div><dt>Repair</dt><dd>${escapeHtml(repairStatus)}</dd></div></dl></article>`;
+        const heading = isReadability
+            ? `${conflict.left.label} readability`
+            : `${conflict.left.label} and ${conflict.right.label}`;
+        const severity = `${conflict.level === 'strong' ? 'Strong' : 'Potential'}${isReadability ? '' : ` (Delta E ${conflict.deltaE})`}`;
+        return `<article class="dc-conflict-row"><h3>${escapeHtml(heading)}</h3><dl><div><dt>Severity</dt><dd>${escapeHtml(severity)}</dd></div><div><dt>Mode</dt><dd>${escapeHtml(formatConflictMode(conflict.mode, conflict.severity))}</dd></div><div><dt>Reason</dt><dd>${(conflict.reasons || [conflict.narration]).map(escapeHtml).join(' ')}</dd></div><div><dt>Readability</dt><dd>${escapeHtml(readability)}</dd></div><div><dt>Repair</dt><dd>${escapeHtml(repairStatus)}</dd></div></dl></article>`;
     }).join('');
-    const omitted = report.conflicts.length - visibleConflicts.length;
-    return `<p class="dc-conflict-summary">${report.conflicts.length} mode-specific conflict${report.conflicts.length === 1 ? '' : 's'} from ${report.comparisonCountPerMode} visual pairs per mode.</p><div class="dc-conflict-list">${rows}</div>${omitted ? `<p>${omitted} additional results omitted from this view.</p>` : ''}`;
+    const omitted = issues.length - visibleConflicts.length;
+    const bounded = partial
+        ? ` This report is partial: ${escapeHtml(limitDescription)}.`
+        : '';
+    return `<p class="dc-conflict-summary">${report.conflicts.length} similarity pair${report.conflicts.length === 1 ? '' : 's'} and ${(report.readabilityIssues || []).length} readability issue${(report.readabilityIssues || []).length === 1 ? '' : 's'} across modes, from ${evaluatedPairs} of ${possiblePairs} visual pairs per mode.${bounded}</p><div class="dc-conflict-list">${rows}</div>${omitted ? `<p>${omitted} additional results omitted from this view.</p>` : ''}`;
 }
 
 export async function showColorConflictReport(report = getPerceptualConflictReport(), options = {}) {
-    const canRepair = report.conflicts.some(conflict => [conflict.left.id, conflict.right.id].some(key => {
-        if (conflict.left.kind === 'narrator' || conflict.right.kind === 'narrator') return false;
-        const entry = characterColors[key];
-        return entry && !entry.locked && !entry.keep && String(entry.name || key).toLowerCase() !== 'narrator';
-    }));
+    const issues = getConflictReportIssues(report);
+    const partial = isConflictReportPartial(report);
+    const canRepair = !partial && issues.some(conflict => {
+        const identities = [conflict.left, conflict.right].filter(Boolean);
+        if (identities.some(item => item.kind === 'narrator')) return false;
+        return identities.some(item => {
+            const entry = characterColors[item.id];
+            return entry && !entry.locked && !entry.keep && String(entry.name || item.id).toLowerCase() !== 'narrator';
+        });
+    });
     const decision = await openDecisionDialog({
         title: options.afterRepair ? 'Conflict repair result' : 'Perceptual color conflicts',
         description: options.afterRepair
             ? `${options.changedCount} character${options.changedCount === 1 ? '' : 's'} recolored in one saved change. Locked, kept, and Narration visuals were not modified; Narration conflicts remain unresolved.`
-            : 'Every primary color and gradient is sampled under normal vision and four color-vision simulations. Readability is measured against the current chat surface.',
+            : partial
+                ? 'Analysis uses deterministic item, sample, and pair limits. The report identifies omitted visuals and unexamined pairs; partial reports are review-only and are never auto-repaired.'
+                : 'Active primary colors and gradients are sampled under normal vision and four color-vision simulations. Readability is measured against the current chat surface.',
         detailsHtml: buildConflictReportHtml(report),
         choices: [
-            ...(!options.afterRepair && report.conflicts.length && canRepair ? [{ value: 'repair', label: 'Repair safe targets', primary: true }] : []),
-            { value: 'close', label: 'Close', primary: !report.conflicts.length || options.afterRepair },
+            ...(!options.afterRepair && issues.length && canRepair ? [{ value: 'repair', label: 'Repair safe targets', primary: true }] : []),
+            { value: 'close', label: 'Close', primary: !issues.length || options.afterRepair || partial },
         ],
     });
     if (decision.value !== 'repair') return report;
@@ -3564,8 +3762,8 @@ export async function showColorConflictReport(report = getPerceptualConflictRepo
 function buildSettingsPanelHtml() {
     return `
     <div id="dc-ext" class="inline-drawer">
-        <div class="inline-drawer-toggle inline-drawer-header"><b>Dialogue Colors</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
-        <div class="inline-drawer-content dc-panel-content">
+        <button type="button" id="dc-panel-toggle" class="inline-drawer-toggle inline-drawer-header" aria-expanded="false" aria-controls="dc-panel-content"><b>Dialogue Colors</b><span class="inline-drawer-icon fa-solid fa-circle-chevron-down down" aria-hidden="true"></span></button>
+        <div id="dc-panel-content" class="inline-drawer-content dc-panel-content" aria-labelledby="dc-panel-toggle">
             <details class="dc-section dc-section-primary" open>
                 <summary>Current setup</summary>
                 <div class="dc-stack">
@@ -3637,6 +3835,7 @@ function buildSettingsPanelHtml() {
                     </div>
                     <div id="dc-cvd-preview-status" class="dc-preview-status" role="status" aria-live="polite">Preview off</div>
                     <div class="dc-field-row dc-gradient-seed-control"><label class="dc-inline-label" for="dc-gradient-master-seed">Random gradient seed</label><input id="dc-gradient-master-seed" class="text_pole" type="text" readonly aria-describedby="dc-gradient-seed-note"><button type="button" id="dc-gradient-new-seed" class="menu_button">New seed</button><small id="dc-gradient-seed-note">Changes future deterministic randomizations; current gradients stay unchanged.</small></div>
+                    <div class="dc-remote-font-policy"><label class="checkbox_label"><input type="checkbox" id="dc-allow-remote-fonts" aria-describedby="dc-remote-fonts-note"><span>Allow remote Google Fonts</span></label><small id="dc-remote-fonts-note">Off by default. Saved font names always remain; when enabled, only used names can make capped requests to Google. Otherwise, fonts resolve locally.</small></div>
                     <div class="dc-toggle-grid"><label class="checkbox_label"><input type="checkbox" id="dc-highlight"><span>Highlight dialogue</span></label><label class="checkbox_label"><input type="checkbox" id="dc-legend"><span>Show floating legend</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-recolor"><span>Auto-recolor after changes</span></label></div>
                 </div>
             </details>
@@ -3651,7 +3850,7 @@ function buildSettingsPanelHtml() {
                         <div id="dc-system-prompt-container" style="display:none;"><label for="dc-system-prompt-text" class="dc-inline-label">Macro text</label><textarea id="dc-system-prompt-text" readonly class="text_pole dc-macro-text">{{dialoguecolors}}</textarea><button id="dc-copy-system-prompt" class="menu_button">Copy macro</button></div>
                     </div>
                     <div class="dc-dom-only dc-stack" style="display:none;">
-                        <label class="checkbox_label"><input type="checkbox" id="dc-stealth-colors"><span>Ask for hidden speaker color blocks</span></label><label class="checkbox_label"><input type="checkbox" id="dc-llm-attr-check"><span>Verify attribution automatically</span></label><label class="checkbox_label"><input type="checkbox" id="dc-llm-attr-parallel"><span>Verify during streaming pauses</span></label><label class="checkbox_label"><input type="checkbox" id="dc-attr-accept-all" checked><span>Accept proposed corrections automatically</span></label><label class="checkbox_label"><input type="checkbox" id="dc-attr-conservative"><span>Only fill unknown attribution</span></label>
+                        <label class="checkbox_label"><input type="checkbox" id="dc-stealth-colors"><span>Ask for hidden speaker color blocks</span></label><label class="checkbox_label"><input type="checkbox" id="dc-llm-attr-check"><span>Verify attribution automatically</span></label><label class="checkbox_label"><input type="checkbox" id="dc-llm-attr-parallel"><span>Verify during streaming pauses</span></label><label class="checkbox_label"><input type="checkbox" id="dc-attr-accept-all" aria-describedby="dc-attr-review-policy-note"><span>Accept proposed corrections automatically</span></label><small id="dc-attr-review-policy-note">Off by default: verifier suggestions wait for human review. Explicit legacy-auto settings keep this enabled.</small><label class="checkbox_label"><input type="checkbox" id="dc-attr-conservative"><span>Only fill unknown attribution</span></label>
                         <div class="dc-field-row"><label class="dc-inline-label" for="dc-attr-profile">Verify profile</label><select id="dc-attr-profile" class="text_pole"><option value="">Use main chat AI</option></select></div><div class="dc-field-row"><label class="dc-inline-label" for="dc-attr-max-tokens">Verify token limit</label><input type="number" id="dc-attr-max-tokens" min="256" max="32768" value="4096" class="text_pole"></div>
                     </div>
                     <section id="dc-narrator-editor" class="dc-narrator-editor" aria-label="Narration style"></section>
@@ -3705,17 +3904,28 @@ function bindSettingsPanelDrawer() {
     const toggle = panel?.querySelector(':scope > .inline-drawer-toggle');
     const content = panel?.querySelector(':scope > .dc-panel-content');
     const hostScroller = panel?.closest('#rm_extensions_block');
-    if (!toggle || !content || !hostScroller) return;
+    if (!toggle || !content) return;
 
     const hostClass = 'dc-dialogue-colors-expanded';
-    const isExpanded = () => getComputedStyle(content).display !== 'none';
-    const syncHostClass = () => hostScroller.classList.toggle(hostClass, isExpanded());
+    let requestedExpanded = null;
+    const isExpanded = () => !content.hidden
+        && content.getAttribute('aria-hidden') !== 'true'
+        && getComputedStyle(content).display !== 'none';
+    const syncDrawerState = () => {
+        const renderedExpanded = isExpanded();
+        const expanded = requestedExpanded ?? renderedExpanded;
+        const ariaExpanded = expanded ? 'true' : 'false';
+        if (toggle.getAttribute('aria-expanded') !== ariaExpanded) toggle.setAttribute('aria-expanded', ariaExpanded);
+        hostScroller?.classList.toggle(hostClass, expanded);
+        if (requestedExpanded === renderedExpanded) requestedExpanded = null;
+    };
 
     toggle.addEventListener('click', () => {
         const opening = !isExpanded();
+        requestedExpanded = opening;
         // Set this before SillyTavern starts slideToggle so browser anchoring
         // cannot move the outer extensions drawer during expansion/collapse.
-        hostScroller.classList.add(hostClass);
+        syncDrawerState();
         if (!opening) return;
         content.scrollTop = 0;
         content.scrollLeft = 0;
@@ -3726,10 +3936,11 @@ function bindSettingsPanelDrawer() {
     });
 
     if (typeof MutationObserver === 'function') {
-        const observer = new MutationObserver(syncHostClass);
-        observer.observe(content, { attributes: true, attributeFilter: ['class', 'hidden', 'style'] });
+        const observer = new MutationObserver(syncDrawerState);
+        const observerOptions = { attributes: true, attributeFilter: ['aria-hidden', 'class', 'hidden', 'style'] };
+        observer.observe(content, observerOptions);
     }
-    syncHostClass();
+    syncDrawerState();
 }
 
 function bindSettingsPanelControls($) {
@@ -3761,6 +3972,17 @@ function bindSettingsPanelControls($) {
         refreshGradientVisualSurfaces();
         renderNarratorEditor();
         repaintDomAfterCharacterDataChange(0);
+    };
+    $('dc-allow-remote-fonts').onchange = e => {
+        const enabled = e.target.checked === true;
+        settings.allowRemoteFonts = enabled;
+        saveData({ preserveEffectiveColors: true });
+        syncRemoteFontLoadingPolicy();
+        if (enabled) {
+            updateCharList();
+            updateLegend();
+            scheduleCustomFontRefresh(0);
+        }
     };
     $('dc-auto-recolor').onchange = e => { settings.autoRecolor = e.target.checked; saveData(); };
     $('dc-auto-colorize').onchange = e => { settings.autoColorize = e.target.checked; saveData(); };
@@ -3907,7 +4129,7 @@ function bindSettingsPanelControls($) {
         });
     };
     $('dc-select-visible').onclick = () => {
-        selectCharacterKeys(getSortedEntries().map(([key]) => key));
+        selectCharacterKeys(getVisibleCharacterEntries().map(([key]) => key));
         updateCharList();
         $('dc-clear-selection').focus({ preventScroll: true });
     };
@@ -4101,7 +4323,12 @@ function bindSettingsPanelControls($) {
             toast.error('Style packs are limited to 1 MiB.');
             return;
         }
-        await reviewAndApplyStylePack(await analyzeStylePackImport(file), $('dc-style-pack-import'));
+        const analysis = await runImportAnalysis(
+            () => analyzeStylePackImport(file),
+            'Style pack',
+            announceStylePack,
+        );
+        if (analysis) await reviewAndApplyStylePack(analysis, $('dc-style-pack-import'));
     };
     $('dc-card').onclick = autoAssignFromCard;
     $('dc-avatar-color').onclick = async () => {
@@ -4132,8 +4359,14 @@ function bindSettingsPanelControls($) {
         }
     };
     $('dc-save-card').onclick = async e => {
-        const existing = await readCardData();
+        const existing = await runImportAnalysis(() => readCardData(), 'Card data');
+        if (!existing) return;
         if (existing.ok) {
+            const analysisError = getImportAnalysisError(existing, 'card');
+            if (analysisError) {
+                toast.error(analysisError);
+                return;
+            }
             const count = existing.preview?.characterCount ?? 0;
             const confirmed = await confirmReviewedAction({
                 title: 'Replace saved card data?',
@@ -4149,7 +4382,10 @@ function bindSettingsPanelControls($) {
         }
         saveToCard();
     };
-    $('dc-load-card').onclick = async e => reviewAndApplyImport(await readCardData(), 'card', e.currentTarget);
+    $('dc-load-card').onclick = async e => {
+        const analysis = await runImportAnalysis(() => readCardData(), 'Card data');
+        if (analysis) await reviewAndApplyImport(analysis, 'card', e.currentTarget);
+    };
     $('dc-undo').onclick = undo;
     $('dc-redo').onclick = redo;
     $('dc-export').onclick = exportColors;
@@ -4157,15 +4393,19 @@ function bindSettingsPanelControls($) {
     $('dc-export-png').onclick = exportLegendPng;
     $('dc-import-file').onchange = async e => {
         const file = e.target.files[0];
-        if (file) await reviewAndApplyImport(await analyzeColorImport(file), 'colors', $('dc-import'));
         e.target.value = '';
+        if (!file) return;
+        const analysis = await runImportAnalysis(() => analyzeColorImport(file), 'Color import');
+        if (analysis) await reviewAndApplyImport(analysis, 'colors', $('dc-import'));
     };
     $('dc-export-settings').onclick = exportSettings;
     $('dc-import-settings').onclick = () => $('dc-import-settings-file').click();
     $('dc-import-settings-file').onchange = async e => {
         const file = e.target.files[0];
-        if (file) await reviewAndApplyImport(await analyzeSettingsImport(file), 'settings', $('dc-import-settings'));
         e.target.value = '';
+        if (!file) return;
+        const analysis = await runImportAnalysis(() => analyzeSettingsImport(file), 'Settings import');
+        if (analysis) await reviewAndApplyImport(analysis, 'settings', $('dc-import-settings'));
     };
     $('dc-setup-autosync').onclick = () => { enableAutoSync(); updateAutoSyncUI(); };
     $('dc-disable-autosync').onclick = () => { disableAutoSync(); updateAutoSyncUI(); };

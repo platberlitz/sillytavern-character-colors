@@ -19,13 +19,13 @@ A SillyTavern extension that gives each character's dialogue a consistent visual
 - **Custom gradients**: create linear or radial gradients with 2–5 stops, deterministic `dc-gradient-v1` seeds, animation, exact positions, 16 built-in presets, custom presets, preset gallery, and one-click randomization.
 - **Group profiles**: define scoped group styles and automation rules. Group profiles are stored with the active color table and apply materialized styles on assignment or character creation.
 - **Multi-select bulk editing & style copy/paste**: select multiple character rows to lock, keep, group, randomize, or delete in one transaction. Copy character style fields (gradient, font, text style) and paste them across rows.
-- **Color-vision simulation & perceptual conflict reports**: preview how dialogue appears under protanopia, deuteranopia, tritanopia, or achromatopsia without mutating stored colors. Detect and repair perceptual color conflicts across all character pairs.
+- **Color-vision simulation & perceptual conflict reports**: preview how dialogue appears under protanopia, deuteranopia, tritanopia, or achromatopsia without mutating stored colors. Conflict analysis uses deterministic item, gradient-sample, and pair limits; partial reports identify omitted visuals and unexamined pairs, and only complete reports can be auto-repaired.
 - **Narrator style**: configure dedicated narrator colors, gradients, and text styles. Narrator styling works across LLM prompts, DOM rendering, legend, statistics, and conflict reports.
 - **Attribution reviews**: verifier suggestions are queued for explicit human review by default. Accept, edit, or reject suggestions segment by segment or in bulk.
 - **Automatic NPC gradients**: optionally randomize gradients for newly discovered NPCs while excluding the current card, group cards, and user persona. Off by default.
 - **Automatic gradients for every new character**: a separate default-off override can randomize gradients for every newly created entry.
 - **Global gradient drift**: optionally animate every gradient without changing each character's individual Drift setting. Off by default.
-- **Fonts and text styles**: assign a Google Font and Normal, Bold, Italic, or Bold Italic styling per character.
+- **Fonts and text styles**: assign installed font families and Normal, Bold, Italic, or Bold Italic styling per character. Optional remote Google Font loading is disclosed, disabled by default, and bounded when enabled.
 - **Safer maintenance**: destructive actions review their targets, skip kept characters, and use recovery where available.
 - **Accessible interaction**: keyboard assignment, focus-managed dialogs, visible focus, speaker labels for assistive technology, reduced-motion support, forced-color fallbacks, and responsive touch targets.
 - **Import and card review**: inspect counts, merge or replace deliberately, and opt in before applying an imported storage scope.
@@ -85,7 +85,7 @@ Adding an existing canonical name or alias reveals its current row instead of si
 
 - Select an Auto, Dark, or Light target surface and a palette for newly generated colors.
 - Adjust the current table's brightness; the value previews while dragging and applies when released.
-- Enable dialogue highlights, the floating legend, or automatic recoloring after edits.
+- Enable dialogue highlights, the floating legend, automatic recoloring after edits, or bounded remote Google Font loading. Remote font requests are off by default.
 - Effective colors are adjusted against the rendered chat surface for at least 4.5:1 text contrast. Speaker metadata remains available to assistive technology without adding visible name tags to dialogue.
 - Scan on load only when the current character list is empty, or scan each new message.
 - Automatically lock detected speakers, assign random gradients to new NPCs or every new character, and optionally drift every gradient.
@@ -105,8 +105,8 @@ Local-mode assignments are stored as per-chat quote overrides. LLM-mode assignme
 - Apply 16 built-in gradient presets or manage reusable custom gradient presets from a character's gradient editor.
 - Export/import color data and settings as JSON. Imports are analyzed before any changes are applied.
 - Build portable **Style packs** (`dialogue-colors-style-pack` v1) from selected custom palettes, palette metadata, custom gradient presets, optional assignment presets, and safe appearance values. This format is separate from the internal color schema version.
-- Style-pack imports are local-only and reviewed before installation. Palette, gradient, and assignment-preset conflicts can keep, rename, or replace per category; assignment application and appearance changes are explicit opt-ins.
-- Style packs never carry storage scope, auto-sync, connection profiles, prompts, attribution/automation settings, UI positions, URLs, CSS, or font files. Font family names in optional assignment presets are shown during review as a privacy note.
+- Style-pack files are local-only and reviewed before installation. Palette, gradient, and assignment-preset conflicts can keep, rename, or replace per category; assignment application and appearance changes are explicit opt-ins.
+- Style packs never carry storage scope, auto-sync, connection profiles, prompts, attribution/automation settings, UI positions, URLs, CSS, or font files. Font family names in optional assignment presets are shown during review; they can trigger bounded Google Fonts requests only when remote font loading has been explicitly enabled.
 
 ## Storage, Cards, and Sync
 
@@ -155,6 +155,7 @@ LLM mode supports prompt depth, system/user role, and two delivery modes:
 - **Local colors disappear on refresh**: Local mode is render-only. Use LLM mode for persisted solid tags.
 - **Auto-colorize does not run**: it only triggers when the latest non-user message contains no color block or existing font tags.
 - **An LLM profile is unavailable**: connection profiles require a compatible SillyTavern ConnectionManagerRequestService.
+- **A selected font is not visible**: install it locally, or explicitly enable remote Google Font loading under Appearance and Automation.
 - **Gradient drift is paused**: the device's Reduce Motion preference intentionally disables it.
 
 ## License

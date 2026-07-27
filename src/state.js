@@ -1,5 +1,7 @@
 // state.js - extracted from index.js (mechanical split)
 
+import { normalizeRegistryIdentity } from './group-profiles.js';
+
 export const RUNTIME_GUARD_KEY = '__dialogueColorsRuntime_v1';
 
 export const runtimeState = {
@@ -34,7 +36,7 @@ export function isDomEngine() {
 
 export const MODULE_NAME = 'dialogue-colors';
 
-export const COLOR_SCHEMA_VERSION = 8;
+export const COLOR_SCHEMA_VERSION = 9;
 
 export const COLOR_STORAGE_SCOPES = Object.freeze(['chat', 'card', 'global']);
 
@@ -48,9 +50,9 @@ export const PRESETS_KEY = 'dc_presets';
 
 export const LEGEND_POSITION_KEY = 'dc_legend_position';
 
-export let characterColors = {};
+export let characterColors = Object.create(null);
 
-export let groupProfiles = {};
+export let groupProfiles = Object.create(null);
 
 export const loadedGoogleFonts = new Set();
 
@@ -67,7 +69,7 @@ export let expandedCharacterRows = new Set();
 // Runtime-only selection for character list bulk actions.
 export const selectedCharacterKeys = new Set();
 
-export let settings = { enabled: true, themeMode: 'auto', narratorStyle: { enabled: false, baseColor: '#888888', gradient: null, gradientGenerator: null }, narratorColor: '#888888', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, thoughtSymbols: '*', disableNarration: true, colorStorageScope: DEFAULT_COLOR_STORAGE_SCOPE, autoScanNewMessages: true, autoLockDetected: true, autoRandomNpcGradients: false, autoRandomAllGradients: false, driftAllGradientColors: false, gradientRandomMasterSeed: '', colorVisionPreviewMode: 'none', colorVisionPreviewSeverity: 100, colorVisionPreviewTarget: 'all', gradientAnimationMode: 'auto', enableRightClick: false, promptDepth: 1, autoRecolor: true, autoColorize: false, llmAttributionCheck: false, llmAttributionParallel: false, attributionConservativeOnly: false, attributionReviewPolicy: 'legacy-auto', attributionMaxTokens: 4096, domStealthColors: true, disableToasts: false, llmConnectionProfile: null, attributionConnectionProfile: null, colorSchemaVersion: COLOR_SCHEMA_VERSION, promptMode: 'inject', promptRole: 'system', sortMode: 'name', coloringEngine: 'llm' };
+export let settings = { enabled: true, themeMode: 'auto', narratorStyle: { enabled: false, baseColor: '#888888', gradient: null, gradientGenerator: null }, narratorColor: '#888888', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, thoughtSymbols: '*', disableNarration: true, colorStorageScope: DEFAULT_COLOR_STORAGE_SCOPE, autoScanNewMessages: true, autoLockDetected: true, autoRandomNpcGradients: false, autoRandomAllGradients: false, driftAllGradientColors: false, gradientRandomMasterSeed: '', colorVisionPreviewMode: 'none', colorVisionPreviewSeverity: 100, colorVisionPreviewTarget: 'all', gradientAnimationMode: 'auto', enableRightClick: false, promptDepth: 1, autoRecolor: true, autoColorize: false, llmAttributionCheck: false, llmAttributionParallel: false, attributionConservativeOnly: false, attributionReviewPolicy: 'review', attributionMaxTokens: 4096, allowRemoteFonts: false, domStealthColors: true, disableToasts: false, llmConnectionProfile: null, attributionConnectionProfile: null, colorSchemaVersion: COLOR_SCHEMA_VERSION, promptMode: 'inject', promptRole: 'system', sortMode: 'name', coloringEngine: 'llm' };
 
 export const TOGGLE_SETTING_DEFAULTS = Object.freeze({
     enabled: true,
@@ -86,6 +88,7 @@ export const TOGGLE_SETTING_DEFAULTS = Object.freeze({
     llmAttributionCheck: false,
     llmAttributionParallel: false,
     attributionConservativeOnly: false,
+    allowRemoteFonts: false,
     domStealthColors: true,
     disableToasts: false,
 });
@@ -154,6 +157,8 @@ export let lastStreamingAttributionVerifyKey = '';
 
 export let attributionChatGeneration = 0;
 
+export let attributionVerificationEpoch = 0;
+
 export const streamingAttributionOverrides = new Map();
 
 export const streamingHeuristicCache = new Map();
@@ -184,6 +189,8 @@ export let autoSyncInterval = null;
 
 export let autoSyncLastTimestamp = null;
 
+export let autoSyncLastWriterId = '';
+
 export let autoSyncSequence = 0;
 
 export let autoSyncPendingRecord = null;
@@ -196,19 +203,66 @@ export let immediateSettingsSaveInFlight = false;
 
 export let immediateSettingsSaveQueued = false;
 
+export function createLatestRequestGate() {
+    let latest = 0;
+    return Object.freeze({
+        begin() { return ++latest; },
+        supersede() { return ++latest; },
+        isCurrent(request) { return request === latest; },
+    });
+}
+
+export function getAutoSyncRecordDisposition(options = {}) {
+    if (options.serverVerified && options.hasPending && !options.matchesPending) return 'conflict';
+    if (options.serverVerified && options.matchesCurrent) return 'confirm';
+    if (options.force
+        || options.matchesPending
+        || (options.serverVerified && !options.hasPending)
+        || (!options.serverVerified && options.isNewer)) return 'apply';
+    return 'ignore';
+}
+
+export function preserveLocalRemoteFontConsent(source, localConsent) {
+    const next = Object.assign(
+        Object.create(null),
+        source && typeof source === 'object' && !Array.isArray(source) ? source : {},
+    );
+    next.allowRemoteFonts = localConsent === true;
+    return next;
+}
+
+function toNullPrototypeNameMap(value, maximum, validateAliases = false) {
+    const map = Object.create(null);
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return map;
+    for (const [key, entry] of Object.entries(value)) {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+        const rawName = Object.prototype.hasOwnProperty.call(entry, 'name') ? entry.name : key;
+        const identity = normalizeRegistryIdentity(rawName, maximum);
+        if (!identity) continue;
+        if (validateAliases && Object.prototype.hasOwnProperty.call(entry, 'aliases')) {
+            if (!Array.isArray(entry.aliases)
+                || entry.aliases.some(alias => !normalizeRegistryIdentity(alias))) continue;
+        }
+        map[identity] = entry;
+    }
+    return map;
+}
+
 export function setAttributionChatGeneration(value) { attributionChatGeneration = value; return value; }
+export function setAttributionVerificationEpoch(value) { attributionVerificationEpoch = value; return value; }
 export function setAutoAttributionVerifyTimer(value) { autoAttributionVerifyTimer = value; return value; }
 export function setAutoAttributionVerifyTimerDue(value) { autoAttributionVerifyTimerDue = value; return value; }
 export function setAutoRecolorHintShown(value) { autoRecolorHintShown = value; return value; }
 export function setAutoSyncEnabled(value) { autoSyncEnabled = value; return value; }
 export function setAutoSyncInterval(value) { autoSyncInterval = value; return value; }
 export function setAutoSyncLastTimestamp(value) { autoSyncLastTimestamp = value; return value; }
+export function setAutoSyncLastWriterId(value) { autoSyncLastWriterId = value; return value; }
 export function setAutoSyncPendingRecord(value) { autoSyncPendingRecord = value; return value; }
 export function setAutoSyncSaveTimeout(value) { autoSyncSaveTimeout = value; return value; }
 export function setAutoSyncSequence(value) { autoSyncSequence = value; return value; }
 export function setAutoSyncStatusError(value) { autoSyncStatusError = value; return value; }
-export function setCharacterColors(value) { characterColors = value; return value; }
-export function setGroupProfiles(value) { groupProfiles = value; return value; }
+export function setCharacterColors(value) { characterColors = toNullPrototypeNameMap(value, 120, true); return characterColors; }
+export function setGroupProfiles(value) { groupProfiles = toNullPrototypeNameMap(value, 80); return groupProfiles; }
 export function setColorHistory(value) { colorHistory = value; return value; }
 export function setColorStateSaveTimer(value) { colorStateSaveTimer = value; return value; }
 export function setExpandedCharacterRows(value) { expandedCharacterRows = value; return value; }

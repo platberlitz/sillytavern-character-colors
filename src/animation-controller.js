@@ -5,23 +5,53 @@ export const GRADIENT_ANIMATION_MODES = Object.freeze(['auto', 'full', 'static']
 export const AUTO_MESSAGE_ROOT_LIMIT = 8;
 export const AUTO_ANIMATED_ELEMENT_LIMIT = 32;
 export const ANIMATION_ROOT_MARGIN = 200;
+const AUTO_ROOT_INSPECTION_LIMIT = 64;
+const AUTO_ELEMENT_SCAN_LIMIT = 2048;
+const ROOT_MAINTENANCE_LIMIT = 24;
+const REQUESTED_SELECTOR = '.dc-gradient-animated.dc-gradient-text, .dc-gradient-animated.dc-gradient-surface';
 
 const roots = new Set();
 const visibleRoots = new Set();
+const runningElements = new Set();
 let observer = null;
 let refreshFrame = 0;
 let reducedMotionQuery = null;
+let maintenanceIterator = null;
+let fallbackVisibilityIterator = null;
+let visibilityListenerBound = false;
+let fallbackVisibilityListenersBound = false;
+let fallbackDocumentTarget = null;
+let fallbackViewportTarget = null;
+let fallbackVisualViewportTarget = null;
 
 function normalizeMode(value) {
     return GRADIENT_ANIMATION_MODES.includes(value) ? value : 'auto';
 }
 
-function collectRequestedElements(root) {
+function collectRequestedElements(root, { limit = Number.POSITIVE_INFINITY, scanLimit = Number.POSITIVE_INFINITY } = {}) {
     const elements = [];
-    const selector = '.dc-gradient-animated.dc-gradient-text, .dc-gradient-animated.dc-gradient-surface';
-    if (root?.matches?.(selector)) elements.push(root);
-    root?.querySelectorAll?.(selector).forEach(element => elements.push(element));
-    return elements;
+    if (!root) return { elements, complete: true };
+    if (root.matches?.(REQUESTED_SELECTOR)) {
+        elements.push(root);
+        if (elements.length >= limit) return { elements, complete: false };
+    }
+    if (typeof document?.createTreeWalker !== 'function') {
+        const matches = root.querySelectorAll?.(REQUESTED_SELECTOR) || [];
+        for (let index = 0; index < matches.length && elements.length < limit; index++) elements.push(matches[index]);
+        return { elements, complete: matches.length <= elements.length };
+    }
+
+    const walker = document.createTreeWalker(root, globalThis.NodeFilter?.SHOW_ELEMENT ?? 1);
+    let scanned = 0;
+    let element;
+    while ((element = walker.nextNode())) {
+        if (scanned >= scanLimit) return { elements, complete: false };
+        scanned++;
+        if (!element.matches?.(REQUESTED_SELECTOR)) continue;
+        elements.push(element);
+        if (elements.length >= limit) return { elements, complete: false };
+    }
+    return { elements, complete: true };
 }
 
 function resolveAnimationRoot(element) {
@@ -40,18 +70,105 @@ function isNearViewport(root) {
         && rect.left <= width + ANIMATION_ROOT_MARGIN;
 }
 
-function clearRunningState(root) {
-    if (root?.matches?.('.dc-gradient-running')) root.classList.remove('dc-gradient-running');
-    root?.querySelectorAll?.('.dc-gradient-running').forEach(element => element.classList.remove('dc-gradient-running'));
+function clearRunningElements() {
+    runningElements.forEach(element => element.classList?.remove('dc-gradient-running'));
+    runningElements.clear();
+}
+
+function removeRoot(root) {
+    if (!root || !roots.has(root)) return false;
+    observer?.unobserve(root);
+    roots.delete(root);
+    visibleRoots.delete(root);
+    if (!roots.size) fallbackVisibilityIterator = null;
+    for (const element of runningElements) {
+        if (element === root || root.contains?.(element)) {
+            element.classList?.remove('dc-gradient-running');
+            runningElements.delete(element);
+        }
+    }
+    return true;
+}
+
+function refreshFallbackRootVisibility() {
+    if (observer || !roots.size) {
+        fallbackVisibilityIterator = null;
+        return;
+    }
+    if (!fallbackVisibilityIterator) fallbackVisibilityIterator = roots.values();
+    let inspected = 0;
+    while (inspected < AUTO_ROOT_INSPECTION_LIMIT) {
+        const next = fallbackVisibilityIterator.next();
+        if (next.done) {
+            fallbackVisibilityIterator = null;
+            break;
+        }
+        inspected++;
+        const root = next.value;
+        if (!root.isConnected) {
+            removeRoot(root);
+            continue;
+        }
+        if (isNearViewport(root)) visibleRoots.add(root);
+        else visibleRoots.delete(root);
+    }
+}
+
+function maintainRegisteredRoots() {
+    if (!roots.size) {
+        maintenanceIterator = null;
+        return;
+    }
+    if (!maintenanceIterator) maintenanceIterator = roots.values();
+    let inspected = 0;
+    while (inspected < ROOT_MAINTENANCE_LIMIT) {
+        const next = maintenanceIterator.next();
+        if (next.done) {
+            maintenanceIterator = null;
+            break;
+        }
+        inspected++;
+        const root = next.value;
+        if (!root.isConnected) {
+            removeRoot(root);
+            continue;
+        }
+        const requested = collectRequestedElements(root, { limit: 1, scanLimit: AUTO_ELEMENT_SCAN_LIMIT });
+        if (!requested.elements.length && requested.complete) removeRoot(root);
+    }
 }
 
 function getAutoRoots() {
-    const connected = [...roots].filter(root => root.isConnected);
-    const nonMessages = connected.filter(root => !root.matches?.('.mes'));
-    const messages = connected.filter(root => root.matches?.('.mes'));
-    const visibleMessages = messages.filter(root => visibleRoots.has(root));
-    if (!observer) return [...nonMessages.filter(isNearViewport), ...messages.slice(-3)];
-    visibleMessages.sort((left, right) => {
+    const nonMessages = [];
+    const messages = [];
+    const seen = new Set();
+    let inspected = 0;
+    const collect = collection => {
+        for (const root of collection) {
+            if (inspected >= AUTO_ROOT_INSPECTION_LIMIT) break;
+            if (seen.has(root)) continue;
+            seen.add(root);
+            inspected++;
+            if (!root.isConnected) {
+                removeRoot(root);
+                continue;
+            }
+            const nearViewport = observer ? visibleRoots.has(root) || isNearViewport(root) : isNearViewport(root);
+            if (!observer) {
+                if (nearViewport) visibleRoots.add(root);
+                else visibleRoots.delete(root);
+            }
+            if (!nearViewport) continue;
+            if (root.matches?.('.mes')) {
+                if (messages.length < AUTO_MESSAGE_ROOT_LIMIT * 2) messages.push(root);
+            } else {
+                nonMessages.push(root);
+            }
+        }
+    };
+    collect(visibleRoots);
+    if (inspected < AUTO_ROOT_INSPECTION_LIMIT) collect(roots);
+    messages.sort((left, right) => {
         const leftRect = left.getBoundingClientRect?.();
         const rightRect = right.getBoundingClientRect?.();
         const leftDistance = Math.abs((leftRect?.top || 0) - ((globalThis.innerHeight || 0) / 2));
@@ -59,36 +176,44 @@ function getAutoRoots() {
         return leftDistance - rightDistance;
     });
     return [
-        ...nonMessages.filter(root => visibleRoots.has(root) || isNearViewport(root)),
-        ...visibleMessages.slice(0, AUTO_MESSAGE_ROOT_LIMIT),
+        ...nonMessages,
+        ...messages.slice(0, AUTO_MESSAGE_ROOT_LIMIT),
     ];
 }
 
 function applyRunningState() {
     refreshFrame = 0;
-    for (const root of [...roots]) {
-        if (!root.isConnected) {
-            observer?.unobserve(root);
-            roots.delete(root);
-            visibleRoots.delete(root);
-            continue;
-        }
-        clearRunningState(root);
-    }
+    clearRunningElements();
+    maintainRegisteredRoots();
 
     const mode = normalizeMode(settings.gradientAnimationMode);
     const reduced = reducedMotionQuery?.matches === true;
     if (document.hidden || reduced || mode === 'static') return;
+    if (mode === 'auto' && !observer) refreshFallbackRootVisibility();
 
-    const activeRoots = mode === 'full' ? [...roots] : getAutoRoots();
+    const activeRoots = mode === 'full' ? roots : getAutoRoots();
     let remaining = mode === 'auto' ? AUTO_ANIMATED_ELEMENT_LIMIT : Number.POSITIVE_INFINITY;
     for (const root of activeRoots) {
         if (remaining <= 0) break;
-        const requested = collectRequestedElements(root);
-        for (const element of requested) {
+        if (!root.isConnected) {
+            removeRoot(root);
+            continue;
+        }
+        const result = collectRequestedElements(root, {
+            limit: remaining,
+            scanLimit: mode === 'auto' ? AUTO_ELEMENT_SCAN_LIMIT : Number.POSITIVE_INFINITY,
+        });
+        if (!result.elements.length && result.complete) {
+            removeRoot(root);
+            continue;
+        }
+        for (const element of result.elements) {
             if (remaining <= 0) break;
             element.classList.add('dc-gradient-running');
-            remaining--;
+            if (!runningElements.has(element)) {
+                runningElements.add(element);
+                remaining--;
+            }
         }
     }
 }
@@ -97,6 +222,36 @@ export function refreshGradientAnimationState() {
     if (refreshFrame || typeof document === 'undefined') return;
     if (typeof requestAnimationFrame === 'function') refreshFrame = requestAnimationFrame(applyRunningState);
     else applyRunningState();
+}
+
+function handleFallbackViewportChange() {
+    if (normalizeMode(settings.gradientAnimationMode) === 'auto') refreshGradientAnimationState();
+}
+
+function removeFallbackVisibilityListeners() {
+    if (!fallbackVisibilityListenersBound) return;
+    fallbackDocumentTarget?.removeEventListener?.('scroll', handleFallbackViewportChange, true);
+    fallbackViewportTarget?.removeEventListener?.('scroll', handleFallbackViewportChange);
+    fallbackViewportTarget?.removeEventListener?.('resize', handleFallbackViewportChange);
+    fallbackVisualViewportTarget?.removeEventListener?.('scroll', handleFallbackViewportChange);
+    fallbackVisualViewportTarget?.removeEventListener?.('resize', handleFallbackViewportChange);
+    fallbackDocumentTarget = null;
+    fallbackViewportTarget = null;
+    fallbackVisualViewportTarget = null;
+    fallbackVisibilityListenersBound = false;
+}
+
+function ensureFallbackVisibilityListeners() {
+    if (observer || fallbackVisibilityListenersBound || typeof document === 'undefined') return;
+    fallbackDocumentTarget = document;
+    fallbackViewportTarget = globalThis.window || globalThis;
+    fallbackVisualViewportTarget = fallbackViewportTarget.visualViewport || null;
+    fallbackDocumentTarget.addEventListener?.('scroll', handleFallbackViewportChange, { capture: true, passive: true });
+    fallbackViewportTarget.addEventListener?.('scroll', handleFallbackViewportChange, { passive: true });
+    fallbackViewportTarget.addEventListener?.('resize', handleFallbackViewportChange, { passive: true });
+    fallbackVisualViewportTarget?.addEventListener?.('scroll', handleFallbackViewportChange, { passive: true });
+    fallbackVisualViewportTarget?.addEventListener?.('resize', handleFallbackViewportChange, { passive: true });
+    fallbackVisibilityListenersBound = true;
 }
 
 function ensureController() {
@@ -109,15 +264,19 @@ function ensureController() {
     if (!observer && typeof IntersectionObserver === 'function') {
         observer = new IntersectionObserver(entries => {
             entries.forEach(entry => {
+                if (!roots.has(entry.target)) return;
                 if (entry.isIntersecting) visibleRoots.add(entry.target);
                 else visibleRoots.delete(entry.target);
             });
             refreshGradientAnimationState();
         }, { rootMargin: `${ANIMATION_ROOT_MARGIN}px` });
     }
+    if (observer) removeFallbackVisibilityListeners();
+    else ensureFallbackVisibilityListeners();
     if (!document.__dcGradientAnimationVisibilityBound) {
         document.__dcGradientAnimationVisibilityBound = true;
         document.addEventListener('visibilitychange', refreshGradientAnimationState);
+        visibilityListenerBound = true;
     }
 }
 
@@ -138,11 +297,7 @@ export function registerGradientAnimationElement(element) {
 }
 
 export function unregisterGradientAnimationRoot(root) {
-    if (!root || !roots.has(root)) return false;
-    observer?.unobserve(root);
-    clearRunningState(root);
-    roots.delete(root);
-    visibleRoots.delete(root);
+    if (!removeRoot(root)) return false;
     refreshGradientAnimationState();
     return true;
 }
@@ -154,16 +309,23 @@ export function setGradientAnimationMode(value) {
 }
 
 export function getGradientAnimationState() {
+    const activeRoots = new Set();
+    let runningElementCount = 0;
+    runningElements.forEach(element => {
+        if (!element.isConnected || !element.classList.contains('dc-gradient-running')) return;
+        runningElementCount++;
+        const root = resolveAnimationRoot(element);
+        if (root) activeRoots.add(root);
+    });
     return {
         mode: normalizeMode(settings.gradientAnimationMode),
         hidden: typeof document !== 'undefined' && document.hidden,
         reducedMotion: reducedMotionQuery?.matches === true,
         rootCount: roots.size,
-        activeRootCount: [...roots].filter(root => collectRequestedElements(root)
-            .some(element => element.classList.contains('dc-gradient-running'))).length,
-        runningElementCount: [...roots].reduce((count, root) => count + collectRequestedElements(root)
-            .filter(element => element.classList.contains('dc-gradient-running')).length, 0),
+        activeRootCount: activeRoots.size,
+        runningElementCount,
         observerEnabled: !!observer,
+        fallbackVisibilityEnabled: fallbackVisibilityListenersBound,
     };
 }
 
@@ -172,9 +334,24 @@ export function destroyGradientAnimationController() {
     refreshFrame = 0;
     observer?.disconnect();
     observer = null;
-    roots.forEach(root => {
-        clearRunningState(root);
-    });
+    removeFallbackVisibilityListeners();
+    clearRunningElements();
+    if (reducedMotionQuery) {
+        if (typeof reducedMotionQuery.removeEventListener === 'function') reducedMotionQuery.removeEventListener('change', refreshGradientAnimationState);
+        else reducedMotionQuery.removeListener?.(refreshGradientAnimationState);
+        reducedMotionQuery = null;
+    }
+    if (visibilityListenerBound && typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', refreshGradientAnimationState);
+        try {
+            delete document.__dcGradientAnimationVisibilityBound;
+        } catch (_) {
+            document.__dcGradientAnimationVisibilityBound = false;
+        }
+        visibilityListenerBound = false;
+    }
     roots.clear();
     visibleRoots.clear();
+    maintenanceIterator = null;
+    fallbackVisibilityIterator = null;
 }

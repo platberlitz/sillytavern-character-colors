@@ -73,7 +73,7 @@ export function getGradientRenderState(entry, options = {}) {
     const gradient = normalizeGradient(entry?.gradient);
     const visual = getVisualRenderState(entry, options);
     if (!gradient || !visual.gradientCss) return null;
-    const animationEnabled = options.allowAnimation === false ? false : visual.effectiveAnimation.requested;
+    const animationEnabled = options.allowAnimation === false ? false : visual.effectiveAnimation.enabled;
     return {
         css: visual.gradientCss,
         fallbackColor: visual.fallbackColor,

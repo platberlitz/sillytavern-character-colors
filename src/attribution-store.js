@@ -374,7 +374,7 @@ function reviewFromCandidate(candidate, now) {
     const segmentIndex = normalizedIndex(candidate.segmentIndex ?? segment?.index ?? candidate.index);
     const segmentStart = normalizedIndex(candidate.segmentStart ?? segment?.start ?? candidate.start);
     const segmentEnd = normalizedIndex(candidate.segmentEnd ?? segment?.end ?? candidate.end);
-    const messageId = boundedString(candidate.messageId ?? message?.id ?? message?.send_date, 120);
+    const messageId = boundedString(candidate.messageId, 120) || messageIdFor(message);
     const messageHash = boundedString(candidate.messageHash, 32)
         || (message !== undefined ? hashAttributionMessageText(message?.mes ?? message?.text ?? message) : '');
     const currentSpeaker = boundedString(candidate.currentSpeaker ?? candidate.currentAssignment?.name, 80);
@@ -496,7 +496,7 @@ export const dismissReview = dismissAttributionReview;
 export const dismiss = dismissAttributionReview;
 
 function messageIdFor(message) {
-    return boundedString(message?.id ?? message?.send_date, 120);
+    return boundedString(message?.id, 120) || boundedString(message?.send_date, 120);
 }
 
 function findCurrentMessage(chat, review) {
@@ -574,6 +574,43 @@ function speakerFromOverride(value) {
     return boundedString(value.speaker ?? value.name ?? value.assignment?.name ?? value.value, 80);
 }
 
+function storedOverrideMessageFingerprint(entry) {
+    let fingerprint = boundedString(entry?.messageFingerprint, 80);
+    if (isPlainObject(entry?.records)) {
+        for (const record of Object.values(entry.records)) {
+            const recordFingerprint = boundedString(record?.messageFingerprint, 80);
+            if (!recordFingerprint) continue;
+            if (fingerprint && fingerprint !== recordFingerprint) return null;
+            fingerprint = recordFingerprint;
+        }
+    }
+    return fingerprint;
+}
+
+export function isLegacyAttributionOverrideEntry(entry, options = {}) {
+    if (!isPlainObject(entry) || !isPlainObject(entry.segments)
+        || typeof entry.hash !== 'string') return false;
+    const expectedHash = boundedString(options.messageHash ?? options.hash, 32);
+    if (expectedHash && entry.hash !== expectedHash) return false;
+    const storedLength = entry.textLength;
+    const expectedLength = options.textLength;
+    const storesTextLength = Object.prototype.hasOwnProperty.call(entry, 'textLength');
+    const hasStoredLength = Number.isInteger(storedLength) && storedLength >= 0;
+    const hasExpectedLength = options.textLength !== null && options.textLength !== undefined
+        && Number.isInteger(expectedLength) && expectedLength >= 0;
+    const storedFingerprint = storedOverrideMessageFingerprint(entry);
+    if (boundedString(entry.messageId, 120) || storedFingerprint !== '') return false;
+    if (storesTextLength && !hasStoredLength) return false;
+    return !storesTextLength || (hasExpectedLength && storedLength === expectedLength);
+}
+
+function isLegacyHashOverrideEntry(entry, expectedHash, expectedTextLength) {
+    return !!expectedHash && isLegacyAttributionOverrideEntry(entry, {
+        messageHash: expectedHash,
+        textLength: expectedTextLength,
+    });
+}
+
 export function getAttributionOverrideRecord(overrideMap, messageIndex, segmentIndex) {
     const entry = valueFromMap(overrideMap, messageIndex);
     if (!isPlainObject(entry)) return null;
@@ -616,16 +653,46 @@ export function setAttributionOverrideRecord(overrideMap, review, options = {}) 
     const speaker = boundedString(options.speaker ?? review.proposedSpeaker ?? review.speaker, 80);
     if (messageIndex === null || segmentIndex === null || !speaker) return false;
     const message = options.message;
+    const text = message === undefined ? '' : String(message?.mes ?? message?.text ?? message);
     const expectedHash = message !== undefined
-        ? hashAttributionMessageText(message?.mes ?? message?.text ?? message)
+        ? hashAttributionMessageText(text)
         : boundedString(review.messageHash, 32);
+    const reviewHash = boundedString(review.messageHash, 32);
+    if (message !== undefined && reviewHash && reviewHash !== expectedHash) return false;
+    const currentMessageId = messageIdFor(message);
+    const reviewMessageId = boundedString(review.messageId, 120);
+    if (currentMessageId && reviewMessageId && currentMessageId !== reviewMessageId) return false;
+    const optionMessageId = boundedString(options.messageId, 120);
+    if (currentMessageId && optionMessageId && currentMessageId !== optionMessageId) return false;
+    const messageId = optionMessageId || currentMessageId || reviewMessageId;
+    const currentMessageFingerprint = message === undefined ? '' : createMessageFingerprint(message);
+    const reviewMessageFingerprint = boundedString(review.messageFingerprint, 80);
+    if (currentMessageFingerprint && reviewMessageFingerprint
+        && currentMessageFingerprint !== reviewMessageFingerprint) return false;
+    const messageFingerprint = currentMessageFingerprint || reviewMessageFingerprint;
     const messageKey = String(messageIndex);
     let entry = overrideMap[messageKey];
-    if (!isPlainObject(entry) || (expectedHash && entry.hash !== expectedHash)) {
+    const storedMessageId = boundedString(entry?.messageId, 120);
+    const storedMessageFingerprint = storedOverrideMessageFingerprint(entry);
+    const legacyHashMatch = isLegacyHashOverrideEntry(
+        entry,
+        expectedHash,
+        message === undefined ? null : text.length,
+    );
+    const identityMismatch = !legacyHashMatch && (storedMessageFingerprint === null
+        || ((messageId || storedMessageId) && (!messageId || !storedMessageId || messageId !== storedMessageId))
+        || (messageFingerprint && storedMessageFingerprint && messageFingerprint !== storedMessageFingerprint)
+        || (!messageId && !storedMessageId && messageFingerprint && storedMessageFingerprint !== messageFingerprint));
+    if (!isPlainObject(entry) || (expectedHash && entry.hash !== expectedHash) || identityMismatch) {
         entry = { segments: {} };
         if (expectedHash) entry.hash = expectedHash;
         overrideMap[messageKey] = entry;
     }
+    if (expectedHash) entry.hash = expectedHash;
+    if (messageId) entry.messageId = messageId;
+    else delete entry.messageId;
+    if (messageFingerprint) entry.messageFingerprint = messageFingerprint;
+    if (message !== undefined) entry.textLength = text.length;
     if (!isPlainObject(entry.segments)) entry.segments = {};
     if (!isPlainObject(entry.sources)) entry.sources = {};
     const segmentKey = String(segmentIndex);
@@ -640,10 +707,6 @@ export function setAttributionOverrideRecord(overrideMap, review, options = {}) 
         if (!isPlainObject(entry.reviewIds)) entry.reviewIds = {};
         entry.reviewIds[segmentKey] = reviewId;
     }
-    const messageId = boundedString(options.messageId ?? review.messageId ?? messageIdFor(message), 120);
-    if (messageId) entry.messageId = messageId;
-    const text = message === undefined ? '' : String(message?.mes ?? message?.text ?? message);
-    if (message !== undefined) entry.textLength = text.length;
     const verificationStatus = boundedString(options.verificationStatus, 32).toLowerCase();
     if (VERIFICATION_STATUS_SET.has(verificationStatus)) {
         entry.verificationStatus = verificationStatus;
@@ -668,7 +731,7 @@ export function setAttributionOverrideRecord(overrideMap, review, options = {}) 
             source,
             confidence: normalizeAttributionConfidence(options.confidence ?? review.confidence),
             evidence: normalizeAttributionEvidence(options.evidence ?? review.evidence),
-            messageFingerprint: boundedString(review.messageFingerprint, 80),
+            messageFingerprint,
             segmentFingerprint: boundedString(review.segmentFingerprint, 80),
             reviewId: boundedString(review.id, 96),
         };
@@ -711,110 +774,229 @@ function resolveFactoryOptions(value, chat) {
 export function createAttributionStore(value = {}, chat) {
     const options = resolveFactoryOptions(value, chat);
     const metadataKey = boundedString(options.metadataKey, 120, ATTRIBUTION_REVIEW_METADATA_KEY);
-    const fallbackMetadata = isPlainObject(options.metadata) ? options.metadata : {};
+    const fallbackMetadata = isPlainObject(options.metadata) ? options.metadata : null;
     const getMetadata = () => {
-        const metadata = typeof options.getMetadata === 'function' ? options.getMetadata() : fallbackMetadata;
-        return isPlainObject(metadata) ? metadata : fallbackMetadata;
+        try {
+            const metadata = typeof options.getMetadata === 'function' ? options.getMetadata() : fallbackMetadata;
+            return isPlainObject(metadata) ? metadata : fallbackMetadata;
+        } catch (_) {
+            return fallbackMetadata;
+        }
     };
     const getChat = () => {
         const current = typeof options.getChat === 'function' ? options.getChat() : options.chat;
         return Array.isArray(current) ? current : null;
     };
     const nowOptions = () => ({ now: typeof options.now === 'function' ? options.now() : options.now });
-    const ensureStore = () => {
+    const getStoreState = () => {
         const metadata = getMetadata();
-        const normalized = createAttributionReviewStore(metadata[metadataKey], nowOptions());
-        metadata[metadataKey] = normalized;
-        return normalized;
+        if (!metadata) {
+            return { metadata: null, store: createAttributionReviewStore({}, nowOptions()), attached: false };
+        }
+        let normalized;
+        try {
+            normalized = createAttributionReviewStore(metadata[metadataKey], nowOptions());
+        } catch (_) {
+            return { metadata, store: createAttributionReviewStore({}, nowOptions()), attached: false };
+        }
+        try {
+            metadata[metadataKey] = normalized;
+        } catch (_) {
+            return { metadata, store: normalized, attached: false };
+        }
+        return { metadata, store: normalized, attached: metadata[metadataKey] === normalized };
     };
-    const notify = (action, record = null) => {
-        const metadata = getMetadata();
+    const getReadableStore = () => getStoreState().store;
+    const getMutableState = () => {
+        const state = getStoreState();
+        return state.attached ? state : null;
+    };
+    const notify = (metadata, action, record = null) => {
+        if (!metadata) return;
         if (typeof options.onChange === 'function') options.onChange({ action, record, metadata });
         if (typeof options.saveMetadata === 'function') options.saveMetadata(metadata);
     };
     const service = {
         getStore() {
-            return ensureStore();
+            return getReadableStore();
         },
         get() {
-            return ensureStore();
+            return getReadableStore();
         },
         upsert(candidate, operationOptions = {}) {
-            const store = ensureStore();
+            const state = getMutableState();
+            if (!state) return null;
+            const { metadata, store } = state;
             pruneAttributionReviews(store, { ...nowOptions(), chat: getChat() });
             const review = upsertAttributionReview(store, candidate, { ...nowOptions(), ...operationOptions });
-            if (review) notify('upsert', review);
+            if (review) notify(metadata, 'upsert', review);
             return review;
         },
         list(operationOptions = {}) {
-            return listAttributionReviews(ensureStore(), { ...nowOptions(), ...operationOptions });
+            return listAttributionReviews(getReadableStore(), { ...nowOptions(), ...operationOptions });
         },
         accept(id, operationOptions = {}) {
-            const store = ensureStore();
-            const pruned = pruneAttributionReviews(store, { ...nowOptions(), chat: getChat() });
+            const state = getMutableState();
+            if (!state) return null;
+            const { metadata, store } = state;
+            const decisionNow = getNow({ ...nowOptions(), ...operationOptions });
+            const pruned = pruneAttributionReviews(store, { now: decisionNow, chat: getChat() });
             const pending = store.pending.find(review => review.id === id);
             if (!pending) {
-                if (pruned.stale) notify('prune');
+                if (pruned.stale) notify(metadata, 'prune');
                 const existing = store.recent.find(review => review.id === id);
                 return existing ? cloneReview(existing) : null;
             }
-            const decision = acceptAttributionReview(store, id, { ...nowOptions(), ...operationOptions });
-            const metadata = getMetadata();
             const currentChat = getChat();
-            const message = currentChat ? findCurrentMessage(currentChat, decision) : undefined;
-            const currentMessageIndex = currentChat ? findCurrentMessageIndex(currentChat, decision, message) : null;
-            if (currentMessageIndex !== null && decision.messageIndex !== currentMessageIndex) {
+            const message = currentChat ? findCurrentMessage(currentChat, pending) : undefined;
+            const currentMessageIndex = currentChat ? findCurrentMessageIndex(currentChat, pending, message) : null;
+            if (currentChat && (currentMessageIndex === null || !message)) return null;
+            const candidate = {
+                ...pending,
+                ...(currentMessageIndex === null ? {} : { messageIndex: currentMessageIndex }),
+            };
+            let acceptedSpeaker = boundedString(operationOptions.speaker ?? candidate.proposedSpeaker, 80);
+            if (typeof options.validateAcceptance === 'function') {
+                let validation;
+                try {
+                    validation = options.validateAcceptance(cloneReview(candidate), { ...operationOptions, speaker: acceptedSpeaker });
+                } catch (_) {
+                    return null;
+                }
+                if (validation === false || validation === null || validation === undefined) return null;
+                if (typeof validation === 'string') acceptedSpeaker = boundedString(validation, 80);
+            }
+            if (!acceptedSpeaker) return null;
+
+            let overrideMap = null;
+            let messageKey = '';
+            let hadPreviousOverride = false;
+            let previousOverride;
+            const externalRecordMap = isPlainObject(operationOptions.recordMap) ? operationOptions.recordMap : null;
+            const recordKey = String(candidate.segmentIndex);
+            const hadPreviousRecord = !!externalRecordMap && Object.prototype.hasOwnProperty.call(externalRecordMap, recordKey);
+            let previousRecord;
+            if (hadPreviousRecord) {
+                try {
+                    previousRecord = JSON.parse(JSON.stringify(externalRecordMap[recordKey]));
+                } catch (_) {
+                    return null;
+                }
+            }
+            const rollbackOverride = () => {
+                try {
+                    if (overrideMap) {
+                        if (hadPreviousOverride) overrideMap[messageKey] = previousOverride;
+                        else delete overrideMap[messageKey];
+                    }
+                    if (externalRecordMap) {
+                        if (hadPreviousRecord) externalRecordMap[recordKey] = previousRecord;
+                        else delete externalRecordMap[recordKey];
+                    }
+                } catch (_) { /* best-effort rollback for hostile/frozen stores */ }
+            };
+            const shouldApplyOverride = operationOptions.applyOverride !== false && options.applyOverrides !== false;
+            if (shouldApplyOverride) {
+                try {
+                    overrideMap = operationOptions.overrideMap;
+                    if (!overrideMap && typeof options.getOverrideMap === 'function') overrideMap = options.getOverrideMap();
+                    if (!overrideMap) {
+                        if (!isPlainObject(metadata[ATTRIBUTION_OVERRIDES_METADATA_KEY])) metadata[ATTRIBUTION_OVERRIDES_METADATA_KEY] = {};
+                        overrideMap = metadata[ATTRIBUTION_OVERRIDES_METADATA_KEY];
+                    }
+                } catch (_) {
+                    return null;
+                }
+                if (!isPlainObject(overrideMap)) return null;
+                messageKey = String(candidate.messageIndex);
+                hadPreviousOverride = Object.prototype.hasOwnProperty.call(overrideMap, messageKey);
+                if (hadPreviousOverride) {
+                    try {
+                        previousOverride = JSON.parse(JSON.stringify(overrideMap[messageKey]));
+                    } catch (_) {
+                        return null;
+                    }
+                }
+                const overrideSource = operationOptions.source
+                    ?? (candidate.source === ATTRIBUTION_SOURCE.MANUAL ? ATTRIBUTION_SOURCE.MANUAL : ATTRIBUTION_SOURCE.REVIEW);
+                let applied = false;
+                try {
+                    applied = setAttributionOverrideRecord(overrideMap, candidate, {
+                        message,
+                        speaker: acceptedSpeaker,
+                        source: overrideSource,
+                        verificationStatus: operationOptions.verificationStatus ?? ATTRIBUTION_VERIFICATION_STATUS.CLEAN,
+                        extended: operationOptions.extended !== false || options.extendedOverrides === true,
+                        recordMap: operationOptions.recordMap,
+                        reviewedAt: decisionNow,
+                    });
+                } catch (_) { /* handled as a failed atomic apply below */ }
+                if (!applied) {
+                    rollbackOverride();
+                    return null;
+                }
+            }
+
+            if (typeof options.applyOverride === 'function') {
+                let applied;
+                try {
+                    applied = options.applyOverride(cloneReview(candidate), { ...operationOptions, speaker: acceptedSpeaker });
+                } catch (_) {
+                    applied = false;
+                }
+                if (applied === false || (applied && typeof applied.then === 'function')) {
+                    rollbackOverride();
+                    return null;
+                }
+            }
+
+            const decision = acceptAttributionReview(store, id, { ...nowOptions(), ...operationOptions, now: decisionNow });
+            if (!decision) {
+                rollbackOverride();
+                return null;
+            }
+            if (currentMessageIndex !== null) {
                 decision.messageIndex = currentMessageIndex;
                 const storedDecision = store.recent.find(review => review.id === decision.id);
                 if (storedDecision) storedDecision.messageIndex = currentMessageIndex;
             }
-            if (decision && operationOptions.applyOverride !== false && options.applyOverrides !== false) {
-                let overrideMap = operationOptions.overrideMap;
-                if (!overrideMap && typeof options.getOverrideMap === 'function') overrideMap = options.getOverrideMap();
-                if (!overrideMap) {
-                    if (!isPlainObject(metadata[ATTRIBUTION_OVERRIDES_METADATA_KEY])) metadata[ATTRIBUTION_OVERRIDES_METADATA_KEY] = {};
-                    overrideMap = metadata[ATTRIBUTION_OVERRIDES_METADATA_KEY];
-                }
-                const overrideSource = operationOptions.source
-                    ?? (decision.source === ATTRIBUTION_SOURCE.MANUAL ? ATTRIBUTION_SOURCE.MANUAL : ATTRIBUTION_SOURCE.REVIEW);
-                setAttributionOverrideRecord(overrideMap, decision, {
-                    message,
-                    source: overrideSource,
-                    verificationStatus: operationOptions.verificationStatus ?? ATTRIBUTION_VERIFICATION_STATUS.CLEAN,
-                    extended: operationOptions.extended !== false || options.extendedOverrides === true,
-                    recordMap: operationOptions.recordMap,
-                });
-            }
-            if (decision && typeof options.applyOverride === 'function') options.applyOverride(cloneReview(decision));
-            if (decision) notify('accept', decision);
+            notify(metadata, 'accept', decision);
             return decision;
         },
         reject(id, operationOptions = {}) {
-            const decision = rejectAttributionReview(ensureStore(), id, { ...nowOptions(), ...operationOptions });
-            if (decision) notify('reject', decision);
+            const state = getMutableState();
+            if (!state) return null;
+            const decision = rejectAttributionReview(state.store, id, { ...nowOptions(), ...operationOptions });
+            if (decision) notify(state.metadata, 'reject', decision);
             return decision;
         },
         dismiss(id, operationOptions = {}) {
-            const decision = dismissAttributionReview(ensureStore(), id, { ...nowOptions(), ...operationOptions });
-            if (decision) notify('dismiss', decision);
+            const state = getMutableState();
+            if (!state) return null;
+            const decision = dismissAttributionReview(state.store, id, { ...nowOptions(), ...operationOptions });
+            if (decision) notify(state.metadata, 'dismiss', decision);
             return decision;
         },
         prune(operationOptions = {}) {
-            const result = pruneAttributionReviews(ensureStore(), {
+            const state = getMutableState();
+            if (!state) return { stale: 0, pending: 0, recent: 0 };
+            const result = pruneAttributionReviews(state.store, {
                 ...nowOptions(),
                 chat: getChat(),
                 ...operationOptions,
             });
-            if (result.stale) notify('prune');
+            if (result.stale) notify(state.metadata, 'prune');
             return result;
         },
         deleteOverride(messageIndex, segmentIndex, operationOptions = {}) {
-            const metadata = getMetadata();
+            const state = getMutableState();
+            if (!state) return false;
+            const { metadata } = state;
             let overrideMap = operationOptions.overrideMap;
             if (!overrideMap && typeof options.getOverrideMap === 'function') overrideMap = options.getOverrideMap();
             if (!overrideMap) overrideMap = metadata[ATTRIBUTION_OVERRIDES_METADATA_KEY];
             const deleted = deleteAttributionOverrideRecord(overrideMap, messageIndex, segmentIndex);
-            if (deleted) notify('delete-override');
+            if (deleted) notify(metadata, 'delete-override');
             return deleted;
         },
         fingerprintMessage: createMessageFingerprint,

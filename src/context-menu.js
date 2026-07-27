@@ -12,6 +12,7 @@ import { escapeAttr, hashMessageText, normalizeHexColor, normalizeSegmentText, t
 
 const INVALID_CHARACTER_NAME_RE = /[\r\n\t\[\]=,()]/;
 const CONTEXT_FOCUS_ATTRIBUTE = 'data-dc-context-focus';
+const CONTEXT_CHARACTER_OPTION_LIMIT = 200;
 let closeActiveAssignmentSurface = null;
 
 function readCharacterName(nameInput) {
@@ -44,6 +45,19 @@ function formatAttributionSource(source) {
         unknown: 'Unknown',
     };
     return labels[source] || String(source || 'Unknown').replace(/-/g, ' ');
+}
+
+function getCharacterSuggestionMarkup() {
+    const entries = getSortedEntries();
+    const datalistOptions = entries
+        .slice(0, CONTEXT_CHARACTER_OPTION_LIMIT)
+        .map(([, entry]) => `<option value="${escapeAttr(entry.name)}">`)
+        .join('');
+    const omittedCount = Math.max(0, entries.length - CONTEXT_CHARACTER_OPTION_LIMIT);
+    const truncationNote = omittedCount
+        ? `<p class="dc-context-note" role="note">Suggestions show the first ${CONTEXT_CHARACTER_OPTION_LIMIT} of ${entries.length} characters. Type an exact existing name or alias to select one of the ${omittedCount} omitted entries.</p>`
+        : '';
+    return { datalistOptions, truncationNote };
 }
 
 function getDomAttributionDetails(targetEl) {
@@ -175,13 +189,20 @@ function mountAssignmentSurface(menu, opener) {
         menu.remove();
         if (closeActiveAssignmentSurface === close) closeActiveAssignmentSurface = null;
         if (restoreFocus) {
-            const focusTarget = opener?.isConnected
-                ? opener
-                : openerMessageId
-                    ? [...document.querySelectorAll(`#chat .mes[mesid="${CSS.escape(openerMessageId)}"] ${getManagedDialogueSelector()}`)]
-                        .filter(element => element.hasAttribute(CONTEXT_FOCUS_ATTRIBUTE))[Math.max(0, openerSegmentIndex)]
-                        || document.querySelector(`#chat .mes[mesid="${CSS.escape(openerMessageId)}"] [${CONTEXT_FOCUS_ATTRIBUTE}][tabindex="0"]`)
-                    : null;
+            let focusTarget = opener?.isConnected ? opener : null;
+            if (!focusTarget && openerMessageId) {
+                const message = document.querySelector(`#chat .mes[mesid="${CSS.escape(openerMessageId)}"]`);
+                const messageText = message?.querySelector('.mes_text');
+                const targets = getMessageDialogueTargets(messageText);
+                focusTarget = openerSegmentIndex >= 0 ? targets[openerSegmentIndex] || targets[0] : messageText;
+                if (focusTarget && !focusTarget.hasAttribute('tabindex')) {
+                    focusTarget.setAttribute('tabindex', openerSegmentIndex >= 0 ? '0' : '-1');
+                    if (openerSegmentIndex >= 0) {
+                        focusTarget.setAttribute('aria-keyshortcuts', 'Shift+F10');
+                        focusTarget.setAttribute(CONTEXT_FOCUS_ATTRIBUTE, 'tabindex');
+                    }
+                }
+            }
             if (typeof focusTarget?.focus === 'function') focusTarget.focus({ preventScroll: true });
         }
     };
@@ -247,10 +268,7 @@ function showMenu(e, fontTag, qElement = null) {
         ? '<button id="dc-ctx-use-automatic" class="menu_button" style="width:100%;margin-bottom:4px;">Use automatic attribution</button>'
         : '';
 
-    // Build character list for datalist
-    const charList = getSortedEntries()
-        .map(([k, v]) => ({ key: k, name: v.name }));
-    const datalistOptions = charList.map(c => `<option value="${escapeAttr(c.name)}">`).join('');
+    const { datalistOptions, truncationNote } = getCharacterSuggestionMarkup();
 
     const menu = document.createElement('div');
     menu.id = 'dc-context-menu';
@@ -270,6 +288,7 @@ function showMenu(e, fontTag, qElement = null) {
             <input type="text" id="dc-ctx-name" list="dc-ctx-chars" aria-label="Character name" placeholder="Character name (type to search)" class="text_pole" style="flex:1;padding:3px;font-size:0.85em;" autocomplete="off">
             <datalist id="dc-ctx-chars">${datalistOptions}</datalist>
         </div>
+        ${truncationNote}
         <p class="dc-context-note">Direct manual assignment may create a character only from the name you enter.</p>
         <button id="dc-ctx-assign" class="menu_button" style="width:100%;margin-bottom:4px;">Assign manually</button>
         ${automaticAttributionAction}
@@ -546,10 +565,22 @@ function showSelectionMenu(e, selection, range, selectedText, mesEl) {
     const chat = ctx?.chat || [];
     const msg = chat[msgIndex];
     if (!msg || msg.is_user) return;
+    const sourceMessageHash = hashMessageText(msg.mes);
+    const selectedRangeText = range.toString();
+    const capturedMesText = mesEl.querySelector('.mes_text');
+    const renderedStartOffset = getRenderedCharOffset(capturedMesText, range);
+    const capturedSourceSpan = mapRenderedSelectionToSourceSpan(
+        msg.mes,
+        capturedMesText?.textContent || '',
+        selectedText,
+        renderedStartOffset,
+    );
+    if (!capturedSourceSpan) {
+        toast.error('The selection could not be mapped safely to plain message source. Please re-select it.');
+        return;
+    }
 
-    const charList = getSortedEntries()
-        .map(([k, v]) => ({ key: k, name: v.name }));
-    const datalistOptions = charList.map(c => `<option value="${escapeAttr(c.name)}">`).join('');
+    const { datalistOptions, truncationNote } = getCharacterSuggestionMarkup();
 
     const preview = selectedText.substring(0, 30) + (selectedText.length > 30 ? '...' : '');
 
@@ -570,6 +601,7 @@ function showSelectionMenu(e, selection, range, selectedText, mesEl) {
             <input type="text" id="dc-ctx-name" list="dc-ctx-chars" aria-label="Character name" placeholder="Character name (type to search)" class="text_pole" style="flex:1;padding:3px;font-size:0.85em;" autocomplete="off">
             <datalist id="dc-ctx-chars">${datalistOptions}</datalist>
         </div>
+        ${truncationNote}
         <p class="dc-context-note">Direct manual assignment may create a character only from the name you enter.</p>
         <button id="dc-ctx-assign" class="menu_button" style="width:100%;margin-bottom:4px;">Assign manually</button>
         <button id="dc-ctx-close" class="menu_button" style="width:100%;">Cancel</button>
@@ -600,18 +632,19 @@ function showSelectionMenu(e, selection, range, selectedText, mesEl) {
         const pickerColor = normalizeHexColor(colorInput.value, '#888888');
         if (!name) { closeMenu(); return; }
 
-        // Validate and measure the saved range before changing character state.
+        // Validate the saved range before changing character state.
         // Streaming can replace the message while this dialog is open.
         const mesTextEl = mesEl.querySelector('.mes_text');
-        if (!range.startContainer?.isConnected
+        if (getContext()?.chat?.[msgIndex] !== msg
+            || hashMessageText(msg.mes) !== sourceMessageHash
+            || !range.startContainer?.isConnected
             || !mesTextEl?.contains(range.startContainer)
-            || !mesTextEl?.contains(range.endContainer)) {
-            toast.error('Selection is no longer valid — the message was re-rendered. Please re-select the text.');
+            || !mesTextEl?.contains(range.endContainer)
+            || range.toString() !== selectedRangeText) {
+            toast.error('Selection is no longer valid; the message changed. Please re-select the text.');
             closeMenu();
             return;
         }
-        const renderedCharOffset = getRenderedCharOffset(mesTextEl, range);
-        const renderedLen = mesTextEl.textContent.length;
 
         const key = resolveCharacterKeyByNameOrAlias(name) || name.toLowerCase();
         let finalColor = pickerColor;
@@ -641,28 +674,12 @@ function showSelectionMenu(e, selection, range, selectedText, mesEl) {
             nextEntry = built.entry;
         }
 
-        try {
-            const fontNode = document.createElement('font');
-            fontNode.setAttribute('color', finalColor);
-            range.surroundContents(fontNode);
-        } catch (wrapErr) {
-            const fontNode = document.createElement('font');
-            fontNode.setAttribute('color', finalColor);
-            try {
-                const fragment = range.extractContents();
-                fontNode.appendChild(fragment);
-                range.insertNode(fontNode);
-            } catch (fallbackErr) {
-                toast.error('Could not wrap selection');
-                closeMenu();
-                return;
-            }
-        }
-
-        selection.removeAllRanges();
-
-        const textUpdated = replaceMessageSelectionWithFontTag(msg, selectedText, finalColor, renderedCharOffset, renderedLen);
+        const textUpdated = replaceMessageSelectionWithFontTag(msg, selectedText, finalColor, {
+            sourceStart: capturedSourceSpan.start,
+            sourceEnd: capturedSourceSpan.end,
+        });
         if (textUpdated) {
+            selection.removeAllRanges();
             characterColors[key] = nextEntry;
             if (existingColorChanged) {
                 applyLiveColorChangesFromSnapshot(existingSnapshot, [key], { saveImmediately: true });
@@ -670,13 +687,10 @@ function showSelectionMenu(e, selection, range, selectedText, mesEl) {
             queueChatSave();
             flushChatSave();
             commit();
+            refreshMessageDom(msgIndex, msg);
             toast.success(`Assigned to ${escapeHtml(name)}`);
         } else {
-            // The rendered selection was not found verbatim in msg.mes (markdown
-            // constructs consumed). Re-render to undo the visual wrap rather than
-            // report a success that would silently vanish on the next render.
-            toast.error('Could not locate the selection in the message source — nothing was colored.');
-            refreshMessageDom(msgIndex, msg);
+            toast.error('The selection could not be mapped unambiguously to plain message source; nothing was changed.');
         }
         closeMenu();
     };
@@ -768,12 +782,61 @@ export function setupContextMenu() {
     let focusSyncQueued = false;
     let forceFullFocusSync = false;
     const pendingFocusRoots = new Set();
+    let activeTouchListeners = false;
+    const activeTouchOptions = { passive: false, capture: true };
 
-    const cancelLongPress = () => {
-        if (!longPressState) return;
-        longPressState.cancelled = true;
-        clearTimeout(longPressState.timer);
-        longPressState = null;
+    const removeActiveTouchListeners = () => {
+        if (!activeTouchListeners) return;
+        activeTouchListeners = false;
+        document.removeEventListener('touchmove', handleTouchMove, activeTouchOptions);
+        document.removeEventListener('touchend', handleTouchEnd, activeTouchOptions);
+        document.removeEventListener('touchcancel', handleTouchCancel, activeTouchOptions);
+    };
+
+    const clearLongPressState = () => {
+        if (longPressState) {
+            longPressState.cancelled = true;
+            clearTimeout(longPressState.timer);
+            longPressState = null;
+        }
+    };
+
+    const finishTouchGesture = () => {
+        clearLongPressState();
+        consumeTouchEnd = false;
+        removeActiveTouchListeners();
+    };
+
+    const handleTouchMove = e => {
+        if (consumeTouchEnd) {
+            e.preventDefault();
+            return;
+        }
+        if (!longPressState || e.touches.length !== 1) {
+            finishTouchGesture();
+            return;
+        }
+        const touch = e.touches[0];
+        if (Math.hypot(touch.clientX - longPressState.startX, touch.clientY - longPressState.startY) > 10) {
+            finishTouchGesture();
+        }
+    };
+
+    const handleTouchEnd = e => {
+        if (consumeTouchEnd) e.preventDefault();
+        finishTouchGesture();
+    };
+
+    const handleTouchCancel = () => {
+        finishTouchGesture();
+    };
+
+    const attachActiveTouchListeners = () => {
+        if (activeTouchListeners) return;
+        activeTouchListeners = true;
+        document.addEventListener('touchmove', handleTouchMove, activeTouchOptions);
+        document.addEventListener('touchend', handleTouchEnd, activeTouchOptions);
+        document.addEventListener('touchcancel', handleTouchCancel, activeTouchOptions);
     };
 
     const queueFocusSync = mutations => {
@@ -834,6 +897,7 @@ export function setupContextMenu() {
     let previousFocusMode = `${settings.enableRightClick}:${isDomEngine()}`;
     eventSource.on(event_types.SETTINGS_UPDATED, () => {
         const nextFocusMode = `${settings.enableRightClick}:${isDomEngine()}`;
+        if (!settings.enableRightClick) finishTouchGesture();
         if (nextFocusMode === previousFocusMode) return;
         previousFocusMode = nextFocusMode;
         queueFocusSync();
@@ -890,9 +954,9 @@ export function setupContextMenu() {
         }
         const sel = window.getSelection();
         if (sel && !sel.isCollapsed && mesText.contains(sel.anchorNode) && mesText.contains(sel.focusNode)) {
-            const range = sel.getRangeAt(0);
-            const selectedText = sel.toString().trim();
-            if (selectedText && mesText.closest('.mes')) {
+            const range = sel.getRangeAt(0).cloneRange();
+            const selectedText = sel.toString();
+            if (selectedText.trim() && mesText.closest('.mes')) {
                 showSelectionMenu(e, sel, range, selectedText, mesText.closest('.mes'));
                 return;
             }
@@ -902,8 +966,7 @@ export function setupContextMenu() {
     });
 
     document.addEventListener('touchstart', e => {
-        cancelLongPress();
-        consumeTouchEnd = false;
+        finishTouchGesture();
         if (!settings.enableRightClick) return;
         if (e.touches.length !== 1) return;
         const assignmentTarget = resolveDialogueAssignmentTarget(e.target);
@@ -920,30 +983,18 @@ export function setupContextMenu() {
             timer: null,
         };
         press.timer = setTimeout(() => {
-            if (longPressState !== press || press.cancelled || !press.targetEl.isConnected || !settings.enableRightClick) return;
+            if (longPressState !== press || press.cancelled || !press.targetEl.isConnected || !settings.enableRightClick) {
+                finishTouchGesture();
+                return;
+            }
             consumeTouchEnd = true;
             suppressedContextTarget = press.targetEl;
             suppressContextUntil = Date.now() + 1200;
             showMenu({ type: 'longpress', clientX: press.clientX, clientY: press.clientY }, press.fontTag, press.qElement);
         }, 500);
         longPressState = press;
+        attachActiveTouchListeners();
     }, { passive: true });
-
-    document.addEventListener('touchmove', e => {
-        if (consumeTouchEnd) e.preventDefault();
-        if (!longPressState || e.touches.length !== 1) { cancelLongPress(); return; }
-        const touch = e.touches[0];
-        if (Math.hypot(touch.clientX - longPressState.startX, touch.clientY - longPressState.startY) > 10) cancelLongPress();
-    }, { passive: false });
-    document.addEventListener('touchend', e => {
-        if (consumeTouchEnd) e.preventDefault();
-        cancelLongPress();
-        consumeTouchEnd = false;
-    }, { passive: false });
-    document.addEventListener('touchcancel', () => {
-        cancelLongPress();
-        consumeTouchEnd = false;
-    });
 }
 
 /**
@@ -952,7 +1003,15 @@ export function setupContextMenu() {
  */
 
 export function getRenderedCharOffset(rootEl, range) {
-    if (!rootEl || !range) return 0;
+    if (!rootEl || !range || !rootEl.contains?.(range.startContainer)) return -1;
+    try {
+        const prefix = document.createRange();
+        prefix.selectNodeContents(rootEl);
+        prefix.setEnd(range.startContainer, range.startOffset);
+        return prefix.toString().length;
+    } catch (_) {
+        // Fall through for older hosts with incomplete Range support.
+    }
     let charOffset = 0;
     const tw = document.createTreeWalker(rootEl, NodeFilter.SHOW_TEXT, null, false);
     let textNode;
@@ -962,44 +1021,452 @@ export function getRenderedCharOffset(rootEl, range) {
         }
         charOffset += textNode.textContent.length;
     }
-    return charOffset;
+    return -1;
+}
+
+function getRenderedTextForRange(range) {
+    if (!range || typeof window === 'undefined' || typeof window.getSelection !== 'function') return range?.toString?.() || '';
+    const selection = window.getSelection();
+    if (!selection) return range.toString();
+    const savedRanges = [];
+    for (let index = 0; index < selection.rangeCount; index++) savedRanges.push(selection.getRangeAt(index).cloneRange());
+    try {
+        selection.removeAllRanges();
+        selection.addRange(range.cloneRange());
+        return selection.toString();
+    } catch (_) {
+        return range.toString();
+    } finally {
+        selection.removeAllRanges();
+        for (const savedRange of savedRanges) {
+            try {
+                selection.addRange(savedRange);
+            } catch (_) {
+                break;
+            }
+        }
+    }
+}
+
+function overlapsSourceRange(start, end, matchStart, matchEnd) {
+    return start < matchEnd && end > matchStart;
+}
+
+function mergeSourceRanges(ranges) {
+    const sorted = ranges
+        .filter(range => Number.isInteger(range.start) && Number.isInteger(range.end) && range.end > range.start)
+        .sort((left, right) => left.start - right.start || left.end - right.end);
+    const merged = [];
+    for (const range of sorted) {
+        const previous = merged[merged.length - 1];
+        if (previous && range.start <= previous.end) previous.end = Math.max(previous.end, range.end);
+        else merged.push({ ...range });
+    }
+    return merged;
+}
+
+function overlapsAnySourceRange(ranges, start, end) {
+    let low = 0;
+    let high = ranges.length;
+    while (low < high) {
+        const middle = (low + high) >> 1;
+        if (ranges[middle].end <= start) low = middle + 1;
+        else high = middle;
+    }
+    const range = ranges[low];
+    return !!range && overlapsSourceRange(start, end, range.start, range.end);
+}
+
+function collectRawHtmlRanges(rawText) {
+    const ranges = [];
+    for (let index = 0; index < rawText.length; index++) {
+        if (rawText[index] !== '<') continue;
+        if (rawText.startsWith('<!--', index)) {
+            const close = rawText.indexOf('-->', index + 4);
+            const end = close < 0 ? rawText.length : close + 3;
+            ranges.push({ start: index, end });
+            index = end - 1;
+            continue;
+        }
+        if (!/[A-Za-z!/?]/.test(rawText[index + 1] || '')) continue;
+        let quote = '';
+        let end = index + 1;
+        for (; end < rawText.length; end++) {
+            const character = rawText[end];
+            if (quote) {
+                if (character === quote) quote = '';
+                continue;
+            }
+            if (character === '"' || character === "'") quote = character;
+            else if (character === '>') { end++; break; }
+        }
+        ranges.push({ start: index, end: Math.min(end, rawText.length) });
+        index = Math.max(index, end - 1);
+    }
+    const rawElementPattern = /<(script|style|textarea|title)\b[^>]*>[\s\S]*?<\/\1\s*>/gi;
+    let rawElement;
+    while ((rawElement = rawElementPattern.exec(rawText)) !== null) {
+        ranges.push({ start: rawElement.index, end: rawElement.index + rawElement[0].length });
+    }
+    return ranges;
+}
+
+function collectMarkdownDestinationRanges(rawText) {
+    const ranges = [];
+    const definition = /^[ \t]{0,3}\[[^\]\r\n]+\]:[^\r\n]*(?:\r?\n|$)/gm;
+    let match;
+    while ((match = definition.exec(rawText)) !== null) {
+        ranges.push({ start: match.index, end: match.index + match[0].length });
+    }
+    const referenceDestination = /\[[^\]\r\n]+\](\[[^\]\r\n]*\])/g;
+    while ((match = referenceDestination.exec(rawText)) !== null) {
+        const destinationStart = match.index + match[0].length - match[1].length;
+        ranges.push({ start: destinationStart, end: match.index + match[0].length });
+    }
+    const findOpeningBracket = closeIndex => {
+        const lineStart = Math.max(rawText.lastIndexOf('\n', closeIndex), rawText.lastIndexOf('\r', closeIndex)) + 1;
+        let depth = 1;
+        for (let cursor = closeIndex - 1; cursor >= lineStart; cursor--) {
+            if (isEscapedSourceCharacter(rawText, cursor)) continue;
+            if (rawText[cursor] === ']') depth++;
+            else if (rawText[cursor] === '[' && --depth === 0) return cursor;
+        }
+        return -1;
+    };
+    for (let index = 0; index < rawText.length - 1; index++) {
+        if (rawText[index] !== ']' || rawText[index + 1] !== '(') continue;
+        if (findOpeningBracket(index) < 0) continue;
+        let depth = 1;
+        let end = index + 2;
+        let escaped = false;
+        for (; end < rawText.length; end++) {
+            const character = rawText[end];
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (character === '\\') {
+                escaped = true;
+                continue;
+            }
+            if (character === '(') depth++;
+            else if (character === ')' && --depth === 0) { end++; break; }
+            else if ((character === '\r' || character === '\n') && depth > 0) break;
+        }
+        ranges.push({ start: index, end: Math.min(end, rawText.length) });
+        index = Math.max(index, end - 1);
+    }
+    const image = /!\[[^\]\r\n]*\](?:\([^\r\n)]*\)|\[[^\]\r\n]*\])/g;
+    while ((match = image.exec(rawText)) !== null) {
+        ranges.push({ start: match.index, end: match.index + match[0].length });
+    }
+    return ranges;
+}
+
+function isEscapedSourceCharacter(rawText, index) {
+    let backslashes = 0;
+    for (let cursor = index - 1; cursor >= 0 && rawText[cursor] === '\\'; cursor--) backslashes++;
+    return backslashes % 2 === 1;
+}
+
+function collectMarkdownMarkerRanges(rawText, excludedRanges = []) {
+    const ranges = [];
+    const linkedLabel = /\[([^\]\r\n]+)\](?=\(|\[[^\]\r\n]*\])/g;
+    let match;
+    while ((match = linkedLabel.exec(rawText)) !== null) {
+        ranges.push({ start: match.index, end: match.index + 1 });
+        ranges.push({ start: match.index + match[0].length - 1, end: match.index + match[0].length });
+    }
+    const openings = new Map();
+    for (let index = 0; index < rawText.length; index++) {
+        const character = rawText[index];
+        if (character === '\r' || character === '\n') {
+            openings.clear();
+            continue;
+        }
+        if (character !== '*' && character !== '_' && character !== '~') continue;
+        let end = index + 1;
+        while (rawText[end] === character) end++;
+        if (isEscapedSourceCharacter(rawText, index)
+            || overlapsAnySourceRange(excludedRanges, index, end)) {
+            openings.clear();
+            index = end - 1;
+            continue;
+        }
+        const length = end - index;
+        const marker = character === '~'
+            ? length === 2 ? '~~' : ''
+            : length <= 3 ? character.repeat(length) : '';
+        if (!marker) {
+            index = end - 1;
+            continue;
+        }
+        const opening = openings.get(marker);
+        if (opening && index > opening.end && !/\s/.test(rawText[index - 1])) {
+            if (character === '_') {
+                const before = rawText[opening.start - 1] || '';
+                const after = rawText[end] || '';
+                if (/[A-Za-z0-9]/.test(before) || /[A-Za-z0-9]/.test(after)) {
+                    index = end - 1;
+                    continue;
+                }
+            }
+            ranges.push({ start: opening.start, end: opening.end });
+            ranges.push({ start: index, end });
+            openings.delete(marker);
+        } else if (!/\s/.test(rawText[end] || '')) {
+            openings.set(marker, { start: index, end });
+        }
+        index = end - 1;
+    }
+    return ranges;
+}
+
+function collectMarkdownCodeSyntax(rawText) {
+    const unsafe = [];
+    const nonVisible = [];
+    const fencePattern = /^[ \t]{0,3}(`{3,}|~{3,})[^\r\n]*(?:\r?\n|$)/gm;
+    let opening;
+    while ((opening = fencePattern.exec(rawText)) !== null) {
+        const marker = opening[1];
+        let end = rawText.length;
+        let closingRange = null;
+        let closing;
+        while ((closing = fencePattern.exec(rawText)) !== null) {
+            if (closing[1][0] !== marker[0] || closing[1].length < marker.length) continue;
+            end = closing.index + closing[0].length;
+            closingRange = { start: closing.index, end };
+            break;
+        }
+        unsafe.push({ start: opening.index, end });
+        nonVisible.push({ start: opening.index, end: opening.index + opening[0].length });
+        if (closingRange) nonVisible.push(closingRange);
+        fencePattern.lastIndex = end;
+    }
+    const fencedRanges = mergeSourceRanges(unsafe);
+    const backticks = /`+/g;
+    let inlineOpening = null;
+    let match;
+    while ((match = backticks.exec(rawText)) !== null) {
+        const start = match.index;
+        const end = start + match[0].length;
+        if (overlapsAnySourceRange(fencedRanges, start, end)) continue;
+        if (!inlineOpening) {
+            inlineOpening = match;
+            continue;
+        }
+        if (inlineOpening[0].length !== match[0].length) continue;
+        unsafe.push({ start: inlineOpening.index, end });
+        nonVisible.push({ start: inlineOpening.index, end: inlineOpening.index + inlineOpening[0].length });
+        nonVisible.push({ start, end });
+        inlineOpening = null;
+    }
+    const indentedCode = /^(?: {4}|\t)[^\r\n]*(?:\r?\n|$)/gm;
+    while ((match = indentedCode.exec(rawText)) !== null) {
+        const end = match.index + match[0].length;
+        if (overlapsAnySourceRange(fencedRanges, match.index, end)) continue;
+        unsafe.push({ start: match.index, end });
+        nonVisible.push({ start: match.index, end: match.index + (match[0][0] === '\t' ? 1 : 4) });
+    }
+    return {
+        unsafe: mergeSourceRanges(unsafe),
+        nonVisible: mergeSourceRanges(nonVisible),
+    };
+}
+
+function getRawSelectionSyntax(rawText) {
+    const code = collectMarkdownCodeSyntax(rawText);
+    const outsideCode = ranges => ranges.filter(range => !overlapsAnySourceRange(code.unsafe, range.start, range.end));
+    const html = outsideCode(collectRawHtmlRanges(rawText));
+    const destinations = outsideCode(collectMarkdownDestinationRanges(rawText));
+    const markers = outsideCode(collectMarkdownMarkerRanges(rawText, code.unsafe));
+    const entities = [];
+    let hasUnknownEntity = false;
+    const entityPattern = /&(?:#\d+|#x[\da-f]+|[a-z][a-z\d]+);/gi;
+    let entity;
+    while ((entity = entityPattern.exec(rawText)) !== null) {
+        const range = { start: entity.index, end: entity.index + entity[0].length, text: decodeHtmlEntityToken(entity[0]) };
+        if (!range.text) hasUnknownEntity = true;
+        if (!overlapsAnySourceRange(code.unsafe, range.start, range.end)) entities.push(range);
+    }
+    const escapedSyntax = [];
+    const escapeIntroducers = [];
+    const escapePattern = /\\[^\r\n]/g;
+    let escaped;
+    while ((escaped = escapePattern.exec(rawText)) !== null) {
+        const range = { start: escaped.index, end: escaped.index + escaped[0].length };
+        if (overlapsAnySourceRange(code.unsafe, range.start, range.end)) continue;
+        escapedSyntax.push(range);
+        escapeIntroducers.push({ start: escaped.index, end: escaped.index + 1 });
+    }
+    return {
+        nonVisible: mergeSourceRanges([
+            ...html,
+            ...destinations,
+            ...markers,
+            ...escapeIntroducers,
+            ...code.nonVisible,
+        ]),
+        unsafe: mergeSourceRanges([...html, ...destinations, ...markers, ...entities, ...escapedSyntax, ...code.unsafe]),
+        visibleReplacements: entities.filter(range => range.text),
+        unsupportedProjection: hasUnknownEntity
+            || /!\[/.test(rawText)
+            || /<(?:[a-z][a-z\d+.-]*:[^>\r\n]+|[^<>\s@]+@[^<>\s@]+)>/i.test(rawText),
+    };
+}
+
+function decodeHtmlEntityToken(token) {
+    const body = String(token ?? '').slice(1, -1);
+    if (/^#\d+$/.test(body)) {
+        const codePoint = Number(body.slice(1));
+        return Number.isInteger(codePoint) && codePoint > 0 && codePoint <= 0x10ffff
+            && !(codePoint >= 0xd800 && codePoint <= 0xdfff)
+            && !(codePoint >= 0x80 && codePoint <= 0x9f)
+            ? String.fromCodePoint(codePoint)
+            : '';
+    }
+    if (/^#x[\da-f]+$/i.test(body)) {
+        const codePoint = Number.parseInt(body.slice(2), 16);
+        return Number.isInteger(codePoint) && codePoint > 0 && codePoint <= 0x10ffff
+            && !(codePoint >= 0xd800 && codePoint <= 0xdfff)
+            && !(codePoint >= 0x80 && codePoint <= 0x9f)
+            ? String.fromCodePoint(codePoint)
+            : '';
+    }
+    const known = ({ amp: '&', apos: "'", gt: '>', lt: '<', nbsp: '\u00a0', quot: '"' })[body.toLowerCase()];
+    if (known) return known;
+    if (typeof document !== 'undefined' && typeof document.createElement === 'function') {
+        const textarea = document.createElement('textarea');
+        textarea.innerHTML = token;
+        return textarea.value !== token ? textarea.value : '';
+    }
+    return '';
+}
+
+function getOverlappingOccurrenceOrdinal(text, selection, offset) {
+    if (!Number.isInteger(offset) || offset < 0 || text.slice(offset, offset + selection.length) !== selection) return -1;
+    let ordinal = 0;
+    let searchStart = 0;
+    while (searchStart <= offset) {
+        const occurrence = text.indexOf(selection, searchStart);
+        if (occurrence < 0 || occurrence > offset) return -1;
+        if (occurrence === offset) return ordinal;
+        ordinal++;
+        searchStart = occurrence + 1;
+    }
+    return -1;
+}
+
+function getVisibleSourceOccurrenceSpans(rawText, sourceSelection, syntax) {
+    const projection = [];
+    const sourceMap = [];
+    const nonVisible = syntax.nonVisible || [];
+    const replacements = [...(syntax.visibleReplacements || [])].sort((left, right) => left.start - right.start);
+    let hiddenIndex = 0;
+    let replacementIndex = 0;
+    for (let cursor = 0; cursor < rawText.length;) {
+        while (hiddenIndex < nonVisible.length && nonVisible[hiddenIndex].end <= cursor) hiddenIndex++;
+        while (replacementIndex < replacements.length && replacements[replacementIndex].end <= cursor) replacementIndex++;
+        const replacement = replacements[replacementIndex];
+        if (replacement?.start === cursor) {
+            for (let index = 0; index < replacement.text.length; index++) {
+                projection.push(replacement.text[index]);
+                sourceMap.push({ start: replacement.start, end: replacement.end });
+            }
+            cursor = replacement.end;
+            continue;
+        }
+        const hidden = nonVisible[hiddenIndex];
+        if (hidden && cursor >= hidden.start && cursor < hidden.end) {
+            cursor = hidden.end;
+            continue;
+        }
+        projection.push(rawText[cursor]);
+        sourceMap.push({ start: cursor, end: cursor + 1 });
+        cursor++;
+    }
+    const visibleText = projection.join('');
+    const spans = [];
+    let searchStart = 0;
+    while (searchStart <= visibleText.length - sourceSelection.length) {
+        const start = visibleText.indexOf(sourceSelection, searchStart);
+        if (start < 0) break;
+        const end = start + sourceSelection.length;
+        const first = sourceMap[start];
+        const last = sourceMap[end - 1];
+        if (first && last) spans.push({ start: first.start, end: last.end });
+        searchStart = start + 1;
+    }
+    return spans;
+}
+
+/** Resolve one rendered selection to the corresponding exact source substring. */
+export function mapRenderedSelectionToSourceSpan(rawValue, renderedValue, selectedValue, renderedStartOffset) {
+    const rawText = String(rawValue ?? '');
+    const renderedText = String(renderedValue ?? '');
+    const sourceSelection = String(selectedValue ?? '');
+    if (!rawText || !sourceSelection) return null;
+    const ordinal = getOverlappingOccurrenceOrdinal(renderedText, sourceSelection, renderedStartOffset);
+    if (ordinal < 0) return null;
+    const syntax = getRawSelectionSyntax(rawText);
+    if (syntax.unsupportedProjection) return null;
+    const span = getVisibleSourceOccurrenceSpans(rawText, sourceSelection, syntax)[ordinal];
+    if (!span || rawText.slice(span.start, span.end) !== sourceSelection
+        || overlapsAnySourceRange(syntax.unsafe, span.start, span.end)) return null;
+    return span;
+}
+
+export function getRenderedOccurrenceOrdinal(rootEl, range, selectedText) {
+    const selection = String(selectedText ?? '');
+    if (!selection || !rootEl?.contains?.(range?.startContainer) || !rootEl.contains(range.endContainer)) return -1;
+    const renderedSelection = getRenderedTextForRange(range);
+    if (renderedSelection !== selection) return -1;
+    const offset = getRenderedCharOffset(rootEl, range);
+    const renderedText = rootEl?.textContent || '';
+    return getOverlappingOccurrenceOrdinal(renderedText, selection, offset);
 }
 
 /**
- * Replaces a text selection in msg.mes with a <font color> tag.
- *
- * The rendered text differs from msg.mes (markdown syntax chars are consumed),
- * so we cannot reliably use a first-match replace. Instead we map the rendered
- * selection offset proportionally onto msg.mes, then choose the occurrence of
- * selectedText closest to that approximate source offset.
- *
- * renderedCharOffset / renderedLen must be captured BEFORE the DOM is mutated.
- * Returns true when msg.mes was modified.
+ * Wraps the rendered occurrence that maps to exact source text. Raw HTML,
+ * entities, code, and link destinations fail closed rather than being moved
+ * into newly active markup.
  */
+export function replaceMessageSelectionWithFontTag(msg, selectedText, hexColor, mapping = {}) {
+    const rawText = typeof msg?.mes === 'string' ? msg.mes : '';
+    const sourceSelection = String(selectedText ?? '');
+    const normalizedColor = normalizeHexColor(hexColor, null);
+    if (!sourceSelection || !sourceSelection.trim() || !rawText || !normalizedColor) return false;
 
-export function replaceMessageSelectionWithFontTag(msg, selectedText, hexColor, renderedCharOffset, renderedLen) {
-    if (!selectedText || !msg?.mes) return false;
-
-    const rawLen = msg.mes.length;
-    const approxRawOffset = renderedLen > 0 ? Math.floor((renderedCharOffset / renderedLen) * rawLen) : 0;
-
-    // Collect all occurrences of selectedText in msg.mes.
-    const occurrences = [];
-    let searchStart = 0;
-    while (true) {
-        const idx = msg.mes.indexOf(selectedText, searchStart);
-        if (idx === -1) break;
-        occurrences.push(idx);
-        searchStart = idx + 1;
+    const syntax = getRawSelectionSyntax(rawText);
+    if (syntax.unsupportedProjection) return false;
+    const spans = getVisibleSourceOccurrenceSpans(rawText, sourceSelection, syntax);
+    const requestedStart = Number.isInteger(mapping?.sourceStart) ? mapping.sourceStart : null;
+    const requestedEnd = Number.isInteger(mapping?.sourceEnd) ? mapping.sourceEnd : null;
+    const requestedOrdinal = Number.isInteger(mapping?.occurrenceOrdinal) && mapping.occurrenceOrdinal >= 0
+        ? mapping.occurrenceOrdinal
+        : null;
+    let span = null;
+    if (requestedStart !== null) {
+        span = spans.find(candidate => candidate.start === requestedStart
+            && (requestedEnd === null || candidate.end === requestedEnd)) || null;
+    } else if (typeof mapping?.renderedText === 'string' && Number.isInteger(mapping?.renderedStartOffset)) {
+        span = mapRenderedSelectionToSourceSpan(
+            rawText,
+            mapping.renderedText,
+            sourceSelection,
+            mapping.renderedStartOffset,
+        );
+    } else if (requestedOrdinal !== null) {
+        span = spans[requestedOrdinal] || null;
+    } else if (spans.length === 1) {
+        [span] = spans;
     }
-    if (!occurrences.length) return false;
+    if (!span) return false;
+    const { start, end } = span;
+    const exactSourceText = rawText.slice(start, end);
+    if (exactSourceText !== sourceSelection || overlapsAnySourceRange(syntax.unsafe, start, end)) return false;
 
-    // Pick the occurrence whose start is closest to approxRawOffset.
-    const bestIdx = occurrences.reduce((best, idx) =>
-        Math.abs(idx - approxRawOffset) < Math.abs(best - approxRawOffset) ? idx : best,
-    occurrences[0]);
-
-    msg.mes = `${msg.mes.slice(0, bestIdx)}<font color="${hexColor}">${selectedText}</font>${msg.mes.slice(bestIdx + selectedText.length)}`;
+    msg.mes = `${rawText.slice(0, start)}<font color="${normalizedColor}">${escapeHtml(exactSourceText)}</font>${rawText.slice(end)}`;
     return true;
 }
 

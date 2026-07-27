@@ -1,7 +1,7 @@
 // utils.js - extracted from index.js (mechanical split)
 import { pruneReducibleCompositeEntries } from './color-blocks.js';
 import { cloneGradient, normalizeGradient } from './gradients.js';
-import { normalizeGroupName } from './group-profiles.js';
+import { normalizeGroupName, normalizeRegistryIdentity, normalizeRegistryIdentityName } from './group-profiles.js';
 import { GRADIENT_GENERATOR_ALGORITHM, normalizeGradientGenerator } from './seeded-gradient-generator.js';
 import { escapeHtml } from './st-api.js';
 import { settings } from './state.js';
@@ -36,7 +36,13 @@ export const VALID_STYLES = new Set(['', 'bold', 'italic', 'bold italic']);
 
 export function normalizeAliases(aliases) {
     if (!Array.isArray(aliases)) return [];
-    return [...new Set(aliases.map(a => String(a ?? '').trim()).filter(Boolean))];
+    const normalized = new Map();
+    for (const alias of aliases) {
+        const name = normalizeRegistryIdentityName(alias);
+        const key = normalizeRegistryIdentity(name);
+        if (key && !normalized.has(key)) normalized.set(key, name);
+    }
+    return [...normalized.values()];
 }
 
 export function normalizeGoogleFontName(fontName) {
@@ -56,7 +62,9 @@ export function getGoogleFontFamily(fontName) {
 }
 
 export function normalizeCharacterEntry(entry, fallbackName = '') {
-    const name = String(entry?.name ?? fallbackName ?? '').trim();
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+    const rawName = Object.prototype.hasOwnProperty.call(entry, 'name') ? entry.name : fallbackName;
+    const name = normalizeRegistryIdentityName(rawName);
     if (!name) return null;
     const color = normalizeHexColor(entry?.color);
     const baseColor = normalizeHexColor(entry?.baseColor, color);
@@ -85,21 +93,22 @@ export function normalizeEntryGradientGenerator(value, gradient = true) {
 }
 
 export function normalizeCharacterColors(rawColors, options = {}) {
-    if (!rawColors || typeof rawColors !== 'object') return {};
-    const normalized = {};
+    const normalized = Object.create(null);
+    if (!rawColors || typeof rawColors !== 'object' || Array.isArray(rawColors)) return normalized;
     for (const [rawKey, entry] of Object.entries(rawColors)) {
         const normalizedEntry = normalizeCharacterEntry(entry, rawKey);
         if (!normalizedEntry) continue;
-        const key = normalizedEntry.name.toLowerCase();
+        const key = normalizeRegistryIdentity(normalizedEntry.name);
+        if (!key) continue;
         if (key === 'narrator') continue;
-        if (!normalized[key]) {
+        if (!Object.prototype.hasOwnProperty.call(normalized, key)) {
             normalized[key] = normalizedEntry;
             continue;
         }
         const existing = normalized[key];
         existing.locked = existing.locked || normalizedEntry.locked;
         existing.keep = existing.keep || normalizedEntry.keep;
-        existing.aliases = [...new Set([...existing.aliases, ...normalizedEntry.aliases])];
+        existing.aliases = normalizeAliases([...existing.aliases, ...normalizedEntry.aliases]);
         existing.dialogueCount = Math.max(existing.dialogueCount || 0, normalizedEntry.dialogueCount || 0);
         if (!existing.group && normalizedEntry.group) existing.group = normalizedEntry.group;
         if (!existing.style && normalizedEntry.style) existing.style = normalizedEntry.style;
@@ -170,8 +179,7 @@ export function unwrapCodeFence(text) {
 
 export function stripFontTags(text) {
     return String(text ?? '')
-        .replace(/<font\b[^>]*>/gi, '')
-        .replace(/<\/font>/gi, '');
+        .replace(/<font(?:\s+[^<>]*?)?\s*\/?>|<\/font\s*>/gi, '');
 }
 
 export function stripColorBlocks(text) {
@@ -189,24 +197,30 @@ export function getMessageElementByIndex(messageIndex) {
 }
 
 export function parseNameWithNicknames(rawName) {
-    const match = rawName.match(/^([^(]+)(.*)$/);
-    if (!match) return { name: rawName.trim(), nicknames: [] };
-    const name = match[1].trim();
-    const nicknames = [...rawName.matchAll(/\(([^)]+)\)/g)].map(m => m[1].trim()).filter(Boolean);
+    if (typeof rawName !== 'string') return { name: '', nicknames: [] };
+    const source = rawName;
+    const match = source.match(/^([^(]+)(.*)$/);
+    if (!match) {
+        return { name: normalizeRegistryIdentityName(source), nicknames: [] };
+    }
+    const name = normalizeRegistryIdentityName(match[1]);
+    if (!name) return { name: '', nicknames: [] };
+    const nicknames = normalizeAliases([...source.matchAll(/\(([^)]+)\)/g)].map(match => match[1]));
     return { name, nicknames };
 }
 
 export function splitCompositeSpeakerName(rawName) {
-    const trimmedName = String(rawName ?? '').trim();
+    if (typeof rawName !== 'string') return [];
+    const trimmedName = rawName.trim();
     if (!trimmedName) return [];
     const parts = trimmedName
         .split(/\s*(?:&|\/|\+|,|\band\b)\s*/i)
-        .map(part => String(part ?? '').trim())
+        .map(part => normalizeRegistryIdentityName(part))
         .filter(Boolean);
     if (parts.length < 2) return [];
     const seen = new Set();
     return parts.filter(part => {
-        const key = part.toLowerCase();
+        const key = normalizeRegistryIdentity(part);
         if (seen.has(key)) return false;
         seen.add(key);
         return true;

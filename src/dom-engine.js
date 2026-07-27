@@ -1,6 +1,6 @@
 // dom-engine.js - extracted from index.js (mechanical split)
 import { attributeDialogueSegments } from './attribution.js';
-import { ATTRIBUTION_REVIEW_STATUS, ATTRIBUTION_VERIFICATION_STATUS, createAttributionStore, deleteAttributionOverrideRecord, normalizeAttributionConfidence, normalizeAttributionSource } from './attribution-store.js';
+import { ATTRIBUTION_REVIEW_STATUS, ATTRIBUTION_SOURCE, ATTRIBUTION_VERIFICATION_STATUS, createAttributionStore, createMessageFingerprint, deleteAttributionOverrideRecord, isLegacyAttributionOverrideEntry, normalizeAttributionConfidence, normalizeAttributionSource } from './attribution-store.js';
 import { unregisterGradientAnimationRoot } from './animation-controller.js';
 import { collectFontColorsFromText, resolveCharacterKeyByNameOrAlias } from './color-blocks.js';
 import { applyCustomFontsToFontTags, applyCustomFontsToMessageElements, clearCustomFontsFromFontTags, loadGoogleFont, scheduleCardStyle, scheduleCustomFontRefresh } from './fonts.js';
@@ -16,51 +16,154 @@ import { updateLegend } from './ui.js';
 import { captureOpenDetailsState, getGoogleFontFamily, getMessageElementByIndex, hashMessageText, normalizeSegmentText, restoreOpenDetailsState, stripColorBlocks } from './utils.js';
 import { queueAutoAttributionVerificationForElements, queueAutoAttributionVerificationForMessage, queueAutoAttributionVerificationForRenderedMessages } from './verify.js';
 
-export function renderMessageDomFallback(messageIndex, message, ctx = getContext(), detailsState = null) {
-    const mesEl = getMessageElementByIndex(messageIndex);
-    const mesText = mesEl?.querySelector?.('.mes_text');
-    if (!mesText || !message) return false;
-    if (suspendMessageDomWorkForEdit(mesEl, messageIndex)) return false;
-    const openDetailsState = detailsState ?? captureOpenDetailsState(mesText);
-    const rawText = stripColorBlocks(message.mes || '');
-    let formatted = '';
-    try {
-        if (typeof ctx?.messageFormatting === 'function') {
-            formatted = ctx.messageFormatting(rawText, message.name || '', message.is_system || false, message.is_user || false, messageIndex);
-        }
-    } catch (e) {
-        console.warn('[Dialogue Colors] Message formatting fallback failed:', e);
+function getStableMessageId(message) {
+    for (const value of [message?.id, message?.send_date]) {
+        if (value === undefined || value === null) continue;
+        const id = String(value).trim().slice(0, 120);
+        if (id) return id;
     }
-    if (!formatted && typeof converter?.makeHtml === 'function') formatted = converter.makeHtml(rawText);
-    try {
-        mesText.innerHTML = formatted || escapeHtml(rawText).replace(/\n/g, '<br>');
-    } finally {
-        restoreOpenDetailsState(mesText, openDetailsState);
-    }
+    return '';
+}
+
+function getMessageText(message) {
+    return String(message?.mes ?? message?.text ?? '');
+}
+
+function getMessageSpeaker(message) {
+    return String(message?.name ?? message?.speaker ?? '');
+}
+
+function getChatContextIdentity(ctx) {
+    const normalizeId = value => {
+        if (typeof value === 'string') return value.trim();
+        if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+        return '';
+    };
+    const chatId = normalizeId(ctx?.chatId ?? ctx?.chat_id);
+    const groupId = normalizeId(ctx?.groupId ?? ctx?.group_id);
+    const characterIndex = ctx?.characterId ?? ctx?.character_id;
+    const character = groupId || chatId ? null : ctx?.characters?.[characterIndex];
+    const ownerId = groupId || chatId
+        ? ''
+        : normalizeId(character?.avatar ?? character?.characterId ?? character?.character_id ?? characterIndex);
+    return `chat:${chatId}\u0000group:${groupId}\u0000owner:${ownerId}`;
+}
+
+function captureMessageDomTarget(messageIndex, message, ctx = getContext()) {
+    const index = Number(messageIndex);
+    const chat = ctx?.chat;
+    if (!Number.isInteger(index) || index < 0 || !Array.isArray(chat)) return null;
+    const currentMessage = message ?? chat[index];
+    if (!currentMessage || chat[index] !== currentMessage) return null;
+    const text = getMessageText(currentMessage);
+    const mesElement = getMessageElementByIndex(index);
+    return {
+        chatGeneration: attributionChatGeneration,
+        context: ctx,
+        contextIdentity: getChatContextIdentity(ctx),
+        chat,
+        message: currentMessage,
+        messageId: getStableMessageId(currentMessage),
+        messageIndex: index,
+        messageHash: hashMessageText(text),
+        messageText: text,
+        messageSpeaker: getMessageSpeaker(currentMessage),
+        isSystem: !!currentMessage.is_system,
+        isUser: !!currentMessage.is_user,
+        chatRoot: typeof document !== 'undefined' ? document.getElementById('chat') : null,
+        mesElement,
+        mesTextElement: mesElement?.querySelector?.('.mes_text') || null,
+    };
+}
+
+function isMessageDomTargetCurrent(target) {
+    if (!target || target.chatGeneration !== attributionChatGeneration) return false;
+    const ctx = getContext();
+    if (!ctx || getChatContextIdentity(ctx) !== target.contextIdentity || ctx.chat !== target.chat) return false;
+    const message = target.chat[target.messageIndex];
+    if (message !== target.message) return false;
+    const currentMessageId = getStableMessageId(message);
+    if ((target.messageId || currentMessageId) && target.messageId !== currentMessageId) return false;
+    const currentText = getMessageText(message);
+    if (currentText !== target.messageText || hashMessageText(currentText) !== target.messageHash) return false;
+    if (getMessageSpeaker(message) !== target.messageSpeaker
+        || !!message.is_system !== target.isSystem
+        || !!message.is_user !== target.isUser) return false;
+    if (target.chatRoot && (typeof document === 'undefined' || document.getElementById('chat') !== target.chatRoot)) return false;
     return true;
 }
 
-export async function refreshMessageDom(messageIndex, message) {
-    if (!Number.isFinite(messageIndex) || messageIndex < 0) return false;
-    const mesElement = getMessageElementByIndex(messageIndex);
-    if (suspendMessageDomWorkForEdit(mesElement, messageIndex)) return false;
+function isMessageDomElementCurrent(target, mesElement) {
+    if (!isMessageDomTargetCurrent(target) || !mesElement || mesElement.isConnected === false) return false;
+    if (target.mesElement && mesElement !== target.mesElement) return false;
+    if (Number(mesElement.getAttribute?.('mesid')) !== target.messageIndex) return false;
+    if (target.mesTextElement && mesElement.querySelector?.('.mes_text') !== target.mesTextElement) return false;
+    return getMessageElementByIndex(target.messageIndex) === mesElement;
+}
+
+function isMessageDomWriteTargetCurrent(target) {
+    return isMessageDomTargetCurrent(target)
+        && (!target.mesElement || isMessageDomElementCurrent(target, target.mesElement));
+}
+
+function renderMessageDomFallbackForTarget(target, detailsState = null) {
+    if (!isMessageDomWriteTargetCurrent(target)) return false;
+    const mesEl = target.mesElement || getMessageElementByIndex(target.messageIndex);
+    const mesText = target.mesTextElement || mesEl?.querySelector?.('.mes_text');
+    if (!mesText || !isMessageDomElementCurrent(target, mesEl)) return false;
+    if (suspendMessageDomWorkForEdit(mesEl, target.messageIndex)) return false;
+    if (!isMessageDomElementCurrent(target, mesEl) || mesEl.querySelector?.('.mes_text') !== mesText) return false;
+    const openDetailsState = detailsState ?? captureOpenDetailsState(mesText);
+    const rawText = stripColorBlocks(target.messageText);
+    let formatted = '';
+    try {
+        if (typeof target.context?.messageFormatting === 'function') {
+            formatted = target.context.messageFormatting(rawText, target.messageSpeaker, target.isSystem, target.isUser, target.messageIndex);
+        }
+        if (!formatted && typeof converter?.makeHtml === 'function') formatted = converter.makeHtml(rawText);
+    } catch (e) {
+        console.warn('[Dialogue Colors] Message formatting fallback failed:', e);
+    }
+    if (!isMessageDomElementCurrent(target, mesEl) || mesEl.querySelector?.('.mes_text') !== mesText) return false;
+    mesText.innerHTML = formatted || escapeHtml(rawText).replace(/\n/g, '<br>');
+    if (!isMessageDomElementCurrent(target, mesEl) || mesEl.querySelector?.('.mes_text') !== mesText) return false;
+    restoreOpenDetailsState(mesText, openDetailsState);
+    return isMessageDomElementCurrent(target, mesEl) && mesEl.querySelector?.('.mes_text') === mesText;
+}
+
+export function renderMessageDomFallback(messageIndex, message, ctx = getContext(), detailsState = null) {
+    const target = captureMessageDomTarget(messageIndex, message, ctx);
+    return target ? renderMessageDomFallbackForTarget(target, detailsState) : false;
+}
+
+async function refreshMessageDomForTarget(target) {
+    if (!isMessageDomWriteTargetCurrent(target)) return false;
+    const { messageIndex, message, context: ctx } = target;
+    const mesElement = target.mesElement;
+    if (mesElement && suspendMessageDomWorkForEdit(mesElement, messageIndex)) return false;
+    if (!isMessageDomWriteTargetCurrent(target)) return false;
     const openDetailsState = captureMessageOpenDetailsState(mesElement, messageIndex);
-    const ctx = getContext();
     if (typeof ctx?.updateMessageBlock === 'function') {
         let timeoutId = null;
         let timedOut = false;
         try {
-            const updatePromise = Promise.resolve(ctx.updateMessageBlock(messageIndex, message ?? ctx?.chat?.[messageIndex]))
+            if (!isMessageDomWriteTargetCurrent(target)) return false;
+            const updatePromise = Promise.resolve(ctx.updateMessageBlock(messageIndex, message))
                 // Skip the deferred details-restore if the fallback path already
                 // took over; re-applying the stale snapshot would revert any
                 // <details> the user toggled in the interim.
-                .finally(() => { if (!timedOut) restoreMessageOpenDetailsState(mesElement, messageIndex, openDetailsState); });
+                .finally(() => {
+                    if (!timedOut && mesElement && isMessageDomElementCurrent(target, mesElement)) {
+                        restoreMessageOpenDetailsState(mesElement, messageIndex, openDetailsState);
+                    }
+                });
             const status = await Promise.race([
                 updatePromise.then(() => 'updated'),
                 new Promise(resolve => {
                     timeoutId = setTimeout(() => resolve('timeout'), UPDATE_MESSAGE_BLOCK_TIMEOUT_MS);
                 }),
             ]);
+            if (!isMessageDomTargetCurrent(target)) return false;
             if (status === 'updated') return true;
             timedOut = true;
             console.warn('[Dialogue Colors] updateMessageBlock timed out, using fallback render.');
@@ -70,18 +173,25 @@ export async function refreshMessageDom(messageIndex, message) {
             if (timeoutId) clearTimeout(timeoutId);
         }
     }
-    if (renderMessageDomFallback(messageIndex, message, ctx, openDetailsState)) {
+    if (!isMessageDomWriteTargetCurrent(target)) return false;
+    if (renderMessageDomFallbackForTarget(target, openDetailsState)) {
         return true;
     }
     if (typeof eventSource?.emit === 'function' && event_types?.MESSAGE_UPDATED) {
         try {
+            if (!isMessageDomWriteTargetCurrent(target)) return false;
             await eventSource.emit(event_types.MESSAGE_UPDATED, messageIndex);
-            return true;
+            return isMessageDomTargetCurrent(target);
         } catch (e) {
             console.warn('[Dialogue Colors] MESSAGE_UPDATED fallback emit failed:', e);
         }
     }
     return false;
+}
+
+export async function refreshMessageDom(messageIndex, message) {
+    const target = captureMessageDomTarget(messageIndex, message);
+    return target ? refreshMessageDomForTarget(target) : false;
 }
 
 export function waitForDomFrame(maxWaitMs = 80) {
@@ -191,20 +301,29 @@ export function waitForMessageDomReadyForDecoration(messageIndex, msg, timeoutMs
 }
 
 export async function refreshAndDecorateMessageDom(messageIndex, message, options = {}) {
-    const msg = message ?? getContext()?.chat?.[messageIndex];
-    const mesElement = getMessageElementByIndex(messageIndex);
-    if (suspendMessageDomWorkForEdit(mesElement, messageIndex)) return false;
-    await refreshMessageDom(messageIndex, msg);
-    let { ready, mesElement: readyMesElement, edited } = await waitForMessageDomReadyForDecoration(messageIndex, msg);
-    if (edited) return false;
-    if (!ready && renderMessageDomFallback(messageIndex, msg)) {
+    let target = captureMessageDomTarget(messageIndex, message);
+    if (!target || !isMessageDomWriteTargetCurrent(target)) return false;
+    const { message: msg, messageIndex: index } = target;
+    if (target.mesElement && suspendMessageDomWorkForEdit(target.mesElement, index)) return false;
+    if (!isMessageDomWriteTargetCurrent(target)) return false;
+    await refreshMessageDomForTarget(target);
+    if (!isMessageDomTargetCurrent(target)) return false;
+    target = captureMessageDomTarget(index, msg);
+    if (!target || !isMessageDomWriteTargetCurrent(target)) return false;
+    const isCurrent = () => isMessageDomWriteTargetCurrent(target);
+    let { ready, mesElement: readyMesElement, edited, stale } = await waitForMessageDomReadyForDecoration(index, msg, 1600, isCurrent);
+    if (edited || stale || !isCurrent()) return false;
+    if (!ready && renderMessageDomFallbackForTarget(target)) {
+        if (!isCurrent()) return false;
         await waitForDomFrame();
-        ({ mesElement: readyMesElement, edited } = await waitForMessageDomReadyForDecoration(messageIndex, msg, 300));
-        if (edited) return false;
+        if (!isCurrent()) return false;
+        ({ ready, mesElement: readyMesElement, edited, stale } = await waitForMessageDomReadyForDecoration(index, msg, 300, isCurrent));
+        if (edited || stale || !isCurrent()) return false;
     }
-    const effectiveMesElement = readyMesElement || getMessageElementByIndex(messageIndex);
-    if (!effectiveMesElement) return false;
+    const effectiveMesElement = readyMesElement || getMessageElementByIndex(index);
+    if (!isMessageDomElementCurrent(target, effectiveMesElement)) return false;
     decorateObservedMessages([effectiveMesElement], { queueVerification: options.queueVerification !== false });
+    if (!isMessageDomTargetCurrent(target)) return false;
     scheduleDomSettleRefresh(DOM_RETRY_REFRESH_DELAYS);
     return true;
 }
@@ -214,25 +333,29 @@ export async function refreshAndDecorateMessageDom(messageIndex, message, option
 // stale follow-ups from re-decorating with outdated state).
 
 export async function decorateMessageDomFromCurrentRender(messageIndex, message, options = {}) {
-    const msg = message ?? getContext()?.chat?.[messageIndex];
-    const mesElement = getMessageElementByIndex(messageIndex);
-    if (suspendMessageDomWorkForEdit(mesElement, messageIndex)) return false;
-    if (options.isCurrent && !options.isCurrent()) return false;
-    let { ready, mesElement: readyMesElement, edited } = await waitForMessageDomReadyForDecoration(messageIndex, msg, options.timeoutMs ?? 400, options.isCurrent);
-    if (edited) return false;
-    if (options.isCurrent && !options.isCurrent()) return false;
-    if (!ready && options.renderFallback !== false && renderMessageDomFallback(messageIndex, msg)) {
+    const target = captureMessageDomTarget(messageIndex, message);
+    if (!target) return false;
+    const { message: msg, messageIndex: index } = target;
+    const isCurrent = () => isMessageDomWriteTargetCurrent(target)
+        && (!options.isCurrent || options.isCurrent());
+    if (!isCurrent()) return false;
+    if (target.mesElement && suspendMessageDomWorkForEdit(target.mesElement, index)) return false;
+    if (!isCurrent()) return false;
+    let { ready, mesElement: readyMesElement, edited, stale } = await waitForMessageDomReadyForDecoration(index, msg, options.timeoutMs ?? 400, isCurrent);
+    if (edited || stale || !isCurrent()) return false;
+    if (!ready && options.renderFallback !== false && renderMessageDomFallbackForTarget(target)) {
+        if (!isCurrent()) return false;
         await waitForDomFrame();
-        if (options.isCurrent && !options.isCurrent()) return false;
-        ({ mesElement: readyMesElement, edited } = await waitForMessageDomReadyForDecoration(messageIndex, msg, 300));
-        if (edited) return false;
+        if (!isCurrent()) return false;
+        ({ ready, mesElement: readyMesElement, edited, stale } = await waitForMessageDomReadyForDecoration(index, msg, 300, isCurrent));
+        if (edited || stale || !isCurrent()) return false;
     }
     if (!ready && options.renderFallback === false) return false;
-    if (options.isCurrent && !options.isCurrent()) return false;
-    const effectiveMesElement = readyMesElement || getMessageElementByIndex(messageIndex);
-    if (!effectiveMesElement) return false;
+    if (!isCurrent()) return false;
+    const effectiveMesElement = readyMesElement || getMessageElementByIndex(index);
+    if (!isMessageDomElementCurrent(target, effectiveMesElement)) return false;
     decorateObservedMessages([effectiveMesElement], { queueVerification: options.queueVerification !== false });
-    return true;
+    return isMessageDomTargetCurrent(target);
 }
 
 // Per-message follow-up repair timers so override/verifier repaints can be
@@ -254,10 +377,11 @@ export function scheduleMessageDomFollowupRepair(messageIndex, repainted) {
     const index = Number(messageIndex);
     if (!Number.isFinite(index) || index < 0) return;
     if (suspendMessageDomWorkForEdit(getMessageElementByIndex(index), index)) return;
+    const target = captureMessageDomTarget(index);
+    if (!target) return;
     // Cancel any in-flight follow-ups for this message first so we never
     // stack overlapping repair passes that fight each other.
     cancelMessageDomFollowupRepairs(index);
-    const chatGeneration = attributionChatGeneration;
     const delays = repainted ? [120, 900, 3200] : [0, 900, 3200];
     const timers = [];
     for (const delay of delays) {
@@ -271,8 +395,8 @@ export function scheduleMessageDomFollowupRepair(messageIndex, repainted) {
             }
             try {
                 if (!settings.enabled || !isDomEngine()) return;
-                if (chatGeneration !== attributionChatGeneration) return;
-                const msg = getContext()?.chat?.[index];
+                if (!isMessageDomTargetCurrent(target)) return;
+                const msg = target.message;
                 const mesElement = getMessageElementByIndex(index);
                 if (!msg || !mesElement) return;
                 if (suspendMessageDomWorkForEdit(mesElement, index)) return;
@@ -280,8 +404,15 @@ export function scheduleMessageDomFollowupRepair(messageIndex, repainted) {
                 // renderFallback:false — never write .mes_text innerHTML here.
                 // A fallback write would trigger the chat observer and cause a
                 // re-decoration cascade (the flicker users were seeing).
-                if (repairType === 'refresh') await decorateMessageDomFromCurrentRender(index, msg, { queueVerification: false, renderFallback: false });
-                else if (repairType === 'decorate') decorateObservedMessages([mesElement], { queueVerification: false });
+                if (repairType === 'refresh') {
+                    await decorateMessageDomFromCurrentRender(index, msg, {
+                        queueVerification: false,
+                        renderFallback: false,
+                        isCurrent: () => isMessageDomTargetCurrent(target),
+                    });
+                } else if (repairType === 'decorate' && isMessageDomTargetCurrent(target)) {
+                    decorateObservedMessages([mesElement], { queueVerification: false });
+                }
             } catch (e) {
                 console.warn('[Dialogue Colors] Follow-up DOM repair failed:', e);
             }
@@ -334,6 +465,8 @@ export function scheduleMessageDomRepair(mesIndex, options = {}) {
     if (!Number.isFinite(index) || index < 0) return false;
 
     if (suspendMessageDomWorkForEdit(getMessageElementByIndex(index), index)) return false;
+    const target = captureMessageDomTarget(index);
+    if (!target) return false;
 
     const source = options.source || 'fallback';
     if (source === 'observer' && messageDomRepairSources.has(index)) return false;
@@ -342,19 +475,18 @@ export function scheduleMessageDomRepair(mesIndex, options = {}) {
 
     clearMessageDomRepairTimer(index);
 
-    const chatGeneration = attributionChatGeneration;
     const token = ++nextMessageDomRepairToken;
     messageDomRepairTokens.set(index, token);
     messageDomRepairSources.set(index, source);
     const isCurrent = () => messageDomRepairTokens.get(index) === token
-        && chatGeneration === attributionChatGeneration;
+        && isMessageDomTargetCurrent(target);
     const delay = Math.max(0, Number(options.delay ?? POST_MUTATION_DOM_REPAIR_DELAY_MS) || 0);
     const timer = setTimeout(async () => {
         try {
             if (!settings.enabled || !isDomEngine()) return;
             if (!isCurrent()) return;
 
-            const msg = getContext()?.chat?.[index];
+            const msg = target.message;
             if (!msg || msg.is_system) return;
             if (suspendMessageDomWorkForEdit(getMessageElementByIndex(index), index)) return;
 
@@ -580,73 +712,191 @@ export function hasMessageQuoteOverridesForLatestMessage() {
     return hasMessageQuoteOverridesForDecoration(mesIndex, chat[mesIndex]);
 }
 
+function getStoredMessageFingerprint(entry) {
+    let fingerprint = typeof entry?.messageFingerprint === 'string' ? entry.messageFingerprint.trim() : '';
+    if (isPlainObject(entry?.records)) {
+        for (const record of Object.values(entry.records)) {
+            const recordFingerprint = typeof record?.messageFingerprint === 'string' ? record.messageFingerprint.trim() : '';
+            if (!recordFingerprint) continue;
+            if (fingerprint && fingerprint !== recordFingerprint) return null;
+            fingerprint = recordFingerprint;
+        }
+    }
+    return fingerprint;
+}
+
+function isLegacyMessageQuoteOverrideEntry(entry, msg) {
+    if (!msg || getStoredMessageFingerprint(entry) === null) return false;
+    const identity = getMessageAttributionIdentity(msg);
+    return isLegacyAttributionOverrideEntry(entry, {
+        messageHash: identity.hash,
+        textLength: identity.textLength,
+    });
+}
+
+function getMessageAttributionIdentity(msg) {
+    const text = getMessageText(msg);
+    return {
+        hash: hashMessageText(text),
+        messageId: getStableMessageId(msg),
+        messageFingerprint: createMessageFingerprint({ name: getMessageSpeaker(msg), mes: text }),
+        textLength: text.length,
+    };
+}
+
+function messageQuoteOverrideEntryMatches(entry, msg) {
+    if (!isPlainObject(entry) || !msg) return false;
+    const identity = getMessageAttributionIdentity(msg);
+    if (entry.hash !== identity.hash) return false;
+    if (isLegacyMessageQuoteOverrideEntry(entry, msg)) return true;
+    const storedMessageId = getStableMessageId({ id: entry.messageId });
+    if ((storedMessageId || identity.messageId)
+        && (!storedMessageId || !identity.messageId || storedMessageId !== identity.messageId)) return false;
+    const storedFingerprint = getStoredMessageFingerprint(entry);
+    if (storedFingerprint === null) return false;
+    if (storedFingerprint && storedFingerprint !== identity.messageFingerprint) return false;
+    const storedLength = Number(entry.textLength);
+    const hasStoredLength = Number.isInteger(storedLength) && storedLength >= 0;
+    if (hasStoredLength && storedLength !== identity.textLength) return false;
+    // ID-less records are safe only when they carry the stronger text+speaker
+    // fingerprint and explicit text length introduced by the provenance store.
+    if (!storedMessageId && !identity.messageId && (!storedFingerprint || !hasStoredLength)) return false;
+    return true;
+}
+
+function applyMessageAttributionIdentity(entry, msg) {
+    const identity = getMessageAttributionIdentity(msg);
+    entry.hash = identity.hash;
+    entry.messageFingerprint = identity.messageFingerprint;
+    entry.textLength = identity.textLength;
+    if (identity.messageId) entry.messageId = identity.messageId;
+    else delete entry.messageId;
+    return entry;
+}
+
+function migrateLegacyMessageQuoteOverrideEntry(entry, msg) {
+    if (!isLegacyMessageQuoteOverrideEntry(entry, msg)) return false;
+    applyMessageAttributionIdentity(entry, msg);
+    return true;
+}
+
+function createMessageQuoteOverrideEntry(msg) {
+    return applyMessageAttributionIdentity({ segments: {} }, msg);
+}
+
 export function getMessageQuoteOverrideEntry(mesIndex, msg, create = false) {
+    const index = Number(mesIndex);
+    if (!Number.isInteger(index) || index < 0 || !msg) return null;
     const map = getQuoteOverridesMap(create);
     if (!map) return null;
-    const key = String(mesIndex);
-    const hash = hashMessageText(msg?.mes);
+    const key = String(index);
     let entry = map[key];
-    if (!isPlainObject(entry) || entry.hash !== hash) {
+    if (!messageQuoteOverrideEntryMatches(entry, msg)) {
         if (!create) return null;
-        entry = { hash, segments: {} };
+        entry = createMessageQuoteOverrideEntry(msg);
         map[key] = entry;
     }
+    const migrated = migrateLegacyMessageQuoteOverrideEntry(entry, msg);
     if (!isPlainObject(entry.segments)) {
         if (!create) return null;
         entry.segments = {};
     }
+    if (migrated) saveChatMetadata();
     return entry;
 }
 
 export function setMessageQuoteOverride(mesIndex, msg, segmentIndex, speakerName, options = {}) {
-    const entry = getMessageQuoteOverrideEntry(mesIndex, msg, true);
-    if (!entry) return false;
-    const key = String(segmentIndex);
-    entry.segments[key] = String(speakerName);
-    if (!isPlainObject(entry.sources)) entry.sources = {};
-    entry.sources[key] = normalizeAttributionSource(options.source, 'manual');
-    if (options.confidence !== undefined) {
-        if (!isPlainObject(entry.confidences)) entry.confidences = {};
-        entry.confidences[key] = normalizeAttributionConfidence(options.confidence);
-    }
-    if (options.reviewId !== undefined && options.reviewId !== null) {
-        const reviewId = String(options.reviewId).trim().slice(0, 96);
-        if (reviewId) {
-            if (!isPlainObject(entry.reviewIds)) entry.reviewIds = {};
-            entry.reviewIds[key] = reviewId;
+    const index = Number(mesIndex);
+    const normalizedSegmentIndex = Number(segmentIndex);
+    if (!Number.isInteger(index) || index < 0 || !Number.isInteger(normalizedSegmentIndex)
+        || normalizedSegmentIndex < 0 || !msg) return false;
+    const normalizedOptions = isPlainObject(options) ? options : {};
+    let speaker;
+    let source;
+    let confidence;
+    let reviewId = '';
+    let evidence;
+    try {
+        speaker = String(speakerName ?? '').trim();
+        if (!speaker) return false;
+        source = normalizeAttributionSource(normalizedOptions.source, ATTRIBUTION_SOURCE.MANUAL);
+        if (normalizedOptions.confidence !== undefined) {
+            confidence = normalizeAttributionConfidence(normalizedOptions.confidence);
         }
+        if (normalizedOptions.reviewId !== undefined && normalizedOptions.reviewId !== null) {
+            reviewId = String(normalizedOptions.reviewId).trim().slice(0, 96);
+        }
+        if (normalizedOptions.evidence !== undefined) {
+            evidence = Array.isArray(normalizedOptions.evidence)
+                ? normalizedOptions.evidence.slice()
+                : [normalizedOptions.evidence];
+        }
+    } catch (_) {
+        return false;
     }
-    if (options.evidence !== undefined) {
-        if (!isPlainObject(entry.records)) entry.records = {};
-        entry.records[key] = {
-            speaker: String(speakerName),
-            source: entry.sources[key],
-            confidence: entry.confidences?.[key],
-            evidence: Array.isArray(options.evidence) ? options.evidence : [options.evidence],
-            ...(entry.reviewIds?.[key] ? { reviewId: entry.reviewIds[key] } : {}),
+
+    const metadata = getChatMetadataStore();
+    if (!metadata) return false;
+    const existingMap = isPlainObject(metadata[OVERRIDES_METADATA_KEY]) ? metadata[OVERRIDES_METADATA_KEY] : null;
+    const messageKey = String(index);
+    const segmentKey = String(normalizedSegmentIndex);
+    const existingEntry = existingMap?.[messageKey];
+    if (messageQuoteOverrideEntryMatches(existingEntry, msg)) {
+        migrateLegacyMessageQuoteOverrideEntry(existingEntry, msg);
+    }
+    const baseEntry = messageQuoteOverrideEntryMatches(existingEntry, msg)
+        ? existingEntry
+        : createMessageQuoteOverrideEntry(msg);
+    const entry = {
+        ...baseEntry,
+        segments: { ...(isPlainObject(baseEntry.segments) ? baseEntry.segments : {}) },
+        sources: { ...(isPlainObject(baseEntry.sources) ? baseEntry.sources : {}) },
+    };
+    entry.segments[segmentKey] = speaker;
+    entry.sources[segmentKey] = source;
+    if (confidence !== undefined) {
+        entry.confidences = { ...(isPlainObject(baseEntry.confidences) ? baseEntry.confidences : {}) };
+        entry.confidences[segmentKey] = confidence;
+    }
+    if (reviewId) {
+        entry.reviewIds = { ...(isPlainObject(baseEntry.reviewIds) ? baseEntry.reviewIds : {}) };
+        entry.reviewIds[segmentKey] = reviewId;
+    }
+    if (evidence !== undefined) {
+        entry.records = { ...(isPlainObject(baseEntry.records) ? baseEntry.records : {}) };
+        entry.records[segmentKey] = {
+            speaker,
+            source,
+            confidence: entry.confidences?.[segmentKey],
+            evidence,
+            ...(entry.reviewIds?.[segmentKey] ? { reviewId: entry.reviewIds[segmentKey] } : {}),
         };
     }
-    const messageId = msg?.id ?? msg?.send_date;
-    if (messageId !== undefined && messageId !== null && String(messageId).trim()) entry.messageId = String(messageId).trim().slice(0, 120);
-    entry.textLength = String(msg?.mes ?? '').length;
-    if (Object.values(ATTRIBUTION_VERIFICATION_STATUS).includes(options.verificationStatus)) {
-        entry.verificationStatus = options.verificationStatus;
+    applyMessageAttributionIdentity(entry, msg);
+    if (Object.values(ATTRIBUTION_VERIFICATION_STATUS).includes(normalizedOptions.verificationStatus)) {
+        entry.verificationStatus = normalizedOptions.verificationStatus;
     }
-    streamingHeuristicCache.clear();
-    if (options.markUnverified === true) {
+    if (normalizedOptions.markUnverified === true) {
         delete entry.verifiedHash;
         delete entry.verifiedAt;
         delete entry.verifiedVersion;
     } else {
-        entry.verifiedHash = hashMessageText(msg?.mes);
+        entry.verifiedHash = entry.hash;
         entry.verifiedAt = Date.now();
         entry.verifiedVersion = ATTRIBUTION_VERIFIER_VERSION;
         if (!Object.values(ATTRIBUTION_VERIFICATION_STATUS).includes(entry.verificationStatus)) {
-            entry.verificationStatus = options.source === ATTRIBUTION_SOURCE.LLM
+            entry.verificationStatus = source === ATTRIBUTION_SOURCE.LLM
                 ? ATTRIBUTION_VERIFICATION_STATUS.AUTO_APPLIED
                 : ATTRIBUTION_VERIFICATION_STATUS.CLEAN;
         }
     }
+    try {
+        if (existingMap) existingMap[messageKey] = entry;
+        else metadata[OVERRIDES_METADATA_KEY] = { [messageKey]: entry };
+    } catch (_) {
+        return false;
+    }
+    streamingHeuristicCache.clear();
     saveChatMetadata();
     return true;
 }
@@ -674,22 +924,21 @@ export function restoreMessageQuoteOverrideEntry(mesIndex, snapshot) {
 export function markMessageAttributionVerified(mesIndex, msg, verificationStatus = ATTRIBUTION_VERIFICATION_STATUS.CLEAN) {
     const entry = getMessageQuoteOverrideEntry(mesIndex, msg, true);
     if (!entry) return false;
-    entry.verifiedHash = hashMessageText(msg?.mes);
+    applyMessageAttributionIdentity(entry, msg);
+    entry.verifiedHash = entry.hash;
     entry.verifiedAt = Date.now();
     entry.verifiedVersion = ATTRIBUTION_VERIFIER_VERSION;
     entry.verificationStatus = Object.values(ATTRIBUTION_VERIFICATION_STATUS).includes(verificationStatus)
         ? verificationStatus
         : ATTRIBUTION_VERIFICATION_STATUS.CLEAN;
-    const messageId = msg?.id ?? msg?.send_date;
-    if (messageId !== undefined && messageId !== null && String(messageId).trim()) entry.messageId = String(messageId).trim().slice(0, 120);
-    entry.textLength = String(msg?.mes ?? '').length;
     saveChatMetadata();
     return true;
 }
 
 export function isMessageAttributionVerified(mesIndex, msg) {
     const entry = getMessageQuoteOverrideEntry(mesIndex, msg, false);
-    const hash = hashMessageText(msg?.mes);
+    if (!entry || !messageQuoteOverrideEntryMatches(entry, msg)) return false;
+    const hash = hashMessageText(getMessageText(msg));
     return !!entry
         && entry.hash === hash
         && entry.verifiedHash === hash
@@ -721,9 +970,11 @@ export function getAttributionReviewAdapter() {
         getOverrideMap: () => getQuoteOverridesMap(true),
         saveMetadata: saveChatMetadata,
         extendedOverrides: true,
-        applyOverride(review) {
-            streamingHeuristicCache.clear();
-            markAttributionReviewDecisionStatus(review);
+        validateAcceptance(review, operationOptions) {
+            const requestedSpeaker = String(operationOptions?.speaker ?? review?.proposedSpeaker ?? '').trim();
+            const key = resolveCharacterKeyByNameOrAlias(requestedSpeaker);
+            if (!key || !Object.prototype.hasOwnProperty.call(characterColors, key) || !characterColors[key]) return false;
+            return String(characterColors[key].name || '').trim() || false;
         },
     });
 }
@@ -741,7 +992,12 @@ export function listAttributionReviews(options = {}) {
 }
 
 export function acceptAttributionReview(id, options = {}) {
-    return getAttributionReviewAdapter().accept(id, options);
+    const decision = getAttributionReviewAdapter().accept(id, options);
+    if (decision?.status === ATTRIBUTION_REVIEW_STATUS.ACCEPTED) {
+        streamingHeuristicCache.clear();
+        markAttributionReviewDecisionStatus(decision);
+    }
+    return decision;
 }
 
 export function rejectAttributionReview(id, options = {}) {
@@ -1390,6 +1646,9 @@ export function scheduleDomSettleRefresh(delays = DOM_RETRY_REFRESH_DELAYS, reas
     if (!isDomEngine()) return;
     startDomHealthCheck();
     const refreshDelays = Array.isArray(delays) && delays.length ? delays : [400];
+    const context = getContext();
+    const chat = context?.chat;
+    const contextIdentity = getChatContextIdentity(context);
     const chatGeneration = attributionChatGeneration;
     const reasonKey = String(reason || 'settle');
     const normalizedDelays = refreshDelays.map(delay => Math.max(0, Number(delay) || 0));
@@ -1411,6 +1670,8 @@ export function scheduleDomSettleRefresh(delays = DOM_RETRY_REFRESH_DELAYS, reas
             }
             if (!settings.enabled || !isDomEngine()) return;
             if (chatGeneration !== attributionChatGeneration) return;
+            const currentContext = getContext();
+            if (currentContext?.chat !== chat || getChatContextIdentity(currentContext) !== contextIdentity) return;
             setupChatObserver();
             decorateAllMessages();
         }, normalizedDelay);

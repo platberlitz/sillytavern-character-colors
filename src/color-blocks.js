@@ -1,5 +1,6 @@
 // color-blocks.js - extracted from index.js (mechanical split)
 import { DOM_RETRY_REFRESH_DELAYS, decorateAllMessages, scheduleDomSettleRefresh } from './dom-engine.js';
+import { normalizeRegistryIdentity, normalizeRegistryIdentityName } from './group-profiles.js';
 import { commit, repaintDomAfterCharacterDataChange } from './live-colors.js';
 import { applyThemeReadabilityAndBrightness, buildCharacterEntry, checkColorConflicts, deriveBaseColorFromEffectiveColor, getEntryEffectiveColor, setEntryFromEffectiveColor } from './palettes.js';
 import { NARRATOR_VISUAL_ID, getNarratorVisual, setTransientNarratorCount } from './narrator-style.js';
@@ -8,26 +9,31 @@ import { escapeHtml, escapeRegex, getContext } from './st-api.js';
 import { characterColors, isDomEngine, settings } from './state.js';
 import { captureOpenDetailsState, isCompositeSpeakerLabel, normalizeAliases, normalizeGoogleFontName, normalizeHexColor, parseNameWithNicknames, restoreOpenDetailsState, splitCompositeSpeakerName, toast } from './utils.js';
 
+function hasOwn(value, key) {
+    return Object.prototype.hasOwnProperty.call(value || {}, key);
+}
+
 export function resolveCharacterKeyByNameOrAlias(rawName) {
-    const lookupName = String(rawName ?? '').trim().toLowerCase();
+    const lookupName = normalizeRegistryIdentity(rawName);
     if (!lookupName) return '';
-    if (characterColors[lookupName]) return lookupName;
+    if (hasOwn(characterColors, lookupName) && characterColors[lookupName]) return lookupName;
     for (const [key, entry] of Object.entries(characterColors)) {
         if (!entry) continue;
-        if (String(entry.name ?? '').trim().toLowerCase() === lookupName) return key;
-        if (normalizeAliases(entry.aliases).some(alias => alias.toLowerCase() === lookupName)) return key;
+        if (normalizeRegistryIdentity(entry.name) === lookupName) return key;
+        if (normalizeAliases(entry.aliases).some(alias => normalizeRegistryIdentity(alias) === lookupName)) return key;
     }
     return '';
 }
 
 export function resolveLookupAssignmentByName(lookup, rawName) {
     if (!(lookup instanceof Map)) return null;
-    const trimmedName = String(rawName ?? '').trim();
+    if (typeof rawName !== 'string') return null;
+    const trimmedName = rawName.trim();
     if (!trimmedName) return null;
     const { name, nicknames } = parseNameWithNicknames(trimmedName);
     const candidates = [];
     const pushCandidate = value => {
-        const normalized = String(value ?? '').trim().toLowerCase();
+        const normalized = normalizeRegistryIdentity(value);
         if (normalized && !candidates.includes(normalized)) candidates.push(normalized);
     };
     pushCandidate(trimmedName);
@@ -83,7 +89,7 @@ export function buildSingleSpeakerEntryLookup(rawColors) {
 // Also fixes auto-lock inconsistency (2A) and adds group field (6B)
 
 export function pruneReducibleCompositeEntries(rawColors) {
-    if (!rawColors || typeof rawColors !== 'object') return {};
+    if (!rawColors || typeof rawColors !== 'object' || Array.isArray(rawColors)) return Object.create(null);
     let removed = false;
     do {
         removed = false;
@@ -113,16 +119,17 @@ export function processColorPairs(pairsString) {
         const rawName = pair.substring(0, eqIdx).trim();
         const { name, nicknames } = parseNameWithNicknames(rawName);
         const rawColor = pair.substring(eqIdx + 1).trim();
-        if (!name || !rawColor || !/^#[a-fA-F0-9]{6}$/i.test(rawColor)) continue;
+        const nameKey = normalizeRegistryIdentity(name);
+        if (!nameKey || !rawColor || !/^#[a-fA-F0-9]{6}$/i.test(rawColor)) continue;
         const assignedColor = normalizeHexColor(rawColor);
-        if (name.toLowerCase() === 'narrator') {
+        if (nameKey === 'narrator') {
             narratorSeen = true;
             continue;
         }
         const existingKey = resolveCharacterKeyByNameOrAlias(name);
-        const key = existingKey || name.toLowerCase();
+        const key = existingKey || nameKey;
         const canonicalName = existingKey ? characterColors[existingKey].name : name;
-        if (characterColors[key]) {
+        if (hasOwn(characterColors, key) && characterColors[key]) {
             characterColors[key].dialogueCount = (characterColors[key].dialogueCount || 0) + 1;
             if (!normalizeHexColor(characterColors[key].color, null)) {
                 setEntryFromEffectiveColor(characterColors[key], assignedColor);
@@ -148,12 +155,7 @@ export function processColorPairs(pairsString) {
         }
         countedKeys.add(key);
         if (nicknames.length) {
-            characterColors[key].aliases = characterColors[key].aliases || [];
-            nicknames.forEach(nick => {
-                if (!characterColors[key].aliases.includes(nick)) {
-                    characterColors[key].aliases.push(nick);
-                }
-            });
+            characterColors[key].aliases = normalizeAliases([...(characterColors[key].aliases || []), ...nicknames]);
         }
     }
     return { foundNew, hadRemapping, remappedAssignments, countedKeys: Array.from(countedKeys), narratorSeen };
@@ -207,7 +209,7 @@ export function countFontColorStatsFromKnownColors(text, countedKeys = new Set()
     for (const color of collectFontColorsFromText(text)) {
         const assignment = colorLookup.get(normalizeHexColor(color, null));
         if (!assignment?.key || existingKeys.has(assignment.key)) continue;
-        const entry = characterColors[assignment.key];
+        const entry = hasOwn(characterColors, assignment.key) ? characterColors[assignment.key] : null;
         if (!entry) continue;
         entry.dialogueCount = (entry.dialogueCount || 0) + 1;
         existingKeys.add(assignment.key);
@@ -298,7 +300,8 @@ export function parseColorAssignmentsFromText(text) {
             const rawColor = pair.substring(eqIdx + 1).trim();
             if (!name || !/^#[0-9a-fA-F]{6}$/.test(rawColor)) continue;
             const colorKey = rawColor.toLowerCase();
-            const nameKey = name.toLowerCase();
+            const nameKey = normalizeRegistryIdentity(name);
+            if (!nameKey) continue;
             latestByColor[colorKey] = nameKey;
             if (!namesByColor[colorKey]) namesByColor[colorKey] = new Set();
             namesByColor[colorKey].add(nameKey);
@@ -309,7 +312,7 @@ export function parseColorAssignmentsFromText(text) {
 
 export function collectFontColorsFromText(text) {
     const colors = new Set();
-    const fontTagRegex = /<font\b[^>]*\bcolor\s*=\s*["']?(#[0-9a-fA-F]{6})["']?[^>]*>/gi;
+    const fontTagRegex = /<font(?=\s|\/?>)[^<>]*\bcolor\s*=\s*["']?(#[0-9a-fA-F]{6})["']?[^<>]*\/?>/gi;
     let match;
     while ((match = fontTagRegex.exec(text || '')) !== null) {
         colors.add(match[1].toLowerCase());
@@ -338,19 +341,20 @@ export function parseNamedColorAssignmentsFromText(text) {
 export function countNarratorFontTagsFromText(text) {
     const assignments = parseNamedColorAssignmentsFromText(text);
     const narratorColors = new Set(assignments
-        .filter(assignment => assignment.name.toLowerCase() === 'narrator')
+        .filter(assignment => normalizeRegistryIdentity(assignment.name) === 'narrator')
         .map(assignment => assignment.color));
     if (!narratorColors.size) return { present: false, count: null };
     const namesByColor = new Map();
     assignments.forEach(assignment => {
         if (!namesByColor.has(assignment.color)) namesByColor.set(assignment.color, new Set());
-        namesByColor.get(assignment.color).add(assignment.name.toLowerCase());
+        const nameKey = normalizeRegistryIdentity(assignment.name);
+        if (nameKey) namesByColor.get(assignment.color).add(nameKey);
     });
     if ([...narratorColors].some(color => [...(namesByColor.get(color) || [])].some(name => name !== 'narrator'))) {
         return { present: true, count: null };
     }
     let count = 0;
-    const fontTagRegex = /<font\b[^>]*\bcolor\s*=\s*["']?(#[0-9a-fA-F]{6})["']?[^>]*>/gi;
+    const fontTagRegex = /<font(?=\s|\/?>)[^<>]*\bcolor\s*=\s*["']?(#[0-9a-fA-F]{6})["']?[^<>]*\/?>/gi;
     let match;
     while ((match = fontTagRegex.exec(text || '')) !== null) {
         if (narratorColors.has(match[1].toLowerCase())) count++;
@@ -432,14 +436,14 @@ export function buildDialogueRegex() {
 }
 
 export function registerLookupAssignment(lookup, name, color, aliases = [], preserveExisting = false, font = '') {
-    const normalizedName = String(name ?? '').trim();
+    const normalizedName = normalizeRegistryIdentityName(name);
     const normalizedColor = normalizeHexColor(color, null);
-    if (!normalizedName || !normalizedColor) return;
-    const canonicalKey = normalizedName.toLowerCase();
+    const canonicalKey = normalizeRegistryIdentity(normalizedName);
+    if (!canonicalKey || !normalizedColor) return;
     const assignment = { key: canonicalKey, name: normalizedName, color: normalizedColor, font: normalizeGoogleFontName(font) };
     const lookupNames = [normalizedName, ...normalizeAliases(aliases)];
     for (const lookupName of lookupNames) {
-        const lookupKey = lookupName.toLowerCase();
+        const lookupKey = normalizeRegistryIdentity(lookupName);
         if (!lookupKey) continue;
         if (preserveExisting && lookup.has(lookupKey)) continue;
         lookup.set(lookupKey, assignment);
@@ -533,7 +537,7 @@ export function buildColorRenderingLookup(rawText = '') {
         const [nameKey] = Array.from(names);
         const narrator = nameKey === 'narrator' ? getNarratorVisual(settings, applyThemeReadabilityAndBrightness) : null;
         const key = narrator ? NARRATOR_VISUAL_ID : resolveCharacterKeyByNameOrAlias(nameKey);
-        const entry = narrator || (key ? characterColors[key] : null);
+        const entry = narrator || (key && hasOwn(characterColors, key) ? characterColors[key] : null);
         if (entry) colorToRendering.set(normalizedColor, { key, entry });
         else colorToRendering.delete(normalizedColor);
     }

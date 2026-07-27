@@ -2,19 +2,97 @@
 import { clearSpeakerRegexCache } from './attribution.js';
 import { GRADIENT_ANIMATION_MODES } from './animation-controller.js';
 import { COLOR_VISION_MODES } from './color-vision.js';
-import { createGradientPresetFromEntry, normalizeGradient, normalizeGradientPreset, normalizeGradientPresetName, normalizeGradientPresets, serializeGradient } from './gradients.js';
-import { normalizeGroupProfiles } from './group-profiles.js';
+import { createGradientPresetFromEntry, normalizeGradient, normalizeGradientPreset, normalizeGradientPresets, serializeGradient } from './gradients.js';
+import { isDangerousRegistryIdentity, migrateLegacyRegistryEntries, migrateLegacyRegistryIdentities, migrateLegacyRegistryIdentityName, normalizeGroupProfile, normalizeGroupProfiles, normalizeRegistryIdentity, normalizeRegistryIdentityName } from './group-profiles.js';
 import { createHistorySnapshot, parseHistorySnapshot, saveHistory, showUndoToast } from './history.js';
+import { analyzeJsonSource } from './import-codec.js';
 import { applyLiveColorChangesFromSnapshot, captureEffectiveColorSnapshot, commit } from './live-colors.js';
 import { normalizeNarratorStyle, setNarratorStyle } from './narrator-style.js';
 import { CUSTOM_PALETTE_KEY, CUSTOM_PALETTE_META_KEY, applyThemeReadabilityAndBrightness, deriveBaseColorFromEffectiveColor, getBaseColor, invalidateThemeCache, normalizeCustomPalettes, syncAllEffectiveColors } from './palettes.js';
 import { injectPrompt } from './prompts.js';
 import { extension_settings, getCharacters, getContext, getRequestHeaders, saveCharacterDebounced, saveMetadata, saveSettings, saveSettingsDebounced } from './st-api.js';
-import { ACTIVE_SETTING_KEYS, AUTO_SYNC_SAVE_TIMEOUT_MS, COLOR_SCHEMA_VERSION, COLOR_STORAGE_SCOPES, DEFAULT_COLOR_STORAGE_SCOPE, GLOBAL_SETTINGS_V2_KEY, GLOBAL_SETTINGS_V2_KEYS, GLOBAL_VISUAL_KEYS, LEGACY_AUTO_SYNC_ENABLED_KEY, LEGACY_GLOBAL_SETTINGS_KEY, LEGEND_POSITION_KEY, MODULE_NAME, PRESETS_KEY, TOGGLE_SETTING_DEFAULTS, autoSyncEnabled, autoSyncInterval, autoSyncLastTimestamp, autoSyncPendingRecord, autoSyncSaveTimeout, autoSyncSequence, autoSyncStatusError, characterColors, colorHistory, expandedCharacterRows, groupProfiles, historyIndex, lastCharKey, lastProcessedMessageSignature, selectedCharacterKeys, setAutoSyncEnabled, setAutoSyncInterval, setAutoSyncLastTimestamp, setAutoSyncPendingRecord, setAutoSyncSaveTimeout, setAutoSyncSequence, setAutoSyncStatusError, setCharacterColors, setColorHistory, setExpandedCharacterRows, setGroupProfiles, setHistoryIndex, setLastCharKey, setLastProcessedMessageSignature, setSwapMode, settings, swapMode } from './state.js';
-import { AESTHETIC_APPEARANCE_KEYS, analyzeStylePackConflicts, buildStylePackInstallationPlan } from './style-packs.js';
+import { ACTIVE_SETTING_KEYS, AUTO_SYNC_SAVE_TIMEOUT_MS, COLOR_SCHEMA_VERSION, COLOR_STORAGE_SCOPES, DEFAULT_COLOR_STORAGE_SCOPE, GLOBAL_SETTINGS_V2_KEY, GLOBAL_SETTINGS_V2_KEYS, GLOBAL_VISUAL_KEYS, LEGACY_AUTO_SYNC_ENABLED_KEY, LEGACY_GLOBAL_SETTINGS_KEY, LEGEND_POSITION_KEY, MODULE_NAME, PRESETS_KEY, TOGGLE_SETTING_DEFAULTS, autoSyncEnabled, autoSyncInterval, autoSyncLastTimestamp, autoSyncLastWriterId, autoSyncPendingRecord, autoSyncSaveTimeout, autoSyncSequence, autoSyncStatusError, characterColors, colorHistory, createLatestRequestGate, expandedCharacterRows, getAutoSyncRecordDisposition, groupProfiles, historyIndex, lastCharKey, lastProcessedMessageSignature, preserveLocalRemoteFontConsent, selectedCharacterKeys, setAutoSyncEnabled, setAutoSyncInterval, setAutoSyncLastTimestamp, setAutoSyncLastWriterId, setAutoSyncPendingRecord, setAutoSyncSaveTimeout, setAutoSyncSequence, setAutoSyncStatusError, setCharacterColors, setColorHistory, setExpandedCharacterRows, setGroupProfiles, setHistoryIndex, setLastCharKey, setLastProcessedMessageSignature, setSwapMode, settings, swapMode } from './state.js';
+import { AESTHETIC_APPEARANCE_KEYS, StylePackError, analyzeStylePackConflicts, buildStylePackInstallationPlan, flattenStylePackAssignmentPresets } from './style-packs.js';
 import { analyzeStylePackEnvelopeSource, digestStylePackEnvelope, normalizeStylePackEnvelope } from './style-pack-adapter.js';
 import { refreshGradientPresetControls, syncUIWithSettings, updateCharList } from './ui.js';
 import { normalizeBoolean, normalizeCharacterColors, normalizeEntryGradientGenerator, normalizeHexColor, toast } from './utils.js';
+
+const ORDINARY_IMPORT_LIMITS = Object.freeze({
+    maxBytes: 1024 * 1024,
+    maxDepth: 20,
+    maxNodes: 20000,
+});
+
+const ORDINARY_IMPORT_OUTPUT_LIMITS = Object.freeze({
+    maxCharacters: 5000,
+    maxAliasesPerCharacter: 128,
+    maxAliasesTotal: 10000,
+    maxGroupProfiles: 2000,
+    maxGradientPresets: 512,
+});
+
+const AUTO_SYNC_TIMESTAMP_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?(?:Z|[+-](\d{2}):(\d{2}))$/;
+const AUTO_SYNC_WRITER_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+const LOCAL_REMOTE_FONT_CONSENT_KEY = 'dc_allow_remote_fonts_local_consent_v1';
+let localRemoteFontConsent = null;
+
+function getLocalRemoteFontConsent() {
+    if (typeof localRemoteFontConsent === 'boolean') return localRemoteFontConsent;
+    try {
+        localRemoteFontConsent = localStorage.getItem(LOCAL_REMOTE_FONT_CONSENT_KEY) === 'true';
+    } catch {
+        localRemoteFontConsent = false;
+    }
+    return localRemoteFontConsent;
+}
+
+function persistLocalRemoteFontConsent(value) {
+    localRemoteFontConsent = value === true;
+    try {
+        localStorage.setItem(LOCAL_REMOTE_FONT_CONSENT_KEY, localRemoteFontConsent ? 'true' : 'false');
+    } catch {
+        // The runtime setting remains effective for this session when storage is unavailable.
+    }
+}
+
+function createAutoSyncWriterId() {
+    if (typeof globalThis.crypto?.randomUUID === 'function') return `dc:${globalThis.crypto.randomUUID()}`;
+    return `dc:${Date.now().toString(36)}:${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`;
+}
+
+export const AUTO_SYNC_WRITER_ID = createAutoSyncWriterId();
+
+const FONT_TRIM_RULE = Object.freeze({
+    id: 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d',
+    scriptName: '[Dialogue Colors] Trim Exact Font Tags',
+    findRegex: '/<font(?:\\s+[^<>]*?)?\\s*\\/?>|<\\/font\\s*>/gi',
+    replaceString: '',
+    trimStrings: Object.freeze([]),
+    placement: Object.freeze([2]),
+    disabled: false,
+    markdownOnly: false,
+    promptOnly: true,
+    runOnEdit: true,
+    substituteRegex: 0,
+    minDepth: null,
+    maxDepth: null,
+});
+
+const CSS_EFFECTS_TRIM_RULE = Object.freeze({
+    id: 'dialogue-colors:trim-css-effects:v1',
+    scriptName: '[Dialogue Colors] Trim CSS Effects (Prompt)',
+    findRegex: '/<span[^>]*style=["\'][^"\']*(?:transform|skew|rotate|scale|opacity|filter|text-shadow|translate)[^"\']*["\'][^>]*>(.*?)<\\/span>/gi',
+    replaceString: '$1',
+    trimStrings: Object.freeze([]),
+    placement: Object.freeze([2]),
+    disabled: false,
+    markdownOnly: false,
+    promptOnly: true,
+    runOnEdit: true,
+    substituteRegex: 0,
+    minDepth: null,
+    maxDepth: null,
+});
 
 export function normalizeToggleSettings() {
     normalizeCurrentColorStorageScope();
@@ -27,7 +105,7 @@ export function normalizeToggleSettings() {
     const attributionReviewPolicy = String(settings.attributionReviewPolicy ?? '').trim().toLowerCase();
     settings.attributionReviewPolicy = ['review', 'auto-high', 'legacy-auto'].includes(attributionReviewPolicy)
         ? attributionReviewPolicy
-        : 'legacy-auto';
+        : 'review';
     settings.gradientRandomMasterSeed = String(settings.gradientRandomMasterSeed ?? '')
         .replace(/[\u0000-\u001f\u007f]/g, '')
         .slice(0, 128);
@@ -64,29 +142,322 @@ export function getCurrentStorageScope() {
 }
 
 export function isPlainObject(value) {
-    return !!value && typeof value === 'object' && !Array.isArray(value);
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    try {
+        const prototype = Object.getPrototypeOf(value);
+        return prototype === Object.prototype || prototype === null;
+    } catch {
+        return false;
+    }
+}
+
+function normalizeNameDictionary(source, maximum = 120) {
+    const normalized = Object.create(null);
+    if (!isPlainObject(source)) return normalized;
+    const limit = Number.isInteger(maximum) && maximum > 0 ? Math.min(maximum, 120) : 120;
+    const occupied = new Set();
+    for (const [rawName, value] of Object.entries(source)) {
+        const baseName = normalizeRegistryIdentityName(rawName, limit);
+        let name = baseName;
+        let identity = normalizeRegistryIdentity(name, limit);
+        if (!name || !identity) continue;
+        let collisionIndex = 2;
+        while (occupied.has(identity)) {
+            const suffix = ` (${collisionIndex++})`;
+            const stem = baseName.slice(0, Math.max(1, limit - suffix.length)).trimEnd();
+            name = normalizeRegistryIdentityName(`${stem}${suffix}`, limit);
+            identity = normalizeRegistryIdentity(name, limit);
+        }
+        occupied.add(identity);
+        normalized[name] = value;
+    }
+    return normalized;
+}
+
+function normalizeGradientPresetRegistry(source) {
+    return normalizeNameDictionary(normalizeGradientPresets(normalizeNameDictionary(source, 80)), 80);
+}
+
+function normalizeCustomPaletteRegistry(source) {
+    return normalizeNameDictionary(normalizeCustomPalettes(normalizeNameDictionary(source)), 120);
+}
+
+const STORAGE_IDENTITY_MIGRATION_REPORT_LIMIT = 500;
+
+function createStorageIdentityMigration() {
+    return { renamed: 0, collisions: 0, changes: [] };
+}
+
+function recordStorageIdentityMigration(migration, path, renames) {
+    for (const rename of renames || []) {
+        migration.renamed++;
+        if (rename.collision) migration.collisions++;
+        if (migration.changes.length < STORAGE_IDENTITY_MIGRATION_REPORT_LIMIT) {
+            migration.changes.push({ path, ...rename });
+        }
+    }
+}
+
+function recordStorageIdentityRename(migration, path, from, to) {
+    if (from === to) return;
+    recordStorageIdentityMigration(migration, path, [{ from, to, collision: false }]);
+}
+
+function legacyIdentityLookup(value) {
+    if (!['string', 'number', 'boolean'].includes(typeof value)) return '';
+    return String(value)
+        .normalize('NFKC')
+        .replace(/[\u0000-\u001F\u007F]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+}
+
+function legacyIdentityExact(value) {
+    return ['string', 'number', 'boolean'].includes(typeof value) ? String(value) : '';
+}
+
+function migrateLegacyGroupProfileRegistry(source, migration, path) {
+    const migrated = migrateLegacyRegistryEntries(source, {
+        maximum: 80,
+        fallback: 'Legacy group',
+        nameFromValue: true,
+    });
+    recordStorageIdentityMigration(migration, path, migrated.renames);
+    const nameMappings = new Map();
+    for (const [rawKey, value] of Object.entries(source || {})) {
+        const names = [rawKey];
+        const explicitName = isPlainObject(value) && hasOwn(value, 'name') ? value.name : undefined;
+        if (legacyIdentityLookup(explicitName)) names.push(explicitName);
+        for (const rawName of names) {
+            const lookup = legacyIdentityLookup(rawName);
+            const exact = legacyIdentityExact(rawName);
+            if (exact) nameMappings.set(`exact:${exact}`, migrated.mappings[rawKey]);
+            if (lookup && !nameMappings.has(`canonical:${lookup}`)) {
+                nameMappings.set(`canonical:${lookup}`, migrated.mappings[rawKey]);
+            }
+        }
+    }
+    return { profiles: normalizeGroupProfiles(migrated.registry), nameMappings };
+}
+
+function migrateLegacyCharacterRegistry(source, groupNames, migration, path) {
+    const migrated = migrateLegacyRegistryEntries(source, {
+        maximum: 120,
+        fallback: 'Legacy character',
+        nameFromValue: true,
+    });
+    recordStorageIdentityMigration(migration, path, migrated.renames);
+    const registry = Object.create(null);
+    for (const [name, value] of Object.entries(migrated.registry)) {
+        if (!isPlainObject(value)) {
+            registry[name] = value;
+            continue;
+        }
+        const entry = { ...value, name };
+        if (Array.isArray(entry.aliases)) {
+            const aliases = migrateLegacyRegistryIdentities(entry.aliases, {
+                maximum: 120,
+                fallback: `${name} alias`,
+            });
+            entry.aliases = aliases.values;
+            recordStorageIdentityMigration(migration, `${path}.${name}.aliases`, aliases.renames);
+        }
+        if (hasOwn(entry, 'group')) {
+            const oldGroup = ['string', 'number', 'boolean'].includes(typeof entry.group) ? String(entry.group) : '';
+            const groupLookup = legacyIdentityLookup(entry.group);
+            if (!groupLookup) {
+                entry.group = '';
+            } else {
+                const mappedGroup = groupNames.get(`exact:${legacyIdentityExact(entry.group)}`)
+                    || groupNames.get(`canonical:${groupLookup}`);
+                entry.group = mappedGroup || migrateLegacyRegistryIdentityName(entry.group, 80, 'Legacy group');
+            }
+            recordStorageIdentityRename(migration, `${path}.${name}.group`, oldGroup, entry.group);
+        }
+        registry[name] = entry;
+    }
+    return registry;
+}
+
+function migrateLegacyColorDataEntry(source, migration, path) {
+    if (!isPlainObject(source)) return source;
+    const groups = migrateLegacyGroupProfileRegistry(source.groupProfiles, migration, `${path}.groupProfiles`);
+    return {
+        ...source,
+        colors: normalizeCharacterColors(migrateLegacyCharacterRegistry(
+            source.colors,
+            groups.nameMappings,
+            migration,
+            `${path}.colors`,
+        )),
+        groupProfiles: groups.profiles,
+    };
+}
+
+function migrateLegacyStoredColorData(source, migration) {
+    const colorData = Object.create(null);
+    if (!isPlainObject(source)) return colorData;
+    for (const [key, value] of Object.entries(source)) {
+        colorData[key] = migrateLegacyColorDataEntry(value, migration, `colorData.${key}`);
+    }
+    return colorData;
+}
+
+function migrateLegacyPresetEntries(entries, groups, migration, path) {
+    if (!Array.isArray(entries)) return entries;
+    const indexed = Object.create(null);
+    entries.forEach((entry, index) => { indexed[index] = entry; });
+    return Object.values(migrateLegacyCharacterRegistry(indexed, groups, migration, path));
+}
+
+function migrateLegacyStoredColorPresets(source, migration) {
+    const migrated = migrateLegacyRegistryEntries(source, {
+        maximum: 120,
+        fallback: 'Legacy preset',
+    });
+    recordStorageIdentityMigration(migration, 'presets', migrated.renames);
+    for (const [name, value] of Object.entries(migrated.registry)) {
+        if (Array.isArray(value)) {
+            migrated.registry[name] = migrateLegacyPresetEntries(
+                value,
+                new Map(),
+                migration,
+                `presets.${name}`,
+            );
+            continue;
+        }
+        if (!isPlainObject(value) || !Array.isArray(value.entries)) continue;
+        const groups = migrateLegacyGroupProfileRegistry(
+            value.groupProfiles,
+            migration,
+            `presets.${name}.groupProfiles`,
+        );
+        migrated.registry[name] = {
+            ...value,
+            entries: migrateLegacyPresetEntries(value.entries, groups.nameMappings, migration, `presets.${name}.entries`),
+            groupProfiles: groups.profiles,
+        };
+    }
+    return migrated.registry;
+}
+
+function migrateLegacyNamedCatalog(source, maximum, fallback, migration, path) {
+    const migrated = migrateLegacyRegistryEntries(source, { maximum, fallback });
+    recordStorageIdentityMigration(migration, path, migrated.renames);
+    return migrated;
+}
+
+function migrateLegacyMappedCatalog(source, mappings, maximum, fallback, migration, path) {
+    const registry = Object.create(null);
+    const occupied = new Set();
+    if (!isPlainObject(source)) return registry;
+    for (const [rawName, value] of Object.entries(source)) {
+        const mappedName = mappings?.[rawName];
+        const baseName = normalizeRegistryIdentityName(mappedName, maximum)
+            || migrateLegacyRegistryIdentityName(rawName, maximum, fallback);
+        let name = baseName;
+        let identity = normalizeRegistryIdentity(name, maximum);
+        let collisionIndex = 2;
+        while (!identity || occupied.has(identity)) {
+            name = migrateLegacyRegistryIdentityName(`${baseName} (${collisionIndex++})`, maximum, fallback);
+            identity = normalizeRegistryIdentity(name, maximum);
+        }
+        occupied.add(identity);
+        registry[name] = value;
+        const from = legacyIdentityExact(rawName);
+        if (name !== from) {
+            recordStorageIdentityMigration(migration, path, [{
+                from,
+                to: name,
+                collision: name !== baseName,
+            }]);
+        }
+    }
+    return registry;
+}
+
+function attachStorageIdentityMigration(ui, migration) {
+    const normalizedUi = isPlainObject(ui) ? { ...ui } : {};
+    if (!migration.renamed) return normalizedUi;
+    const previous = isPlainObject(normalizedUi.identitySchemaMigration)
+        && normalizedUi.identitySchemaMigration.version === COLOR_SCHEMA_VERSION
+        ? normalizedUi.identitySchemaMigration
+        : null;
+    const previousChanges = Array.isArray(previous?.changes) ? previous.changes : [];
+    const changes = [...previousChanges, ...migration.changes].slice(0, STORAGE_IDENTITY_MIGRATION_REPORT_LIMIT);
+    const renamed = (Number.isSafeInteger(previous?.renamed) ? previous.renamed : 0) + migration.renamed;
+    normalizedUi.identitySchemaMigration = {
+        version: COLOR_SCHEMA_VERSION,
+        renamed,
+        collisions: (Number.isSafeInteger(previous?.collisions) ? previous.collisions : 0) + migration.collisions,
+        truncated: previous?.truncated === true || renamed > changes.length,
+        changes,
+    };
+    return normalizedUi;
+}
+
+function migrateLegacyUiState(ui, migration) {
+    const migrated = isPlainObject(ui) ? { ...ui } : {};
+    if (isPlainObject(ui?.storageTrash) && isPlainObject(ui.storageTrash.entries)) {
+        const entries = Object.create(null);
+        for (const [key, value] of Object.entries(ui.storageTrash.entries)) {
+            entries[key] = migrateLegacyColorDataEntry(value, migration, `ui.storageTrash.entries.${key}`);
+        }
+        migrated.storageTrash = { ...ui.storageTrash, entries };
+    }
+    return attachStorageIdentityMigration(migrated, migration);
+}
+
+function migrateLegacyAutoSyncRecord(source) {
+    const migration = createStorageIdentityMigration();
+    const palettes = migrateLegacyNamedCatalog(source?.customPalettes, 120, 'Legacy palette', migration, 'customPalettes');
+    const gradients = migrateLegacyNamedCatalog(source?.customGradientPresets, 80, 'Legacy gradient', migration, 'customGradientPresets');
+    return {
+        ...source,
+        version: COLOR_SCHEMA_VERSION,
+        colorData: migrateLegacyStoredColorData(source?.colorData, migration),
+        presets: migrateLegacyStoredColorPresets(source?.presets, migration),
+        customPalettes: palettes.registry,
+        customPaletteMeta: migrateLegacyMappedCatalog(
+            source?.customPaletteMeta,
+            palettes.mappings,
+            120,
+            'Legacy palette metadata',
+            migration,
+            'customPaletteMeta',
+        ),
+        customGradientPresets: gradients.registry,
+        ui: migrateLegacyUiState(source?.ui, migration),
+    };
+}
+
+function prepareAutoSyncRecordSource(source) {
+    const version = Number(source?.version);
+    return !Number.isFinite(version) || version < COLOR_SCHEMA_VERSION
+        ? migrateLegacyAutoSyncRecord(source)
+        : source;
 }
 
 function normalizeStylePackRegistry(source) {
-    if (!isPlainObject(source)) return {};
-    const registry = {};
-    const reservedKeys = new Set(['__proto__', 'prototype', 'constructor']);
+    const registry = Object.create(null);
+    if (!isPlainObject(source)) return registry;
     const entries = Object.entries(source).slice(0, 256);
     for (const [key, value] of entries) {
         const registryKey = String(key).replace(/[\u0000-\u001F\u007F]/g, '').slice(0, 512);
-        if (!registryKey || reservedKeys.has(registryKey) || !isPlainObject(value)) continue;
+        if (!registryKey || isDangerousRegistryIdentity(registryKey) || !isPlainObject(value)) continue;
         const installedAt = typeof value.installedAt === 'string' && Number.isFinite(Date.parse(value.installedAt))
             ? new Date(value.installedAt).toISOString()
             : '';
-        const itemMappings = {};
+        const itemMappings = Object.create(null);
         for (const category of ['palettes', 'gradientPresets', 'assignmentPresets']) {
             const mappings = value.itemMappings?.[category];
             if (!isPlainObject(mappings)) continue;
-            const cleanMappings = {};
+            const cleanMappings = Object.create(null);
             for (const [sourceName, targetName] of Object.entries(mappings).slice(0, 128)) {
                 const sourceKey = String(sourceName).replace(/[\u0000-\u001F\u007F]/g, '').slice(0, 160);
                 const target = String(targetName).replace(/[\u0000-\u001F\u007F]/g, '').slice(0, 160);
-                if (sourceKey && target && !reservedKeys.has(sourceKey)) cleanMappings[sourceKey] = target;
+                if (sourceKey && target && !isDangerousRegistryIdentity(sourceKey)) cleanMappings[sourceKey] = target;
             }
             if (Object.keys(cleanMappings).length) itemMappings[category] = cleanMappings;
         }
@@ -100,8 +471,17 @@ function cloneJsonValue(value) {
     return JSON.parse(JSON.stringify(value));
 }
 
+function sortJsonForComparison(value) {
+    if (Array.isArray(value)) return value.map(sortJsonForComparison);
+    if (!value || typeof value !== 'object') return value;
+    const sorted = Object.create(null);
+    for (const key of Object.keys(value).sort()) sorted[key] = sortJsonForComparison(value[key]);
+    return sorted;
+}
+
 function recordsEqual(left, right) {
-    return JSON.stringify(buildAutoSyncRecord(left)) === JSON.stringify(buildAutoSyncRecord(right));
+    return JSON.stringify(sortJsonForComparison(buildAutoSyncRecord(left)))
+        === JSON.stringify(sortJsonForComparison(buildAutoSyncRecord(right)));
 }
 
 export function parseStorageObject(key) {
@@ -168,6 +548,14 @@ export function normalizeStoredSettings(source) {
     for (const key of ACTIVE_SETTING_KEYS) {
         if (source[key] !== undefined) normalized[key] = source[key];
     }
+    if (hasOwn(normalized, 'attributionReviewPolicy')) {
+        const policy = typeof normalized.attributionReviewPolicy === 'string'
+            ? normalized.attributionReviewPolicy.trim().toLowerCase()
+            : '';
+        normalized.attributionReviewPolicy = ['review', 'auto-high', 'legacy-auto'].includes(policy)
+            ? policy
+            : 'review';
+    }
     if (source.colorSchemaVersion !== undefined) normalized.colorSchemaVersion = source.colorSchemaVersion;
     normalized.colorStorageScope = normalizeColorStorageScope(source.colorStorageScope, source.shareColorsGlobally);
     if (source.narratorStyle !== undefined || source.disableNarration !== undefined || source.narratorColor !== undefined) {
@@ -181,7 +569,11 @@ export function normalizeStoredSettings(source) {
 export function applyStoredSettingsSnapshot(source, { includeColorSchemaVersion = true } = {}) {
     const normalized = normalizeStoredSettings(source);
     if (!includeColorSchemaVersion) delete normalized.colorSchemaVersion;
-    if (!Object.keys(normalized).length) return false;
+    if (!Object.keys(normalized).length) {
+        settings.allowRemoteFonts = getLocalRemoteFontConsent();
+        return false;
+    }
+    normalized.allowRemoteFonts = getLocalRemoteFontConsent();
     Object.assign(settings, normalized);
     normalizeToggleSettings();
     return true;
@@ -206,12 +598,14 @@ export function getLegacyAutoSyncEnabledPreference() {
 }
 
 export function normalizeStoredColorPresets(source) {
-    if (!isPlainObject(source)) return {};
-    const presets = {};
+    const presets = Object.create(null);
+    if (!isPlainObject(source)) return presets;
     const normalizeEntries = entries => entries.map(entry => isPlainObject(entry)
         ? { ...entry, gradient: serializeGradient(entry.gradient) }
         : entry);
-    for (const [name, value] of Object.entries(source)) {
+    for (const [rawName, value] of Object.entries(source)) {
+        const name = normalizeRegistryIdentityName(rawName);
+        if (!name) continue;
         if (Array.isArray(value)) {
             presets[name] = normalizeEntries(value);
         } else if (isPlainObject(value) && Array.isArray(value.entries)) {
@@ -228,8 +622,8 @@ export function normalizeStoredColorPresets(source) {
 }
 
 export function normalizeStoredColorData(source) {
-    if (!isPlainObject(source)) return {};
-    const colorData = {};
+    const colorData = Object.create(null);
+    if (!isPlainObject(source)) return colorData;
     for (const [key, value] of Object.entries(source)) {
         const normalized = normalizeColorDataEntry(value);
         colorData[key] = normalized || value;
@@ -238,21 +632,77 @@ export function normalizeStoredColorData(source) {
 }
 
 export function cleanupLegacyAutoSyncPreference() {
-    // localStorage is now read-only legacy input; do not write back to browser storage.
+    // Legacy settings remain read-only; only the separate device-consent key is written.
+}
+
+function normalizeAutoSyncSequence(value) {
+    return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+function normalizeAutoSyncWriterId(value) {
+    if (typeof value !== 'string') return '';
+    const writerId = value.trim();
+    return AUTO_SYNC_WRITER_ID_PATTERN.test(writerId) ? writerId : '';
+}
+
+function normalizeAutoSyncTimestamp(value) {
+    if (typeof value !== 'string') return '';
+    const timestamp = value.trim();
+    const match = timestamp.match(AUTO_SYNC_TIMESTAMP_PATTERN);
+    if (!match) return '';
+    const [, rawYear, rawMonth, rawDay, rawHour, rawMinute, rawSecond, rawOffsetHour, rawOffsetMinute] = match;
+    const year = Number(rawYear);
+    const month = Number(rawMonth);
+    const day = Number(rawDay);
+    const daysInMonth = [31, year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    if (month < 1 || month > 12 || day < 1 || day > daysInMonth[month - 1]
+        || Number(rawHour) > 23 || Number(rawMinute) > 59 || Number(rawSecond) > 59
+        || (rawOffsetHour !== undefined && (Number(rawOffsetHour) > 23 || Number(rawOffsetMinute) > 59))) return '';
+    const parsed = Date.parse(timestamp);
+    return Number.isFinite(parsed) ? new Date(parsed).toISOString() : '';
+}
+
+export function compareAutoSyncMarkers(left, right) {
+    const leftWriterId = normalizeAutoSyncWriterId(left?.writerId);
+    const rightWriterId = normalizeAutoSyncWriterId(right?.writerId);
+    const leftTimestamp = normalizeAutoSyncTimestamp(left?.timestamp);
+    const rightTimestamp = normalizeAutoSyncTimestamp(right?.timestamp);
+    const leftSequence = normalizeAutoSyncSequence(left?.sequence);
+    const rightSequence = normalizeAutoSyncSequence(right?.sequence);
+
+    if (leftWriterId && leftWriterId === rightWriterId && leftSequence !== rightSequence) {
+        return leftSequence < rightSequence ? -1 : 1;
+    }
+    // Legacy records had no writer identity. Preserve their timestamp ordering,
+    // but never compare client-local sequences from different writers.
+    if (leftWriterId !== rightWriterId && (leftWriterId || rightWriterId)) return 0;
+    if (!leftTimestamp || !rightTimestamp) {
+        if (leftTimestamp) return 1;
+        if (rightTimestamp) return -1;
+    } else {
+        const leftTime = Date.parse(leftTimestamp);
+        const rightTime = Date.parse(rightTimestamp);
+        if (leftTime !== rightTime) return leftTime < rightTime ? -1 : 1;
+    }
+    if (!leftWriterId && !rightWriterId && leftSequence !== rightSequence) {
+        return leftSequence < rightSequence ? -1 : 1;
+    }
+    return 0;
 }
 
 export function buildAutoSyncRecord(source = {}) {
+    source = prepareAutoSyncRecordSource(source);
     const settingsSource = isPlainObject(source?.settings) ? source.settings : null;
     const normalizedSettings = settingsSource && Object.keys(settingsSource).length
         ? buildSettingsSubsetFromSource(settingsSource, GLOBAL_SETTINGS_V2_KEYS)
         : {};
     const globalSettingsSource = isPlainObject(source?.globalSettings) ? source.globalSettings : null;
     const parsedVersion = Number(source?.version);
-    const parsedSequence = Number(source?.sequence);
     const record = {
         version: Number.isFinite(parsedVersion) ? parsedVersion : COLOR_SCHEMA_VERSION,
-        timestamp: typeof source?.timestamp === 'string' ? source.timestamp : '',
-        sequence: Number.isFinite(parsedSequence) ? parsedSequence : 0,
+        timestamp: normalizeAutoSyncTimestamp(source?.timestamp),
+        writerId: normalizeAutoSyncWriterId(source?.writerId),
+        sequence: normalizeAutoSyncSequence(source?.sequence),
         autoSyncEnabled: typeof source?.autoSyncEnabled === 'boolean' ? source.autoSyncEnabled : getLegacyAutoSyncEnabledPreference(),
         settings: normalizedSettings,
         globalSettings: globalSettingsSource && Object.keys(globalSettingsSource).length
@@ -260,9 +710,9 @@ export function buildAutoSyncRecord(source = {}) {
             : {},
         colorData: normalizeStoredColorData(source?.colorData),
         presets: normalizeStoredColorPresets(source?.presets),
-        customPalettes: isPlainObject(source?.customPalettes) ? source.customPalettes : {},
-        customPaletteMeta: isPlainObject(source?.customPaletteMeta) ? source.customPaletteMeta : {},
-        customGradientPresets: normalizeGradientPresets(source?.customGradientPresets),
+        customPalettes: normalizeCustomPaletteRegistry(source?.customPalettes),
+        customPaletteMeta: normalizeNameDictionary(source?.customPaletteMeta),
+        customGradientPresets: normalizeGradientPresetRegistry(source?.customGradientPresets),
         ui: isPlainObject(source?.ui) ? source.ui : {},
         legacyLocalStorageMigrated: !!source?.legacyLocalStorageMigrated,
     };
@@ -277,6 +727,7 @@ export function mergeIncomingAutoSyncRecord(source) {
         ...current,
         ...incoming,
         timestamp: hasOwn(source, 'timestamp') ? incoming.timestamp : current.timestamp,
+        writerId: hasOwn(source, 'writerId') ? incoming.writerId : current.writerId,
         sequence: hasOwn(source, 'sequence') ? incoming.sequence : current.sequence,
         autoSyncEnabled: hasOwn(source, 'autoSyncEnabled') ? incoming.autoSyncEnabled : current.autoSyncEnabled,
         settings: hasOwn(source, 'settings') ? incoming.settings : current.settings,
@@ -307,8 +758,11 @@ let moduleSettingsDebounceTimer = null;
 let storageOperationBarrier = Promise.resolve();
 let storageOperationActive = false;
 let deferredAutoSyncApplication = null;
+let moduleSettingsActivityEpoch = 0;
 let metadataPersistenceSuppression = 0;
 let autoSyncPendingExpectedRecord = null;
+const autoSyncRequestGate = createLatestRequestGate();
+let autoSyncPollPromise = null;
 
 function enqueueModuleSettingsPersistence(task) {
     moduleSettingsPersistenceQueued++;
@@ -321,6 +775,7 @@ function enqueueModuleSettingsPersistence(task) {
             } finally {
                 moduleSettingsPersistenceActive = false;
                 moduleSettingsPersistenceQueued = Math.max(0, moduleSettingsPersistenceQueued - 1);
+                moduleSettingsActivityEpoch++;
                 if (moduleSettingsPersistenceQueued === 0) applyDeferredAutoSyncRecord();
             }
         });
@@ -333,17 +788,22 @@ function applyDeferredAutoSyncRecord() {
         || moduleSettingsDebounceTimer || !deferredAutoSyncApplication) return;
     const deferred = deferredAutoSyncApplication;
     deferredAutoSyncApplication = null;
+    if ((deferred.options.request !== undefined && !autoSyncRequestGate.isCurrent(deferred.options.request))
+        || (deferred.options.activityEpoch !== undefined
+            && deferred.options.activityEpoch !== moduleSettingsActivityEpoch)) return;
     applyAutoSyncRecord(deferred.record, deferred.options);
 }
 
 function shouldReplaceDeferredAutoSync(record, options = {}) {
     if (!deferredAutoSyncApplication) return true;
+    if (options.serverVerified === true) return true;
+    if (deferredAutoSyncApplication.options?.serverVerified === true) return false;
     const candidate = buildAutoSyncRecord(record);
     const current = buildAutoSyncRecord(deferredAutoSyncApplication.record);
-    if (candidate.timestamp !== current.timestamp) return candidate.timestamp > current.timestamp;
-    if (candidate.sequence !== current.sequence) return candidate.sequence > current.sequence;
+    const markerOrder = compareAutoSyncMarkers(candidate, current);
+    if (markerOrder !== 0) return markerOrder > 0;
     if (options.force && !deferredAutoSyncApplication.options?.force) return true;
-    return options.serverVerified === true && deferredAutoSyncApplication.options?.serverVerified !== true;
+    return false;
 }
 
 function clearModuleSettingsDebounce() {
@@ -362,6 +822,7 @@ function moduleRecordMatchesSnapshot(expected) {
 
 function queueDebouncedModuleSettingsSave(expectedSource = getAutoSyncRecord(true), options = {}) {
     clearModuleSettingsDebounce();
+    moduleSettingsActivityEpoch++;
     const expected = getModuleRecordSnapshot(expectedSource);
     const expectedRegex = cloneJsonValue(extension_settings.regex);
     const delay = Number.isFinite(options.delay) ? options.delay : 250;
@@ -373,6 +834,7 @@ function queueDebouncedModuleSettingsSave(expectedSource = getAutoSyncRecord(tru
 
 export function queueImmediateSettingsSave(expectedSource = getAutoSyncRecord(true), options = {}) {
     clearModuleSettingsDebounce();
+    moduleSettingsActivityEpoch++;
     if (!options.retry) ordinaryModuleSaveRetryCount = 0;
     ordinaryModuleSaveExpected = getModuleRecordSnapshot(expectedSource);
     ordinaryModuleSaveExpectedRegex = cloneJsonValue(options.expectedRegex ?? extension_settings.regex);
@@ -467,7 +929,7 @@ export function getAutoSyncRecord(create = false) {
 }
 
 export function getCustomGradientPresets() {
-    return normalizeGradientPresets(getAutoSyncRecord(true).customGradientPresets);
+    return normalizeGradientPresetRegistry(getAutoSyncRecord(true).customGradientPresets);
 }
 
 function persistCustomGradientPresetRecord(record, options = {}) {
@@ -481,12 +943,12 @@ function persistCustomGradientPresetRecord(record, options = {}) {
 }
 
 export function saveCustomGradientPreset(name, source, options = {}) {
-    const normalizedName = normalizeGradientPresetName(name);
+    const normalizedName = normalizeRegistryIdentityName(name, 80);
     const preset = createGradientPresetFromEntry(source) || normalizeGradientPreset(source);
     if (!normalizedName || !preset) return null;
     const record = getAutoSyncRecord(true);
     record.version = COLOR_SCHEMA_VERSION;
-    record.customGradientPresets = normalizeGradientPresets(record.customGradientPresets);
+    record.customGradientPresets = normalizeGradientPresetRegistry(record.customGradientPresets);
     if (Object.prototype.hasOwnProperty.call(record.customGradientPresets, normalizedName) && options.overwrite !== true) return null;
     record.customGradientPresets[normalizedName] = preset;
     persistCustomGradientPresetRecord(record, options);
@@ -494,10 +956,10 @@ export function saveCustomGradientPreset(name, source, options = {}) {
 }
 
 export function renameCustomGradientPreset(currentName, nextName, options = {}) {
-    const current = normalizeGradientPresetName(currentName);
-    const next = normalizeGradientPresetName(nextName);
+    const current = normalizeRegistryIdentityName(currentName, 80);
+    const next = normalizeRegistryIdentityName(nextName, 80);
     const presets = getCustomGradientPresets();
-    if (!current || !next || !presets[current] || (current !== next && presets[next])) return false;
+    if (!current || !next || !hasOwn(presets, current) || (current !== next && hasOwn(presets, next))) return false;
     if (current !== next) {
         presets[next] = presets[current];
         delete presets[current];
@@ -510,7 +972,7 @@ export function renameCustomGradientPreset(currentName, nextName, options = {}) 
 }
 
 export function deleteCustomGradientPreset(name, options = {}) {
-    const normalizedName = normalizeGradientPresetName(name);
+    const normalizedName = normalizeRegistryIdentityName(name, 80);
     const presets = getCustomGradientPresets();
     if (!normalizedName || !Object.prototype.hasOwnProperty.call(presets, normalizedName)) return false;
     delete presets[normalizedName];
@@ -534,21 +996,29 @@ export function areSettingsSubsetsEqual(left, right) {
 
 export function doAutoSyncMarkersMatch(left, right) {
     if (!left || !right) return false;
-    return (left.timestamp || '') === (right.timestamp || '') && (left.sequence || 0) === (right.sequence || 0);
+    const leftWriterId = normalizeAutoSyncWriterId(left.writerId);
+    const rightWriterId = normalizeAutoSyncWriterId(right.writerId);
+    if (leftWriterId || rightWriterId) {
+        return !!leftWriterId
+            && leftWriterId === rightWriterId
+            && normalizeAutoSyncSequence(left.sequence) === normalizeAutoSyncSequence(right.sequence);
+    }
+    return normalizeAutoSyncTimestamp(left.timestamp) === normalizeAutoSyncTimestamp(right.timestamp)
+        && normalizeAutoSyncSequence(left.sequence) === normalizeAutoSyncSequence(right.sequence);
 }
 
 export function getLatestKnownAutoSyncMarker() {
-    return autoSyncPendingRecord || { timestamp: autoSyncLastTimestamp || '', sequence: autoSyncSequence || 0 };
+    return autoSyncPendingRecord || {
+        timestamp: autoSyncLastTimestamp || '',
+        writerId: autoSyncLastWriterId || '',
+        sequence: autoSyncSequence || 0,
+    };
 }
 
 export function isIncomingAutoSyncRecordNewer(record) {
     const normalized = buildAutoSyncRecord(record);
     const known = getLatestKnownAutoSyncMarker();
-    if (!normalized.timestamp && !normalized.sequence) return false;
-    if (!known.timestamp && !known.sequence) return true;
-    if (normalized.timestamp > (known.timestamp || '')) return true;
-    if (normalized.timestamp === (known.timestamp || '') && normalized.sequence > (known.sequence || 0)) return true;
-    return false;
+    return compareAutoSyncMarkers(normalized, known) > 0;
 }
 
 export function clearAutoSyncSaveTimeout() {
@@ -582,6 +1052,7 @@ export function markAutoSyncPending(record) {
     autoSyncPendingExpectedRecord = getModuleRecordSnapshot(record);
     setAutoSyncPendingRecord({
         timestamp: record?.timestamp || '',
+        writerId: normalizeAutoSyncWriterId(record?.writerId),
         sequence: record?.sequence || 0,
     });
     clearAutoSyncSaveTimeout();
@@ -598,24 +1069,15 @@ export function confirmAutoSyncRecord(record, { serverVerified = false } = {}) {
         updateAutoSyncUI();
         return normalized;
     }
-    if (autoSyncPendingRecord
-        && doAutoSyncMarkersMatch(normalized, autoSyncPendingRecord)
-        && autoSyncPendingExpectedRecord
-        && !recordsEqual(normalized, autoSyncPendingExpectedRecord)) {
+    if (autoSyncPendingRecord && (!autoSyncPendingExpectedRecord
+        || !recordsEqual(normalized, autoSyncPendingExpectedRecord))) {
+        setAutoSyncStatusError('Remote state changed while saving');
         updateAutoSyncUI();
         return normalized;
     }
-    if (autoSyncPendingRecord && !doAutoSyncMarkersMatch(normalized, autoSyncPendingRecord)) {
-        const isNewerThanPending = normalized.timestamp > (autoSyncPendingRecord.timestamp || '')
-            || (normalized.timestamp === (autoSyncPendingRecord.timestamp || '')
-                && normalized.sequence > (autoSyncPendingRecord.sequence || 0));
-        if (!isNewerThanPending) {
-            updateAutoSyncUI();
-            return normalized;
-        }
-    }
     setAutoSyncLastTimestamp(normalized.timestamp || null);
-    setAutoSyncSequence(Number.isFinite(normalized.sequence) ? normalized.sequence : 0);
+    setAutoSyncLastWriterId(normalized.writerId);
+    setAutoSyncSequence(normalizeAutoSyncSequence(normalized.sequence));
     setAutoSyncEnabled(normalized.autoSyncEnabled);
     setAutoSyncPendingRecord(null);
     autoSyncPendingExpectedRecord = null;
@@ -633,28 +1095,77 @@ export function syncAutoSyncPolling() {
     }
 }
 
-export function applyAutoSyncRecord(record, { force = false, serverVerified = false } = {}) {
-    if (storageOperationActive || moduleSettingsPersistenceActive) {
-        const options = { force, serverVerified };
+function preserveRemoteFontConsentInRecord(record) {
+    const localConsent = getLocalRemoteFontConsent();
+    const preserveSnapshot = snapshot => isPlainObject(snapshot) && hasOwn(snapshot, 'allowRemoteFonts')
+        ? preserveLocalRemoteFontConsent(snapshot, localConsent)
+        : snapshot;
+    return {
+        ...record,
+        settings: preserveSnapshot(record.settings),
+        globalSettings: preserveSnapshot(record.globalSettings),
+    };
+}
+
+export function applyAutoSyncRecord(record, {
+    force = false,
+    serverVerified = false,
+    request = undefined,
+    activityEpoch = undefined,
+} = {}) {
+    if ((request !== undefined && !autoSyncRequestGate.isCurrent(request))
+        || (activityEpoch !== undefined && activityEpoch !== moduleSettingsActivityEpoch)) {
+        return 'superseded';
+    }
+    if (serverVerified && autoSyncPendingRecord) {
+        const serverRecord = buildAutoSyncRecord(cloneJsonValue(record));
+        if (!autoSyncPendingExpectedRecord || !recordsEqual(serverRecord, autoSyncPendingExpectedRecord)) {
+            setAutoSyncError('Remote state changed while saving');
+            cleanupLegacyAutoSyncPreference();
+            return 'conflict';
+        }
+    }
+    if (storageOperationActive || moduleSettingsPersistenceActive || moduleSettingsPersistenceQueued > 0
+        || moduleSettingsDebounceTimer || ordinaryModuleSaveQueued) {
+        const options = { force, serverVerified, request, activityEpoch };
         if (shouldReplaceDeferredAutoSync(record, options)) {
             deferredAutoSyncApplication = { record: cloneJsonValue(record), options };
         }
-        return;
+        return 'deferred';
     }
     const hasIncomingColorData = hasOwn(record, 'colorData');
-    const ownsIncomingMarker = hasOwn(record, 'timestamp') && hasOwn(record, 'sequence');
     const incoming = buildAutoSyncRecord(cloneJsonValue(record));
-    const normalized = mergeIncomingAutoSyncRecord(cloneJsonValue(record));
-    const matchesPending = ownsIncomingMarker && doAutoSyncMarkersMatch(normalized, autoSyncPendingRecord)
-        && (!autoSyncPendingExpectedRecord || recordsEqual(normalized, autoSyncPendingExpectedRecord));
-    const shouldAcceptRecord = force || matchesPending || isIncomingAutoSyncRecordNewer(incoming);
+    const normalized = preserveRemoteFontConsentInRecord(serverVerified
+        ? incoming
+        : mergeIncomingAutoSyncRecord(cloneJsonValue(record)));
+    const matchesPending = !!autoSyncPendingRecord
+        && !!autoSyncPendingExpectedRecord
+        && recordsEqual(incoming, autoSyncPendingExpectedRecord);
+    const disposition = getAutoSyncRecordDisposition({
+        force,
+        serverVerified,
+        hasPending: !!autoSyncPendingRecord,
+        matchesPending,
+        matchesCurrent: serverVerified && recordsEqual(normalized, getModuleRecordSnapshot()),
+        isNewer: !serverVerified && isIncomingAutoSyncRecordNewer(incoming),
+    });
+    if (disposition === 'conflict') {
+        setAutoSyncError('Remote state changed while saving');
+        cleanupLegacyAutoSyncPreference();
+        return disposition;
+    }
+    if (disposition === 'confirm') {
+        confirmAutoSyncRecord(normalized, { serverVerified: true });
+        cleanupLegacyAutoSyncPreference();
+        return disposition;
+    }
     const previousAutoSyncEnabled = autoSyncEnabled;
     const previousScope = activeStorageScope || getCurrentStorageScope();
 
-    if (!shouldAcceptRecord) {
+    if (disposition !== 'apply') {
         updateAutoSyncUI();
         cleanupLegacyAutoSyncPreference();
-        return;
+        return disposition;
     }
 
     metadataPersistenceSuppression++;
@@ -670,6 +1181,7 @@ export function applyAutoSyncRecord(record, { force = false, serverVerified = fa
         let changed = false;
         if (hasSettingsPayload) {
             for (const key of GLOBAL_SETTINGS_V2_KEYS) {
+                if (key === 'allowRemoteFonts') continue;
                 if (normalized.settings[key] !== undefined && !jsonValuesEqual(settings[key], normalized.settings[key])) {
                     settings[key] = cloneJsonValue(normalized.settings[key]);
                     changed = true;
@@ -703,7 +1215,7 @@ export function applyAutoSyncRecord(record, { force = false, serverVerified = fa
             injectPrompt();
         }
 
-        confirmAutoSyncRecord(normalized, { serverVerified: serverVerified && ownsIncomingMarker });
+        confirmAutoSyncRecord(normalized, { serverVerified });
 
         if (autoSyncEnabled !== previousAutoSyncEnabled) {
             syncAutoSyncPolling();
@@ -712,6 +1224,7 @@ export function applyAutoSyncRecord(record, { force = false, serverVerified = fa
     } finally {
         metadataPersistenceSuppression--;
     }
+    return disposition;
 }
 
 async function fetchExtensionSettingsFromServer() {
@@ -839,7 +1352,7 @@ function persistGeneratedChatScopeId(metadata) {
         if (result && typeof result.catch === 'function') {
             const promise = Promise.resolve(result)
                 .then(() => {
-                    chatScopeMetadataPersistence.set(metadata, { status: 'completed_unverified', promise: null });
+                    chatScopeMetadataPersistence.set(metadata, { status: 'completed', promise: null });
                     return true;
                 })
                 .catch(error => {
@@ -863,14 +1376,17 @@ async function ensureChatScopeMetadataSafety(context = getContext()) {
     if (!metadata || typeof metadata !== 'object') {
         return { safe: getHostProvidedChatId(context) !== null, status: 'unavailable' };
     }
+    const pendingPersistence = chatScopeMetadataPersistence.get(metadata);
+    if (pendingPersistence?.promise) await pendingPersistence.promise;
     const persistence = chatScopeMetadataPersistence.get(metadata);
-    if (persistence?.promise) await persistence.promise;
-    const finalStatus = chatScopeMetadataPersistence.get(metadata)?.status;
+    const finalStatus = persistence?.status || 'existing';
     const hasFallback = getHostProvidedChatId(context) !== null;
     const hasStoredId = getStringOrNumberId(metadata[CHAT_SCOPE_METADATA_KEY]) !== null;
+    const completed = finalStatus === 'completed';
+    if (completed && hasStoredId) chatScopeMetadataPersistence.delete(metadata);
     return {
-        safe: hasFallback || (hasStoredId && !persistence),
-        status: finalStatus || persistence?.status || 'existing',
+        safe: hasFallback || (hasStoredId && (!persistence || completed)),
+        status: finalStatus,
     };
 }
 
@@ -1059,7 +1575,7 @@ export function normalizeColorDataEntry(source) {
 
 export function getUserColorDataStore() {
     const record = getAutoSyncRecord(true);
-    if (!isPlainObject(record.colorData)) record.colorData = {};
+    if (!isPlainObject(record.colorData)) record.colorData = Object.create(null);
     return record.colorData;
 }
 
@@ -1088,8 +1604,14 @@ function findColorDataForScope(scope, primaryKey = getStorageKeyForScope(scope),
         if (entry) return { entry, exists: true, sourceKey: key, legacy: true };
     }
     for (const key of candidates) {
-        const entry = normalizeColorDataEntry(parseStorageObject(key));
-        if (entry) return { entry, exists: true, sourceKey: key, legacy: true };
+        const legacyValue = parseStorageObject(key);
+        const identityMigration = createStorageIdentityMigration();
+        const entry = normalizeColorDataEntry(migrateLegacyColorDataEntry(
+            legacyValue,
+            identityMigration,
+            `colorData.${key}`,
+        ));
+        if (entry) return { entry, exists: true, sourceKey: key, legacy: true, identityMigration };
     }
     return { entry: null, exists: primaryExists, sourceKey: primaryKey, legacy: false };
 }
@@ -1199,7 +1721,7 @@ export function migrateRenamedCharacterStorage(oldValue, newValue) {
 export function setStoredColorData(key, colors, storedSettings = settings, options = {}) {
     const record = getAutoSyncRecord(true);
     record.version = COLOR_SCHEMA_VERSION;
-    if (!isPlainObject(record.colorData)) record.colorData = {};
+    if (!isPlainObject(record.colorData)) record.colorData = Object.create(null);
     record.colorData[key] = {
         colors: normalizeCharacterColors(colors || {}),
         groupProfiles: normalizeGroupProfiles(options.groupProfiles === undefined ? groupProfiles : options.groupProfiles),
@@ -1217,6 +1739,12 @@ export function removeStoredColorData(key) {
     return true;
 }
 
+function getNextLocalAutoSyncSequence(record) {
+    return normalizeAutoSyncWriterId(record?.writerId) === AUTO_SYNC_WRITER_ID
+        ? normalizeAutoSyncSequence(record?.sequence) + 1
+        : 1;
+}
+
 function prepareExpectedModuleRecord({ refreshAutoSyncSettings = true } = {}) {
     if (autoSyncEnabled) {
         if (refreshAutoSyncSettings) {
@@ -1226,7 +1754,8 @@ function prepareExpectedModuleRecord({ refreshAutoSyncSettings = true } = {}) {
             const next = buildAutoSyncRecord({
                 ...current,
                 timestamp: new Date().toISOString(),
-                sequence: (Number.isFinite(current.sequence) ? current.sequence : 0) + 1,
+                writerId: AUTO_SYNC_WRITER_ID,
+                sequence: getNextLocalAutoSyncSequence(current),
                 autoSyncEnabled,
             });
             persistModuleStore(next, { debounce: false });
@@ -1290,10 +1819,13 @@ function restoreAppliedObjectChanges(base, applied, current) {
 function restoreModuleRecord(baseRecord, appliedRecord) {
     const currentRecord = getModuleRecordSnapshot();
     const restoredRecord = restoreAppliedObjectChanges(baseRecord, appliedRecord, currentRecord);
-    restoredRecord.sequence = Math.max(
-        Number(restoredRecord.sequence) || 0,
-        Number(currentRecord.sequence) || 0,
-    );
+    if (normalizeAutoSyncWriterId(restoredRecord.writerId)
+        && restoredRecord.writerId === normalizeAutoSyncWriterId(currentRecord.writerId)) {
+        restoredRecord.sequence = Math.max(
+            normalizeAutoSyncSequence(restoredRecord.sequence),
+            normalizeAutoSyncSequence(currentRecord.sequence),
+        );
+    }
     persistModuleStore(restoredRecord, { debounce: false });
     return restoredRecord;
 }
@@ -1322,7 +1854,7 @@ async function archiveStoredColorDataInternal(keys, binding) {
     let appliedRecord = baseRecord;
     try {
         const record = getAutoSyncRecord(true);
-        if (!isPlainObject(record.colorData)) record.colorData = {};
+        if (!isPlainObject(record.colorData)) record.colorData = Object.create(null);
         const entries = {};
         const currentKey = binding.key;
         for (const key of [...new Set(Array.isArray(keys) ? keys : [])]) {
@@ -1395,7 +1927,7 @@ async function restoreArchivedColorDataInternal(binding) {
         const record = getAutoSyncRecord(true);
         const trash = cloneJsonValue(record.ui?.storageTrash);
         if (!isPlainObject(trash) || !isPlainObject(trash.entries)) return { ok: false, count: 0 };
-        if (!isPlainObject(record.colorData)) record.colorData = {};
+        if (!isPlainObject(record.colorData)) record.colorData = Object.create(null);
         let restored = 0;
         let skipped = 0;
         const restoredKeys = [];
@@ -1471,8 +2003,15 @@ export function saveLegendPosition(position) {
 // Extract dominant color from avatar image
 
 export function migrateLegacyLocalStorageIfNeeded() {
+    const storedVersion = Number(extension_settings?.[MODULE_NAME]?.version);
+    const identitySchemaMigrated = !Number.isFinite(storedVersion) || storedVersion < COLOR_SCHEMA_VERSION;
     const record = getAutoSyncRecord(true);
-    if (record.legacyLocalStorageMigrated) return;
+    if (record.legacyLocalStorageMigrated) {
+        if (identitySchemaMigrated) persistModuleStore(record);
+        return;
+    }
+    const identityMigration = createStorageIdentityMigration();
+    let legacyPaletteMappings = null;
 
     if (!isPlainObject(record.globalSettings) || !Object.keys(record.globalSettings).length) {
         const legacyGlobal = parseStorageObject(LEGACY_GLOBAL_SETTINGS_KEY);
@@ -1489,11 +2028,20 @@ export function migrateLegacyLocalStorageIfNeeded() {
         const value = parseStorageObject(key);
         if (!value) continue;
         if (key === PRESETS_KEY && !Object.keys(record.presets || {}).length) {
-            record.presets = isPlainObject(value) ? value : {};
+            record.presets = normalizeStoredColorPresets(migrateLegacyStoredColorPresets(value, identityMigration));
         } else if (key === CUSTOM_PALETTE_KEY && !Object.keys(record.customPalettes || {}).length) {
-            record.customPalettes = normalizeCustomPalettes(value);
+            const palettes = migrateLegacyNamedCatalog(value, 120, 'Legacy palette', identityMigration, 'customPalettes');
+            record.customPalettes = normalizeCustomPaletteRegistry(palettes.registry);
+            legacyPaletteMappings = palettes.mappings;
         } else if (key === CUSTOM_PALETTE_META_KEY && !Object.keys(record.customPaletteMeta || {}).length) {
-            record.customPaletteMeta = isPlainObject(value) ? value : {};
+            record.customPaletteMeta = normalizeNameDictionary(migrateLegacyMappedCatalog(
+                value,
+                legacyPaletteMappings,
+                120,
+                'Legacy palette metadata',
+                identityMigration,
+                'customPaletteMeta',
+            ));
         } else if (key === LEGEND_POSITION_KEY && !isPlainObject(record.ui?.legendPosition)) {
             record.ui = { ...(isPlainObject(record.ui) ? record.ui : {}), legendPosition: value };
         }
@@ -1502,18 +2050,23 @@ export function migrateLegacyLocalStorageIfNeeded() {
     try {
         for (let i = 0; i < localStorage.length; i++) {
             const key = localStorage.key(i);
-            if (!key || !(key.startsWith('dc_char_') || key === 'dc_global')) continue;
+            if (!key || !(key.startsWith('dc_char_') || key.startsWith('dc_chat_') || key === 'dc_global')) continue;
             if (record.colorData?.[key]) continue;
             const value = parseStorageObject(key);
-            const normalized = normalizeColorDataEntry(value);
+            const normalized = normalizeColorDataEntry(migrateLegacyColorDataEntry(
+                value,
+                identityMigration,
+                `colorData.${key}`,
+            ));
             if (!normalized) continue;
-            if (!isPlainObject(record.colorData)) record.colorData = {};
+            if (!isPlainObject(record.colorData)) record.colorData = Object.create(null);
             record.colorData[key] = normalized;
         }
     } catch {
         // Browser storage is a best-effort legacy migration source only.
     }
 
+    record.ui = attachStorageIdentityMigration(record.ui, identityMigration);
     record.legacyLocalStorageMigrated = true;
     persistModuleStore(record);
 }
@@ -1528,6 +2081,7 @@ function persistActiveStorageData(options = {}) {
 }
 
 export function saveData(options = {}) {
+    persistLocalRemoteFontConsent(settings.allowRemoteFonts === true);
     normalizeToggleSettings();
     setCharacterColors(normalizeCharacterColors(characterColors));
     setGroupProfiles(normalizeGroupProfiles(groupProfiles));
@@ -1627,15 +2181,18 @@ export function loadData(options = {}) {
     if (options.persistPrevious !== false && activeStorageKey && activeStorageKey !== primaryKey) {
         persistActiveStorageData();
     }
-    setCharacterColors({});
-    setGroupProfiles({});
+    setCharacterColors(normalizeCharacterColors({}));
+    setGroupProfiles(normalizeGroupProfiles({}));
     selectedCharacterKeys.clear();
     setExpandedCharacterRows(new Set());
     setSwapMode(null);
     clearSpeakerRegexCache();
     const located = findColorDataForScope(scope, primaryKey, options);
     const loaded = applyStoredColorData(located.entry);
-    if (loaded && located.sourceKey !== primaryKey && options.persistMigrations !== false) {
+    if (loaded && (located.legacy || located.sourceKey !== primaryKey) && options.persistMigrations !== false) {
+        if (located.identityMigration?.renamed) {
+            record.ui = attachStorageIdentityMigration(record.ui, located.identityMigration);
+        }
         setStoredColorData(primaryKey, characterColors, { ...settings, colorStorageScope: scope });
     }
     applyStoredSettingsSnapshot(record.globalSettings, { includeColorSchemaVersion: false });
@@ -1732,16 +2289,16 @@ async function rollbackStorageTransaction(transaction, appliedRecord, appliedRun
             activeStorageKey = restoreRuntimeValue(baseRuntime.activeStorageKey, applied.activeStorageKey, currentRuntime.activeStorageKey);
             activeStorageScope = restoreRuntimeValue(baseRuntime.activeStorageScope, applied.activeStorageScope, currentRuntime.activeStorageScope);
             const restoredColors = restoreRuntimeValue(baseRuntime.colors, applied.colors, currentRuntime.colors);
-            setCharacterColors(restoredColors);
+            setCharacterColors(normalizeCharacterColors(restoredColors));
             const restoredGroupProfiles = restoreRuntimeValue(baseRuntime.groupProfiles, applied.groupProfiles, currentRuntime.groupProfiles);
             setGroupProfiles(normalizeGroupProfiles(restoredGroupProfiles));
             const restoredSelectedKeys = restoreRuntimeValue(baseRuntime.selectedKeys, applied.selectedKeys, currentRuntime.selectedKeys);
             selectedCharacterKeys.clear();
-            restoredSelectedKeys.filter(key => characterColors[key]).forEach(key => selectedCharacterKeys.add(key));
+            restoredSelectedKeys.filter(key => hasOwn(characterColors, key) && characterColors[key]).forEach(key => selectedCharacterKeys.add(key));
             const restoredExpandedKeys = restoreRuntimeValue(baseRuntime.expandedKeys, applied.expandedKeys, currentRuntime.expandedKeys);
-            setExpandedCharacterRows(new Set(restoredExpandedKeys.filter(key => characterColors[key])));
+            setExpandedCharacterRows(new Set(restoredExpandedKeys.filter(key => hasOwn(characterColors, key) && characterColors[key])));
             const restoredSwapMode = restoreRuntimeValue(baseRuntime.swapMode, applied.swapMode, currentRuntime.swapMode);
-            setSwapMode(restoredSwapMode && characterColors[restoredSwapMode] ? restoredSwapMode : null);
+            setSwapMode(restoredSwapMode && hasOwn(characterColors, restoredSwapMode) && characterColors[restoredSwapMode] ? restoredSwapMode : null);
             if (jsonValuesEqual(currentRuntime.history, applied.history)
                 && currentRuntime.historyIndex === applied.historyIndex) {
                 setColorHistory([...baseRuntime.history]);
@@ -1801,7 +2358,6 @@ async function rollbackStorageTransaction(transaction, appliedRecord, appliedRun
 
 async function persistSettingsImmediately(expectedSource = getAutoSyncRecord(true)) {
     const expected = getModuleRecordSnapshot(expectedSource);
-    const expectedJson = JSON.stringify(expected);
     clearModuleSettingsDebounce();
     return enqueueModuleSettingsPersistence(async () => {
         if (!moduleRecordMatchesSnapshot(expected)) return false;
@@ -1812,7 +2368,7 @@ async function persistSettingsImmediately(expectedSource = getAutoSyncRecord(tru
         try {
             await saveSettings();
             const stored = await fetchModuleRecordFromServer();
-            const matches = !!stored && JSON.stringify(buildAutoSyncRecord(stored)) === expectedJson;
+            const matches = !!stored && recordsEqual(stored, expected);
             if (matches) confirmAutoSyncRecord(stored, { serverVerified: true });
             return matches;
         } catch (error) {
@@ -2036,9 +2592,9 @@ function getStylePackRegistryKey(pack, digest) {
 }
 
 function getStylePackItemMappings(plan) {
-    const itemMappings = {};
+    const itemMappings = Object.create(null);
     for (const category of ['palettes', 'gradientPresets', 'assignmentPresets']) {
-        const mappings = {};
+        const mappings = Object.create(null);
         for (const operation of plan.operations || []) {
             if (operation.category !== category || operation.action === 'keep') continue;
             mappings[operation.sourceName] = operation.targetName;
@@ -2062,25 +2618,86 @@ function applyStylePackAppearance(appearance) {
     }
 }
 
-function applyStylePackAssignments(pack, plan, mode) {
-    const incoming = {};
-    for (const operation of plan.operations || []) {
-        if (operation.category !== 'assignmentPresets') continue;
-        for (const entry of pack.assignmentPresets?.[operation.sourceName] || []) {
-            const name = String(entry?.name || '').trim();
-            if (name) incoming[name.toLowerCase()] = entry;
-        }
-    }
+function mergeCharacterRegistriesKeepingCurrent(incoming, current) {
+    const merged = normalizeCharacterColors(incoming);
+    const normalizedCurrent = normalizeCharacterColors(current);
+    for (const [key, entry] of Object.entries(normalizedCurrent)) merged[key] = entry;
+    return merged;
+}
+
+function mergeGroupProfileRegistriesKeepingCurrent(incoming, current) {
+    const merged = normalizeGroupProfiles(incoming);
+    const normalizedCurrent = normalizeGroupProfiles(current);
+    for (const [key, profile] of Object.entries(normalizedCurrent)) merged[key] = profile;
+    return merged;
+}
+
+function getStylePackAssignmentApplyPlan(pack, options) {
+    const selected = isPlainObject(options?.selected) ? options.selected : {};
+    return buildStylePackInstallationPlan(pack, {}, {
+        selected: {
+            palettes: [],
+            gradientPresets: [],
+            assignmentPresets: selected.assignmentPresets,
+        },
+        includeAssignmentPresets: true,
+        includeAppearance: false,
+    });
+}
+
+function collectStylePackAssignments(pack, plan) {
+    const presetNames = (plan.operations || [])
+        .filter(operation => operation.category === 'assignmentPresets')
+        .map(operation => operation.sourceName);
+    return flattenStylePackAssignmentPresets(pack.assignmentPresets || Object.create(null), presetNames).assignments;
+}
+
+function getStylePackCatalogFingerprint(record) {
+    const normalized = buildAutoSyncRecord(record || {});
+    return JSON.stringify(sortJsonForComparison({
+        customPalettes: normalized.customPalettes,
+        customPaletteMeta: normalized.customPaletteMeta,
+        customGradientPresets: normalized.customGradientPresets,
+        presets: normalized.presets,
+    }));
+}
+
+function snapshotStylePackSelection(value) {
+    if (value instanceof Set) return [...value];
+    if (Array.isArray(value)) return [...value];
+    return value === undefined ? undefined : cloneJsonValue(value);
+}
+
+function snapshotStylePackApplyOptions(options = {}) {
+    const selected = isPlainObject(options?.selected) ? options.selected : {};
+    return {
+        applyAssignments: options?.applyAssignments === true,
+        applyAppearance: options?.applyAppearance === true,
+        installAssignmentPresets: options?.installAssignmentPresets === true,
+        includeAssignmentPresets: options?.includeAssignmentPresets === true,
+        assignmentApplyMode: options?.assignmentApplyMode === 'replace' ? 'replace' : 'merge',
+        conflictStrategy: options?.conflictStrategy,
+        selected: {
+            palettes: snapshotStylePackSelection(selected.palettes),
+            gradientPresets: snapshotStylePackSelection(selected.gradientPresets),
+            assignmentPresets: snapshotStylePackSelection(selected.assignmentPresets),
+        },
+        categoryStrategies: cloneJsonValue(options?.categoryStrategies),
+        decisions: cloneJsonValue(options?.decisions),
+        resolutions: cloneJsonValue(options?.resolutions),
+    };
+}
+
+function applyStylePackAssignments(assignments, mode) {
+    const incoming = Object.create(null);
+    assignments.forEach((entry, index) => {
+        incoming[index] = entry;
+    });
     const incomingColors = normalizeImportedColorsForApply(incoming, COLOR_SCHEMA_VERSION);
     if (!Object.keys(incomingColors).length) return false;
-    const mergedColors = { ...incomingColors };
-    for (const [key, entry] of Object.entries(characterColors)) {
-        const mergeKey = mergedColors[key] ? `existing_${key}` : key;
-        mergedColors[mergeKey] = entry;
-    }
     setCharacterColors(mode === 'replace'
         ? incomingColors
-        : normalizeCharacterColors(mergedColors));
+        : mergeCharacterRegistriesKeepingCurrent(incomingColors, characterColors));
     if (mode === 'replace') {
         selectedCharacterKeys.clear();
         setExpandedCharacterRows(new Set());
@@ -2105,6 +2722,7 @@ export async function analyzeStylePackImport(source) {
     return {
         ...analysis,
         conflicts,
+        catalogFingerprint: getStylePackCatalogFingerprint(current),
         registryKey: getStylePackRegistryKey(analysis.pack, analysis.digest),
     };
 }
@@ -2156,6 +2774,16 @@ export async function applyStylePackImport(reviewed, options = {}) {
         return importError('invalid_reviewed_pack', 'Choose a style pack and review it before installing.');
     }
 
+    const optionSnapshot = snapshotStylePackApplyOptions(options);
+    const applyAssignments = optionSnapshot.applyAssignments;
+    const applyAppearance = optionSnapshot.applyAppearance;
+    const installAssignments = optionSnapshot.installAssignmentPresets
+        || optionSnapshot.includeAssignmentPresets;
+    const needsScope = applyAssignments || applyAppearance;
+    const binding = needsScope ? captureActiveStorageBinding() : null;
+    const reviewedDigest = reviewed.digest;
+    const reviewedCatalogFingerprint = reviewed.catalogFingerprint;
+    const reviewedAssignmentOrder = cloneJsonValue(reviewed.conflicts?.categories?.assignmentPresets?.presetOrder);
     let normalized;
     let digest;
     try {
@@ -2164,27 +2792,45 @@ export async function applyStylePackImport(reviewed, options = {}) {
     } catch (error) {
         return importError('invalid_reviewed_pack', 'The reviewed style pack is no longer valid.');
     }
-    if (digest !== reviewed.digest) {
+    if (digest !== reviewedDigest) {
         return importError('digest_mismatch', 'The style pack changed after review. Analyze it again before installing.');
     }
+    if (typeof reviewedCatalogFingerprint !== 'string' || !reviewedCatalogFingerprint) {
+        return importError('invalid_reviewed_pack', 'The style-pack catalog review is incomplete. Analyze it again before installing.');
+    }
 
-    const applyAssignments = options.applyAssignments === true;
-    const applyAppearance = options.applyAppearance === true;
-    const installAssignments = options.installAssignmentPresets === true
-        || options.includeAssignmentPresets === true
-        || applyAssignments;
-    const needsScope = applyAssignments || applyAppearance;
-    const binding = needsScope ? captureActiveStorageBinding() : null;
+    if (optionSnapshot.applyAssignments) {
+        let selectedOrder;
+        try {
+            selectedOrder = flattenStylePackAssignmentPresets(
+                normalized.pack.assignmentPresets || Object.create(null),
+                optionSnapshot.selected.assignmentPresets,
+            ).presetNames;
+        } catch {
+            return importError('selection_changed', 'The assignment preset selection changed after review. Analyze the pack again.');
+        }
+        if (!Array.isArray(reviewedAssignmentOrder) || !jsonValuesEqual(selectedOrder, reviewedAssignmentOrder)) {
+            return importError('selection_changed', 'The assignment preset order changed after review. Analyze the pack again.');
+        }
+    }
+
     return runStorageOperation(() => applyStylePackImportInternal(
         normalized,
         digest,
-        options,
-        { applyAssignments, applyAppearance, installAssignments, needsScope, binding },
+        optionSnapshot,
+        {
+            applyAssignments,
+            applyAppearance,
+            installAssignments,
+            needsScope,
+            binding,
+            reviewedCatalogFingerprint,
+        },
     ));
 }
 
 async function applyStylePackImportInternal(normalized, digest, options, mode) {
-    const { applyAssignments, applyAppearance, installAssignments, needsScope, binding } = mode;
+    const { applyAssignments, applyAppearance, installAssignments, needsScope, binding, reviewedCatalogFingerprint } = mode;
     const baseRecord = getModuleRecordSnapshot();
     const transaction = needsScope ? captureStorageTransaction(binding) : null;
     let appliedRecord = baseRecord;
@@ -2206,11 +2852,20 @@ async function applyStylePackImportInternal(normalized, digest, options, mode) {
         }
 
         const record = getAutoSyncRecord(true);
+        if (getStylePackCatalogFingerprint(record) !== reviewedCatalogFingerprint) {
+            return importError('stale_review', 'The installed style library changed after review. Analyze the style pack again.');
+        }
         const plan = buildStylePackInstallationPlan(
             normalized.pack,
             record,
             getStylePackPlanOptions(normalized.pack, options, installAssignments),
         );
+        const assignmentsToApply = applyAssignments
+            ? collectStylePackAssignments(
+                normalized.pack,
+                getStylePackAssignmentApplyPlan(normalized.pack, options),
+            )
+            : [];
         const paletteOperations = plan.operations.filter(operation => operation.category === 'palettes' && operation.action !== 'keep');
         const gradientOperations = plan.operations.filter(operation => operation.category === 'gradientPresets' && operation.action !== 'keep');
         const assignmentOperations = plan.operations.filter(operation => operation.category === 'assignmentPresets' && operation.action !== 'keep');
@@ -2228,7 +2883,7 @@ async function applyStylePackImportInternal(normalized, digest, options, mode) {
 
         mutationStarted = true;
         if (paletteOperations.length) {
-            record.customPalettes = normalizeCustomPalettes({ ...record.customPalettes, ...plan.install.palettes });
+            record.customPalettes = normalizeCustomPaletteRegistry({ ...record.customPalettes, ...plan.install.palettes });
             record.customPaletteMeta = isPlainObject(record.customPaletteMeta) ? { ...record.customPaletteMeta } : {};
             for (const operation of paletteOperations) {
                 const metadata = normalized.paletteMetadata[operation.sourceName];
@@ -2237,7 +2892,7 @@ async function applyStylePackImportInternal(normalized, digest, options, mode) {
             }
         }
         if (gradientOperations.length) {
-            record.customGradientPresets = normalizeGradientPresets({ ...record.customGradientPresets, ...plan.install.gradientPresets });
+            record.customGradientPresets = normalizeGradientPresetRegistry({ ...record.customGradientPresets, ...plan.install.gradientPresets });
         }
         if (assignmentOperations.length) {
             record.presets = normalizeStoredColorPresets({ ...record.presets, ...plan.install.assignmentPresets });
@@ -2272,8 +2927,7 @@ async function applyStylePackImportInternal(normalized, digest, options, mode) {
             }
             if (applyAssignments) {
                 changedRuntime = applyStylePackAssignments(
-                    normalized.pack,
-                    plan,
+                    assignmentsToApply,
                     options.assignmentApplyMode === 'replace' ? 'replace' : 'merge',
                 ) || changedRuntime;
             }
@@ -2346,8 +3000,10 @@ async function applyStylePackImportInternal(normalized, digest, options, mode) {
             : true;
         return {
             ...importError(
-                'style_pack_apply_failed',
-                rollbackPersisted
+                error instanceof StylePackError ? error.code : 'style_pack_apply_failed',
+                error instanceof StylePackError
+                    ? error.message
+                    : rollbackPersisted
                     ? 'The style pack could not be applied. The previous library was restored.'
                     : 'The style-pack install and recovery could not be saved reliably. Export your library before reloading.',
             ),
@@ -2360,47 +3016,37 @@ function importError(error, message) {
     return { ok: false, error, message };
 }
 
+function analyzeImportPayloadSafely(analyze) {
+    try {
+        return analyze();
+    } catch (error) {
+        return importError(error?.code || 'invalid_payload', error?.message || 'The import payload is malformed.');
+    }
+}
+
 async function parseImportSource(source) {
-    const isFileLike = typeof source?.text === 'function'
-        || (typeof source?.name === 'string' && typeof source?.size === 'number' && typeof source?.slice === 'function');
-    if (typeof source !== 'string' && !isFileLike) {
-        return { ok: true, value: source };
-    }
-
-    let text;
-    try {
-        if (typeof source === 'string') {
-            text = source;
-        } else if (typeof source.text === 'function') {
-            text = await source.text();
-        } else if (typeof FileReader === 'function') {
-            text = await new Promise((resolve, reject) => {
-                const reader = new FileReader();
-                reader.onload = event => resolve(event.target?.result);
-                reader.onerror = () => reject(reader.error || new Error('File read failed'));
-                reader.readAsText(source);
-            });
-        } else {
-            return importError('read_failed', 'The selected file could not be read.');
-        }
-    } catch {
-        return importError('read_failed', 'The selected file could not be read.');
-    }
-
-    try {
-        return { ok: true, value: JSON.parse(text) };
-    } catch {
-        return importError('invalid_json', 'The source is not valid JSON.');
-    }
+    const decoded = await analyzeJsonSource(source, ORDINARY_IMPORT_LIMITS);
+    return decoded.ok ? { ok: true, value: decoded.value } : decoded;
 }
 
 function normalizeImportSettings(source, keys) {
     const normalized = normalizeStoredSettings(source);
+    delete normalized.allowRemoteFonts;
     if (!hasOwn(source, 'colorStorageScope') && !hasOwn(source, 'shareColorsGlobally')) delete normalized.colorStorageScope;
     for (const key of Object.keys(normalized)) {
         if (!keys.includes(key)) delete normalized[key];
     }
     return normalized;
+}
+
+function getRemoteFontImportDisclosure(source, inherited = null) {
+    if (isPlainObject(inherited) && inherited.preserved === true) {
+        return { present: true, requested: inherited.requested === true, preserved: true };
+    }
+    if (!isPlainObject(source) || !hasOwn(source, 'allowRemoteFonts')) {
+        return { present: false, requested: false, preserved: false };
+    }
+    return { present: true, requested: source.allowRemoteFonts === true, preserved: true };
 }
 
 function getExplicitImportScope(source) {
@@ -2416,7 +3062,52 @@ function getExplicitImportScope(source) {
     return { ok: true, requestedStorageScope: source.colorStorageScope };
 }
 
-function buildImportPreview(colors, profiles, importedSettings, customGradientPresets, requestedStorageScope) {
+function migrateLegacyColorPayload(source, { allowUnversioned = false } = {}) {
+    const version = Number(source?.settings?.colorSchemaVersion ?? source?.version);
+    if ((!Number.isFinite(version) && !allowUnversioned) || version >= COLOR_SCHEMA_VERSION) {
+        return { source, migration: null };
+    }
+    const migration = createStorageIdentityMigration();
+    const groups = migrateLegacyGroupProfileRegistry(source.groupProfiles, migration, 'groupProfiles');
+    const migrated = {
+        ...source,
+        colors: normalizeCharacterColors(migrateLegacyCharacterRegistry(
+            source.colors,
+            groups.nameMappings,
+            migration,
+            'colors',
+        )),
+    };
+    if (hasOwn(source, 'groupProfiles')) migrated.groupProfiles = groups.profiles;
+    if (hasOwn(source, 'customGradientPresets')) {
+        migrated.customGradientPresets = migrateLegacyNamedCatalog(
+            source.customGradientPresets,
+            80,
+            'Legacy gradient',
+            migration,
+            'customGradientPresets',
+        ).registry;
+    }
+    return { source: migrated, migration };
+}
+
+function migrateLegacySettingsPayload(source) {
+    const version = Number(source?.settings?.colorSchemaVersion ?? source?.version);
+    if (!Number.isFinite(version) || version >= COLOR_SCHEMA_VERSION || !hasOwn(source, 'customGradientPresets')) {
+        return { source, migration: null };
+    }
+    const migration = createStorageIdentityMigration();
+    const gradients = migrateLegacyNamedCatalog(
+        source.customGradientPresets,
+        80,
+        'Legacy gradient',
+        migration,
+        'customGradientPresets',
+    );
+    return { source: { ...source, customGradientPresets: gradients.registry }, migration };
+}
+
+function buildImportPreview(colors, profiles, importedSettings, customGradientPresets, requestedStorageScope, options = {}) {
     const preview = {
         characterCount: Object.keys(colors || {}).length,
         groupProfileCount: Object.keys(profiles || {}).length,
@@ -2425,7 +3116,127 @@ function buildImportPreview(colors, profiles, importedSettings, customGradientPr
         customGradientPresetCount: Object.keys(customGradientPresets || {}).length,
     };
     if (requestedStorageScope !== undefined) preview.requestedStorageScope = requestedStorageScope;
+    if (options.remoteFontSettingPresent) {
+        preview.remoteFontConsentPreserved = true;
+        preview.remoteFontsRequested = options.remoteFontsRequested === true;
+    }
+    if (options.identityMigration?.renamed) {
+        preview.legacyIdentityMigration = {
+            renamed: options.identityMigration.renamed,
+            collisions: options.identityMigration.collisions,
+        };
+    }
     return preview;
+}
+
+function validateImportedCatalogIdentities(source, maximum, label) {
+    const identities = new Map();
+    for (const rawName of Object.keys(source || {})) {
+        if (isDangerousRegistryIdentity(rawName)) {
+            return importError('reserved_identity', `Reserved ${label} name "${rawName}" is not allowed.`);
+        }
+        const identity = normalizeRegistryIdentity(rawName, maximum);
+        if (!identity) return importError('invalid_identity', `${label} name "${rawName}" is invalid.`);
+        const existing = identities.get(identity);
+        if (existing !== undefined) {
+            return importError('identity_collision', `${label} names "${existing}" and "${rawName}" normalize to the same identity.`);
+        }
+        identities.set(identity, rawName);
+    }
+    return null;
+}
+
+function validateImportedCollectionLimits(colors, profiles) {
+    const colorEntries = Object.entries(colors || {});
+    if (colorEntries.length > ORDINARY_IMPORT_OUTPUT_LIMITS.maxCharacters) {
+        return importError('too_many_characters', `The import exceeds ${ORDINARY_IMPORT_OUTPUT_LIMITS.maxCharacters} characters.`);
+    }
+    let aliasCount = 0;
+    for (const [rawKey, entry] of colorEntries) {
+        if (!isPlainObject(entry)) return importError('invalid_character', `Character entry "${rawKey}" is not a JSON object.`);
+        if (hasOwn(entry, 'aliases') && !Array.isArray(entry.aliases)) {
+            return importError('invalid_aliases', `Aliases for "${rawKey}" must be an array.`);
+        }
+        const aliases = entry.aliases || [];
+        if (aliases.length > ORDINARY_IMPORT_OUTPUT_LIMITS.maxAliasesPerCharacter) {
+            return importError('too_many_aliases', `Character "${rawKey}" exceeds ${ORDINARY_IMPORT_OUTPUT_LIMITS.maxAliasesPerCharacter} aliases.`);
+        }
+        aliasCount += aliases.length;
+        if (aliasCount > ORDINARY_IMPORT_OUTPUT_LIMITS.maxAliasesTotal) {
+            return importError('too_many_aliases', `The import exceeds ${ORDINARY_IMPORT_OUTPUT_LIMITS.maxAliasesTotal} aliases.`);
+        }
+    }
+    if (Object.keys(profiles || {}).length > ORDINARY_IMPORT_OUTPUT_LIMITS.maxGroupProfiles) {
+        return importError('too_many_group_profiles', `The import exceeds ${ORDINARY_IMPORT_OUTPUT_LIMITS.maxGroupProfiles} group profiles.`);
+    }
+    return null;
+}
+
+function validateImportedIdentities(colors, profiles) {
+    const colorEntries = Object.entries(colors || {});
+    if (colorEntries.length > ORDINARY_IMPORT_OUTPUT_LIMITS.maxCharacters) {
+        return importError('too_many_characters', `The import exceeds ${ORDINARY_IMPORT_OUTPUT_LIMITS.maxCharacters} characters.`);
+    }
+    let aliasCount = 0;
+    const characterIdentities = new Map();
+    for (const [rawKey, entry] of colorEntries) {
+        if (!isPlainObject(entry)) return importError('invalid_character', `Character entry "${rawKey}" is not a JSON object.`);
+        const name = hasOwn(entry, 'name') ? entry.name : rawKey;
+        if (isDangerousRegistryIdentity(name)) {
+            return importError('reserved_identity', `Reserved registry identity "${name}" is not allowed.`);
+        }
+        const identity = normalizeRegistryIdentity(name);
+        if (!identity) {
+            return importError('invalid_identity', `Character entry "${rawKey}" has an invalid name.`);
+        }
+        const existingCharacter = characterIdentities.get(identity);
+        if (existingCharacter !== undefined) {
+            return importError('identity_collision', `Characters "${existingCharacter}" and "${name}" normalize to the same identity.`);
+        }
+        characterIdentities.set(identity, name);
+        if (hasOwn(entry, 'aliases') && !Array.isArray(entry.aliases)) {
+            return importError('invalid_aliases', `Aliases for "${name}" must be an array.`);
+        }
+        const aliases = entry.aliases || [];
+        if (aliases.length > ORDINARY_IMPORT_OUTPUT_LIMITS.maxAliasesPerCharacter) {
+            return importError('too_many_aliases', `Character "${name}" exceeds ${ORDINARY_IMPORT_OUTPUT_LIMITS.maxAliasesPerCharacter} aliases.`);
+        }
+        aliasCount += aliases.length;
+        if (aliasCount > ORDINARY_IMPORT_OUTPUT_LIMITS.maxAliasesTotal) {
+            return importError('too_many_aliases', `The import exceeds ${ORDINARY_IMPORT_OUTPUT_LIMITS.maxAliasesTotal} aliases.`);
+        }
+        for (const alias of aliases) {
+            if (isDangerousRegistryIdentity(alias)) {
+                return importError('reserved_identity', `Reserved registry identity "${alias}" is not allowed.`);
+            }
+            if (!normalizeRegistryIdentity(alias)) {
+                return importError('invalid_identity', `Character "${name}" contains an invalid alias.`);
+            }
+        }
+    }
+
+    const profileEntries = Object.entries(profiles || {});
+    if (profileEntries.length > ORDINARY_IMPORT_OUTPUT_LIMITS.maxGroupProfiles) {
+        return importError('too_many_group_profiles', `The import exceeds ${ORDINARY_IMPORT_OUTPUT_LIMITS.maxGroupProfiles} group profiles.`);
+    }
+    const groupIdentities = new Map();
+    for (const [rawKey, profile] of profileEntries) {
+        if (!isPlainObject(profile)) return importError('invalid_group_profile', `Group profile "${rawKey}" is not a JSON object.`);
+        const name = hasOwn(profile, 'name') ? profile.name : rawKey;
+        if (isDangerousRegistryIdentity(name)) {
+            return importError('reserved_identity', `Reserved registry identity "${name}" is not allowed.`);
+        }
+        const identity = normalizeRegistryIdentity(name, 80);
+        if (!identity || !normalizeGroupProfile(profile, rawKey)) {
+            return importError('invalid_group_profile', `Group profile "${rawKey}" has an invalid name or style.`);
+        }
+        const existingGroup = groupIdentities.get(identity);
+        if (existingGroup !== undefined) {
+            return importError('identity_collision', `Group profiles "${existingGroup}" and "${name}" normalize to the same identity.`);
+        }
+        groupIdentities.set(identity, name);
+    }
+    return null;
 }
 
 function analyzeColorPayload(source, kind = 'colors') {
@@ -2441,13 +3252,27 @@ function analyzeColorPayload(source, kind = 'colors') {
     if (hasOwn(source, 'groupProfiles') && !isPlainObject(source.groupProfiles)) {
         return importError('invalid_group_profiles', 'The color payload has invalid group profile data.');
     }
+    const collectionLimitError = validateImportedCollectionLimits(source.colors, source.groupProfiles);
+    if (collectionLimitError) return collectionLimitError;
+    const legacyPayload = migrateLegacyColorPayload(source, { allowUnversioned: kind === 'card' });
+    source = legacyPayload.source;
+    const identityError = validateImportedIdentities(source.colors, source.groupProfiles);
+    if (identityError) return identityError;
 
     const settingsPresent = hasOwn(source, 'settings');
+    const remoteFontConsent = getRemoteFontImportDisclosure(source.settings, source.remoteFontConsent);
     const importedSettings = settingsPresent ? normalizeImportSettings(source.settings, ACTIVE_SETTING_KEYS) : null;
     const scopeResult = getExplicitImportScope(source.settings);
     if (!scopeResult.ok) return scopeResult;
     const presetsPresent = hasOwn(source, 'customGradientPresets');
-    const customGradientPresets = presetsPresent ? normalizeGradientPresets(source.customGradientPresets) : null;
+    if (presetsPresent && Object.keys(source.customGradientPresets).length > ORDINARY_IMPORT_OUTPUT_LIMITS.maxGradientPresets) {
+        return importError('too_many_gradient_presets', `The import exceeds ${ORDINARY_IMPORT_OUTPUT_LIMITS.maxGradientPresets} custom gradient presets.`);
+    }
+    if (presetsPresent) {
+        const catalogError = validateImportedCatalogIdentities(source.customGradientPresets, 80, 'Gradient preset');
+        if (catalogError) return catalogError;
+    }
+    const customGradientPresets = presetsPresent ? normalizeGradientPresetRegistry(source.customGradientPresets) : null;
     const colors = normalizeCharacterColors(source.colors);
     const profilesPresent = hasOwn(source, 'groupProfiles');
     const profiles = profilesPresent ? normalizeGroupProfiles(source.groupProfiles) : null;
@@ -2456,6 +3281,7 @@ function analyzeColorPayload(source, kind = 'colors') {
         colors,
         ...(profilesPresent ? { groupProfiles: profiles } : {}),
         ...(settingsPresent ? { settings: importedSettings } : {}),
+        ...(remoteFontConsent.present ? { remoteFontConsent } : {}),
         ...(presetsPresent ? { customGradientPresets } : {}),
         ...(scopeResult.requestedStorageScope !== undefined
             ? { requestedStorageScope: scopeResult.requestedStorageScope }
@@ -2465,7 +3291,11 @@ function analyzeColorPayload(source, kind = 'colors') {
         ok: true,
         kind,
         payload,
-        preview: buildImportPreview(colors, profiles, importedSettings, customGradientPresets, scopeResult.requestedStorageScope),
+        preview: buildImportPreview(colors, profiles, importedSettings, customGradientPresets, scopeResult.requestedStorageScope, {
+            remoteFontSettingPresent: remoteFontConsent.present,
+            remoteFontsRequested: remoteFontConsent.requested,
+            identityMigration: legacyPayload.migration,
+        }),
     };
 }
 
@@ -2476,12 +3306,22 @@ function analyzeSettingsPayload(source) {
     if (hasOwn(source, 'customGradientPresets') && !isPlainObject(source.customGradientPresets)) {
         return importError('invalid_gradient_presets', 'The settings payload has invalid custom gradient presets.');
     }
+    const legacyPayload = migrateLegacySettingsPayload(source);
+    source = legacyPayload.source;
 
+    const remoteFontConsent = getRemoteFontImportDisclosure(source.settings, source.remoteFontConsent);
     const importedSettings = normalizeImportSettings(source.settings, GLOBAL_SETTINGS_V2_KEYS);
     const scopeResult = getExplicitImportScope(source.settings);
     if (!scopeResult.ok) return scopeResult;
     const presetsPresent = hasOwn(source, 'customGradientPresets');
-    const customGradientPresets = presetsPresent ? normalizeGradientPresets(source.customGradientPresets) : null;
+    if (presetsPresent && Object.keys(source.customGradientPresets).length > ORDINARY_IMPORT_OUTPUT_LIMITS.maxGradientPresets) {
+        return importError('too_many_gradient_presets', `The import exceeds ${ORDINARY_IMPORT_OUTPUT_LIMITS.maxGradientPresets} custom gradient presets.`);
+    }
+    if (presetsPresent) {
+        const catalogError = validateImportedCatalogIdentities(source.customGradientPresets, 80, 'Gradient preset');
+        if (catalogError) return catalogError;
+    }
+    const customGradientPresets = presetsPresent ? normalizeGradientPresetRegistry(source.customGradientPresets) : null;
     if (!Object.keys(importedSettings).length && !Object.keys(customGradientPresets || {}).length) {
         return importError('unrecognized_payload', 'The source contains no recognized settings or custom gradient presets.');
     }
@@ -2489,6 +3329,7 @@ function analyzeSettingsPayload(source) {
     const payload = {
         kind: 'settings',
         settings: importedSettings,
+        ...(remoteFontConsent.present ? { remoteFontConsent } : {}),
         ...(presetsPresent ? { customGradientPresets } : {}),
         ...(scopeResult.requestedStorageScope !== undefined
             ? { requestedStorageScope: scopeResult.requestedStorageScope }
@@ -2498,7 +3339,11 @@ function analyzeSettingsPayload(source) {
         ok: true,
         kind: 'settings',
         payload,
-        preview: buildImportPreview({}, {}, importedSettings, customGradientPresets, scopeResult.requestedStorageScope),
+        preview: buildImportPreview({}, {}, importedSettings, customGradientPresets, scopeResult.requestedStorageScope, {
+            remoteFontSettingPresent: remoteFontConsent.present,
+            remoteFontsRequested: remoteFontConsent.requested,
+            identityMigration: legacyPayload.migration,
+        }),
     };
 }
 
@@ -2517,21 +3362,27 @@ export async function analyzeColorImport(source) {
     const binding = captureActiveStorageBinding();
     const parsed = await parseImportSource(source);
     if (!isActiveStorageBindingCurrent(binding)) return contextChangedError('The active import target changed while the file was read.');
-    return parsed.ok ? attachImportReviewContext(analyzeColorPayload(parsed.value), binding) : parsed;
+    return parsed.ok
+        ? attachImportReviewContext(analyzeImportPayloadSafely(() => analyzeColorPayload(parsed.value)), binding)
+        : parsed;
 }
 
 export async function analyzeSettingsImport(source) {
     const binding = captureActiveStorageBinding();
     const parsed = await parseImportSource(source);
     if (!isActiveStorageBindingCurrent(binding)) return contextChangedError('The active import target changed while the file was read.');
-    return parsed.ok ? attachImportReviewContext(analyzeSettingsPayload(parsed.value), binding) : parsed;
+    return parsed.ok
+        ? attachImportReviewContext(analyzeImportPayloadSafely(() => analyzeSettingsPayload(parsed.value)), binding)
+        : parsed;
 }
 
 export async function analyzeCardData(source) {
     const binding = captureActiveStorageBinding();
     const parsed = await parseImportSource(source);
     if (!isActiveStorageBindingCurrent(binding)) return contextChangedError('The active import target changed while the card data was read.');
-    return parsed.ok ? attachImportReviewContext(analyzeColorPayload(parsed.value, 'card'), binding) : parsed;
+    return parsed.ok
+        ? attachImportReviewContext(analyzeImportPayloadSafely(() => analyzeColorPayload(parsed.value, 'card')), binding)
+        : parsed;
 }
 
 export async function readCardData({ refresh = true } = {}) {
@@ -2564,13 +3415,14 @@ function normalizeReviewedPayload(payload, kind) {
     if (!isPlainObject(payload) || payload.kind !== kind) {
         return importError('invalid_reviewed_payload', `Expected a reviewed ${kind} payload.`);
     }
-    if (kind === 'settings') return analyzeSettingsPayload(payload);
-    return analyzeColorPayload(payload, kind);
+    return analyzeImportPayloadSafely(() => kind === 'settings'
+        ? analyzeSettingsPayload(payload)
+        : analyzeColorPayload(payload, kind));
 }
 
 function applyImportedSettings(importedSettings, activeScope) {
     for (const [key, value] of Object.entries(importedSettings || {})) {
-        if (key === 'colorStorageScope' || key === 'colorSchemaVersion') continue;
+        if (key === 'colorStorageScope' || key === 'colorSchemaVersion' || key === 'allowRemoteFonts') continue;
         settings[key] = value;
     }
     settings.colorStorageScope = activeScope;
@@ -2590,7 +3442,7 @@ function normalizeImportedColorsForApply(colors, colorSchemaVersion) {
 
 function applyImportedGradientPresets(payload) {
     if (!hasOwn(payload, 'customGradientPresets')) return false;
-    const incoming = normalizeGradientPresets(payload.customGradientPresets);
+    const incoming = normalizeGradientPresetRegistry(payload.customGradientPresets);
     const nextPresets = { ...incoming, ...getCustomGradientPresets() };
     const record = getAutoSyncRecord(true);
     record.version = COLOR_SCHEMA_VERSION;
@@ -2717,17 +3569,12 @@ async function applyReviewedImportInternal(
         const hasColors = kind !== 'settings';
         if (hasColors) {
             const incomingColors = normalizeImportedColorsForApply(normalized.colors, normalized.settings?.colorSchemaVersion);
-            const mergedColors = { ...incomingColors };
-            for (const [key, entry] of Object.entries(characterColors)) {
-                const mergeKey = mergedColors[key] ? `existing_${key}` : key;
-                mergedColors[mergeKey] = entry;
-            }
             setCharacterColors(mode === 'merge'
-                ? normalizeCharacterColors(mergedColors)
+                ? mergeCharacterRegistriesKeepingCurrent(incomingColors, characterColors)
                 : incomingColors);
             const incomingProfiles = normalizeGroupProfiles(normalized.groupProfiles);
             setGroupProfiles(mode === 'merge'
-                ? normalizeGroupProfiles({ ...incomingProfiles, ...groupProfiles })
+                ? mergeGroupProfileRegistriesKeepingCurrent(incomingProfiles, groupProfiles)
                 : incomingProfiles);
             if (mode === 'replace') {
                 selectedCharacterKeys.clear();
@@ -2787,6 +3634,7 @@ async function applyReviewedImportInternal(
             groupProfileCount: Object.keys(groupProfiles).length,
             settingsCount: reviewed.preview.settingsCount,
             customGradientPresetCount: reviewed.preview.customGradientPresetCount,
+            remoteFontConsentPreserved: reviewed.preview.remoteFontConsentPreserved === true,
         };
     } catch (error) {
         console.error('[Dialogue Colors] Failed to apply reviewed import data:', error);
@@ -2880,6 +3728,9 @@ export async function importSettings(file) {
 }
 
 export function applySettingsSnapshotWithRefresh(snapshot) {
+    if (typeof snapshot?.allowRemoteFonts === 'boolean') {
+        persistLocalRemoteFontConsent(snapshot.allowRemoteFonts);
+    }
     const keys = Object.keys(characterColors);
     const colorSnapshot = captureEffectiveColorSnapshot(keys);
     pruneInactiveSettings();
@@ -2920,7 +3771,7 @@ export function restoreAllSettingsToDefaults() {
     settings.gradientAnimationMode = 'auto';
     settings.llmConnectionProfile = null;
     settings.attributionConnectionProfile = null;
-    settings.attributionReviewPolicy = 'legacy-auto';
+    settings.attributionReviewPolicy = 'review';
     settings.attributionMaxTokens = 4096;
     settings.colorSchemaVersion = COLOR_SCHEMA_VERSION;
 
@@ -2933,15 +3784,33 @@ export function restoreAllSettingsToDefaults() {
 
 // Auto-sync functions
 export async function loadSettingsFromServer() {
+    const request = autoSyncRequestGate.begin();
+    const activityEpoch = moduleSettingsActivityEpoch;
     try {
         const record = await fetchAutoSyncRecordFromServer();
-        clearAutoSyncError();
-        if (!record) return;
-        applyAutoSyncRecord(record, { serverVerified: true });
+        if (!autoSyncRequestGate.isCurrent(request)) return { ok: false, superseded: true };
+        if (!record) {
+            clearAutoSyncError();
+            return { ok: true, found: false };
+        }
+        const disposition = applyAutoSyncRecord(record, { serverVerified: true, request, activityEpoch });
+        return { ok: disposition !== 'conflict', found: true, disposition };
     } catch (e) {
+        if (!autoSyncRequestGate.isCurrent(request)) return { ok: false, superseded: true };
         console.warn('[Dialogue Colors] Auto-sync settings refresh failed:', e);
         setAutoSyncError('Read failed');
+        return { ok: false, error: 'read_failed' };
     }
+}
+
+function pollAutoSyncServer() {
+    if (autoSyncPollPromise) return autoSyncPollPromise;
+    const request = loadSettingsFromServer();
+    autoSyncPollPromise = request;
+    void request.finally(() => {
+        if (autoSyncPollPromise === request) autoSyncPollPromise = null;
+    });
+    return request;
 }
 
 export function saveSettingsToStore(options = {}) {
@@ -2957,7 +3826,8 @@ export function saveSettingsToStore(options = {}) {
         ...currentRecord,
         version: COLOR_SCHEMA_VERSION,
         timestamp: new Date().toISOString(),
-        sequence: (Number.isFinite(currentRecord.sequence) ? currentRecord.sequence : 0) + 1,
+        writerId: AUTO_SYNC_WRITER_ID,
+        sequence: getNextLocalAutoSyncSequence(currentRecord),
         autoSyncEnabled,
         settings: settingsData,
     });
@@ -2980,10 +3850,6 @@ export function disableAutoSync() {
     setAutoSyncEnabled(false);
     stopAutoSyncPolling();
     saveSettingsToStore({ force: true });
-    // Polling is stopped, so the save echo that would normally confirm the
-    // pending record never arrives — clear it now or the 15s timeout paints a
-    // spurious "Save failed" status.
-    clearAutoSyncPending();
     toast.info('Auto-sync disabled');
 }
 
@@ -2991,12 +3857,15 @@ export function startAutoSyncPolling() {
     if (autoSyncInterval) return;
     const pollInterval = document.hidden ? 30000 : 5000;
     setAutoSyncInterval(setInterval(() => {
-        void loadSettingsFromServer();
+        void pollAutoSyncServer();
     }, pollInterval));
     document.addEventListener('visibilitychange', handleVisibilityChange);
 }
 
 export function stopAutoSyncPolling() {
+    autoSyncRequestGate.supersede();
+    autoSyncPollPromise = null;
+    deferredAutoSyncApplication = null;
     if (autoSyncInterval) {
         clearInterval(autoSyncInterval);
         setAutoSyncInterval(null);
@@ -3008,7 +3877,7 @@ export function handleVisibilityChange() {
     if (autoSyncEnabled) {
         stopAutoSyncPolling();
         startAutoSyncPolling();
-        void loadSettingsFromServer();
+        void pollAutoSyncServer();
     }
 }
 
@@ -3056,7 +3925,7 @@ export function initAutoSync() {
 
     if (autoSyncEnabled) {
         startAutoSyncPolling();
-        void loadSettingsFromServer();
+        void pollAutoSyncServer();
     }
 }
 
@@ -3072,21 +3941,35 @@ export function ensureRegexScript() {
             return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
         });
 
-        if (!extension_settings.regex.some(r => r?.scriptName === 'Trim Font Colors')) {
+        const isLegacyOwnedFontRule = rule => rule?.scriptName === 'Trim Font Colors'
+            && rule.findRegex === '/<\\/?font[^>]*>/gi'
+            && rule.replaceString === ''
+            && Array.isArray(rule.trimStrings) && rule.trimStrings.length === 0
+            && Array.isArray(rule.placement) && rule.placement.length === 1 && rule.placement[0] === 2
+            && rule.disabled === false
+            && rule.markdownOnly === false
+            && rule.promptOnly === true
+            && rule.runOnEdit === true
+            && rule.substituteRegex === 0
+            && rule.minDepth === null
+            && rule.maxDepth === null;
+        const stableOwnedFontRule = extension_settings.regex.find(rule => rule?.id === FONT_TRIM_RULE.id);
+        const hasUnownedTargetName = extension_settings.regex.some(rule => rule !== stableOwnedFontRule
+            && rule?.scriptName === FONT_TRIM_RULE.scriptName);
+        const ownedFontRule = stableOwnedFontRule
+            || (!hasUnownedTargetName ? extension_settings.regex.find(isLegacyOwnedFontRule) : null);
+        if (ownedFontRule) {
+            for (const [key, value] of Object.entries(FONT_TRIM_RULE)) {
+                const nextValue = Array.isArray(value) ? [...value] : value;
+                if (JSON.stringify(ownedFontRule[key]) === JSON.stringify(nextValue)) continue;
+                ownedFontRule[key] = nextValue;
+                changed = true;
+            }
+        } else if (!hasUnownedTargetName) {
             extension_settings.regex.push({
-                id: uuidv4(),
-                scriptName: 'Trim Font Colors',
-                findRegex: '/<\\/?font[^>]*>/gi',
-                replaceString: '',
+                ...FONT_TRIM_RULE,
                 trimStrings: [],
                 placement: [2],
-                disabled: false,
-                markdownOnly: false,
-                promptOnly: true,
-                runOnEdit: true,
-                substituteRegex: 0,
-                minDepth: null,
-                maxDepth: null
             });
             changed = true;
         }
@@ -3110,29 +3993,35 @@ export function ensureRegexScript() {
             changed = true;
         }
 
-        const cssEffectsTrimRegex = '/<span[^>]*style=["\'][^"\']*(?:transform|skew|rotate|scale|opacity|filter|text-shadow|translate)[^"\']*["\'][^>]*>(.*?)<\\/span>/gi';
-        const cssEffectsTrim = extension_settings.regex.find(r => r?.scriptName === 'Trim CSS Effects (Prompt)');
-        if (cssEffectsTrim) {
-            if (cssEffectsTrim.findRegex !== cssEffectsTrimRegex || cssEffectsTrim.replaceString !== '$1') {
-                cssEffectsTrim.findRegex = cssEffectsTrimRegex;
-                cssEffectsTrim.replaceString = '$1';
+        const isLegacyOwnedCssRule = rule => rule?.scriptName === 'Trim CSS Effects (Prompt)'
+            && rule.findRegex === CSS_EFFECTS_TRIM_RULE.findRegex
+            && rule.replaceString === CSS_EFFECTS_TRIM_RULE.replaceString
+            && Array.isArray(rule.trimStrings) && rule.trimStrings.length === 0
+            && Array.isArray(rule.placement) && rule.placement.length === 1 && rule.placement[0] === 2
+            && rule.disabled === false
+            && rule.markdownOnly === false
+            && rule.promptOnly === true
+            && rule.runOnEdit === true
+            && rule.substituteRegex === 0
+            && rule.minDepth === null
+            && rule.maxDepth === null;
+        const stableOwnedCssRule = extension_settings.regex.find(rule => rule?.id === CSS_EFFECTS_TRIM_RULE.id);
+        const hasUnownedCssTargetName = extension_settings.regex.some(rule => rule !== stableOwnedCssRule
+            && rule?.scriptName === CSS_EFFECTS_TRIM_RULE.scriptName);
+        const ownedCssRule = stableOwnedCssRule
+            || (!hasUnownedCssTargetName ? extension_settings.regex.find(isLegacyOwnedCssRule) : null);
+        if (ownedCssRule) {
+            for (const [key, value] of Object.entries(CSS_EFFECTS_TRIM_RULE)) {
+                const nextValue = Array.isArray(value) ? [...value] : value;
+                if (JSON.stringify(ownedCssRule[key]) === JSON.stringify(nextValue)) continue;
+                ownedCssRule[key] = nextValue;
                 changed = true;
             }
-        } else {
+        } else if (!hasUnownedCssTargetName) {
             extension_settings.regex.push({
-                id: uuidv4(),
-                scriptName: 'Trim CSS Effects (Prompt)',
-                findRegex: cssEffectsTrimRegex,
-                replaceString: '$1',
+                ...CSS_EFFECTS_TRIM_RULE,
                 trimStrings: [],
                 placement: [2],
-                disabled: false,
-                markdownOnly: false,
-                promptOnly: true,
-                runOnEdit: true,
-                substituteRegex: 0,
-                minDepth: null,
-                maxDepth: null
             });
             changed = true;
         }
@@ -3180,8 +4069,9 @@ export function tryLoadFromCard() {
         const char = ctx?.characters?.[ctx?.characterId];
         const data = char?.data?.extensions?.dialogueColors;
         if (data?.colors) {
-            setCharacterColors(normalizeImportedColorsForApply(data.colors, data.settings?.colorSchemaVersion));
-            setGroupProfiles(normalizeGroupProfiles(data.groupProfiles));
+            const migrated = migrateLegacyColorPayload(data, { allowUnversioned: true }).source;
+            setCharacterColors(normalizeImportedColorsForApply(migrated.colors, migrated.settings?.colorSchemaVersion));
+            setGroupProfiles(normalizeGroupProfiles(migrated.groupProfiles));
             selectedCharacterKeys.clear();
             setExpandedCharacterRows(new Set());
             setSwapMode(null);

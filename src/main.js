@@ -5,8 +5,8 @@ import { setupContextMenu } from './context-menu.js';
 import { DOM_RETRY_REFRESH_DELAYS, POST_MUTATION_DOM_REPAIR_DELAY_MS, clearDecoratedWatchers, decorateAllMessages, hasMessageQuoteOverridesForLatestMessage, scheduleDecorateLast, scheduleDomRefreshSeries, scheduleDomSettleRefresh, scheduleMessageDomRepair, setupChatObserver, setupChatRootObserver, startDomHealthCheck, stopDomHealthCheck } from './dom-engine.js';
 import { scheduleCustomFontRefresh } from './fonts.js';
 import { redo, undo } from './history.js';
-import { commit, onNewMessage } from './live-colors.js';
-import { populateProfileDropdown } from './llm.js';
+import { commit, onNewMessage, resumePendingChatSave } from './live-colors.js';
+import { consumeMainAiQuietGenerationEnd, populateProfileDropdown } from './llm.js';
 import { detectTheme, getReadableSurfaceSignature, invalidateThemeCache } from './palettes.js';
 import { buildMinimalPromptInstruction, injectPrompt } from './prompts.js';
 import { eventSource, event_types, getContext } from './st-api.js';
@@ -18,6 +18,7 @@ import { cancelStreamingAttributionVerification, clearAutoAttributionVerificatio
 let lastAppliedAutoTheme = null;
 let lastAppliedAutoSurface = null;
 let themeRefreshTimer = null;
+let loudGenerationActive = false;
 
 export function registerKeyboardShortcuts() {
     if (runtimeState.keyboardSetup) return;
@@ -49,6 +50,7 @@ export function resetDialogueCountsForNewChat() {
 }
 
 export function handleChatChanged() {
+    resumePendingChatSave();
     selectedCharacterKeys.clear();
     setAttributionChatGeneration(attributionChatGeneration + 1);
     setIsStreamingGenerationActive(false);
@@ -136,12 +138,20 @@ export function handleMessageUpdated(mesIndex) {
 export function registerEventHandlers() {
     if (runtimeState.eventsRegistered) return;
     runtimeState.eventHandlers = {
+        generationStarted: (type, _options, dryRun) => {
+            if (dryRun) return;
+            if (type !== 'quiet') loudGenerationActive = true;
+        },
         generationAfterCommands: () => injectPrompt(),
         characterMessageRendered: () => { onNewMessage(); scheduleDomRefreshSeries(120); scheduleCustomFontRefresh(120); },
         messageRendered: () => { scheduleDomRefreshSeries(120); scheduleCustomFontRefresh(120); },
         messageUpdated: handleMessageUpdated,
         streamToken: () => { setIsStreamingGenerationActive(true); scheduleDecorateLast(hasMessageQuoteOverridesForLatestMessage() ? 0 : 80); scheduleCustomFontRefresh(120); scheduleStreamingAttributionVerification(); },
         generationEnded: () => {
+            // GENERATION_ENDED has no type payload. A preceding non-quiet start
+            // takes priority over an overlapping extension quiet request.
+            if (loudGenerationActive) loudGenerationActive = false;
+            else if (consumeMainAiQuietGenerationEnd()) return;
             setIsStreamingGenerationActive(false);
             streamingHeuristicCache.clear();
             cancelStreamingAttributionVerification();
@@ -180,6 +190,7 @@ export function registerEventHandlers() {
         },
     };
     lastAppliedAutoTheme = null;
+    if (event_types.GENERATION_STARTED) eventSource.on(event_types.GENERATION_STARTED, runtimeState.eventHandlers.generationStarted);
     eventSource.on(event_types.GENERATION_AFTER_COMMANDS, runtimeState.eventHandlers.generationAfterCommands);
     eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, runtimeState.eventHandlers.characterMessageRendered);
     if (event_types.USER_MESSAGE_RENDERED) eventSource.on(event_types.USER_MESSAGE_RENDERED, runtimeState.eventHandlers.messageRendered);
