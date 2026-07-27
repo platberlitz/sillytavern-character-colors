@@ -24,15 +24,22 @@
     overscroll-behavior: contain;
 }
 
-#dc-ext > button.inline-drawer-toggle {
-    width: 100%;
-    box-sizing: border-box;
+/*
+ * Zero-specificity reset: strips browser button chrome without outranking
+ * SillyTavern core or user theme rules that style .inline-drawer-toggle.
+ */
+:where(#dc-ext > button.inline-drawer-toggle) {
     border: 0;
     background: transparent;
     color: inherit;
     font: inherit;
     text-align: inherit;
     cursor: pointer;
+}
+
+#dc-ext > button.inline-drawer-toggle {
+    width: 100%;
+    box-sizing: border-box;
 }
 
 #dc-ext > button.inline-drawer-toggle:focus-visible {
