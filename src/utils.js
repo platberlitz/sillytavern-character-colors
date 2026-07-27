@@ -191,8 +191,6 @@ export function getMessageElementByIndex(messageIndex) {
     if (!Number.isFinite(index) || index < 0) return null;
     return document.querySelector(`#chat .mes[mesid="${index}"]`)
         || document.querySelector(`.mes[mesid="${index}"]`)
-        || document.querySelectorAll('#chat .mes[mesid]')[index]
-        || document.querySelectorAll('.mes[mesid]')[index]
         || null;
 }
 

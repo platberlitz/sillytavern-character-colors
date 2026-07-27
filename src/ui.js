@@ -3025,7 +3025,9 @@ export function autoAssignFromCard() {
             const result = addCharacter(name);
             if (result?.added) toast.success(`Added ${escapeHtml(name)}`);
         }
-    } catch { }
+    } catch (error) {
+        console.warn('[Dialogue Colors] Could not auto-add the active character from its card.', error);
+    }
 }
 
 export function updateStorageScopeStatus() {
@@ -4015,8 +4017,8 @@ function bindSettingsPanelControls($) {
     $('dc-attr-max-tokens').oninput = e => {
         // Clamp to the input's declared range; sub-minimum values truncate the
         // verifier's JSON output and make every verification fail parsing.
-        const parsed = parseInt(e.target.value, 10) || 4096;
-        settings.attributionMaxTokens = Math.min(32768, Math.max(256, parsed));
+        const parsed = parseInt(e.target.value, 10);
+        settings.attributionMaxTokens = Number.isNaN(parsed) ? 4096 : Math.min(32768, Math.max(256, parsed));
         saveData();
     };
     $('dc-stealth-colors').onchange = e => { settings.domStealthColors = e.target.checked; saveData(); injectPrompt(); };

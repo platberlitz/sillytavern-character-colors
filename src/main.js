@@ -80,6 +80,8 @@ export function handleChatChanged() {
     startDomHealthCheck();
     scheduleDomRefreshSeries(150);
     scheduleCustomFontRefresh(150);
+    const scanGeneration = attributionChatGeneration;
+    const scanStorageKey = getStorageKey();
     if (runtimeState.chatChangedRafId) cancelAnimationFrame(runtimeState.chatChangedRafId);
     runtimeState.chatChangedRafId = requestAnimationFrame(() => {
         runtimeState.chatChangedRafId = null;
@@ -89,12 +91,18 @@ export function handleChatChanged() {
         scheduleDomSettleRefresh(DOM_RETRY_REFRESH_DELAYS);
         scheduleCustomFontRefresh(0);
     });
-    setTimeout(() => { setupChatObserver(); startDomHealthCheck(); scheduleDomSettleRefresh(DOM_RETRY_REFRESH_DELAYS); scheduleCustomFontRefresh(0); }, 250);
+    clearTimeout(runtimeState.chatChangedSettleTimer);
+    runtimeState.chatChangedSettleTimer = setTimeout(() => {
+        runtimeState.chatChangedSettleTimer = null;
+        if (scanGeneration !== attributionChatGeneration || scanStorageKey !== getStorageKey()) return;
+        setupChatObserver();
+        startDomHealthCheck();
+        scheduleDomSettleRefresh(DOM_RETRY_REFRESH_DELAYS);
+        scheduleCustomFontRefresh(0);
+    }, 250);
     const shouldInitialScan = settings.enabled
         && settings.autoScanOnLoad !== false
         && !Object.keys(characterColors).length;
-    const scanGeneration = attributionChatGeneration;
-    const scanStorageKey = getStorageKey();
     if (shouldInitialScan) {
         setTimeout(() => {
             if (!settings.enabled || settings.autoScanOnLoad === false) return;
@@ -150,11 +158,16 @@ export function registerEventHandlers() {
         generationEnded: () => {
             // GENERATION_ENDED has no type payload. A preceding non-quiet start
             // takes priority over an overlapping extension quiet request.
+            let isQuietEnd = false;
             if (loudGenerationActive) loudGenerationActive = false;
-            else if (consumeMainAiQuietGenerationEnd()) return;
+            else isQuietEnd = consumeMainAiQuietGenerationEnd();
+            // Streaming teardown runs even for quiet ends: the heuristic cache is
+            // keyed by character offset only, so leaving it populated lets stale
+            // entries be replayed onto a different message body.
             setIsStreamingGenerationActive(false);
             streamingHeuristicCache.clear();
             cancelStreamingAttributionVerification();
+            if (isQuietEnd) return;
             scheduleDomRefreshSeries(0);
             scheduleCustomFontRefresh(0);
             // Run post-generation verification sweep for unverified rendered messages.
@@ -256,6 +269,7 @@ export function init() {
             scheduleCustomFontRefresh(150);
         } else if (waitAttempts > 60) {
             clearInterval(waitUI);
+            console.warn('[Dialogue Colors] #extensions_settings never appeared after 30s; the settings panel was not created. Reload SillyTavern to retry.');
         }
     }, 500);
 }

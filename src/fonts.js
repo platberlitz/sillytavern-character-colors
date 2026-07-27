@@ -96,6 +96,10 @@ export function loadGoogleFont(fontName) {
     };
     link.onerror = () => {
         loadedGoogleFonts.delete(key);
+        // Release the request slot so one unreachable font cannot exhaust the
+        // budget for every other font. The failed link stays in the document and
+        // keeps acting as the dedup guard against re-requesting this family.
+        remoteFontRequests.delete(key);
         link.dataset.dcGoogleFontState = 'failed';
         link.disabled = true;
         link.onload = null;
@@ -106,6 +110,7 @@ export function loadGoogleFont(fontName) {
         document.head.appendChild(link);
     } catch (error) {
         loadedGoogleFonts.delete(key);
+        remoteFontRequests.delete(key);
         link.dataset.dcGoogleFontState = 'failed';
         console.warn(`[Dialogue Colors] Google Font request could not be started: ${normalized}`, error);
     }

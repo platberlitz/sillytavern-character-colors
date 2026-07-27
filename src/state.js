@@ -17,6 +17,7 @@ export const runtimeState = {
     chatObserverTimer: null,
     domHealthCheckTimer: null,
     chatChangedRafId: null,
+    chatChangedSettleTimer: null,
     // Per-message self-terminating observers that replace the old polling settle timers.
     // Keyed by the .mes element; value is { observer, fallbackTimer }.
     messageSettleObservers: new Map(),

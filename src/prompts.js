@@ -28,10 +28,19 @@ export const PROMPT_THOUGHT_DELIMITER_PAIRS = Object.freeze({
 });
 
 export function normalizePromptThoughtSymbols(thoughtSymbols) {
-    const symbols = Array.isArray(thoughtSymbols)
+    // Accepts a bare run of characters ("*\"") or a comma-separated list ("*, \"").
+    // Downstream consumers (buildDialogueRegex character classes, delimiter pairing)
+    // only support single-character delimiters, so tokens are flattened per character.
+    const tokens = Array.isArray(thoughtSymbols)
         ? thoughtSymbols
         : String(thoughtSymbols ?? '').split(',');
-    return [...new Set(symbols.map(formatPromptLiteralSymbol).map(s => s.trim()).filter(Boolean))];
+    const symbols = [];
+    for (const token of tokens) {
+        for (const symbol of formatPromptLiteralSymbol(token)) {
+            if (symbol.trim()) symbols.push(symbol);
+        }
+    }
+    return [...new Set(symbols)];
 }
 
 export function getPromptThoughtDelimiterPairs(thoughtSymbols) {
@@ -178,7 +187,7 @@ export const PALETTE_DESCRIPTIONS = {
 };
 
 export function getThoughtDelimiterSymbols() {
-    return [...new Set(String(settings.thoughtSymbols || '').split('').filter(s => s && s.trim()))];
+    return normalizePromptThoughtSymbols(settings.thoughtSymbols);
 }
 
 export function formatPromptLiteralSymbol(symbol) {

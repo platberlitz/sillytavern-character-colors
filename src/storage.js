@@ -4063,22 +4063,40 @@ export async function loadFromCard() {
 }
 
 export function tryLoadFromCard() {
+    let currentScope;
+    let colors;
+    let profiles;
+    // Everything that can throw runs before any state is touched, so a malformed
+    // card cannot leave the registry half-applied.
     try {
-        const currentScope = getCurrentStorageScope();
+        currentScope = getCurrentStorageScope();
         const ctx = getContext();
         const char = ctx?.characters?.[ctx?.characterId];
         const data = char?.data?.extensions?.dialogueColors;
-        if (data?.colors) {
-            const migrated = migrateLegacyColorPayload(data, { allowUnversioned: true }).source;
-            setCharacterColors(normalizeImportedColorsForApply(migrated.colors, migrated.settings?.colorSchemaVersion));
-            setGroupProfiles(normalizeGroupProfiles(migrated.groupProfiles));
-            selectedCharacterKeys.clear();
-            setExpandedCharacterRows(new Set());
-            setSwapMode(null);
-            settings.colorStorageScope = currentScope;
-            normalizeToggleSettings();
-            settings.colorSchemaVersion = COLOR_SCHEMA_VERSION;
-            saveHistory(); saveData();
-        }
-    } catch { }
+        if (!data?.colors) return;
+        const migrated = migrateLegacyColorPayload(data, { allowUnversioned: true }).source;
+        colors = normalizeImportedColorsForApply(migrated.colors, migrated.settings?.colorSchemaVersion);
+        profiles = normalizeGroupProfiles(migrated.groupProfiles);
+    } catch (error) {
+        console.warn('[Dialogue Colors] Card colors could not be read; keeping the current registry.', error);
+        toast.error('Saved colors on this character card could not be read.');
+        return;
+    }
+
+    setCharacterColors(colors);
+    setGroupProfiles(profiles);
+    selectedCharacterKeys.clear();
+    setExpandedCharacterRows(new Set());
+    setSwapMode(null);
+    settings.colorStorageScope = currentScope;
+    normalizeToggleSettings();
+    settings.colorSchemaVersion = COLOR_SCHEMA_VERSION;
+
+    try {
+        saveHistory();
+        saveData();
+    } catch (error) {
+        console.warn('[Dialogue Colors] Card colors were applied but could not be saved.', error);
+        toast.error('Loaded colors from the card, but saving them failed.');
+    }
 }

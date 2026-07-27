@@ -7,7 +7,7 @@ import { NARRATOR_VISUAL_ID, getNarratorVisual, setTransientNarratorCount } from
 import { getThoughtDelimiterSymbols } from './prompts.js';
 import { escapeHtml, escapeRegex, getContext } from './st-api.js';
 import { characterColors, isDomEngine, settings } from './state.js';
-import { captureOpenDetailsState, isCompositeSpeakerLabel, normalizeAliases, normalizeGoogleFontName, normalizeHexColor, parseNameWithNicknames, restoreOpenDetailsState, splitCompositeSpeakerName, toast } from './utils.js';
+import { isCompositeSpeakerLabel, normalizeAliases, normalizeGoogleFontName, normalizeHexColor, parseNameWithNicknames, splitCompositeSpeakerName, toast } from './utils.js';
 
 function hasOwn(value, key) {
     return Object.prototype.hasOwnProperty.call(value || {}, key);
@@ -236,16 +236,46 @@ export function parseColorBlock(element) {
 export function stripColorBlockFromElement(element) {
     const mesText = element?.querySelector?.('.mes_text') || element;
     if (!mesText) return false;
-    const openDetailsState = captureOpenDetailsState(mesText);
-    const before = mesText.innerHTML;
-    const cleaned = before.replace(/\[COLORS?:[^\]]*\]/gi, '');
-    if (cleaned === before) return false;
-    try {
-        mesText.innerHTML = cleaned;
-    } finally {
-        restoreOpenDetailsState(mesText, openDetailsState);
+    const documentRef = mesText.ownerDocument || document;
+    const nodeFilter = documentRef?.defaultView?.NodeFilter || globalThis.NodeFilter;
+    if (!nodeFilter || typeof documentRef?.createTreeWalker !== 'function') return false;
+    const walker = documentRef.createTreeWalker(mesText, nodeFilter.SHOW_TEXT);
+    // Text nodes are edited in place instead of rewriting innerHTML: serialized
+    // markup lets a `[COLOR:` run match across tag boundaries and delete elements,
+    // and reassigning innerHTML discards listeners and open <details> state.
+    const nodes = [];
+    let combined = '';
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        nodes.push({ node, start: combined.length });
+        combined += node.nodeValue;
     }
-    return true;
+    if (!nodes.length) return false;
+
+    // Matching runs over the concatenated text so a block interrupted by inline
+    // markup is still removed, mirroring what parseColorBlock reads via textContent.
+    const removals = [];
+    const blockRegex = /\[COLORS?:[^\]]*\]/gi;
+    for (let match = blockRegex.exec(combined); match; match = blockRegex.exec(combined)) {
+        removals.push([match.index, match.index + match[0].length]);
+    }
+    if (!removals.length) return false;
+
+    let changed = false;
+    for (const { node, start } of nodes) {
+        const end = start + node.nodeValue.length;
+        let value = node.nodeValue;
+        for (let i = removals.length - 1; i >= 0; i--) {
+            const [removeStart, removeEnd] = removals[i];
+            if (removeEnd <= start || removeStart >= end) continue;
+            const from = Math.max(removeStart, start) - start;
+            const to = Math.min(removeEnd, end) - start;
+            value = value.slice(0, from) + value.slice(to);
+        }
+        if (value === node.nodeValue) continue;
+        node.nodeValue = value;
+        changed = true;
+    }
+    return changed;
 }
 
 export function stripColorBlocksFromDisplay() {

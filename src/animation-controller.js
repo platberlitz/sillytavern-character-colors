@@ -273,9 +273,14 @@ function ensureController() {
     }
     if (observer) removeFallbackVisibilityListeners();
     else ensureFallbackVisibilityListeners();
-    if (!document.__dcGradientAnimationVisibilityBound) {
-        document.__dcGradientAnimationVisibilityBound = true;
+    if (!visibilityListenerBound) {
+        // A reloaded module gets a fresh refreshGradientAnimationState reference, so the
+        // previous instance's listener is tracked on the document and removed by identity
+        // rather than gated behind a boolean this instance can no longer act on.
+        const previous = document.__dcGradientAnimationVisibilityHandler;
+        if (typeof previous === 'function') document.removeEventListener('visibilitychange', previous);
         document.addEventListener('visibilitychange', refreshGradientAnimationState);
+        document.__dcGradientAnimationVisibilityHandler = refreshGradientAnimationState;
         visibilityListenerBound = true;
     }
 }
@@ -343,10 +348,8 @@ export function destroyGradientAnimationController() {
     }
     if (visibilityListenerBound && typeof document !== 'undefined') {
         document.removeEventListener('visibilitychange', refreshGradientAnimationState);
-        try {
-            delete document.__dcGradientAnimationVisibilityBound;
-        } catch (_) {
-            document.__dcGradientAnimationVisibilityBound = false;
+        if (document.__dcGradientAnimationVisibilityHandler === refreshGradientAnimationState) {
+            document.__dcGradientAnimationVisibilityHandler = null;
         }
         visibilityListenerBound = false;
     }
