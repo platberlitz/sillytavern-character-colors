@@ -157,6 +157,62 @@ test('verification propagates provider failures into bounded automatic loops', (
     assert.match(verifyStreaming, /MAX_STREAMING_PROVIDER_FAILURES/);
 });
 
+test('applied verifier corrections always reach the rendered DOM in one pass', () => {
+    const verifyOne = functionSection(sources['verify.js'], 'verifyAttributionsWithLLM');
+
+    // The optimistic no-render decoration must never be the only attempt: a
+    // message whose segments cannot text-match the rendered markup would keep
+    // its corrections invisible until a later verify pass repainted them.
+    assert.match(verifyOne, /!repainted && !useTransientOverrides && isCurrent\(\)[\s\S]*?refreshAndDecorateMessageDom\(mesIndex, msg, \{ queueVerification: false \}\)/);
+    // The follow-up repair schedules on a 0ms first tick when nothing was
+    // repainted, so it must not be gated behind a successful repaint.
+    assert.match(verifyOne, /if \(isCurrent\(\)\) scheduleMessageDomFollowupRepair\(mesIndex, repainted\)/);
+    assert.doesNotMatch(verifyOne, /if \(repainted &&/);
+    // Neither post-verify decoration may re-queue verification for a message
+    // that was just verified.
+    assert.match(verifyOne, /decorateObservedMessages\(\[mesElement\], \{ queueVerification: false \}\)/);
+    assert.doesNotMatch(verifyOne, /decorateObservedMessages\(\[mesElement\]\)/);
+});
+
+test('a stale verification target reports the corrections it already wrote', () => {
+    const verifyOne = functionSection(sources['verify.js'], 'verifyAttributionsWithLLM');
+
+    // Bailing with `unchecked` after overrides were written hid them from the
+    // caller's toast and left the message unverified, so automatic
+    // verification kept re-spending LLM calls on it.
+    assert.match(verifyOne, /const abortedResult = \(\) => \(\{[\s\S]*?corrections: appliedCorrections,[\s\S]*?aborted: true,/);
+    assert.match(verifyOne, /staleTarget = true; break;/);
+    assert.match(verifyOne, /if \(staleTarget\) return abortedResult\(\)/);
+    const correctionLoop = /for \(const correction of validCorrections\) \{[\s\S]*?\n {4}\}/.exec(verifyOne);
+    assert.ok(correctionLoop, 'missing verifier correction loop');
+    assert.doesNotMatch(correctionLoop[0], /return unchecked/);
+});
+
+test('manual verification queues behind an in-flight run instead of being dropped', () => {
+    const runVerification = functionSection(sources['verify.js'], 'runAttributionVerification');
+
+    assert.match(runVerification, /const shouldQueue = options\.queue !== false/);
+    // A fixed key collapses repeated clicks into one pending run.
+    assert.match(runVerification, /automatic \? '' : 'manual'/);
+    assert.match(runVerification, /return \{[^}]*queued: shouldQueue/);
+});
+
+test('unmatchable messages get a bounded best-effort decoration', () => {
+    const repairType = functionSection(sources['dom-engine.js'], 'getMessageDomHealthRepairType');
+    const healthCheck = functionSection(sources['dom-engine.js'], 'runDomHealthCheck');
+
+    // Without allowPartial, a never-ready message short-circuits to 'refresh'
+    // forever and the 'decorate' branch below is unreachable.
+    assert.match(repairType, /!readiness\.ready && options\.allowPartial !== true\) return 'refresh'/);
+    assert.match(healthCheck, /const exhausted = attempts === DOM_HEALTH_REFRESH_MAX_ATTEMPTS/);
+    assert.match(healthCheck, /getMessageDomHealthRepairType\(mesElement, msg, mesIndex, \{ allowPartial: exhausted \}\)/);
+    // One best-effort pass only - repeating it every tick brings back flicker.
+    assert.match(healthCheck, /if \(attempts > DOM_HEALTH_REFRESH_MAX_ATTEMPTS\) continue/);
+    assert.match(healthCheck, /if \(exhausted\) healthRefreshAttempts\.set\(attemptsKey, attempts \+ 1\);\s*\n\s*else healthRefreshAttempts\.delete\(attemptsKey\)/);
+    // A host re-render wipes decorations, so the budget must reset with them.
+    assert.match(healthCheck, /clearDecoratedWatcher\(mesElement\);[\s\S]*?healthRefreshAttempts\.delete\(`\$\{repairIndex\}/);
+});
+
 test('edited attribution review acceptance stays atomic', () => {
     const acceptFromUi = functionSection(sources['ui.js'], 'acceptAttributionReviewFromUi');
 

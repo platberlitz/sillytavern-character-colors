@@ -2,7 +2,7 @@
 import { attributeDialogueSegments, clearSpeakerRegexCache, ensureCharacterEntry } from './attribution.js';
 import { ATTRIBUTION_SOURCE, ATTRIBUTION_VERIFICATION_STATUS, normalizeAttributionConfidence } from './attribution-store.js';
 import { buildNameColorLookup, collectFontColorsFromText, parseNamedColorAssignmentsFromText, resolveCharacterKeyByNameOrAlias } from './color-blocks.js';
-import { cancelMessageDomFollowupRepairs, clearMessageDomRepairTimer, clearStreamingAttributionOverrides, decorateMessageDomFromCurrentRender, decorateObservedMessages, getMessageQuoteOverrideEntry, getMessageQuoteOverrideOptions, isMessageAttributionVerified, markMessageAttributionVerified, scheduleMessageDomFollowupRepair, setMessageQuoteOverride, setStreamingAttributionOverride, suspendMessageDomWorkForEdit, upsertAttributionReview } from './dom-engine.js';
+import { cancelMessageDomFollowupRepairs, clearMessageDomRepairTimer, clearStreamingAttributionOverrides, decorateMessageDomFromCurrentRender, decorateObservedMessages, getMessageQuoteOverrideEntry, getMessageQuoteOverrideOptions, isMessageAttributionVerified, markMessageAttributionVerified, refreshAndDecorateMessageDom, scheduleMessageDomFollowupRepair, setMessageQuoteOverride, setStreamingAttributionOverride, suspendMessageDomWorkForEdit, upsertAttributionReview } from './dom-engine.js';
 import { callLLMWithProfile, classifyLlmRequestError } from './llm.js';
 import { commit, repaintDomAfterCharacterDataChange } from './live-colors.js';
 import { formatPromptLiteralSymbol, getThoughtDelimiterSymbols } from './prompts.js';
@@ -906,8 +906,21 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
     let appliedCorrections = 0;
     let queuedReviews = 0;
     let createdCharacters = false;
+    let staleTarget = false;
+    // The target can change under us mid-loop (chat switch, edit, swipe). Once
+    // corrections have already been written to metadata, reporting `unchecked`
+    // hides them from the caller's toast and leaves the message unverified, so
+    // automatic verification keeps re-spending LLM calls on it. Stop the loop
+    // but report what actually happened.
+    const abortedResult = () => ({
+        checked: appliedCorrections > 0 || queuedReviews > 0,
+        corrections: appliedCorrections,
+        queuedReviews,
+        createdCharacters,
+        aborted: true,
+    });
     for (const correction of validCorrections) {
-        if (!isAttributionVerificationTargetCurrent(target, { allowAppendedText: useTransientOverrides })) return unchecked;
+        if (!isAttributionVerificationTargetCurrent(target, { allowAppendedText: useTransientOverrides })) { staleTarget = true; break; }
         const seg = segmentByIndex.get(correction.index);
         let { assignment } = resolveVerifierSpeakerName(correction.speaker, currentLookup);
         // Under full auto-accept the user opted out of review, so an unconfigured
@@ -935,7 +948,7 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
             || (policy === 'auto-high' && (correction.confidence < AUTO_HIGH_ATTRIBUTION_CONFIDENCE || hasHumanOverride))
         );
         if (shouldQueueReview) {
-            if (!isAttributionVerificationTargetAndSegmentsCurrent(target)) return unchecked;
+            if (!isAttributionVerificationTargetAndSegmentsCurrent(target)) { staleTarget = true; break; }
             const review = upsertAttributionReview({
                 message: msg,
                 messageIndex: mesIndex,
@@ -958,7 +971,7 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
             || (policy === 'auto-high' && correction.confidence >= AUTO_HIGH_ATTRIBUTION_CONFIDENCE)
         );
         if (!shouldApply) continue;
-        if (!isAttributionVerificationTargetAndSegmentsCurrent(target, { allowAppendedText: useTransientOverrides })) return unchecked;
+        if (!isAttributionVerificationTargetAndSegmentsCurrent(target, { allowAppendedText: useTransientOverrides })) { staleTarget = true; break; }
         const didSetOverride = useTransientOverrides
             ? setStreamingAttributionOverride(mesIndex, msg, correction.index, assignment.name, { source: ATTRIBUTION_SOURCE.LLM })
             : setMessageQuoteOverride(mesIndex, msg, correction.index, assignment.name, {
@@ -977,37 +990,51 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
         repaintDomAfterCharacterDataChange(0);
     }
 
+    // A stale target must not be marked verified or repainted - it no longer
+    // matches what the verifier reviewed - but the counts above are still real.
+    if (staleTarget) return abortedResult();
+
     if (!skipMarkVerified && !useTransientOverrides) {
         const verificationStatus = queuedReviews > 0
             ? ATTRIBUTION_VERIFICATION_STATUS.PENDING_REVIEW
             : appliedCorrections > 0
                 ? ATTRIBUTION_VERIFICATION_STATUS.AUTO_APPLIED
                 : ATTRIBUTION_VERIFICATION_STATUS.CLEAN;
-        if (!isAttributionVerificationTargetAndSegmentsCurrent(target)) return unchecked;
+        if (!isAttributionVerificationTargetAndSegmentsCurrent(target)) return abortedResult();
         markMessageAttributionVerified(mesIndex, msg, verificationStatus);
         clearStreamingAttributionOverrides(mesIndex);
     }
     if (appliedCorrections) {
-        if (!isAttributionVerificationTargetAndSegmentsCurrent(target, { allowAppendedText: useTransientOverrides })) return unchecked;
+        if (!isAttributionVerificationTargetAndSegmentsCurrent(target, { allowAppendedText: useTransientOverrides })) return abortedResult();
         clearMessageDomRepairTimer(mesIndex);
         cancelMessageDomFollowupRepairs(mesIndex);
-        // Verifier corrections only change override metadata; decorate the
-        // already-rendered DOM without an innerHTML fallback write.
+        // Prefer decorating the already-rendered DOM, but never let that
+        // optimistic pass be the only one. When a segment can never text-match
+        // the rendered markup (e.g. **bold** inside a quote) readiness never
+        // lands, decorateMessageDomFromCurrentRender returns false, and the
+        // corrections stay invisible until a later pass takes the else branch
+        // below - which is why verification used to need repeated clicks.
+        // Fall back to a full refresh the way the review-accept path does, and
+        // always schedule the follow-up repair: its 0ms first tick exists for
+        // exactly the case where nothing was repainted here.
         const isCurrent = () => isAttributionVerificationTargetAndSegmentsCurrent(target, { allowAppendedText: useTransientOverrides });
         if (isCurrent()) {
-            const repainted = await decorateMessageDomFromCurrentRender(mesIndex, msg, {
+            let repainted = await decorateMessageDomFromCurrentRender(mesIndex, msg, {
                 queueVerification: false,
                 renderFallback: false,
                 isCurrent,
             });
-            if (repainted && isAttributionVerificationTargetAndSegmentsCurrent(target, { allowAppendedText: useTransientOverrides })) {
-                scheduleMessageDomFollowupRepair(mesIndex, repainted);
+            // Streaming corrections are transient and the message text is still
+            // growing, so never force a re-render mid-generation.
+            if (!repainted && !useTransientOverrides && isCurrent()) {
+                repainted = await refreshAndDecorateMessageDom(mesIndex, msg, { queueVerification: false });
             }
+            if (isCurrent()) scheduleMessageDomFollowupRepair(mesIndex, repainted);
         }
     } else {
         const mesElement = document.querySelector(`#chat .mes[mesid="${mesIndex}"]`) || document.querySelectorAll('#chat .mes[mesid]')[mesIndex];
         if (mesElement && isAttributionVerificationTargetCurrent(target, { allowAppendedText: useTransientOverrides })) {
-            decorateObservedMessages([mesElement]);
+            decorateObservedMessages([mesElement], { queueVerification: false });
         }
     }
 
@@ -1060,6 +1087,7 @@ export async function verifyVisibleAttributionsWithLLM(options = {}) {
     let queuedReviews = 0;
     let createdCharacters = false;
     let retryableProviderFailures = 0;
+    let providerFailure = null;
     if (!automatic) toast.info('Verifying visible messages with LLM...');
     for (const identity of identities) {
         if (identity.cancellationEpoch !== attributionVerificationEpoch
@@ -1072,7 +1100,10 @@ export async function verifyVisibleAttributionsWithLLM(options = {}) {
         if (!isAttributionMessageIdentityCurrent(identity)) continue;
         const result = await verifyAttributionsWithLLM(index, { ...options, expectedIdentity: identity });
         if (result.providerFailure) {
-            if (!result.providerFailure.retryable || ++retryableProviderFailures >= 2) break;
+            if (!result.providerFailure.retryable || ++retryableProviderFailures >= 2) {
+                providerFailure = result.providerFailure;
+                break;
+            }
             continue;
         }
         if (result.checked) checked++;
@@ -1080,7 +1111,15 @@ export async function verifyVisibleAttributionsWithLLM(options = {}) {
         queuedReviews += result.queuedReviews || 0;
         createdCharacters = createdCharacters || result.createdCharacters === true;
     }
-    if (!automatic && (corrections > 0 || queuedReviews > 0)) {
+    if (!automatic && providerFailure) {
+        // The sweep runs newest-first and stops at the first fatal provider
+        // error, so the remaining messages were never looked at. Saying
+        // "nothing to check" here would be wrong.
+        const applied = corrections > 0 || queuedReviews > 0
+            ? ` Applied ${corrections} correction${corrections !== 1 ? 's' : ''} and queued ${queuedReviews} suggestion${queuedReviews !== 1 ? 's' : ''} before stopping.`
+            : '';
+        toast.error(`Verification stopped after ${checked} message${checked !== 1 ? 's' : ''}: the provider request failed.${applied}`);
+    } else if (!automatic && (corrections > 0 || queuedReviews > 0)) {
         if (corrections > 0 && queuedReviews > 0) {
             toast.info(`Verified DOM colors: applied ${corrections} correction${corrections !== 1 ? 's' : ''}, queued ${queuedReviews} suggestion${queuedReviews !== 1 ? 's' : ''} for review.`);
         } else if (queuedReviews > 0) {
@@ -1106,10 +1145,19 @@ export async function runAttributionVerification(action, options = {}) {
         return { checked: false, corrections: 0, createdCharacters: false };
     }
     if (isVerifyingAttribution) {
-        if (!automatic) toast.info('Attribution verification is already running.');
-        else if (options.queue !== false) {
-            const queued = { action, options: { ...options, cancellationEpoch: runEpoch }, cancellationEpoch: runEpoch };
-            const queueKey = options.queueKey ? String(options.queueKey) : '';
+        // Automatic verification fires from every observed decoration, so a
+        // manual click lands in the busy window often. Dropping it there is
+        // indistinguishable from the button doing nothing, so queue manual runs
+        // too - under a fixed key, so repeated clicks collapse into one pending
+        // run instead of stacking a queue of identical LLM calls.
+        const shouldQueue = options.queue !== false;
+        if (shouldQueue) {
+            const queueKey = options.queueKey ? String(options.queueKey) : (automatic ? '' : 'manual');
+            const queued = {
+                action,
+                options: { ...options, cancellationEpoch: runEpoch, queueKey: queueKey || undefined },
+                cancellationEpoch: runEpoch,
+            };
             const existingIndex = queueKey
                 ? pendingAttributionVerifications.findIndex(item => item.options?.queueKey === queueKey)
                 : -1;
@@ -1121,7 +1169,12 @@ export async function runAttributionVerification(action, options = {}) {
                 }
             }
         }
-        return { checked: false, corrections: 0, createdCharacters: false, queued: automatic && options.queue !== false };
+        if (!automatic) {
+            toast.info(shouldQueue
+                ? 'Attribution verification is already running; this run is queued.'
+                : 'Attribution verification is already running.');
+        }
+        return { checked: false, corrections: 0, createdCharacters: false, queued: shouldQueue };
     }
     setIsVerifyingAttribution(true);
     setVerifyAttributionButtonBusy(true);

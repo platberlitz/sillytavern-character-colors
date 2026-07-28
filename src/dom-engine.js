@@ -1545,7 +1545,12 @@ export function getMessageDomHealthRepairType(mesElement, msg, mesIndex, options
     if (readiness.totalSegments === 0) {
         return narratorMissing ? 'decorate' : '';
     }
-    if (!readiness.ready) return 'refresh';
+    // A message whose segments can never text-match the rendered markup (e.g.
+    // **bold** inside a quote) is never "ready", and a refresh repair cannot
+    // fix it. Once the caller has spent its refresh budget it asks for
+    // allowPartial so we fall through to the best-effort decorate decision
+    // below instead of leaving the message permanently undecorated.
+    if (!readiness.ready && options.allowPartial !== true) return 'refresh';
     if (options.bootstrap === true && readiness.expectedDecorations === 0
         && !mesText.querySelector('[data-dc-seg]')) return 'decorate';
     return readiness.expectedDecorations > readiness.correctDecorations || narratorMissing ? 'decorate' : '';
@@ -1578,6 +1583,10 @@ export function runDomHealthCheck() {
         if (suspendMessageDomWorkForEdit(mesElement, repairIndex)) continue;
         if (watcher?.mesText !== currentMesText) {
             clearDecoratedWatcher(mesElement);
+            // The host replaced .mes_text, so any decorations are gone. Reset
+            // the refresh budget too, otherwise a message that had settled on a
+            // best-effort pass can never be decorated again.
+            healthRefreshAttempts.delete(`${repairIndex}:${hashMessageText(chat[repairIndex]?.mes)}`);
             scheduleMessageDomRepair(repairIndex, {
                 delay: 0,
                 source: 'observer',
@@ -1593,22 +1602,28 @@ export function runDomHealthCheck() {
         if (runtimeState.messageDomRepairTimers.has(mesIndex)) continue;
         const msg = chat[mesIndex];
         if (suspendMessageDomWorkForEdit(mesElement, mesIndex)) continue;
-        const repairType = getMessageDomHealthRepairType(mesElement, msg, mesIndex);
         const attemptsKey = `${mesIndex}:${hashMessageText(msg?.mes)}`;
+        const attempts = healthRefreshAttempts.get(attemptsKey) || 0;
+        // Past the ceiling the best-effort decorate below has already run for
+        // this message text. Repeating it every tick would reintroduce the
+        // flicker the cap was added to stop.
+        if (attempts > DOM_HEALTH_REFRESH_MAX_ATTEMPTS) continue;
+        const exhausted = attempts === DOM_HEALTH_REFRESH_MAX_ATTEMPTS;
+        const repairType = getMessageDomHealthRepairType(mesElement, msg, mesIndex, { allowPartial: exhausted });
         if (repairType === 'refresh') {
             // Back off after a few consecutive failures: if a segment can never
             // match the rendered DOM (e.g. **bold** rendered as <strong>), an
             // unbounded refresh loop re-renders innerHTML every tick (flicker).
-            const attempts = healthRefreshAttempts.get(attemptsKey) || 0;
-            if (attempts < DOM_HEALTH_REFRESH_MAX_ATTEMPTS) {
-                healthRefreshAttempts.set(attemptsKey, attempts + 1);
-                // renderFallback:false — the health check must never rewrite
-                // .mes_text innerHTML; that retriggers the observer cascade.
-                scheduleMessageDomRepair(mesIndex, { delay: 0, verify: false, renderFallback: false });
-            }
+            healthRefreshAttempts.set(attemptsKey, attempts + 1);
+            // renderFallback:false — the health check must never rewrite
+            // .mes_text innerHTML; that retriggers the observer cascade.
+            scheduleMessageDomRepair(mesIndex, { delay: 0, verify: false, renderFallback: false });
             continue;
         }
-        healthRefreshAttempts.delete(attemptsKey);
+        // Settle after the single best-effort pass an exhausted message gets;
+        // a genuinely repairable message resets its budget instead.
+        if (exhausted) healthRefreshAttempts.set(attemptsKey, attempts + 1);
+        else healthRefreshAttempts.delete(attemptsKey);
         if (repairType === 'decorate') {
             decorateTargets.add(mesElement);
             continue;
