@@ -267,6 +267,35 @@ test('fullscreen is opt-in and reversible', () => {
     assert.match(show, /toggleAttribute\('hidden', fullscreen && section\.dataset\.dcPage !== target\)/);
 });
 
+test('verification samples the model and applies only what the samples agree on', () => {
+    const verifyOne = functionSection(sources['verify.js'], 'verifyAttributionsWithLLM');
+
+    // Each pass must be a fresh request, and a single unparseable sample must
+    // not throw away the passes that did come back.
+    assert.match(verifyOne, /for \(let pass = 0; pass < passes; pass\+\+\)/);
+    assert.match(verifyOne, /ballots\.push\(validated\)/);
+    assert.match(verifyOne, /if \(!ballots\.length\)/);
+    assert.match(verifyOne, /reduceAttributionVerifierBallots\(ballots\)/);
+    // Distinct quietName per pass, or the host can collide the requests.
+    assert.match(verifyOne, /quietName: `\$\{[^`]*\}_\$\{mesIndex\}_\$\{pass\}_/);
+});
+
+test('auto-created speakers must appear in the text they came from', () => {
+    const verifyOne = functionSection(sources['verify.js'], 'verifyAttributionsWithLLM');
+
+    // Accept-all removes the human review step, not the evidence requirement:
+    // ensureCharacterEntry is irreversible from the user's side.
+    assert.match(verifyOne, /policy === 'legacy-auto'\s*\n\s*&& isVerifierSpeakerGroundedInChat\(correction\.speaker, msg, mesIndex, chat\)\) \{\s*\n\s*const created = ensureCharacterEntry/);
+});
+
+test('consensus logic stays free of SillyTavern imports', async () => {
+    // The module is the one piece of verification that can be unit tested, and
+    // it only stays that way while it imports nothing host-bound.
+    const consensus = await readFile(new URL('../src/verify-consensus.js', import.meta.url), 'utf8');
+    const imports = [...consensus.matchAll(/^import .*?from '([^']+)';/gm)].map(m => m[1]);
+    assert.deepEqual(imports, []);
+});
+
 test('edited attribution review acceptance stays atomic', () => {
     const acceptFromUi = functionSection(sources['ui.js'], 'acceptAttributionReviewFromUi');
 

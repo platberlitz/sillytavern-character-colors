@@ -16,6 +16,7 @@ import { AESTHETIC_APPEARANCE_KEYS, StylePackError, analyzeStylePackConflicts, b
 import { analyzeStylePackEnvelopeSource, digestStylePackEnvelope, normalizeStylePackEnvelope } from './style-pack-adapter.js';
 import { refreshGradientPresetControls, syncUIWithSettings, updateCharList } from './ui.js';
 import { normalizeBoolean, normalizeCharacterColors, normalizeEntryGradientGenerator, normalizeHexColor, toast } from './utils.js';
+import { normalizeAttributionVerifyPasses } from './verify-consensus.js';
 
 const ORDINARY_IMPORT_LIMITS = Object.freeze({
     maxBytes: 1024 * 1024,
@@ -106,6 +107,7 @@ export function normalizeToggleSettings() {
     settings.attributionReviewPolicy = ['review', 'auto-high', 'legacy-auto'].includes(attributionReviewPolicy)
         ? attributionReviewPolicy
         : 'review';
+    settings.attributionVerifyPasses = normalizeAttributionVerifyPasses(settings.attributionVerifyPasses);
     settings.gradientRandomMasterSeed = String(settings.gradientRandomMasterSeed ?? '')
         .replace(/[\u0000-\u001f\u007f]/g, '')
         .slice(0, 128);
@@ -555,6 +557,9 @@ export function normalizeStoredSettings(source) {
         normalized.attributionReviewPolicy = ['review', 'auto-high', 'legacy-auto'].includes(policy)
             ? policy
             : 'review';
+    }
+    if (hasOwn(normalized, 'attributionVerifyPasses')) {
+        normalized.attributionVerifyPasses = normalizeAttributionVerifyPasses(normalized.attributionVerifyPasses);
     }
     if (source.colorSchemaVersion !== undefined) normalized.colorSchemaVersion = source.colorSchemaVersion;
     normalized.colorStorageScope = normalizeColorStorageScope(source.colorStorageScope, source.shareColorsGlobally);
@@ -3773,6 +3778,7 @@ export function restoreAllSettingsToDefaults() {
     settings.attributionConnectionProfile = null;
     settings.attributionReviewPolicy = 'review';
     settings.attributionMaxTokens = 4096;
+    settings.attributionVerifyPasses = 1;
     settings.colorSchemaVersion = COLOR_SCHEMA_VERSION;
 
     applySettingsSnapshotWithRefresh(settings);

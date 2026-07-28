@@ -21,7 +21,7 @@ import { autoRecolorHintShown, characterColors, expandedCharacterRows, groupProf
 import { analyzeColorImport, analyzeSettingsImport, analyzeStylePackImport, applyCardData, applyColorImport, applySettingsImport, applyStylePackImport, archiveStoredColorData, deleteCustomGradientPreset, disableAutoSync, enableAutoSync, exportColors, exportSettings, getArchivedColorData, getCurrentStorageScope, getCustomGradientPresets, getLegendPosition, getStorageKey, getStorageLabelForKey, getStorageScopeDescriptor, getStylePackRegistry, getUserColorDataStore, normalizeColorDataEntry, normalizeToggleSettings, readCardData, renameCustomGradientPreset, restoreAllSettingsToDefaults, restoreArchivedColorData, saveCustomGradientPreset, saveData, saveLegendPosition, saveToCard, switchColorStorageScope, updateAutoSyncUI } from './storage.js';
 import { buildStylePackEnvelope } from './style-pack-adapter.js';
 import { escapeAttr, getGoogleFontFamily, htmlToNode, normalizeEntryGradientGenerator, normalizeGoogleFontName, normalizeHexColor, normalizeManualColorInput, toast } from './utils.js';
-import { AUTO_HIGH_ATTRIBUTION_CONFIDENCE, cancelStreamingAttributionVerification, clearAutoAttributionVerificationQueue, queueAutoAttributionVerificationForRenderedMessages, runAttributionVerification, verifyLatestAttributionsWithLLM, verifyVisibleAttributionsWithLLM } from './verify.js';
+import { AUTO_HIGH_ATTRIBUTION_CONFIDENCE, cancelStreamingAttributionVerification, clearAutoAttributionVerificationQueue, getAttributionVerifyPasses, queueAutoAttributionVerificationForRenderedMessages, runAttributionVerification, verifyLatestAttributionsWithLLM, verifyVisibleAttributionsWithLLM } from './verify.js';
 
 export const DYNAMIC_CONTROL_HELP_TEXT = Object.freeze({
     '.dc-char-select': 'Select this character for bulk actions.',
@@ -3578,6 +3578,7 @@ export function syncUIWithSettings() {
     if ($('dc-attr-accept-all')) $('dc-attr-accept-all').checked = settings.attributionReviewPolicy === 'legacy-auto';
     if ($('dc-attr-conservative')) $('dc-attr-conservative').checked = settings.attributionConservativeOnly || false;
     if ($('dc-attr-max-tokens')) $('dc-attr-max-tokens').value = Number.isFinite(settings.attributionMaxTokens) && settings.attributionMaxTokens > 0 ? settings.attributionMaxTokens : 4096;
+    if ($('dc-attr-passes')) $('dc-attr-passes').value = getAttributionVerifyPasses();
     if ($('dc-stealth-colors')) $('dc-stealth-colors').checked = settings.domStealthColors !== false;
     if ($('dc-right-click')) $('dc-right-click').checked = settings.enableRightClick;
     if ($('dc-legend')) $('dc-legend').checked = settings.showLegend;
@@ -3882,6 +3883,7 @@ function buildSettingsPanelHtml() {
                     <div class="dc-dom-only dc-stack" style="display:none;">
                         <label class="checkbox_label"><input type="checkbox" id="dc-stealth-colors"><span>Ask for hidden speaker color blocks</span></label><label class="checkbox_label"><input type="checkbox" id="dc-llm-attr-check"><span>Verify attribution automatically</span></label><label class="checkbox_label"><input type="checkbox" id="dc-llm-attr-parallel"><span>Verify during streaming pauses</span></label><label class="checkbox_label"><input type="checkbox" id="dc-attr-accept-all" aria-describedby="dc-attr-review-policy-note"><span>Accept proposed corrections automatically</span></label><small id="dc-attr-review-policy-note">Off by default: verifier suggestions wait for human review. Explicit legacy-auto settings keep this enabled.</small><label class="checkbox_label"><input type="checkbox" id="dc-attr-conservative"><span>Only fill unknown attribution</span></label>
                         <div class="dc-field-row"><label class="dc-inline-label" for="dc-attr-profile">Verify profile</label><select id="dc-attr-profile" class="text_pole"><option value="">Use main chat AI</option></select></div><div class="dc-field-row"><label class="dc-inline-label" for="dc-attr-max-tokens">Verify token limit</label><input type="number" id="dc-attr-max-tokens" min="256" max="32768" value="4096" class="text_pole"></div>
+                        <div class="dc-field-row"><label class="dc-inline-label" for="dc-attr-passes">Agreement passes</label><input type="number" id="dc-attr-passes" min="1" max="5" value="1" class="text_pole" aria-describedby="dc-attr-passes-note"></div><small id="dc-attr-passes-note">Verify each message this many times and keep only the corrections most passes agree on. Raise this for fast models that answer differently each run; it multiplies tokens per verification.</small>
                     </div>
                     <section id="dc-narrator-editor" class="dc-narrator-editor" aria-label="Narration style"></section>
                     <div class="dc-field-row dc-field-row-wrap"><label class="dc-inline-label" for="dc-thought-symbols">Thought delimiters</label><input type="text" id="dc-thought-symbols" placeholder="*" class="text_pole"><button id="dc-thought-clear" class="menu_button">Clear</button></div>
@@ -4189,6 +4191,11 @@ function bindSettingsPanelControls($) {
         // verifier's JSON output and make every verification fail parsing.
         const parsed = parseInt(e.target.value, 10);
         settings.attributionMaxTokens = Number.isNaN(parsed) ? 4096 : Math.min(32768, Math.max(256, parsed));
+        saveData();
+    };
+    $('dc-attr-passes').oninput = e => {
+        const parsed = parseInt(e.target.value, 10);
+        settings.attributionVerifyPasses = Number.isNaN(parsed) ? 1 : Math.min(5, Math.max(1, parsed));
         saveData();
     };
     $('dc-stealth-colors').onchange = e => { settings.domStealthColors = e.target.checked; saveData(); injectPrompt(); };

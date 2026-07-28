@@ -4,6 +4,7 @@ import { ATTRIBUTION_SOURCE, ATTRIBUTION_VERIFICATION_STATUS, normalizeAttributi
 import { buildNameColorLookup, collectFontColorsFromText, parseNamedColorAssignmentsFromText, resolveCharacterKeyByNameOrAlias } from './color-blocks.js';
 import { cancelMessageDomFollowupRepairs, clearMessageDomRepairTimer, clearStreamingAttributionOverrides, decorateMessageDomFromCurrentRender, decorateObservedMessages, getMessageQuoteOverrideEntry, getMessageQuoteOverrideOptions, isMessageAttributionVerified, markMessageAttributionVerified, refreshAndDecorateMessageDom, scheduleMessageDomFollowupRepair, setMessageQuoteOverride, setStreamingAttributionOverride, suspendMessageDomWorkForEdit, upsertAttributionReview } from './dom-engine.js';
 import { callLLMWithProfile, classifyLlmRequestError } from './llm.js';
+import { isSpeakerNamePresentInText, normalizeAttributionVerifyPasses, reduceAttributionVerifierBallots } from './verify-consensus.js';
 import { commit, repaintDomAfterCharacterDataChange } from './live-colors.js';
 import { formatPromptLiteralSymbol, getThoughtDelimiterSymbols } from './prompts.js';
 import { getContext } from './st-api.js';
@@ -102,6 +103,10 @@ export function validateAttributionVerifierCorrections(corrections, segments = n
         normalized.push(valid);
     }
     return normalized;
+}
+
+export function getAttributionVerifyPasses(value = settings.attributionVerifyPasses) {
+    return normalizeAttributionVerifyPasses(value);
 }
 
 export function isAutoAttributionVerificationEnabled() {
@@ -575,15 +580,19 @@ Return only one valid JSON object with this schema:
 {"corrections":[{"index":0,"speaker":"Name","confidence":0.95,"reason":"explicit speaker tag"}]}
 If there are no corrections, return exactly {"corrections":[]}.
 
+Most current labels are already correct. {"corrections":[]} is the expected answer for a well-attributed message, and reporting no corrections is always better than guessing at one.
+
 Rules:
 1. ${conservativeLine}
 2. The current speaker labels came from heuristics and may be wrong. Evaluate message text, surrounding text, explicit dialogue/action tags, and conversation flow.
-3. Omit a segment when its current speaker is supported by the evidence or when the speaker remains unclear.
-4. Use exactly one safe speaker name per correction, preferably a supplied known speaker or alias. Never invent a name.
-5. An explicitly named speaker absent from the known-speaker table may be proposed using its exact single name, but must not be treated as an existing identity.
-6. Never use Unknown, Unclear, None, N/A, Narrator, a prototype-reserved identity, or a group/composite name.
-7. Include a numeric confidence from 0 to 1 and a short evidence-based reason for every correction.
-8. Correction indexes must exactly match the supplied segment indexes.`;
+3. Omit a segment when its current speaker is supported by the evidence or when the speaker remains unclear. Proximity to a name is not evidence: a character being mentioned, addressed, or merely present nearby does not make them the speaker.
+4. Correct a segment only when the text states or directly implies who is speaking, through a speech tag, an action beat by the same character, an explicit address and reply, or an unambiguous alternating exchange.
+5. Use exactly one safe speaker name per correction, preferably a supplied known speaker or alias. Never invent a name.
+6. An explicitly named speaker absent from the known-speaker table may be proposed using its exact single name, but must not be treated as an existing identity. Propose such a name only when it appears verbatim in the supplied message or preceding context.
+7. Never use Unknown, Unclear, None, N/A, Narrator, a prototype-reserved identity, or a group/composite name.
+8. The reason must cite the specific evidence, quoting the words from the message that establish the speaker. A reason you cannot ground in the text means the segment should be omitted instead.
+9. Confidence is a number from 0 to 1 and must reflect real certainty. Use above 0.9 only for an explicit speech tag naming the speaker, and below 0.5 when you are inferring from flow alone.
+10. Correction indexes must exactly match the supplied segment indexes.`;
 }
 
 function buildAttributionVerifierRequest(msg, mesIndex, segments, lookup) {
@@ -708,6 +717,28 @@ export function getAttributionReviewPolicy(value = settings.attributionReviewPol
 
 export function isHumanAttributionOverride(source) {
     return source !== ATTRIBUTION_SOURCE.LLM;
+}
+
+/**
+ * Whether a proposed speaker name actually occurs in the message or its recent
+ * context.
+ *
+ * Creating a character for a name the verifier produced is irreversible from
+ * the user's side, and a weak model will occasionally return a plausible name
+ * that appears nowhere in the scene. Requiring the name to be present in the
+ * text it was supposedly read from turns that class of mistake into a no-op.
+ */
+export function isVerifierSpeakerGroundedInChat(speaker, msg, mesIndex, chat = getContext()?.chat) {
+    const name = normalizeAttributionVerifierSpeaker(speaker);
+    if (!name) return false;
+    const texts = [msg?.mes, msg?.name];
+    const messages = Array.isArray(chat) ? chat : [];
+    if (Number.isFinite(mesIndex)) {
+        for (let i = Math.max(0, mesIndex - MAX_ATTRIBUTION_VERIFIER_CONTEXT_MESSAGES); i < mesIndex; i++) {
+            texts.push(messages[i]?.mes, messages[i]?.name);
+        }
+    }
+    return isSpeakerNamePresentInText(name, texts);
 }
 
 function captureAttributionVerificationTarget(mesIndex, msg, segments, options = {}, chat = getContext()?.chat) {
@@ -847,39 +878,59 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
         : 4096;
     if (!isAttributionVerificationTargetAndSegmentsCurrent(target, { allowAppendedText: useTransientOverrides })) return unchecked;
 
-    const controller = new AbortController();
-    const activeRequest = { controller, streaming: useTransientOverrides };
-    activeAttributionVerificationControllers.add(activeRequest);
-    let response = '';
-    try {
-        response = await callLLMWithProfile(request.userContent, {
-            profileId: settings.attributionConnectionProfile,
-            quietName: `${useTransientOverrides ? 'DC_Attr_Stream' : 'DC_Attr'}_${mesIndex}_${Date.now()}`,
-            jsonSchema,
-            maxTokens,
-            systemInstruction: request.systemInstruction,
-            signal: controller.signal,
-            timeoutMs: ATTRIBUTION_VERIFIER_TIMEOUT_MS,
-        });
-    } catch (e) {
-        const cancelled = e?.name === 'AbortError'
-            || !isAttributionVerificationTargetCurrent(target, { allowAppendedText: useTransientOverrides });
-        if (!cancelled) {
-            console.warn('[Dialogue Colors] LLM attribution verification failed:', e);
-            if (trackFailure) recordAutoAttributionVerifyFailure(verifyKey);
-            if (!quiet) toast.warning('Color verification failed (see console).');
+    // Sampling the same message several times and keeping only what the
+    // samples agree on. A fast model that answers differently each run is
+    // exactly the case this converts into a stable answer; one pass keeps the
+    // original single-request cost.
+    const passes = getAttributionVerifyPasses();
+    const targetSegmentList = [...target.segments.values()];
+    const ballots = [];
+    for (let pass = 0; pass < passes; pass++) {
+        if (!isAttributionVerificationTargetAndSegmentsCurrent(target, { allowAppendedText: useTransientOverrides })) return unchecked;
+        const controller = new AbortController();
+        const activeRequest = { controller, streaming: useTransientOverrides };
+        activeAttributionVerificationControllers.add(activeRequest);
+        let response = '';
+        try {
+            response = await callLLMWithProfile(request.userContent, {
+                profileId: settings.attributionConnectionProfile,
+                quietName: `${useTransientOverrides ? 'DC_Attr_Stream' : 'DC_Attr'}_${mesIndex}_${pass}_${Date.now()}`,
+                jsonSchema,
+                maxTokens,
+                systemInstruction: request.systemInstruction,
+                signal: controller.signal,
+                timeoutMs: ATTRIBUTION_VERIFIER_TIMEOUT_MS,
+            });
+        } catch (e) {
+            const cancelled = e?.name === 'AbortError'
+                || !isAttributionVerificationTargetCurrent(target, { allowAppendedText: useTransientOverrides });
+            if (!cancelled) {
+                console.warn('[Dialogue Colors] LLM attribution verification failed:', e);
+                if (trackFailure) recordAutoAttributionVerifyFailure(verifyKey);
+                if (!quiet) toast.warning('Color verification failed (see console).');
+            }
+            return cancelled
+                ? unchecked
+                : { ...unchecked, providerFailure: classifyLlmRequestError(e) };
+        } finally {
+            activeAttributionVerificationControllers.delete(activeRequest);
         }
-        return cancelled
-            ? unchecked
-            : { ...unchecked, providerFailure: classifyLlmRequestError(e) };
-    } finally {
-        activeAttributionVerificationControllers.delete(activeRequest);
+
+        if (!isAttributionVerificationTargetAndSegmentsCurrent(target, { allowAppendedText: useTransientOverrides })) return unchecked;
+        const parsed = parseAttributionVerifierResponse(response);
+        const validated = Array.isArray(parsed)
+            ? validateAttributionVerifierCorrections(parsed, targetSegmentList)
+            : null;
+        if (!validated) {
+            // One unusable sample out of several is survivable; only a total
+            // washout counts as a failed verification.
+            console.warn(`[Dialogue Colors] LLM attribution verification pass ${pass + 1}/${passes} returned invalid JSON.`);
+            continue;
+        }
+        ballots.push(validated);
     }
 
-    if (!isAttributionVerificationTargetAndSegmentsCurrent(target, { allowAppendedText: useTransientOverrides })) return unchecked;
-    const corrections = parseAttributionVerifierResponse(response);
-    if (!Array.isArray(corrections)) {
-        console.warn('[Dialogue Colors] LLM attribution verification returned invalid JSON.');
+    if (!ballots.length) {
         if (trackFailure) recordAutoAttributionVerifyFailure(verifyKey);
         if (!quiet) toast.warning('Color verification failed (see console).');
         return unchecked;
@@ -890,8 +941,8 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
         ...getMessageQuoteOverrideOptions(mesIndex, msg),
         mesIndex,
     });
-    const validCorrections = validateAttributionVerifierCorrections(corrections, [...target.segments.values()]);
-    if (!validCorrections || !hasCurrentVerifierSegments(target, currentAttribution.segments)) {
+    const validCorrections = reduceAttributionVerifierBallots(ballots);
+    if (!hasCurrentVerifierSegments(target, currentAttribution.segments)) {
         if (trackFailure && isAttributionVerificationTargetCurrent(target, { allowAppendedText: useTransientOverrides })) {
             recordAutoAttributionVerifyFailure(verifyKey);
         }
@@ -925,7 +976,10 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
         let { assignment } = resolveVerifierSpeakerName(correction.speaker, currentLookup);
         // Under full auto-accept the user opted out of review, so an unconfigured
         // named speaker is created instead of being parked in the review queue.
-        if (!assignment && !useTransientOverrides && policy === 'legacy-auto') {
+        // It still has to be a name that appears in the scene: auto-accept
+        // removes the human check, not the requirement for evidence.
+        if (!assignment && !useTransientOverrides && policy === 'legacy-auto'
+            && isVerifierSpeakerGroundedInChat(correction.speaker, msg, mesIndex, chat)) {
             const created = ensureCharacterEntry(correction.speaker);
             if (created.created) {
                 createdCharacters = true;

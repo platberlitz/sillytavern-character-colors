@@ -48,6 +48,14 @@ Local mode attributes and colors rendered quotes and thoughts without editing `m
 
 **Stealth speaker color blocks** can ask the model for hidden `[COLORS:...]` metadata without visible font tags. Optional LLM attribution verification can review the latest or visible rendered messages and save corrections in chat metadata.
 
+#### Verification accuracy
+
+Small, fast models often answer the same message differently on each run, which shows up as attribution that changes every time you press Verify. **Agreement passes** (Engine settings) verifies each message several times and keeps only the corrections that most passes agree on. A pass that proposes nothing for a segment counts as a vote to leave it alone, so with 3 passes a correction has to be proposed at least twice, with the same speaker, to be applied.
+
+The default is 1 pass, which behaves exactly as before and costs one request. Raising it multiplies tokens per verification, so it is worth it mainly for cheap, fast models. The reported confidence is capped at the agreement rate, so a model that always claims high confidence cannot push a bare-majority result past the **auto-high** review policy.
+
+Independently of that setting, a correction naming a speaker who is not already configured will only create that character if the name appears verbatim in the message or its recent context.
+
 ## Storage Scopes
 
 - **Per chat**: one color table for the current chat. A durable ID is stored in chat metadata so renaming the chat does not lose its colors.
