@@ -229,30 +229,42 @@ test('every settings page section has a matching nav tab', () => {
     }
 });
 
-test('the settings page mounts outside the extensions drawer', () => {
+test('the settings panel stays in the extensions tab and flows freely', async () => {
     const createUI = functionSection(sources['ui.js'], 'createUI');
 
-    // The launcher stays in the host drawer; the page itself must go to
-    // <body>, otherwise it inherits the drawer's width and scroll height,
-    // which is the boxed-in layout this replaced.
-    assert.match(createUI, /getElementById\('extensions_settings'\)\?\.insertAdjacentHTML\('beforeend', buildSettingsLauncherHtml\(\)\)/);
-    assert.match(createUI, /document\.body\.insertAdjacentHTML\('beforeend', buildSettingsPanelHtml\(\)\)/);
-    assert.match(createUI, /bindSettingsPage\(\)/);
-    // The old fixed-height inner scroller must not come back.
-    assert.doesNotMatch(sources['ui.js'], /inline-drawer-content/);
+    assert.match(createUI, /getElementById\('extensions_settings'\)\?\.insertAdjacentHTML\('beforeend', buildSettingsPanelHtml\(\)\)/);
+    assert.doesNotMatch(createUI, /document\.body\.insertAdjacentHTML/);
+
+    // The capped inner scroller is what boxed every section into a sliver of
+    // the panel; the extensions tab must remain the only scroller.
+    const css = await readFile(new URL('../style.css', import.meta.url), 'utf8');
+    const drawerContent = /#dc-ext \.inline-drawer-content \{([^}]*)\}/.exec(css);
+    assert.ok(drawerContent, 'missing #dc-ext .inline-drawer-content rule');
+    const declarations = drawerContent[1].replace(/\/\*[\s\S]*?\*\//g, '');
+    assert.doesNotMatch(declarations, /max-height|overflow-y/);
 });
 
-test('the settings page keeps a closable, focus-restoring dialog contract', () => {
+test('fullscreen is opt-in and reversible', () => {
     const source = sources['ui.js'];
-    const close = functionSection(source, 'closeSettingsPage');
+    const enter = functionSection(source, 'enterSettingsFullscreen');
+    const exit = functionSection(source, 'exitSettingsFullscreen');
     const bind = functionSection(source, 'bindSettingsPage');
+    const show = functionSection(source, 'showSettingsPageSection');
 
-    assert.match(source, /role="dialog" aria-modal="true" aria-labelledby="dc-page-title"/);
-    assert.match(close, /opener\?\.offsetParent\) opener\.focus\(\)/);
+    // Default is the drawer: nothing may add the fullscreen class at build or
+    // bind time, only the explicit toggle.
+    assert.doesNotMatch(source, /class="[^"]*dc-fullscreen(?![-\w])/);
+    assert.match(bind, /toggle\.addEventListener\('click', \(\) => toggleSettingsFullscreen\(toggle\)\)/);
+    assert.match(enter, /classList\.add\('dc-fullscreen'\)/);
+    assert.match(enter, /setAttribute\('aria-modal', 'true'\)/);
+    assert.match(exit, /classList\.remove\('dc-fullscreen'\)/);
+    assert.match(exit, /removeAttribute\('aria-modal'\)/);
+    assert.match(exit, /opener\?\.offsetParent\) opener\.focus\(\)/);
     assert.match(bind, /e\.key === 'Escape'/);
-    // Scrim mousedown must suppress the browser's own focus move, or the
-    // restore in closeSettingsPage is undone right after it runs.
-    assert.match(bind, /e\.preventDefault\(\);\s*\n\s*closeSettingsPage\(\)/);
+
+    // Sections may only be hidden in fullscreen; in the tab they are an
+    // accordion list and hiding one would make it unreachable.
+    assert.match(show, /toggleAttribute\('hidden', fullscreen && section\.dataset\.dcPage !== target\)/);
 });
 
 test('edited attribution review acceptance stays atomic', () => {

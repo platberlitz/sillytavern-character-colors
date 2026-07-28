@@ -6,7 +6,7 @@ product
 
 ## Users
 
-SillyTavern roleplay users who want dialogue speakers to remain visually distinct in long, multi-character chats. They reach configuration from SillyTavern's extensions surface on desktop and mobile, open it as a full-window page, make the change they came for, and return to the chat. Configuration is a place they visit deliberately, not a panel that sits alongside the conversation.
+SillyTavern roleplay users who want dialogue speakers to remain visually distinct in long, multi-character chats. They configure the extension inside SillyTavern's settings surface on desktop and mobile, then return to the chat rather than treating configuration as a destination of its own. Long sessions of heavier work (auditing a cast, reviewing attribution) are the exception, and are served by an optional fullscreen mode rather than by making every visit feel like one.
 
 ## Product Purpose
 
@@ -22,7 +22,7 @@ Do not turn the extension into a standalone analytics dashboard. Avoid card grid
 
 ## Design Principles
 
-1. Keep the chat primary. Configuration is a full-window page, so it must be transient: entered in one action, left in one action, and never persistent over the chat. Sections earn the width to be readable without nested scrollers, but the page still opens on a single task and closes back to where the user was. Breadth of settings is not a license for the page to become somewhere users linger.
+1. Keep the chat primary. Configuration lives in the host's settings surface, flows at its natural height there rather than inside a capped scroller of its own, and is easy to leave. Give heavier work more room through an explicit, reversible fullscreen mode; never by making the default surface larger or more persistent.
 2. Make consequential behavior explicit. Storage scope, replacement, cleanup, and chat rewriting must state their target before acting.
 3. Let character identity carry the expression. Use vivid color and gradients for speakers, not as decoration across ordinary controls.
 4. Prefer familiar controls over clever gestures. Every action available by pointer should have an understandable keyboard and touch path.

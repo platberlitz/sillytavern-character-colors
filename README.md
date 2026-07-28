@@ -4,7 +4,7 @@ A SillyTavern extension that gives each character's dialogue a consistent visual
 
 ## Quick Start
 
-1. Open **Dialogue Colors** from the Extensions panel. Settings open as a full-window page with a section list down the left side; press **Escape**, click the scrim, or use the close button to return to the chat.
+1. Open **Dialogue Colors** in the Extensions panel. Settings sit in the tab and scroll with it. For heavier work use **Fullscreen**, which gives the sections a left-hand nav; **Escape** or the same button returns to the tab.
 2. On **Current setup**, enable the extension and choose where colors are saved: **Per chat**, **Per card**, or **Global**.
 3. Choose the **LLM** or **Local (DOM-only)** engine.
 4. Use **Scan entire chat** to discover existing speakers, or start chatting so new speakers are detected automatically.
@@ -13,7 +13,7 @@ A SillyTavern extension that gives each character's dialogue a consistent visual
 
 ## Highlights
 
-- **Full-window settings page**: sections are a left-hand nav rather than stacked accordions in a fixed-height side panel, so no section is boxed into a nested scroller. The nav collapses to a horizontal strip on narrow screens.
+- **Optional fullscreen settings**: the panel flows at its natural height in the extensions tab instead of inside a capped inner scroller. Fullscreen is opt-in and swaps the stacked accordions for a left-hand section nav, which collapses to a horizontal strip on narrow screens.
 - **Two coloring engines**: persistent LLM formatting or reversible local DOM rendering.
 - **Three storage scopes**: separate colors per chat, share them across one character card, or use one global table.
 - **Reviewed scope switching**: choose whether to use, copy, merge, replace, or start an empty destination. Existing data is never overwritten merely by changing the scope selector.

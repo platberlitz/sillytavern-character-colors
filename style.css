@@ -17,106 +17,124 @@
 }
 
 /* ==========================================================================
-   Full-window settings page
-   The settings are a page, not a drawer: the scrim covers the chat and the
-   page owns the viewport, so no section is boxed into a nested scroller.
-   Every colour continues SillyTavern's theme tokens rather than introducing
-   a palette that would fight the host interface.
+   Settings surface
+   Default is the extensions tab: the panel flows at its natural height so the
+   tab is the only scroller. Fullscreen is opt-in and fixes the same element
+   to the viewport, where the section nav finally has room to be worth it.
    ========================================================================== */
 
-.dc-page-overlay {
-    position: fixed;
-    inset: 0;
-    /* Below the host's critical tier so SillyTavern popups and dropdowns
-       opened from inside the page still layer above it. */
-    z-index: var(--sb-z-modal, 3000);
-    display: flex;
-    padding: clamp(0px, 2vmin, 28px);
-    background: color-mix(in srgb, oklch(0.14 0.012 265) 72%, transparent);
-    -webkit-backdrop-filter: blur(6px);
-    backdrop-filter: blur(6px);
-    overscroll-behavior: contain;
+#dc-ext .inline-drawer-content {
+    font-size: 0.9em;
+    /* Deliberately no max-height/overflow: a capped inner scroller inside the
+       already-scrolling extensions tab gives two scrollbars and boxes every
+       section into a sliver of the panel. */
 }
 
-.dc-page-overlay[hidden] {
+.dc-panel-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+}
+
+#dc-ext .dc-panel-toolbar-title {
+    display: none;
+    flex: 1;
+    min-width: 0;
+    font-size: 1.15em;
+    font-weight: 600;
+}
+
+#dc-ext .dc-fullscreen-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    margin-left: auto;
+    min-height: 32px;
+}
+
+/* The nav only exists in fullscreen; in the tab the accordions are the nav. */
+#dc-ext .dc-page-nav {
     display: none;
 }
 
-/* The page owns the viewport while open; the chat behind it must not scroll. */
-body.dc-page-open {
-    overflow: hidden;
-}
+/* --- Fullscreen mode --- */
 
-#dc-ext-launcher .dc-launcher-icon {
-    margin-left: auto;
-    opacity: 0.7;
-    font-size: 0.85em;
-}
-
-#dc-ext.dc-page {
-    display: flex;
-    flex-direction: column;
-    flex: 1;
-    min-width: 0;
-    min-height: 0;
-    overflow: hidden;
+#dc-ext.dc-fullscreen {
+    position: fixed;
+    inset: 0;
+    /* Below the host's critical tier so SillyTavern popups and dropdowns
+       opened from inside the panel still layer above it. */
+    z-index: var(--sb-z-modal, 3000);
+    margin: 0;
     border: 1px solid var(--dc-border);
-    border-radius: 14px;
-    /* Same surface recipe SillyTavern uses for its own popups, so the page
+    border-radius: 0;
+    /* Same surface recipe SillyTavern uses for its own popups, so fullscreen
        reads as part of the host rather than a foreign panel. */
     background-color: var(--SmartThemeBlurTintColor, oklch(0.2 0.012 265));
     -webkit-backdrop-filter: blur(var(--SmartThemeBlurStrength, 10px));
     backdrop-filter: blur(var(--SmartThemeBlurStrength, 10px));
     color: var(--SmartThemeBodyColor, inherit);
     box-shadow: 0 18px 48px rgb(0 0 0 / 45%);
-    font-size: 0.9em;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
 }
 
-.dc-page-header {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    flex: none;
-    padding: 14px 18px;
+/* The drawer header is redundant once the panel owns the viewport. */
+#dc-ext.dc-fullscreen > .inline-drawer-toggle {
+    display: none;
+}
+
+body.dc-fullscreen-open {
+    overflow: hidden;
+}
+
+/*
+ * One grid, two columns: the nav in column 1 and every section stacked in the
+ * same cell of column 2. No wrapper element, so the sections stay direct
+ * children of #dc-panel-content and every existing rule keeps matching.
+ */
+#dc-ext.dc-fullscreen > .dc-panel-content {
+    display: grid;
+    grid-template-columns: 208px minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    flex: 1;
+    min-height: 0;
+    padding: 0;
+}
+
+/* Outranks SillyTavern's inline display from slideToggle, so a mid-animation
+   or collapsed drawer still shows its content once fullscreen takes over. */
+#dc-ext.dc-fullscreen > .dc-panel-content {
+    display: grid !important;
+}
+
+/* Expanding a full-height panel inside the extensions tab otherwise lets
+   scroll anchoring yank the tab while the drawer animates. */
+#rm_extensions_block.dc-dialogue-colors-expanded {
+    overflow-anchor: none;
+}
+
+#dc-ext.dc-fullscreen .dc-panel-toolbar {
+    grid-column: 1 / -1;
+    grid-row: 1;
+    margin: 0;
+    padding: 12px 18px;
     border-bottom: 1px solid var(--dc-border);
     background: var(--dc-surface-soft);
 }
 
-#dc-ext .dc-page-title {
-    flex: 1;
-    min-width: 0;
-    margin: 0;
-    font-size: 1.15em;
-    font-weight: 600;
-    line-height: 1.2;
-    letter-spacing: 0.01em;
+#dc-ext.dc-fullscreen .dc-panel-toolbar-title {
+    display: block;
 }
 
-#dc-ext .dc-page-close {
-    flex: none;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 34px;
-    height: 34px;
-    padding: 0;
-    border-radius: 8px;
-    font-size: 1em;
-}
-
-.dc-page-body {
-    display: flex;
-    flex: 1;
-    min-height: 0;
-    min-width: 0;
-}
-
-.dc-page-nav {
+#dc-ext.dc-fullscreen .dc-page-nav {
     display: flex;
     flex-direction: column;
     gap: 2px;
-    flex: none;
-    width: 208px;
+    grid-column: 1;
+    grid-row: 2;
     padding: 12px 10px;
     border-right: 1px solid var(--dc-border);
     background: var(--dc-surface-soft);
@@ -161,36 +179,31 @@ body.dc-page-open {
     color: var(--dc-danger);
 }
 
-#dc-ext > .dc-page-body > .dc-panel-content {
-    flex: 1;
-    min-width: 0;
+#dc-ext.dc-fullscreen > .dc-panel-content > [data-dc-page] {
+    grid-column: 2;
+    grid-row: 2;
+    margin: 0;
     padding: 20px 24px 32px;
+    border: 0;
+    background: none;
+    box-shadow: none;
     overflow-y: auto;
     overscroll-behavior: contain;
+    /* Body prose stays readable; dense controls and tables may exceed this. */
+    max-width: 78ch;
 }
 
 /*
- * Sections keep their <details> markup so every existing rule still applies,
- * but the nav owns disclosure now: the summary is redundant chrome and a
- * collapsed section could otherwise hide the controls the nav points at.
+ * Doubled id keeps this above the generic `#dc-ext .dc-section > summary`
+ * rule further down the sheet, which sets display: flex. In fullscreen the
+ * nav is the disclosure, so the summary would just repeat the tab label.
  */
-/* Doubled id keeps this above the generic `#dc-ext .dc-section > summary`
-   rule further down the sheet, which sets display: flex. */
-#dc-ext #dc-panel-content > [data-dc-page] > summary {
+#dc-ext.dc-fullscreen #dc-panel-content > [data-dc-page] > summary {
     display: none;
 }
 
 #dc-ext #dc-panel-content > [data-dc-page][hidden] {
     display: none;
-}
-
-#dc-ext #dc-panel-content > [data-dc-page] {
-    margin: 0;
-    padding: 0;
-    border: 0;
-    background: none;
-    /* Body prose stays readable; dense controls and tables may exceed this. */
-    max-width: 78ch;
 }
 
 #dc-ext #dc-panel-content > [data-dc-page]:focus {
@@ -204,23 +217,16 @@ body.dc-page-open {
 }
 
 @media (max-width: 700px) {
-    .dc-page-overlay {
-        padding: 0;
-    }
-
-    #dc-ext.dc-page {
-        border: 0;
-        border-radius: 0;
-    }
-
-    .dc-page-body {
-        flex-direction: column;
-    }
-
     /* Nav becomes a horizontal strip so the content keeps the full width. */
-    .dc-page-nav {
+    #dc-ext.dc-fullscreen > .dc-panel-content {
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-rows: auto auto minmax(0, 1fr);
+    }
+
+    #dc-ext.dc-fullscreen .dc-page-nav {
         flex-direction: row;
-        width: auto;
+        grid-column: 1;
+        grid-row: 2;
         padding: 8px 10px;
         border-right: 0;
         border-bottom: 1px solid var(--dc-border);
@@ -232,13 +238,15 @@ body.dc-page-open {
         white-space: nowrap;
     }
 
-    #dc-ext > .dc-page-body > .dc-panel-content {
+    #dc-ext.dc-fullscreen > .dc-panel-content > [data-dc-page] {
+        grid-column: 1;
+        grid-row: 3;
         padding: 16px 14px 28px;
     }
 }
 
 @media (forced-colors: active) {
-    #dc-ext.dc-page {
+    #dc-ext.dc-fullscreen {
         border: 1px solid CanvasText;
     }
 
@@ -253,7 +261,7 @@ body.dc-page-open {
  * Zero-specificity reset: strips browser button chrome without outranking
  * SillyTavern core or user theme rules that style .inline-drawer-toggle.
  */
-:where(#dc-ext-launcher > button.inline-drawer-toggle) {
+:where(#dc-ext > button.inline-drawer-toggle) {
     border: 0;
     background: transparent;
     color: inherit;
@@ -262,12 +270,12 @@ body.dc-page-open {
     cursor: pointer;
 }
 
-#dc-ext-launcher > button.inline-drawer-toggle {
+#dc-ext > button.inline-drawer-toggle {
     width: 100%;
     box-sizing: border-box;
 }
 
-#dc-ext-launcher > button.inline-drawer-toggle:focus-visible {
+#dc-ext > button.inline-drawer-toggle:focus-visible {
     outline: 2px solid var(--dc-accent, var(--SmartThemeQuoteColor, #5a9));
     outline-offset: -2px;
 }

@@ -3778,19 +3778,6 @@ const SETTINGS_PAGE_SECTIONS = [
 
 const DEFAULT_SETTINGS_PAGE_SLUG = SETTINGS_PAGE_SECTIONS[0].slug;
 
-function buildSettingsLauncherHtml() {
-    return `
-    <div id="dc-ext-launcher" class="dc-ext-launcher inline-drawer">
-        <button type="button" id="dc-open-page" class="inline-drawer-toggle inline-drawer-header" aria-haspopup="dialog" aria-expanded="false" aria-controls="dc-ext">
-            <b>Dialogue Colors</b>
-            <!-- Deliberately not .inline-drawer-icon: SillyTavern's global
-                 .inline-drawer-toggle handler swaps chevron classes onto that
-                 hook, which would stack a second glyph on this launcher. -->
-            <span class="dc-launcher-icon fa-solid fa-up-right-and-down-left-from-center" aria-hidden="true"></span>
-        </button>
-    </div>`;
-}
-
 function buildSettingsPageNavHtml() {
     return SETTINGS_PAGE_SECTIONS.map(({ slug, label }) => `
                 <button type="button" role="tab" class="dc-page-tab" id="dc-tab-${slug}" data-dc-tab="${slug}" aria-controls="dc-page-${slug}" aria-selected="false" tabindex="-1">${label}</button>`).join('');
@@ -3798,16 +3785,15 @@ function buildSettingsPageNavHtml() {
 
 function buildSettingsPanelHtml() {
     return `
-    <div id="dc-page-overlay" class="dc-page-overlay" hidden>
-    <div id="dc-ext" class="dc-page" role="dialog" aria-modal="true" aria-labelledby="dc-page-title">
-        <header class="dc-page-header">
-            <h1 id="dc-page-title" class="dc-page-title">Dialogue Colors</h1>
-            <button type="button" id="dc-page-close" class="dc-page-close menu_button" aria-label="Close Dialogue Colors settings"><span class="fa-solid fa-xmark" aria-hidden="true"></span></button>
-        </header>
-        <div class="dc-page-body">
+    <div id="dc-ext" class="inline-drawer">
+        <button type="button" id="dc-panel-toggle" class="inline-drawer-toggle inline-drawer-header" aria-expanded="false" aria-controls="dc-panel-content"><b>Dialogue Colors</b><span class="inline-drawer-icon fa-solid fa-circle-chevron-down down" aria-hidden="true"></span></button>
+        <div id="dc-panel-content" class="inline-drawer-content dc-panel-content" aria-labelledby="dc-panel-toggle">
+            <div class="dc-panel-toolbar">
+                <span class="dc-panel-toolbar-title" aria-hidden="true">Dialogue Colors</span>
+                <button type="button" id="dc-fullscreen-toggle" class="menu_button dc-fullscreen-toggle" aria-pressed="false"><span class="fa-solid fa-up-right-and-down-left-from-center" aria-hidden="true"></span><span class="dc-fullscreen-label">Fullscreen</span></button>
+            </div>
             <nav id="dc-page-nav" class="dc-page-nav" role="tablist" aria-orientation="vertical" aria-label="Dialogue Colors sections">${buildSettingsPageNavHtml()}
             </nav>
-        <div id="dc-panel-content" class="dc-panel-content">
             <details class="dc-section dc-section-primary" id="dc-page-setup" data-dc-page="setup" role="tabpanel" aria-labelledby="dc-tab-setup" tabindex="-1" open>
                 <summary>Current setup</summary>
                 <div class="dc-stack">
@@ -3940,23 +3926,31 @@ function buildSettingsPanelHtml() {
                 </div>
             </details>
         </div>
-        </div>
-    </div>
     </div>`;
 }
 
 const FOCUSABLE_PAGE_SELECTOR = 'a[href], button, input, select, textarea, summary, [tabindex]:not([tabindex="-1"])';
 
+// The panel lives in SillyTavern's extensions tab and flows at its natural
+// height there, so the tab is the only scroller. Fullscreen is an opt-in mode
+// on the same element: it fixes the panel to the viewport and swaps the
+// stacked accordions for the section nav, which only earns its space once
+// there is space to earn.
 let activeSettingsPageSlug = DEFAULT_SETTINGS_PAGE_SLUG;
-let settingsPageOpener = null;
+let fullscreenOpener = null;
 
 function getSettingsPageTabs() {
     return Array.from(document.querySelectorAll('#dc-page-nav .dc-page-tab'));
 }
 
+export function isSettingsFullscreen() {
+    return document.getElementById('dc-ext')?.classList.contains('dc-fullscreen') === true;
+}
+
 export function showSettingsPageSection(slug, { focusTab = false } = {}) {
     const target = SETTINGS_PAGE_SECTIONS.some(section => section.slug === slug) ? slug : DEFAULT_SETTINGS_PAGE_SLUG;
     activeSettingsPageSlug = target;
+    const fullscreen = isSettingsFullscreen();
     for (const tab of getSettingsPageTabs()) {
         const selected = tab.dataset.dcTab === target;
         tab.setAttribute('aria-selected', selected ? 'true' : 'false');
@@ -3965,17 +3959,19 @@ export function showSettingsPageSection(slug, { focusTab = false } = {}) {
         tab.tabIndex = selected ? 0 : -1;
         if (selected && focusTab) tab.focus();
     }
-    const content = document.getElementById('dc-panel-content');
     for (const section of document.querySelectorAll('#dc-panel-content > [data-dc-page]')) {
-        const selected = section.dataset.dcPage === target;
-        section.toggleAttribute('hidden', !selected);
-        // The sections stay <details open> permanently; the nav replaces the
-        // disclosure, so a collapsed section can never hide its own controls.
-        if (selected) section.setAttribute('open', '');
+        // Drawer mode is a plain accordion list: every section stays in the
+        // flow and keeps its own summary. Only fullscreen hides the inactive
+        // ones, because only fullscreen has a nav to reach them again.
+        section.toggleAttribute('hidden', fullscreen && section.dataset.dcPage !== target);
+        if (fullscreen && section.dataset.dcPage === target) section.setAttribute('open', '');
     }
-    if (content) {
-        content.scrollTop = 0;
-        content.scrollLeft = 0;
+    if (fullscreen) {
+        const content = document.getElementById('dc-panel-content');
+        if (content) {
+            content.scrollTop = 0;
+            content.scrollLeft = 0;
+        }
     }
 }
 
@@ -3986,48 +3982,85 @@ function moveSettingsPageSelection(step) {
     showSettingsPageSection(SETTINGS_PAGE_SECTIONS[next].slug, { focusTab: true });
 }
 
-export function isSettingsPageOpen() {
-    return document.getElementById('dc-page-overlay')?.hidden === false;
-}
-
-export function openSettingsPage(opener = document.activeElement) {
-    const overlay = document.getElementById('dc-page-overlay');
-    if (!overlay || !overlay.hidden) return;
-    settingsPageOpener = opener instanceof HTMLElement ? opener : null;
-    overlay.hidden = false;
-    document.getElementById('dc-open-page')?.setAttribute('aria-expanded', 'true');
-    document.body.classList.add('dc-page-open');
+export function enterSettingsFullscreen(opener = document.activeElement) {
+    const panel = document.getElementById('dc-ext');
+    const toggle = document.getElementById('dc-fullscreen-toggle');
+    if (!panel || panel.classList.contains('dc-fullscreen')) return;
+    fullscreenOpener = opener instanceof HTMLElement ? opener : null;
+    panel.classList.add('dc-fullscreen');
+    panel.setAttribute('role', 'dialog');
+    panel.setAttribute('aria-modal', 'true');
+    panel.setAttribute('aria-label', 'Dialogue Colors settings');
+    document.body.classList.add('dc-fullscreen-open');
+    toggle?.setAttribute('aria-pressed', 'true');
     showSettingsPageSection(activeSettingsPageSlug);
-    const tab = document.querySelector('#dc-page-nav .dc-page-tab[aria-selected="true"]');
-    (tab || document.getElementById('dc-page-close'))?.focus();
+    document.querySelector('#dc-page-nav .dc-page-tab[aria-selected="true"]')?.focus();
 }
 
-export function closeSettingsPage() {
-    const overlay = document.getElementById('dc-page-overlay');
-    if (!overlay || overlay.hidden) return;
-    // Blur first: focus stranded inside a hidden subtree falls back to <body>
-    // and the opener never gets it back.
-    if (overlay.contains(document.activeElement)) document.activeElement.blur();
-    overlay.hidden = true;
-    document.getElementById('dc-open-page')?.setAttribute('aria-expanded', 'false');
-    document.body.classList.remove('dc-page-open');
-    const opener = settingsPageOpener?.isConnected ? settingsPageOpener : document.getElementById('dc-open-page');
-    settingsPageOpener = null;
-    // The launcher lives in SillyTavern's extensions drawer, which may have
-    // been collapsed (display:none) while the page was open. focus() is a
-    // no-op on an unrendered element, so only restore when it can actually
-    // take focus; otherwise the browser's default (body) is the honest result.
+export function exitSettingsFullscreen() {
+    const panel = document.getElementById('dc-ext');
+    const toggle = document.getElementById('dc-fullscreen-toggle');
+    if (!panel || !panel.classList.contains('dc-fullscreen')) return;
+    panel.classList.remove('dc-fullscreen');
+    panel.removeAttribute('role');
+    panel.removeAttribute('aria-modal');
+    panel.removeAttribute('aria-label');
+    document.body.classList.remove('dc-fullscreen-open');
+    toggle?.setAttribute('aria-pressed', 'false');
+    // Reveal every section again before focus moves, so the accordion list is
+    // whole the moment the panel is back in the tab.
+    showSettingsPageSection(activeSettingsPageSlug);
+    const opener = fullscreenOpener?.isConnected ? fullscreenOpener : toggle;
+    fullscreenOpener = null;
     if (opener?.offsetParent) opener.focus();
 }
 
-function bindSettingsPage() {
-    const overlay = document.getElementById('dc-page-overlay');
-    const nav = document.getElementById('dc-page-nav');
-    const launcher = document.getElementById('dc-open-page');
-    if (!overlay || !nav || !launcher) return;
+export function toggleSettingsFullscreen(opener) {
+    if (isSettingsFullscreen()) exitSettingsFullscreen();
+    else enterSettingsFullscreen(opener);
+}
 
-    launcher.addEventListener('click', () => openSettingsPage(launcher));
-    document.getElementById('dc-page-close')?.addEventListener('click', () => closeSettingsPage());
+// SillyTavern's own drawer handler animates the panel but never reports its
+// state, so mirror it onto the toggle for assistive technology and suppress
+// scroll anchoring on the host tab while the height changes.
+function bindSettingsDrawerState(panel) {
+    const drawerToggle = panel.querySelector(':scope > .inline-drawer-toggle');
+    const content = panel.querySelector(':scope > .dc-panel-content');
+    const hostScroller = panel.closest('#rm_extensions_block');
+    if (!drawerToggle || !content) return;
+
+    const isExpanded = () => !content.hidden
+        && content.getAttribute('aria-hidden') !== 'true'
+        && getComputedStyle(content).display !== 'none';
+    const sync = () => {
+        const expanded = isSettingsFullscreen() || isExpanded();
+        drawerToggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+        hostScroller?.classList.toggle('dc-dialogue-colors-expanded', expanded);
+    };
+
+    drawerToggle.addEventListener('click', () => {
+        // Runs before SillyTavern starts slideToggle, so anchoring is already
+        // suppressed by the time the height starts moving.
+        hostScroller?.classList.add('dc-dialogue-colors-expanded');
+        requestAnimationFrame(sync);
+    });
+    if (typeof MutationObserver === 'function') {
+        new MutationObserver(sync).observe(content, {
+            attributes: true,
+            attributeFilter: ['aria-hidden', 'class', 'hidden', 'style'],
+        });
+    }
+    sync();
+}
+
+function bindSettingsPage() {
+    const panel = document.getElementById('dc-ext');
+    const nav = document.getElementById('dc-page-nav');
+    const toggle = document.getElementById('dc-fullscreen-toggle');
+    if (!panel || !nav || !toggle) return;
+
+    bindSettingsDrawerState(panel);
+    toggle.addEventListener('click', () => toggleSettingsFullscreen(toggle));
 
     nav.addEventListener('click', e => {
         // No focusTab here: the click already focuses the button, and forcing
@@ -4039,9 +4072,7 @@ function bindSettingsPage() {
 
     nav.addEventListener('keydown', e => {
         if (e.altKey || e.ctrlKey || e.metaKey) return;
-        const keys = {
-            ArrowDown: 1, ArrowRight: 1, ArrowUp: -1, ArrowLeft: -1,
-        };
+        const keys = { ArrowDown: 1, ArrowRight: 1, ArrowUp: -1, ArrowLeft: -1 };
         if (e.key in keys) {
             e.preventDefault();
             moveSettingsPageSelection(keys[e.key]);
@@ -4056,17 +4087,18 @@ function bindSettingsPage() {
         }
     });
 
-    overlay.addEventListener('keydown', e => {
+    panel.addEventListener('keydown', e => {
+        if (!isSettingsFullscreen()) return;
         if (e.key === 'Escape' && !e.defaultPrevented) {
-            // Let a dialog, popup, or open dropdown inside the page consume
-            // Escape first; only close the page when nothing else claimed it.
+            // Let a dialog, popup, or open dropdown inside the panel consume
+            // Escape first; only leave fullscreen when nothing else claimed it.
             if (document.activeElement?.closest('.dc-dialog, dialog[open]')) return;
             e.preventDefault();
-            closeSettingsPage();
+            exitSettingsFullscreen();
             return;
         }
         if (e.key !== 'Tab') return;
-        const focusable = Array.from(overlay.querySelectorAll(FOCUSABLE_PAGE_SELECTOR))
+        const focusable = Array.from(panel.querySelectorAll(FOCUSABLE_PAGE_SELECTOR))
             .filter(el => !el.disabled && el.tabIndex !== -1 && el.offsetParent !== null);
         if (!focusable.length) return;
         const first = focusable[0];
@@ -4078,16 +4110,6 @@ function bindSettingsPage() {
             e.preventDefault();
             first.focus();
         }
-    });
-
-    // Clicking the scrim closes; clicks inside the page must not.
-    overlay.addEventListener('mousedown', e => {
-        if (e.target !== overlay) return;
-        // Without this the browser's own post-mousedown focus handling runs
-        // after closeSettingsPage() and drops focus on the body, undoing the
-        // restore that Escape and the close button both get right.
-        e.preventDefault();
-        closeSettingsPage();
     });
 
     showSettingsPageSection(DEFAULT_SETTINGS_PAGE_SLUG);
@@ -4689,11 +4711,7 @@ function bindSettingsPanelControls($) {
 
 export function createUI() {
     if (document.getElementById('dc-ext')) return;
-    // The launcher stays in SillyTavern's extensions drawer; the settings
-    // themselves live in a full-window page appended to <body>, so they are
-    // not boxed into the side drawer's width or its scroll height.
-    document.getElementById('extensions_settings')?.insertAdjacentHTML('beforeend', buildSettingsLauncherHtml());
-    document.body.insertAdjacentHTML('beforeend', buildSettingsPanelHtml());
+    document.getElementById('extensions_settings')?.insertAdjacentHTML('beforeend', buildSettingsPanelHtml());
 
     const $ = id => document.getElementById(id);
 
