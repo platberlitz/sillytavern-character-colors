@@ -6,7 +6,7 @@ product
 
 ## Users
 
-SillyTavern roleplay users who want dialogue speakers to remain visually distinct in long, multi-character chats. They configure the extension inside SillyTavern's settings surface on desktop and mobile, then return to the chat rather than treating configuration as a destination of its own.
+SillyTavern roleplay users who want dialogue speakers to remain visually distinct in long, multi-character chats. They reach configuration from SillyTavern's extensions surface on desktop and mobile, open it as a full-window page, make the change they came for, and return to the chat. Configuration is a place they visit deliberately, not a panel that sits alongside the conversation.
 
 ## Product Purpose
 
@@ -22,7 +22,7 @@ Do not turn the extension into a standalone analytics dashboard. Avoid card grid
 
 ## Design Principles
 
-1. Keep the chat primary. Configuration should be compact, progressive, and easy to leave.
+1. Keep the chat primary. Configuration is a full-window page, so it must be transient: entered in one action, left in one action, and never persistent over the chat. Sections earn the width to be readable without nested scrollers, but the page still opens on a single task and closes back to where the user was. Breadth of settings is not a license for the page to become somewhere users linger.
 2. Make consequential behavior explicit. Storage scope, replacement, cleanup, and chat rewriting must state their target before acting.
 3. Let character identity carry the expression. Use vivid color and gradients for speakers, not as decoration across ordinary controls.
 4. Prefer familiar controls over clever gestures. Every action available by pointer should have an understandable keyboard and touch path.
