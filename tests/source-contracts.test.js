@@ -306,6 +306,42 @@ test('consensus logic stays free of SillyTavern imports', async () => {
     assert.deepEqual(imports, []);
 });
 
+test('scroll preservation reaches the host scroller, not just the panel', async () => {
+    const capture = functionSection(sources['ui.js'], 'captureScrollPositions');
+
+    // The panel is no longer its own scroller, so a boundary that stops at it
+    // captures nothing and a list re-render silently loses the user's place.
+    assert.doesNotMatch(capture, /closest\?\.\('#dc-ext \.dc-panel-content'\)/);
+    assert.match(capture, /isScrollableElement\(current\)/);
+    assert.match(capture, /if \(!current\.closest\('#dc-ext'\)\) break/);
+
+    // Declared overflow decides, not size alone: plenty of `overflow: visible`
+    // boxes report scrollHeight > clientHeight and hold no scroll position.
+    const scrollable = functionSection(sources['ui.js'], 'isScrollableElement');
+    assert.match(scrollable, /\(auto\|scroll\|overlay\)/);
+});
+
+test('anchor suppression targets whichever ancestor actually scrolls', async () => {
+    const bind = functionSection(sources['ui.js'], 'bindSettingsDrawerState');
+    const find = functionSection(sources['ui.js'], 'findScrollableAncestor');
+
+    // Forks relocate the extensions container, so #rm_extensions_block is not
+    // reliably the scroller; on SillyBunny it is an overflow: visible wrapper.
+    // Comments are stripped first: the contract is the code, and the comment
+    // explaining this fix necessarily names the selector it removed.
+    const bindCode = bind.replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    assert.doesNotMatch(bindCode, /#rm_extensions_block/);
+    assert.match(bind, /findScrollableAncestor\(panel\)/);
+    assert.match(bind, /getHostScroller\(\)\?\.classList/);
+    // Resolve on declared overflow so the container that will scroll once the
+    // panel expands is found before it has anything to scroll.
+    assert.match(find, /\(auto\|scroll\|overlay\)/);
+
+    const css = await readFile(new URL('../style.css', import.meta.url), 'utf8');
+    assert.doesNotMatch(css, /#rm_extensions_block\.dc-dialogue-colors-expanded/);
+    assert.match(css, /^\.dc-dialogue-colors-expanded \{[^}]*overflow-anchor: none/m);
+});
+
 test('edited attribution review acceptance stays atomic', () => {
     const acceptFromUi = functionSection(sources['ui.js'], 'acceptAttributionReviewFromUi');
 

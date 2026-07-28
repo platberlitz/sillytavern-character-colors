@@ -110,9 +110,13 @@ body.dc-fullscreen-open {
     display: grid !important;
 }
 
-/* Expanding a full-height panel inside the extensions tab otherwise lets
-   scroll anchoring yank the tab while the drawer animates. */
-#rm_extensions_block.dc-dialogue-colors-expanded {
+/*
+ * Expanding a full-height panel otherwise lets scroll anchoring yank the host
+ * tab while the drawer animates. Unscoped on purpose: the class is applied to
+ * whichever ancestor actually scrolls, which differs between SillyTavern and
+ * forks that relocate the extensions container into their own shell.
+ */
+.dc-dialogue-colors-expanded {
     overflow-anchor: none;
 }
 

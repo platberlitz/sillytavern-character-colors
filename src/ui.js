@@ -2105,16 +2105,42 @@ function bindNarratorEditorControls(host) {
     });
 }
 
+// An element only holds a scroll position if its overflow actually scrolls;
+// scrollHeight alone is true of plenty of `overflow: visible` boxes.
+function isScrollableElement(element) {
+    if (!element || element.nodeType !== 1) return false;
+    const style = getComputedStyle(element);
+    const scrollsY = /(auto|scroll|overlay)/.test(style.overflowY) && element.scrollHeight > element.clientHeight;
+    const scrollsX = /(auto|scroll|overlay)/.test(style.overflowX) && element.scrollWidth > element.clientWidth;
+    return scrollsY || scrollsX;
+}
+
+export function findScrollableAncestor(element) {
+    let current = element?.parentElement;
+    while (current && current !== document.documentElement) {
+        const style = getComputedStyle(current);
+        // Test the declared overflow, not the current size: the container that
+        // will scroll once our panel expands does not scroll yet.
+        if (/(auto|scroll|overlay)/.test(style.overflowY)) return current;
+        current = current.parentElement;
+    }
+    return null;
+}
+
 function captureScrollPositions(container) {
     const positions = [];
-    const boundary = container?.closest?.('#dc-ext .dc-panel-content')
-        || container?.closest?.('#dc-ext');
     let current = container;
-    while (current) {
-        if (current.scrollTop !== undefined && (current.scrollTop > 0 || current.scrollHeight > current.clientHeight || current.scrollLeft > 0)) {
+    // The panel used to be its own scroller, so stopping at it was enough.
+    // It now flows at natural height inside the host's scroller, and that
+    // outer element is the one a list re-render actually disturbs, so the
+    // walk has to reach it or nothing gets restored at all.
+    while (current && current !== document.documentElement) {
+        if (isScrollableElement(current)) {
             positions.push({ element: current, top: current.scrollTop, left: current.scrollLeft });
+            // Stop at the first scroller outside the panel: that is the host's
+            // own, and nothing above it is ours to restore.
+            if (!current.closest('#dc-ext')) break;
         }
-        if (current === boundary) break;
         current = current.parentElement;
     }
     return positions;
@@ -4121,8 +4147,19 @@ export function toggleSettingsFullscreen(opener) {
 function bindSettingsDrawerState(panel) {
     const drawerToggle = panel.querySelector(':scope > .inline-drawer-toggle');
     const content = panel.querySelector(':scope > .dc-panel-content');
-    const hostScroller = panel.closest('#rm_extensions_block');
     if (!drawerToggle || !content) return;
+
+    // Resolved on demand rather than hardcoded to #rm_extensions_block. Hosts
+    // relocate the extensions container: SillyBunny embeds it in its settings
+    // shell, where #rm_extensions_block is a plain `overflow: visible` wrapper
+    // and the real scroller is an ancestor of it. Suppressing anchoring on the
+    // wrapper did nothing, which is how a tall panel could still yank the tab.
+    let cachedScroller = null;
+    const getHostScroller = () => {
+        if (cachedScroller?.isConnected && cachedScroller.contains(panel)) return cachedScroller;
+        cachedScroller = findScrollableAncestor(panel);
+        return cachedScroller;
+    };
 
     const isExpanded = () => !content.hidden
         && content.getAttribute('aria-hidden') !== 'true'
@@ -4130,13 +4167,13 @@ function bindSettingsDrawerState(panel) {
     const sync = () => {
         const expanded = isSettingsFullscreen() || isExpanded();
         drawerToggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
-        hostScroller?.classList.toggle('dc-dialogue-colors-expanded', expanded);
+        getHostScroller()?.classList.toggle('dc-dialogue-colors-expanded', expanded);
     };
 
     drawerToggle.addEventListener('click', () => {
         // Runs before SillyTavern starts slideToggle, so anchoring is already
         // suppressed by the time the height starts moving.
-        hostScroller?.classList.add('dc-dialogue-colors-expanded');
+        getHostScroller()?.classList.add('dc-dialogue-colors-expanded');
         requestAnimationFrame(sync);
     });
     if (typeof MutationObserver === 'function') {
