@@ -4185,6 +4185,57 @@ function bindSettingsDrawerState(panel) {
     sync();
 }
 
+/**
+ * Re-assert the host scroller's offset when the extensions page comes back.
+ *
+ * iOS gives that scroller `-webkit-overflow-scrolling: touch`, and a momentum
+ * container that is display:none'd and shown again loses its offset, landing
+ * at the bottom when the content is tall. Our panel is only tall while its
+ * drawer is open, which is exactly when the jump was reported and why a closed
+ * drawer looked fine. The property is inert off iOS, so on every other engine
+ * this restores the value the scroller already had.
+ */
+function bindHostScrollStability(panel) {
+    if (typeof ResizeObserver !== 'function') return;
+    let scroller = null;
+    let savedScrollTop = 0;
+    const isRendered = () => panel.getClientRects().length > 0;
+
+    function onScroll() {
+        // Only trust offsets observed while the page is actually on screen; a
+        // scrambled offset from a hidden container must not be recorded.
+        if (scroller && isRendered()) savedScrollTop = scroller.scrollTop;
+    }
+
+    const resolveScroller = () => {
+        if (scroller?.isConnected && scroller.contains(panel)) return scroller;
+        scroller?.removeEventListener('scroll', onScroll);
+        scroller = findScrollableAncestor(panel);
+        scroller?.addEventListener('scroll', onScroll, { passive: true });
+        return scroller;
+    };
+
+    let wasRendered = isRendered();
+    new ResizeObserver(() => {
+        const rendered = isRendered();
+        if (rendered && !wasRendered) {
+            const host = resolveScroller();
+            if (host) {
+                const target = Math.min(savedScrollTop, Math.max(0, host.scrollHeight - host.clientHeight));
+                host.scrollTop = target;
+                // The offset can be clobbered again once momentum scrolling is
+                // re-armed, so re-assert after the frame the show happened in.
+                requestAnimationFrame(() => {
+                    if (host.isConnected && isRendered()) host.scrollTop = target;
+                });
+            }
+        }
+        wasRendered = rendered;
+    }).observe(panel);
+
+    resolveScroller();
+}
+
 function bindSettingsPage() {
     const panel = document.getElementById('dc-ext');
     const nav = document.getElementById('dc-page-nav');
@@ -4192,6 +4243,7 @@ function bindSettingsPage() {
     if (!panel || !nav || !toggle) return;
 
     bindSettingsDrawerState(panel);
+    bindHostScrollStability(panel);
     bindPanelDisclosurePersistence(panel);
     applyPanelDisclosureState(panel);
     toggle.addEventListener('click', () => toggleSettingsFullscreen(toggle));

@@ -342,6 +342,24 @@ test('anchor suppression targets whichever ancestor actually scrolls', async () 
     assert.match(css, /^\.dc-dialogue-colors-expanded \{[^}]*overflow-anchor: none/m);
 });
 
+test('the host scroll offset is re-asserted when the page returns', () => {
+    const source = sources['ui.js'];
+    const stability = functionSection(source, 'bindHostScrollStability');
+    const bind = functionSection(source, 'bindSettingsPage');
+
+    assert.match(bind, /bindHostScrollStability\(panel\)/);
+    // A hidden momentum-scrolling container reports a scrambled offset, so only
+    // offsets seen while the page is on screen may be recorded.
+    assert.match(stability, /if \(scroller && isRendered\(\)\) savedScrollTop = scroller\.scrollTop/);
+    assert.match(stability, /new ResizeObserver/);
+    assert.match(stability, /rendered && !wasRendered/);
+    // Clamp, or a stale offset taller than the current content scrolls to the
+    // bottom, which is the very failure being corrected.
+    assert.match(stability, /Math\.min\(savedScrollTop, Math\.max\(0, host\.scrollHeight - host\.clientHeight\)\)/);
+    // Re-assert after the frame: iOS re-arms momentum scrolling on show.
+    assert.match(stability, /requestAnimationFrame\(\(\) => \{[\s\S]*?host\.scrollTop = target/);
+});
+
 test('edited attribution review acceptance stays atomic', () => {
     const acceptFromUi = functionSection(sources['ui.js'], 'acceptAttributionReviewFromUi');
 
