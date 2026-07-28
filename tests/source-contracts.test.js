@@ -224,7 +224,17 @@ test('every settings page section has a matching nav tab', () => {
     assert.deepEqual([...panelSlugs].sort(), [...navSlugs].sort());
 
     for (const slug of navSlugs) {
-        assert.match(source, new RegExp(`id="dc-page-${slug}" data-dc-page="${slug}" role="tabpanel" aria-labelledby="dc-tab-${slug}"`));
+        // Attribute order is not the contract; presence on the one tag is.
+        const tag = new RegExp(`<details[^>]*\\bid="dc-page-${slug}"[^>]*>`).exec(source);
+        assert.ok(tag, `no panel tag for ${slug}`);
+        for (const attribute of [
+            `data-dc-page="${slug}"`,
+            `data-dc-disclosure="${slug}"`,
+            'role="tabpanel"',
+            `aria-labelledby="dc-tab-${slug}"`,
+        ]) {
+            assert.ok(tag[0].includes(attribute), `${slug} panel is missing ${attribute}`);
+        }
         assert.match(source, new RegExp(`id="dc-tab-\\$\\{slug\\}" data-dc-tab="\\$\\{slug\\}" aria-controls="dc-page-\\$\\{slug\\}"`));
     }
 });

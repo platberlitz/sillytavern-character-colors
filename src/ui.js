@@ -3818,7 +3818,7 @@ function buildSettingsPanelHtml() {
             </div>
             <nav id="dc-page-nav" class="dc-page-nav" role="tablist" aria-orientation="vertical" aria-label="Dialogue Colors sections">${buildSettingsPageNavHtml()}
             </nav>
-            <details class="dc-section dc-section-primary" id="dc-page-setup" data-dc-page="setup" role="tabpanel" aria-labelledby="dc-tab-setup" tabindex="-1" open>
+            <details class="dc-section dc-section-primary" id="dc-page-setup" data-dc-page="setup" data-dc-disclosure="setup" role="tabpanel" aria-labelledby="dc-tab-setup" tabindex="-1" open>
                 <summary>Current setup</summary>
                 <div class="dc-stack">
                     <div class="dc-setup-strip">
@@ -3831,7 +3831,7 @@ function buildSettingsPanelHtml() {
                     <small class="dc-engine-note dc-llm-only">LLM mode stores ordinary font colors in chat text; gradients remain a local visual enhancement.</small>
                 </div>
             </details>
-            <details class="dc-section dc-section-primary" id="dc-page-process" data-dc-page="process" role="tabpanel" aria-labelledby="dc-tab-process" tabindex="-1" open>
+            <details class="dc-section dc-section-primary" id="dc-page-process" data-dc-page="process" data-dc-disclosure="process" role="tabpanel" aria-labelledby="dc-tab-process" tabindex="-1" open>
                 <summary>Process chat</summary>
                 <p class="dc-section-note">Each action names exactly what it changes.</p>
                 <div class="dc-process-grid">
@@ -3843,13 +3843,13 @@ function buildSettingsPanelHtml() {
                     <div class="dc-action-block"><span><strong>List tools</strong><small>Inspect activity or clear every unpinned entry.</small></span><div class="dc-action-control"><button id="dc-stats" class="menu_button">Statistics</button><button id="dc-clear" class="menu_button dc-danger-button">Clear unpinned</button></div></div>
                 </div>
             </details>
-            <details class="dc-section dc-section-primary" id="dc-page-characters" data-dc-page="characters" role="tabpanel" aria-labelledby="dc-tab-characters" tabindex="-1" open>
+            <details class="dc-section dc-section-primary" id="dc-page-characters" data-dc-page="characters" data-dc-disclosure="characters" role="tabpanel" aria-labelledby="dc-tab-characters" tabindex="-1" open>
                 <summary>Characters</summary>
                 <p class="dc-section-note">Use row checkboxes for bulk actions. Keep pins important entries; Edit reveals color, lock, type, aliases, and gradients.</p>
                 <div class="dc-stack">
                     <div class="dc-field-row dc-field-row-wrap"><label class="dc-visually-hidden" for="dc-search">Search characters</label><input type="search" id="dc-search" placeholder="Search names, aliases, groups…" class="text_pole"><select id="dc-sort" class="text_pole" aria-label="Character sort"><option value="name">Sort: Name</option><option value="count">Sort: Dialogue activity</option><option value="group">Sort: Group</option></select></div>
                     <div class="dc-field-row dc-field-row-wrap"><label class="dc-visually-hidden" for="dc-add-name">New character name</label><input type="text" id="dc-add-name" placeholder="Character name" class="text_pole" aria-describedby="dc-add-error"><button id="dc-add-btn" class="menu_button dc-primary-button">Add</button><span id="dc-add-error" class="dc-field-error" aria-live="polite"></span></div>
-                    <details class="dc-advanced-add">
+                    <details class="dc-advanced-add" data-dc-disclosure="characters-advanced">
                         <summary>Advanced</summary>
                         <div class="dc-field-row dc-field-row-wrap" style="margin-top: 6px;">
                             <label class="dc-visually-hidden" for="dc-add-group">Initial group</label><input type="text" id="dc-add-group" placeholder="Initial group (optional)" class="text_pole" list="dc-group-profile-labels" maxlength="80">
@@ -3870,11 +3870,11 @@ function buildSettingsPanelHtml() {
                         <div class="dc-bulk-group-actions" role="group" aria-label="Bulk group actions">
                             <label class="dc-visually-hidden" for="dc-bulk-group-select">Group for selected characters</label><select id="dc-bulk-group-select" class="text_pole" data-dc-selection-required><option value="">Group selected…</option></select><button type="button" id="dc-bulk-set-group" class="menu_button" data-dc-selection-required>Set group</button><button type="button" id="dc-bulk-clear-group" class="menu_button" data-dc-selection-required>Clear group</button>
                         </div>
-                        <details class="dc-bulk-style-fields"><summary>Style fields for copy/paste</summary><div class="dc-bulk-style-options"><label class="checkbox_label"><input type="checkbox" id="dc-bulk-style-primary"><span>Primary color</span></label><label class="checkbox_label"><input type="checkbox" id="dc-bulk-style-gradient" checked><span>Gradient</span></label><label class="checkbox_label"><input type="checkbox" id="dc-bulk-style-font" checked><span>Font</span></label><label class="checkbox_label"><input type="checkbox" id="dc-bulk-style-text" checked><span>Text style</span></label></div></details>
+                        <details class="dc-bulk-style-fields" data-dc-disclosure="characters-bulk-style"><summary>Style fields for copy/paste</summary><div class="dc-bulk-style-options"><label class="checkbox_label"><input type="checkbox" id="dc-bulk-style-primary"><span>Primary color</span></label><label class="checkbox_label"><input type="checkbox" id="dc-bulk-style-gradient" checked><span>Gradient</span></label><label class="checkbox_label"><input type="checkbox" id="dc-bulk-style-font" checked><span>Font</span></label><label class="checkbox_label"><input type="checkbox" id="dc-bulk-style-text" checked><span>Text style</span></label></div></details>
                     </section>
                 </div>
             </details>
-            <details class="dc-section" id="dc-page-appearance" data-dc-page="appearance" role="tabpanel" aria-labelledby="dc-tab-appearance" tabindex="-1" open>
+            <details class="dc-section" id="dc-page-appearance" data-dc-page="appearance" data-dc-disclosure="appearance" role="tabpanel" aria-labelledby="dc-tab-appearance" tabindex="-1">
                 <summary>Appearance</summary>
                 <div class="dc-stack">
                     <div class="dc-field-row"><label class="dc-inline-label" for="dc-theme">Target surface</label><select id="dc-theme" class="text_pole"><option value="auto">Auto</option><option value="dark">Dark</option><option value="light">Light</option></select></div>
@@ -3893,7 +3893,7 @@ function buildSettingsPanelHtml() {
                     <div class="dc-toggle-grid"><label class="checkbox_label"><input type="checkbox" id="dc-highlight"><span>Highlight dialogue</span></label><label class="checkbox_label"><input type="checkbox" id="dc-legend"><span>Show floating legend</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-recolor"><span>Auto-recolor after changes</span></label></div>
                 </div>
             </details>
-            <details class="dc-section" id="dc-page-engine" data-dc-page="engine" role="tabpanel" aria-labelledby="dc-tab-engine" tabindex="-1" open>
+            <details class="dc-section" id="dc-page-engine" data-dc-page="engine" data-dc-disclosure="engine" role="tabpanel" aria-labelledby="dc-tab-engine" tabindex="-1">
                 <summary>Engine settings</summary>
                 <div class="dc-stack">
                     <div class="dc-llm-only dc-stack">
@@ -3913,21 +3913,21 @@ function buildSettingsPanelHtml() {
                     <div id="dc-prompt-preview" class="dc-prompt-preview"></div>
                 </div>
             </details>
-            <details class="dc-section" id="dc-page-automation" data-dc-page="automation" role="tabpanel" aria-labelledby="dc-tab-automation" tabindex="-1" open>
+            <details class="dc-section" id="dc-page-automation" data-dc-page="automation" data-dc-disclosure="automation" role="tabpanel" aria-labelledby="dc-tab-automation" tabindex="-1">
                 <summary>Automation</summary>
                 <div class="dc-toggle-grid"><label class="checkbox_label"><input type="checkbox" id="dc-autoscan"><span>Scan when the character list is empty</span></label><label class="checkbox_label"><input type="checkbox" id="dc-autoscan-new"><span>Scan new messages</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-lock"><span>Lock new characters</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-random-gradients"><span>Random gradients for new NPCs</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-random-all-gradients"><span>Random gradients for every new character</span></label><label class="checkbox_label"><input type="checkbox" id="dc-drift-all-gradients"><span>Drift every gradient color</span></label><label class="checkbox_label dc-llm-only"><input type="checkbox" id="dc-auto-colorize"><span>Colorize missing tags automatically</span></label><label class="checkbox_label"><input type="checkbox" id="dc-right-click"><span>Manual dialogue reassignment</span></label><label class="checkbox_label"><input type="checkbox" id="dc-disable-toasts"><span>Reduce routine notifications</span></label></div>
             </details>
-            <details class="dc-section" id="dc-page-library" data-dc-page="library" role="tabpanel" aria-labelledby="dc-tab-library" tabindex="-1" open>
+            <details class="dc-section" id="dc-page-library" data-dc-page="library" data-dc-disclosure="library" role="tabpanel" aria-labelledby="dc-tab-library" tabindex="-1">
                 <summary>Style library</summary>
                 <div class="dc-stack">
-                    <details class="dc-subsection" open><summary>Group profiles</summary><div class="dc-group-profile-manager dc-stack"><p class="dc-section-note">Profiles are scoped with the active color table. Applying one copies its selected fields; later profile edits do not change characters.</p><div class="dc-field-row"><label class="dc-inline-label" for="dc-group-profile-name">Group label</label><input type="text" id="dc-group-profile-name" class="text_pole" list="dc-group-profile-labels" maxlength="80" autocomplete="off" placeholder="Choose or enter a group"><datalist id="dc-group-profile-labels"></datalist></div><div class="dc-field-row"><label class="dc-inline-label" for="dc-group-profile-source">Copy style from</label><select id="dc-group-profile-source" class="text_pole"><option value="">Keep saved style</option></select></div><fieldset class="dc-profile-fieldset"><legend>Saved style fields</legend><div class="dc-profile-options"><label class="checkbox_label"><input type="checkbox" id="dc-group-profile-primary"><span>Primary color</span></label><label class="checkbox_label"><input type="checkbox" id="dc-group-profile-gradient" checked><span>Gradient</span></label><label class="checkbox_label"><input type="checkbox" id="dc-group-profile-font" checked><span>Font</span></label><label class="checkbox_label"><input type="checkbox" id="dc-group-profile-text" checked><span>Text style</span></label></div></fieldset><fieldset class="dc-profile-fieldset"><legend>Automation</legend><div class="dc-profile-automation"><label>Style on assignment<select id="dc-group-profile-applyStyleOnAssign" class="text_pole"><option value="null">Default (off)</option><option value="true">On</option><option value="false">Off</option></select></label><label>Style on creation<select id="dc-group-profile-applyStyleOnCreate" class="text_pole"><option value="null">Default (off)</option><option value="true">On</option><option value="false">Off</option></select></label><label>Lock on creation<select id="dc-group-profile-autoLock" class="text_pole"><option value="null">Use global</option><option value="true">On</option><option value="false">Off</option></select></label><label>Random gradient on creation<select id="dc-group-profile-randomGradient" class="text_pole"><option value="null">Use global</option><option value="true">On</option><option value="false">Off</option></select></label></div></fieldset><div class="dc-button-row"><button type="button" id="dc-group-profile-save" class="menu_button">Create profile</button><button type="button" id="dc-group-profile-apply" class="menu_button" disabled>Apply to existing (0)</button><button type="button" id="dc-group-profile-delete" class="menu_button dc-danger-button" disabled>Delete</button></div><div class="dc-field-row"><label class="dc-visually-hidden" for="dc-group-profile-rename">New group label</label><input type="text" id="dc-group-profile-rename" class="text_pole" maxlength="80" placeholder="New group label"><button type="button" id="dc-group-profile-rename-button" class="menu_button" disabled>Rename profile</button></div><span id="dc-group-profile-status" class="dc-status-text" role="status" aria-live="polite">Choose or enter a group label.</span></div></details>
-                    <details class="dc-subsection" open><summary>Gradient presets</summary><div id="dc-gradient-gallery" class="dc-gradient-gallery" aria-label="Gradient preset gallery"></div></details>
-                    <details class="dc-subsection"><summary>Assignment presets</summary><div class="dc-stack"><div class="dc-field-row dc-field-row-wrap"><label class="dc-visually-hidden" for="dc-preset-name">Preset name</label><input type="text" id="dc-preset-name" placeholder="Preset name" class="text_pole"><button id="dc-save-preset" class="menu_button dc-primary-button">Save current</button></div><div class="dc-field-row dc-field-row-wrap"><select id="dc-preset-select" class="text_pole" aria-label="Assignment preset"><option value="">Select preset</option></select><button id="dc-load-preset" class="menu_button">Load</button><button id="dc-delete-preset" class="menu_button dc-danger-button">Delete</button></div></div></details>
-                    <details class="dc-subsection"><summary>Custom palettes</summary><div class="dc-stack"><div class="dc-field-row dc-field-row-wrap"><label class="dc-visually-hidden" for="dc-palette-name-input">Palette name</label><input type="text" id="dc-palette-name-input" placeholder="Palette name" class="text_pole"><label class="dc-visually-hidden" for="dc-palette-notes-input">Palette notes</label><input type="text" id="dc-palette-notes-input" placeholder="Notes or mood words" class="text_pole"></div><label class="checkbox_label"><input type="checkbox" id="dc-overwrite-existing"><span>Allow replacing an existing palette</span></label><div class="dc-button-row"><button id="dc-gen-palette" class="menu_button dc-primary-button">Generate</button><button id="dc-save-palette" class="menu_button">Save current colors</button><button id="dc-del-palette" class="menu_button dc-danger-button">Delete selected</button></div></div></details>
-                    <details class="dc-subsection"><summary>Style packs</summary><div class="dc-stack dc-style-pack-library"><p class="dc-section-note">Portable format: dialogue-colors-style-pack v1. Builds stay local and import always opens a review.</p><div class="dc-button-row"><button type="button" id="dc-style-pack-export" class="menu_button">Build style pack</button><button type="button" id="dc-style-pack-import" class="menu_button">Import style pack</button></div><input type="file" id="dc-style-pack-file" accept=".json,application/json" hidden><span id="dc-style-pack-status" class="dc-status-text" role="status" aria-live="polite"></span><div id="dc-style-pack-registry" class="dc-style-pack-registry" aria-live="polite"></div></div></details>
+                    <details class="dc-subsection" data-dc-disclosure="library-group-profiles" open><summary>Group profiles</summary><div class="dc-group-profile-manager dc-stack"><p class="dc-section-note">Profiles are scoped with the active color table. Applying one copies its selected fields; later profile edits do not change characters.</p><div class="dc-field-row"><label class="dc-inline-label" for="dc-group-profile-name">Group label</label><input type="text" id="dc-group-profile-name" class="text_pole" list="dc-group-profile-labels" maxlength="80" autocomplete="off" placeholder="Choose or enter a group"><datalist id="dc-group-profile-labels"></datalist></div><div class="dc-field-row"><label class="dc-inline-label" for="dc-group-profile-source">Copy style from</label><select id="dc-group-profile-source" class="text_pole"><option value="">Keep saved style</option></select></div><fieldset class="dc-profile-fieldset"><legend>Saved style fields</legend><div class="dc-profile-options"><label class="checkbox_label"><input type="checkbox" id="dc-group-profile-primary"><span>Primary color</span></label><label class="checkbox_label"><input type="checkbox" id="dc-group-profile-gradient" checked><span>Gradient</span></label><label class="checkbox_label"><input type="checkbox" id="dc-group-profile-font" checked><span>Font</span></label><label class="checkbox_label"><input type="checkbox" id="dc-group-profile-text" checked><span>Text style</span></label></div></fieldset><fieldset class="dc-profile-fieldset"><legend>Automation</legend><div class="dc-profile-automation"><label>Style on assignment<select id="dc-group-profile-applyStyleOnAssign" class="text_pole"><option value="null">Default (off)</option><option value="true">On</option><option value="false">Off</option></select></label><label>Style on creation<select id="dc-group-profile-applyStyleOnCreate" class="text_pole"><option value="null">Default (off)</option><option value="true">On</option><option value="false">Off</option></select></label><label>Lock on creation<select id="dc-group-profile-autoLock" class="text_pole"><option value="null">Use global</option><option value="true">On</option><option value="false">Off</option></select></label><label>Random gradient on creation<select id="dc-group-profile-randomGradient" class="text_pole"><option value="null">Use global</option><option value="true">On</option><option value="false">Off</option></select></label></div></fieldset><div class="dc-button-row"><button type="button" id="dc-group-profile-save" class="menu_button">Create profile</button><button type="button" id="dc-group-profile-apply" class="menu_button" disabled>Apply to existing (0)</button><button type="button" id="dc-group-profile-delete" class="menu_button dc-danger-button" disabled>Delete</button></div><div class="dc-field-row"><label class="dc-visually-hidden" for="dc-group-profile-rename">New group label</label><input type="text" id="dc-group-profile-rename" class="text_pole" maxlength="80" placeholder="New group label"><button type="button" id="dc-group-profile-rename-button" class="menu_button" disabled>Rename profile</button></div><span id="dc-group-profile-status" class="dc-status-text" role="status" aria-live="polite">Choose or enter a group label.</span></div></details>
+                    <details class="dc-subsection" data-dc-disclosure="library-gradient-presets" open><summary>Gradient presets</summary><div id="dc-gradient-gallery" class="dc-gradient-gallery" aria-label="Gradient preset gallery"></div></details>
+                    <details class="dc-subsection" data-dc-disclosure="library-assignment-presets"><summary>Assignment presets</summary><div class="dc-stack"><div class="dc-field-row dc-field-row-wrap"><label class="dc-visually-hidden" for="dc-preset-name">Preset name</label><input type="text" id="dc-preset-name" placeholder="Preset name" class="text_pole"><button id="dc-save-preset" class="menu_button dc-primary-button">Save current</button></div><div class="dc-field-row dc-field-row-wrap"><select id="dc-preset-select" class="text_pole" aria-label="Assignment preset"><option value="">Select preset</option></select><button id="dc-load-preset" class="menu_button">Load</button><button id="dc-delete-preset" class="menu_button dc-danger-button">Delete</button></div></div></details>
+                    <details class="dc-subsection" data-dc-disclosure="library-custom-palettes"><summary>Custom palettes</summary><div class="dc-stack"><div class="dc-field-row dc-field-row-wrap"><label class="dc-visually-hidden" for="dc-palette-name-input">Palette name</label><input type="text" id="dc-palette-name-input" placeholder="Palette name" class="text_pole"><label class="dc-visually-hidden" for="dc-palette-notes-input">Palette notes</label><input type="text" id="dc-palette-notes-input" placeholder="Notes or mood words" class="text_pole"></div><label class="checkbox_label"><input type="checkbox" id="dc-overwrite-existing"><span>Allow replacing an existing palette</span></label><div class="dc-button-row"><button id="dc-gen-palette" class="menu_button dc-primary-button">Generate</button><button id="dc-save-palette" class="menu_button">Save current colors</button><button id="dc-del-palette" class="menu_button dc-danger-button">Delete selected</button></div></div></details>
+                    <details class="dc-subsection" data-dc-disclosure="library-style-packs"><summary>Style packs</summary><div class="dc-stack dc-style-pack-library"><p class="dc-section-note">Portable format: dialogue-colors-style-pack v1. Builds stay local and import always opens a review.</p><div class="dc-button-row"><button type="button" id="dc-style-pack-export" class="menu_button">Build style pack</button><button type="button" id="dc-style-pack-import" class="menu_button">Import style pack</button></div><input type="file" id="dc-style-pack-file" accept=".json,application/json" hidden><span id="dc-style-pack-status" class="dc-status-text" role="status" aria-live="polite"></span><div id="dc-style-pack-registry" class="dc-style-pack-registry" aria-live="polite"></div></div></details>
                 </div>
             </details>
-            <details class="dc-section" id="dc-page-storage" data-dc-page="storage" role="tabpanel" aria-labelledby="dc-tab-storage" tabindex="-1" open>
+            <details class="dc-section" id="dc-page-storage" data-dc-page="storage" data-dc-disclosure="storage" role="tabpanel" aria-labelledby="dc-tab-storage" tabindex="-1">
                 <summary>Storage & transfer</summary>
                 <div class="dc-stack">
                     <div class="dc-button-row"><button id="dc-export" class="menu_button">Export colors</button><button id="dc-import" class="menu_button">Import colors</button><button id="dc-export-settings" class="menu_button">Export settings</button><button id="dc-import-settings" class="menu_button">Import settings</button><button id="dc-export-png" class="menu_button">Export legend image</button></div>
@@ -3936,11 +3936,11 @@ function buildSettingsPanelHtml() {
                     <div class="dc-button-row"><button id="dc-setup-autosync" class="menu_button">Enable auto-sync</button><button id="dc-disable-autosync" class="menu_button" style="display:none;">Disable auto-sync</button></div><span id="dc-autosync-status" class="dc-status-text" role="status" aria-live="polite"></span>
                 </div>
             </details>
-            <details class="dc-section" id="dc-page-maintenance" data-dc-page="maintenance" role="tabpanel" aria-labelledby="dc-tab-maintenance" tabindex="-1" open>
+            <details class="dc-section" id="dc-page-maintenance" data-dc-page="maintenance" data-dc-disclosure="maintenance" role="tabpanel" aria-labelledby="dc-tab-maintenance" tabindex="-1">
                 <summary>Maintenance</summary>
                 <div class="dc-stack"><div class="dc-button-row"><button id="dc-undo" class="menu_button">Undo</button><button id="dc-redo" class="menu_button">Redo</button><button id="dc-fix-conflicts" class="menu_button">Check color conflicts</button></div><div class="dc-button-row"><button id="dc-regen" class="menu_button">Regenerate unlocked</button><button id="dc-flip-theme" class="menu_button">Flip for theme</button><button id="dc-restore-defaults" class="menu_button dc-danger-button">Restore setting defaults</button></div></div>
             </details>
-            <details class="dc-section dc-danger-zone" id="dc-page-danger" data-dc-page="danger" role="tabpanel" aria-labelledby="dc-tab-danger" tabindex="-1" open>
+            <details class="dc-section dc-danger-zone" id="dc-page-danger" data-dc-page="danger" data-dc-disclosure="danger" role="tabpanel" aria-labelledby="dc-tab-danger" tabindex="-1">
                 <summary>Danger zone</summary>
                 <p class="dc-section-note">Deletion tools review the target count first and always skip pinned characters.</p>
                 <div class="dc-stack">
@@ -3955,6 +3955,74 @@ function buildSettingsPanelHtml() {
 }
 
 const FOCUSABLE_PAGE_SELECTOR = 'a[href], button, input, select, textarea, summary, [tabindex]:not([tabindex="-1"])';
+
+// Which panel drawers the user left open. This is per-browser UI state, so it
+// lives in localStorage rather than in settings: exports, style packs, and
+// auto-sync deliberately carry no UI positions.
+const PANEL_DISCLOSURE_KEY = 'dc_panel_disclosure_v1';
+
+// Sections that are open on a fresh install. Everything else starts closed so
+// the panel opens short rather than as one long wall of controls.
+const DEFAULT_OPEN_DISCLOSURES = Object.freeze([
+    'setup', 'process', 'characters', 'library-group-profiles', 'library-gradient-presets',
+]);
+
+let panelDisclosureState = null;
+
+function readPanelDisclosureState() {
+    if (panelDisclosureState) return panelDisclosureState;
+    panelDisclosureState = {};
+    try {
+        const parsed = JSON.parse(localStorage.getItem(PANEL_DISCLOSURE_KEY) || '{}');
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            for (const [key, value] of Object.entries(parsed)) {
+                if (typeof value === 'boolean') panelDisclosureState[key] = value;
+            }
+        }
+    } catch {
+        // Unreadable or corrupt state just means defaults for this session.
+    }
+    return panelDisclosureState;
+}
+
+function writePanelDisclosureState() {
+    try {
+        localStorage.setItem(PANEL_DISCLOSURE_KEY, JSON.stringify(panelDisclosureState || {}));
+    } catch {
+        // The in-memory state still holds for this session when storage is full
+        // or blocked; losing it on reload is better than breaking the toggle.
+    }
+}
+
+function isDisclosureOpenByDefault(id) {
+    return DEFAULT_OPEN_DISCLOSURES.includes(id);
+}
+
+export function applyPanelDisclosureState(root = document) {
+    const saved = readPanelDisclosureState();
+    for (const element of root.querySelectorAll('[data-dc-disclosure]')) {
+        const id = element.dataset.dcDisclosure;
+        const open = Object.prototype.hasOwnProperty.call(saved, id) ? saved[id] : isDisclosureOpenByDefault(id);
+        element.open = open;
+    }
+}
+
+function bindPanelDisclosurePersistence(panel) {
+    // `toggle` does not bubble, so capture it instead of delegating.
+    panel.addEventListener('toggle', e => {
+        const element = e.target;
+        const id = element?.dataset?.dcDisclosure;
+        if (!id) return;
+        // Fullscreen forces the selected section open and the rest hidden; that
+        // is navigation, not the user collapsing a drawer, so it must not
+        // overwrite what they chose in the tab.
+        if (isSettingsFullscreen() && element.hasAttribute('data-dc-page')) return;
+        const saved = readPanelDisclosureState();
+        if (saved[id] === element.open) return;
+        saved[id] = element.open;
+        writePanelDisclosureState();
+    }, true);
+}
 
 // The panel lives in SillyTavern's extensions tab and flows at its natural
 // height there, so the tab is the only scroller. Fullscreen is an opt-in mode
@@ -4033,8 +4101,10 @@ export function exitSettingsFullscreen() {
     document.body.classList.remove('dc-fullscreen-open');
     toggle?.setAttribute('aria-pressed', 'false');
     // Reveal every section again before focus moves, so the accordion list is
-    // whole the moment the panel is back in the tab.
+    // whole the moment the panel is back in the tab, then hand the sections
+    // back the open/closed state the user actually chose.
     showSettingsPageSection(activeSettingsPageSlug);
+    applyPanelDisclosureState(panel);
     const opener = fullscreenOpener?.isConnected ? fullscreenOpener : toggle;
     fullscreenOpener = null;
     if (opener?.offsetParent) opener.focus();
@@ -4085,6 +4155,8 @@ function bindSettingsPage() {
     if (!panel || !nav || !toggle) return;
 
     bindSettingsDrawerState(panel);
+    bindPanelDisclosurePersistence(panel);
+    applyPanelDisclosureState(panel);
     toggle.addEventListener('click', () => toggleSettingsFullscreen(toggle));
 
     nav.addEventListener('click', e => {
