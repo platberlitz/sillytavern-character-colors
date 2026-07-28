@@ -16,19 +16,244 @@
     container-type: inline-size;
 }
 
-#dc-ext .inline-drawer-content {
+/* ==========================================================================
+   Full-window settings page
+   The settings are a page, not a drawer: the scrim covers the chat and the
+   page owns the viewport, so no section is boxed into a nested scroller.
+   Every colour continues SillyTavern's theme tokens rather than introducing
+   a palette that would fight the host interface.
+   ========================================================================== */
+
+.dc-page-overlay {
+    position: fixed;
+    inset: 0;
+    /* Below the host's critical tier so SillyTavern popups and dropdowns
+       opened from inside the page still layer above it. */
+    z-index: var(--sb-z-modal, 3000);
+    display: flex;
+    padding: clamp(0px, 2vmin, 28px);
+    background: color-mix(in srgb, oklch(0.14 0.012 265) 72%, transparent);
+    -webkit-backdrop-filter: blur(6px);
+    backdrop-filter: blur(6px);
+    overscroll-behavior: contain;
+}
+
+.dc-page-overlay[hidden] {
+    display: none;
+}
+
+/* The page owns the viewport while open; the chat behind it must not scroll. */
+body.dc-page-open {
+    overflow: hidden;
+}
+
+#dc-ext-launcher .dc-launcher-icon {
+    margin-left: auto;
+    opacity: 0.7;
+    font-size: 0.85em;
+}
+
+#dc-ext.dc-page {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    border: 1px solid var(--dc-border);
+    border-radius: 14px;
+    /* Same surface recipe SillyTavern uses for its own popups, so the page
+       reads as part of the host rather than a foreign panel. */
+    background-color: var(--SmartThemeBlurTintColor, oklch(0.2 0.012 265));
+    -webkit-backdrop-filter: blur(var(--SmartThemeBlurStrength, 10px));
+    backdrop-filter: blur(var(--SmartThemeBlurStrength, 10px));
+    color: var(--SmartThemeBodyColor, inherit);
+    box-shadow: 0 18px 48px rgb(0 0 0 / 45%);
     font-size: 0.9em;
-    max-height: 80vh;
-    max-height: 80dvh;
+}
+
+.dc-page-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex: none;
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--dc-border);
+    background: var(--dc-surface-soft);
+}
+
+#dc-ext .dc-page-title {
+    flex: 1;
+    min-width: 0;
+    margin: 0;
+    font-size: 1.15em;
+    font-weight: 600;
+    line-height: 1.2;
+    letter-spacing: 0.01em;
+}
+
+#dc-ext .dc-page-close {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 34px;
+    height: 34px;
+    padding: 0;
+    border-radius: 8px;
+    font-size: 1em;
+}
+
+.dc-page-body {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+    min-width: 0;
+}
+
+.dc-page-nav {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    flex: none;
+    width: 208px;
+    padding: 12px 10px;
+    border-right: 1px solid var(--dc-border);
+    background: var(--dc-surface-soft);
     overflow-y: auto;
     overscroll-behavior: contain;
+}
+
+#dc-ext .dc-page-tab {
+    flex: none;
+    min-height: 40px;
+    padding: 9px 12px;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    opacity: 0.76;
+    transition: background-color 160ms cubic-bezier(0.22, 1, 0.36, 1), opacity 160ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+#dc-ext .dc-page-tab:hover {
+    background: color-mix(in srgb, currentColor 8%, transparent);
+    opacity: 1;
+}
+
+#dc-ext .dc-page-tab[aria-selected="true"] {
+    background: color-mix(in srgb, var(--dc-accent) 18%, transparent);
+    color: var(--dc-accent);
+    font-weight: 600;
+    opacity: 1;
+}
+
+#dc-ext .dc-page-tab:focus-visible {
+    outline: 2px solid var(--dc-accent);
+    outline-offset: -2px;
+}
+
+#dc-ext .dc-page-tab[data-dc-tab="danger"][aria-selected="true"] {
+    background: var(--dc-danger-soft);
+    color: var(--dc-danger);
+}
+
+#dc-ext > .dc-page-body > .dc-panel-content {
+    flex: 1;
+    min-width: 0;
+    padding: 20px 24px 32px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+/*
+ * Sections keep their <details> markup so every existing rule still applies,
+ * but the nav owns disclosure now: the summary is redundant chrome and a
+ * collapsed section could otherwise hide the controls the nav points at.
+ */
+/* Doubled id keeps this above the generic `#dc-ext .dc-section > summary`
+   rule further down the sheet, which sets display: flex. */
+#dc-ext #dc-panel-content > [data-dc-page] > summary {
+    display: none;
+}
+
+#dc-ext #dc-panel-content > [data-dc-page][hidden] {
+    display: none;
+}
+
+#dc-ext #dc-panel-content > [data-dc-page] {
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: none;
+    /* Body prose stays readable; dense controls and tables may exceed this. */
+    max-width: 78ch;
+}
+
+#dc-ext #dc-panel-content > [data-dc-page]:focus {
+    outline: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    #dc-ext .dc-page-tab {
+        transition: none;
+    }
+}
+
+@media (max-width: 700px) {
+    .dc-page-overlay {
+        padding: 0;
+    }
+
+    #dc-ext.dc-page {
+        border: 0;
+        border-radius: 0;
+    }
+
+    .dc-page-body {
+        flex-direction: column;
+    }
+
+    /* Nav becomes a horizontal strip so the content keeps the full width. */
+    .dc-page-nav {
+        flex-direction: row;
+        width: auto;
+        padding: 8px 10px;
+        border-right: 0;
+        border-bottom: 1px solid var(--dc-border);
+        overflow-x: auto;
+        overflow-y: hidden;
+    }
+
+    #dc-ext .dc-page-tab {
+        white-space: nowrap;
+    }
+
+    #dc-ext > .dc-page-body > .dc-panel-content {
+        padding: 16px 14px 28px;
+    }
+}
+
+@media (forced-colors: active) {
+    #dc-ext.dc-page {
+        border: 1px solid CanvasText;
+    }
+
+    #dc-ext .dc-page-tab[aria-selected="true"] {
+        background: Highlight;
+        color: HighlightText;
+        forced-color-adjust: none;
+    }
 }
 
 /*
  * Zero-specificity reset: strips browser button chrome without outranking
  * SillyTavern core or user theme rules that style .inline-drawer-toggle.
  */
-:where(#dc-ext > button.inline-drawer-toggle) {
+:where(#dc-ext-launcher > button.inline-drawer-toggle) {
     border: 0;
     background: transparent;
     color: inherit;
@@ -37,18 +262,14 @@
     cursor: pointer;
 }
 
-#dc-ext > button.inline-drawer-toggle {
+#dc-ext-launcher > button.inline-drawer-toggle {
     width: 100%;
     box-sizing: border-box;
 }
 
-#dc-ext > button.inline-drawer-toggle:focus-visible {
-    outline: 2px solid var(--dc-accent);
+#dc-ext-launcher > button.inline-drawer-toggle:focus-visible {
+    outline: 2px solid var(--dc-accent, var(--SmartThemeQuoteColor, #5a9));
     outline-offset: -2px;
-}
-
-#rm_extensions_block.dc-dialogue-colors-expanded {
-    overflow-anchor: none;
 }
 
 #dc-ext .dc-remote-font-policy,
@@ -568,7 +789,7 @@
 }
 
 #dc-ext .dc-prompt-preview {
-    max-height: 58px;
+    max-height: 180px;
     overflow: auto;
     margin-top: 12px;
     padding: 6px 8px;

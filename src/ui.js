@@ -2096,7 +2096,7 @@ function bindNarratorEditorControls(host) {
 
 function captureScrollPositions(container) {
     const positions = [];
-    const boundary = container?.closest?.('#dc-ext > .dc-panel-content')
+    const boundary = container?.closest?.('#dc-ext .dc-panel-content')
         || container?.closest?.('#dc-ext');
     let current = container;
     while (current) {
@@ -3761,12 +3761,54 @@ export async function showColorConflictReport(report = getPerceptualConflictRepo
     return result.report;
 }
 
+// Settings open as a full-window page rather than an inline drawer, so the
+// section list doubles as the page navigation. Order here is the nav order.
+const SETTINGS_PAGE_SECTIONS = [
+    { slug: 'setup', label: 'Current setup' },
+    { slug: 'process', label: 'Process chat' },
+    { slug: 'characters', label: 'Characters' },
+    { slug: 'appearance', label: 'Appearance' },
+    { slug: 'engine', label: 'Engine settings' },
+    { slug: 'automation', label: 'Automation' },
+    { slug: 'library', label: 'Style library' },
+    { slug: 'storage', label: 'Storage & transfer' },
+    { slug: 'maintenance', label: 'Maintenance' },
+    { slug: 'danger', label: 'Danger zone' },
+];
+
+const DEFAULT_SETTINGS_PAGE_SLUG = SETTINGS_PAGE_SECTIONS[0].slug;
+
+function buildSettingsLauncherHtml() {
+    return `
+    <div id="dc-ext-launcher" class="dc-ext-launcher inline-drawer">
+        <button type="button" id="dc-open-page" class="inline-drawer-toggle inline-drawer-header" aria-haspopup="dialog" aria-expanded="false" aria-controls="dc-ext">
+            <b>Dialogue Colors</b>
+            <!-- Deliberately not .inline-drawer-icon: SillyTavern's global
+                 .inline-drawer-toggle handler swaps chevron classes onto that
+                 hook, which would stack a second glyph on this launcher. -->
+            <span class="dc-launcher-icon fa-solid fa-up-right-and-down-left-from-center" aria-hidden="true"></span>
+        </button>
+    </div>`;
+}
+
+function buildSettingsPageNavHtml() {
+    return SETTINGS_PAGE_SECTIONS.map(({ slug, label }) => `
+                <button type="button" role="tab" class="dc-page-tab" id="dc-tab-${slug}" data-dc-tab="${slug}" aria-controls="dc-page-${slug}" aria-selected="false" tabindex="-1">${label}</button>`).join('');
+}
+
 function buildSettingsPanelHtml() {
     return `
-    <div id="dc-ext" class="inline-drawer">
-        <button type="button" id="dc-panel-toggle" class="inline-drawer-toggle inline-drawer-header" aria-expanded="false" aria-controls="dc-panel-content"><b>Dialogue Colors</b><span class="inline-drawer-icon fa-solid fa-circle-chevron-down down" aria-hidden="true"></span></button>
-        <div id="dc-panel-content" class="inline-drawer-content dc-panel-content" aria-labelledby="dc-panel-toggle">
-            <details class="dc-section dc-section-primary" open>
+    <div id="dc-page-overlay" class="dc-page-overlay" hidden>
+    <div id="dc-ext" class="dc-page" role="dialog" aria-modal="true" aria-labelledby="dc-page-title">
+        <header class="dc-page-header">
+            <h1 id="dc-page-title" class="dc-page-title">Dialogue Colors</h1>
+            <button type="button" id="dc-page-close" class="dc-page-close menu_button" aria-label="Close Dialogue Colors settings"><span class="fa-solid fa-xmark" aria-hidden="true"></span></button>
+        </header>
+        <div class="dc-page-body">
+            <nav id="dc-page-nav" class="dc-page-nav" role="tablist" aria-orientation="vertical" aria-label="Dialogue Colors sections">${buildSettingsPageNavHtml()}
+            </nav>
+        <div id="dc-panel-content" class="dc-panel-content">
+            <details class="dc-section dc-section-primary" id="dc-page-setup" data-dc-page="setup" role="tabpanel" aria-labelledby="dc-tab-setup" tabindex="-1" open>
                 <summary>Current setup</summary>
                 <div class="dc-stack">
                     <div class="dc-setup-strip">
@@ -3779,7 +3821,7 @@ function buildSettingsPanelHtml() {
                     <small class="dc-engine-note dc-llm-only">LLM mode stores ordinary font colors in chat text; gradients remain a local visual enhancement.</small>
                 </div>
             </details>
-            <details class="dc-section dc-section-primary" open>
+            <details class="dc-section dc-section-primary" id="dc-page-process" data-dc-page="process" role="tabpanel" aria-labelledby="dc-tab-process" tabindex="-1" open>
                 <summary>Process chat</summary>
                 <p class="dc-section-note">Each action names exactly what it changes.</p>
                 <div class="dc-process-grid">
@@ -3791,7 +3833,7 @@ function buildSettingsPanelHtml() {
                     <div class="dc-action-block"><span><strong>List tools</strong><small>Inspect activity or clear every unpinned entry.</small></span><div class="dc-action-control"><button id="dc-stats" class="menu_button">Statistics</button><button id="dc-clear" class="menu_button dc-danger-button">Clear unpinned</button></div></div>
                 </div>
             </details>
-            <details class="dc-section dc-section-primary" open>
+            <details class="dc-section dc-section-primary" id="dc-page-characters" data-dc-page="characters" role="tabpanel" aria-labelledby="dc-tab-characters" tabindex="-1" open>
                 <summary>Characters</summary>
                 <p class="dc-section-note">Use row checkboxes for bulk actions. Keep pins important entries; Edit reveals color, lock, type, aliases, and gradients.</p>
                 <div class="dc-stack">
@@ -3822,7 +3864,7 @@ function buildSettingsPanelHtml() {
                     </section>
                 </div>
             </details>
-            <details class="dc-section">
+            <details class="dc-section" id="dc-page-appearance" data-dc-page="appearance" role="tabpanel" aria-labelledby="dc-tab-appearance" tabindex="-1" open>
                 <summary>Appearance</summary>
                 <div class="dc-stack">
                     <div class="dc-field-row"><label class="dc-inline-label" for="dc-theme">Target surface</label><select id="dc-theme" class="text_pole"><option value="auto">Auto</option><option value="dark">Dark</option><option value="light">Light</option></select></div>
@@ -3841,7 +3883,7 @@ function buildSettingsPanelHtml() {
                     <div class="dc-toggle-grid"><label class="checkbox_label"><input type="checkbox" id="dc-highlight"><span>Highlight dialogue</span></label><label class="checkbox_label"><input type="checkbox" id="dc-legend"><span>Show floating legend</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-recolor"><span>Auto-recolor after changes</span></label></div>
                 </div>
             </details>
-            <details class="dc-section">
+            <details class="dc-section" id="dc-page-engine" data-dc-page="engine" role="tabpanel" aria-labelledby="dc-tab-engine" tabindex="-1" open>
                 <summary>Engine settings</summary>
                 <div class="dc-stack">
                     <div class="dc-llm-only dc-stack">
@@ -3857,13 +3899,14 @@ function buildSettingsPanelHtml() {
                     </div>
                     <section id="dc-narrator-editor" class="dc-narrator-editor" aria-label="Narration style"></section>
                     <div class="dc-field-row dc-field-row-wrap"><label class="dc-inline-label" for="dc-thought-symbols">Thought delimiters</label><input type="text" id="dc-thought-symbols" placeholder="*" class="text_pole"><button id="dc-thought-clear" class="menu_button">Clear</button></div>
+                    <div id="dc-prompt-preview" class="dc-prompt-preview"></div>
                 </div>
             </details>
-            <details class="dc-section">
+            <details class="dc-section" id="dc-page-automation" data-dc-page="automation" role="tabpanel" aria-labelledby="dc-tab-automation" tabindex="-1" open>
                 <summary>Automation</summary>
                 <div class="dc-toggle-grid"><label class="checkbox_label"><input type="checkbox" id="dc-autoscan"><span>Scan when the character list is empty</span></label><label class="checkbox_label"><input type="checkbox" id="dc-autoscan-new"><span>Scan new messages</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-lock"><span>Lock new characters</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-random-gradients"><span>Random gradients for new NPCs</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-random-all-gradients"><span>Random gradients for every new character</span></label><label class="checkbox_label"><input type="checkbox" id="dc-drift-all-gradients"><span>Drift every gradient color</span></label><label class="checkbox_label dc-llm-only"><input type="checkbox" id="dc-auto-colorize"><span>Colorize missing tags automatically</span></label><label class="checkbox_label"><input type="checkbox" id="dc-right-click"><span>Manual dialogue reassignment</span></label><label class="checkbox_label"><input type="checkbox" id="dc-disable-toasts"><span>Reduce routine notifications</span></label></div>
             </details>
-            <details class="dc-section">
+            <details class="dc-section" id="dc-page-library" data-dc-page="library" role="tabpanel" aria-labelledby="dc-tab-library" tabindex="-1" open>
                 <summary>Style library</summary>
                 <div class="dc-stack">
                     <details class="dc-subsection" open><summary>Group profiles</summary><div class="dc-group-profile-manager dc-stack"><p class="dc-section-note">Profiles are scoped with the active color table. Applying one copies its selected fields; later profile edits do not change characters.</p><div class="dc-field-row"><label class="dc-inline-label" for="dc-group-profile-name">Group label</label><input type="text" id="dc-group-profile-name" class="text_pole" list="dc-group-profile-labels" maxlength="80" autocomplete="off" placeholder="Choose or enter a group"><datalist id="dc-group-profile-labels"></datalist></div><div class="dc-field-row"><label class="dc-inline-label" for="dc-group-profile-source">Copy style from</label><select id="dc-group-profile-source" class="text_pole"><option value="">Keep saved style</option></select></div><fieldset class="dc-profile-fieldset"><legend>Saved style fields</legend><div class="dc-profile-options"><label class="checkbox_label"><input type="checkbox" id="dc-group-profile-primary"><span>Primary color</span></label><label class="checkbox_label"><input type="checkbox" id="dc-group-profile-gradient" checked><span>Gradient</span></label><label class="checkbox_label"><input type="checkbox" id="dc-group-profile-font" checked><span>Font</span></label><label class="checkbox_label"><input type="checkbox" id="dc-group-profile-text" checked><span>Text style</span></label></div></fieldset><fieldset class="dc-profile-fieldset"><legend>Automation</legend><div class="dc-profile-automation"><label>Style on assignment<select id="dc-group-profile-applyStyleOnAssign" class="text_pole"><option value="null">Default (off)</option><option value="true">On</option><option value="false">Off</option></select></label><label>Style on creation<select id="dc-group-profile-applyStyleOnCreate" class="text_pole"><option value="null">Default (off)</option><option value="true">On</option><option value="false">Off</option></select></label><label>Lock on creation<select id="dc-group-profile-autoLock" class="text_pole"><option value="null">Use global</option><option value="true">On</option><option value="false">Off</option></select></label><label>Random gradient on creation<select id="dc-group-profile-randomGradient" class="text_pole"><option value="null">Use global</option><option value="true">On</option><option value="false">Off</option></select></label></div></fieldset><div class="dc-button-row"><button type="button" id="dc-group-profile-save" class="menu_button">Create profile</button><button type="button" id="dc-group-profile-apply" class="menu_button" disabled>Apply to existing (0)</button><button type="button" id="dc-group-profile-delete" class="menu_button dc-danger-button" disabled>Delete</button></div><div class="dc-field-row"><label class="dc-visually-hidden" for="dc-group-profile-rename">New group label</label><input type="text" id="dc-group-profile-rename" class="text_pole" maxlength="80" placeholder="New group label"><button type="button" id="dc-group-profile-rename-button" class="menu_button" disabled>Rename profile</button></div><span id="dc-group-profile-status" class="dc-status-text" role="status" aria-live="polite">Choose or enter a group label.</span></div></details>
@@ -3873,7 +3916,7 @@ function buildSettingsPanelHtml() {
                     <details class="dc-subsection"><summary>Style packs</summary><div class="dc-stack dc-style-pack-library"><p class="dc-section-note">Portable format: dialogue-colors-style-pack v1. Builds stay local and import always opens a review.</p><div class="dc-button-row"><button type="button" id="dc-style-pack-export" class="menu_button">Build style pack</button><button type="button" id="dc-style-pack-import" class="menu_button">Import style pack</button></div><input type="file" id="dc-style-pack-file" accept=".json,application/json" hidden><span id="dc-style-pack-status" class="dc-status-text" role="status" aria-live="polite"></span><div id="dc-style-pack-registry" class="dc-style-pack-registry" aria-live="polite"></div></div></details>
                 </div>
             </details>
-            <details class="dc-section">
+            <details class="dc-section" id="dc-page-storage" data-dc-page="storage" role="tabpanel" aria-labelledby="dc-tab-storage" tabindex="-1" open>
                 <summary>Storage & transfer</summary>
                 <div class="dc-stack">
                     <div class="dc-button-row"><button id="dc-export" class="menu_button">Export colors</button><button id="dc-import" class="menu_button">Import colors</button><button id="dc-export-settings" class="menu_button">Export settings</button><button id="dc-import-settings" class="menu_button">Import settings</button><button id="dc-export-png" class="menu_button">Export legend image</button></div>
@@ -3882,11 +3925,11 @@ function buildSettingsPanelHtml() {
                     <div class="dc-button-row"><button id="dc-setup-autosync" class="menu_button">Enable auto-sync</button><button id="dc-disable-autosync" class="menu_button" style="display:none;">Disable auto-sync</button></div><span id="dc-autosync-status" class="dc-status-text" role="status" aria-live="polite"></span>
                 </div>
             </details>
-            <details class="dc-section">
+            <details class="dc-section" id="dc-page-maintenance" data-dc-page="maintenance" role="tabpanel" aria-labelledby="dc-tab-maintenance" tabindex="-1" open>
                 <summary>Maintenance</summary>
                 <div class="dc-stack"><div class="dc-button-row"><button id="dc-undo" class="menu_button">Undo</button><button id="dc-redo" class="menu_button">Redo</button><button id="dc-fix-conflicts" class="menu_button">Check color conflicts</button></div><div class="dc-button-row"><button id="dc-regen" class="menu_button">Regenerate unlocked</button><button id="dc-flip-theme" class="menu_button">Flip for theme</button><button id="dc-restore-defaults" class="menu_button dc-danger-button">Restore setting defaults</button></div></div>
             </details>
-            <details class="dc-section dc-danger-zone">
+            <details class="dc-section dc-danger-zone" id="dc-page-danger" data-dc-page="danger" role="tabpanel" aria-labelledby="dc-tab-danger" tabindex="-1" open>
                 <summary>Danger zone</summary>
                 <p class="dc-section-note">Deletion tools review the target count first and always skip pinned characters.</p>
                 <div class="dc-stack">
@@ -3896,53 +3939,158 @@ function buildSettingsPanelHtml() {
                     <button id="dc-del-dupes" class="menu_button dc-danger-button">Delete duplicate colors</button>
                 </div>
             </details>
-            <div id="dc-prompt-preview" class="dc-prompt-preview"></div>
         </div>
+        </div>
+    </div>
     </div>`;
 }
 
-function bindSettingsPanelDrawer() {
-    const panel = document.getElementById('dc-ext');
-    const toggle = panel?.querySelector(':scope > .inline-drawer-toggle');
-    const content = panel?.querySelector(':scope > .dc-panel-content');
-    const hostScroller = panel?.closest('#rm_extensions_block');
-    if (!toggle || !content) return;
+const FOCUSABLE_PAGE_SELECTOR = 'a[href], button, input, select, textarea, summary, [tabindex]:not([tabindex="-1"])';
 
-    const hostClass = 'dc-dialogue-colors-expanded';
-    let requestedExpanded = null;
-    const isExpanded = () => !content.hidden
-        && content.getAttribute('aria-hidden') !== 'true'
-        && getComputedStyle(content).display !== 'none';
-    const syncDrawerState = () => {
-        const renderedExpanded = isExpanded();
-        const expanded = requestedExpanded ?? renderedExpanded;
-        const ariaExpanded = expanded ? 'true' : 'false';
-        if (toggle.getAttribute('aria-expanded') !== ariaExpanded) toggle.setAttribute('aria-expanded', ariaExpanded);
-        hostScroller?.classList.toggle(hostClass, expanded);
-        if (requestedExpanded === renderedExpanded) requestedExpanded = null;
-    };
+let activeSettingsPageSlug = DEFAULT_SETTINGS_PAGE_SLUG;
+let settingsPageOpener = null;
 
-    toggle.addEventListener('click', () => {
-        const opening = !isExpanded();
-        requestedExpanded = opening;
-        // Set this before SillyTavern starts slideToggle so browser anchoring
-        // cannot move the outer extensions drawer during expansion/collapse.
-        syncDrawerState();
-        if (!opening) return;
+function getSettingsPageTabs() {
+    return Array.from(document.querySelectorAll('#dc-page-nav .dc-page-tab'));
+}
+
+export function showSettingsPageSection(slug, { focusTab = false } = {}) {
+    const target = SETTINGS_PAGE_SECTIONS.some(section => section.slug === slug) ? slug : DEFAULT_SETTINGS_PAGE_SLUG;
+    activeSettingsPageSlug = target;
+    for (const tab of getSettingsPageTabs()) {
+        const selected = tab.dataset.dcTab === target;
+        tab.setAttribute('aria-selected', selected ? 'true' : 'false');
+        // Roving tabindex: only the selected tab is in the tab order, so Tab
+        // leaves the nav instead of walking ten buttons.
+        tab.tabIndex = selected ? 0 : -1;
+        if (selected && focusTab) tab.focus();
+    }
+    const content = document.getElementById('dc-panel-content');
+    for (const section of document.querySelectorAll('#dc-panel-content > [data-dc-page]')) {
+        const selected = section.dataset.dcPage === target;
+        section.toggleAttribute('hidden', !selected);
+        // The sections stay <details open> permanently; the nav replaces the
+        // disclosure, so a collapsed section can never hide its own controls.
+        if (selected) section.setAttribute('open', '');
+    }
+    if (content) {
         content.scrollTop = 0;
         content.scrollLeft = 0;
-        requestAnimationFrame(() => {
-            content.scrollTop = 0;
-            content.scrollLeft = 0;
-        });
+    }
+}
+
+function moveSettingsPageSelection(step) {
+    const index = SETTINGS_PAGE_SECTIONS.findIndex(section => section.slug === activeSettingsPageSlug);
+    const count = SETTINGS_PAGE_SECTIONS.length;
+    const next = (((index < 0 ? 0 : index) + step) % count + count) % count;
+    showSettingsPageSection(SETTINGS_PAGE_SECTIONS[next].slug, { focusTab: true });
+}
+
+export function isSettingsPageOpen() {
+    return document.getElementById('dc-page-overlay')?.hidden === false;
+}
+
+export function openSettingsPage(opener = document.activeElement) {
+    const overlay = document.getElementById('dc-page-overlay');
+    if (!overlay || !overlay.hidden) return;
+    settingsPageOpener = opener instanceof HTMLElement ? opener : null;
+    overlay.hidden = false;
+    document.getElementById('dc-open-page')?.setAttribute('aria-expanded', 'true');
+    document.body.classList.add('dc-page-open');
+    showSettingsPageSection(activeSettingsPageSlug);
+    const tab = document.querySelector('#dc-page-nav .dc-page-tab[aria-selected="true"]');
+    (tab || document.getElementById('dc-page-close'))?.focus();
+}
+
+export function closeSettingsPage() {
+    const overlay = document.getElementById('dc-page-overlay');
+    if (!overlay || overlay.hidden) return;
+    // Blur first: focus stranded inside a hidden subtree falls back to <body>
+    // and the opener never gets it back.
+    if (overlay.contains(document.activeElement)) document.activeElement.blur();
+    overlay.hidden = true;
+    document.getElementById('dc-open-page')?.setAttribute('aria-expanded', 'false');
+    document.body.classList.remove('dc-page-open');
+    const opener = settingsPageOpener?.isConnected ? settingsPageOpener : document.getElementById('dc-open-page');
+    settingsPageOpener = null;
+    // The launcher lives in SillyTavern's extensions drawer, which may have
+    // been collapsed (display:none) while the page was open. focus() is a
+    // no-op on an unrendered element, so only restore when it can actually
+    // take focus; otherwise the browser's default (body) is the honest result.
+    if (opener?.offsetParent) opener.focus();
+}
+
+function bindSettingsPage() {
+    const overlay = document.getElementById('dc-page-overlay');
+    const nav = document.getElementById('dc-page-nav');
+    const launcher = document.getElementById('dc-open-page');
+    if (!overlay || !nav || !launcher) return;
+
+    launcher.addEventListener('click', () => openSettingsPage(launcher));
+    document.getElementById('dc-page-close')?.addEventListener('click', () => closeSettingsPage());
+
+    nav.addEventListener('click', e => {
+        // No focusTab here: the click already focuses the button, and forcing
+        // it again makes the browser treat it as keyboard focus and paint a
+        // focus ring on a plain mouse click.
+        const tab = e.target.closest?.('.dc-page-tab');
+        if (tab) showSettingsPageSection(tab.dataset.dcTab);
     });
 
-    if (typeof MutationObserver === 'function') {
-        const observer = new MutationObserver(syncDrawerState);
-        const observerOptions = { attributes: true, attributeFilter: ['aria-hidden', 'class', 'hidden', 'style'] };
-        observer.observe(content, observerOptions);
-    }
-    syncDrawerState();
+    nav.addEventListener('keydown', e => {
+        if (e.altKey || e.ctrlKey || e.metaKey) return;
+        const keys = {
+            ArrowDown: 1, ArrowRight: 1, ArrowUp: -1, ArrowLeft: -1,
+        };
+        if (e.key in keys) {
+            e.preventDefault();
+            moveSettingsPageSelection(keys[e.key]);
+            return;
+        }
+        if (e.key === 'Home' || e.key === 'End') {
+            e.preventDefault();
+            const section = e.key === 'Home'
+                ? SETTINGS_PAGE_SECTIONS[0]
+                : SETTINGS_PAGE_SECTIONS[SETTINGS_PAGE_SECTIONS.length - 1];
+            showSettingsPageSection(section.slug, { focusTab: true });
+        }
+    });
+
+    overlay.addEventListener('keydown', e => {
+        if (e.key === 'Escape' && !e.defaultPrevented) {
+            // Let a dialog, popup, or open dropdown inside the page consume
+            // Escape first; only close the page when nothing else claimed it.
+            if (document.activeElement?.closest('.dc-dialog, dialog[open]')) return;
+            e.preventDefault();
+            closeSettingsPage();
+            return;
+        }
+        if (e.key !== 'Tab') return;
+        const focusable = Array.from(overlay.querySelectorAll(FOCUSABLE_PAGE_SELECTOR))
+            .filter(el => !el.disabled && el.tabIndex !== -1 && el.offsetParent !== null);
+        if (!focusable.length) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+            e.preventDefault();
+            last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+            e.preventDefault();
+            first.focus();
+        }
+    });
+
+    // Clicking the scrim closes; clicks inside the page must not.
+    overlay.addEventListener('mousedown', e => {
+        if (e.target !== overlay) return;
+        // Without this the browser's own post-mousedown focus handling runs
+        // after closeSettingsPage() and drops focus on the body, undoing the
+        // restore that Escape and the close button both get right.
+        e.preventDefault();
+        closeSettingsPage();
+    });
+
+    showSettingsPageSection(DEFAULT_SETTINGS_PAGE_SLUG);
 }
 
 function bindSettingsPanelControls($) {
@@ -4541,11 +4689,15 @@ function bindSettingsPanelControls($) {
 
 export function createUI() {
     if (document.getElementById('dc-ext')) return;
-    document.getElementById('extensions_settings')?.insertAdjacentHTML('beforeend', buildSettingsPanelHtml());
+    // The launcher stays in SillyTavern's extensions drawer; the settings
+    // themselves live in a full-window page appended to <body>, so they are
+    // not boxed into the side drawer's width or its scroll height.
+    document.getElementById('extensions_settings')?.insertAdjacentHTML('beforeend', buildSettingsLauncherHtml());
+    document.body.insertAdjacentHTML('beforeend', buildSettingsPanelHtml());
 
     const $ = id => document.getElementById(id);
 
-    bindSettingsPanelDrawer();
+    bindSettingsPage();
     syncUIWithSettings();
     bindSettingsPanelControls($);
 

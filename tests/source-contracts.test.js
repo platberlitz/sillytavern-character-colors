@@ -213,6 +213,48 @@ test('unmatchable messages get a bounded best-effort decoration', () => {
     assert.match(healthCheck, /clearDecoratedWatcher\(mesElement\);[\s\S]*?healthRefreshAttempts\.delete\(`\$\{repairIndex\}/);
 });
 
+test('every settings page section has a matching nav tab', () => {
+    const source = sources['ui.js'];
+    const navSlugs = [...source.matchAll(/\{ slug: '([a-z]+)', label: '[^']+' \}/g)].map(m => m[1]);
+    assert.ok(navSlugs.length >= 2, 'expected a populated SETTINGS_PAGE_SECTIONS list');
+
+    // The nav is the only disclosure now, so a section without a tab is
+    // unreachable and a tab without a section shows an empty page.
+    const panelSlugs = [...source.matchAll(/data-dc-page="([a-z]+)"/g)].map(m => m[1]);
+    assert.deepEqual([...panelSlugs].sort(), [...navSlugs].sort());
+
+    for (const slug of navSlugs) {
+        assert.match(source, new RegExp(`id="dc-page-${slug}" data-dc-page="${slug}" role="tabpanel" aria-labelledby="dc-tab-${slug}"`));
+        assert.match(source, new RegExp(`id="dc-tab-\\$\\{slug\\}" data-dc-tab="\\$\\{slug\\}" aria-controls="dc-page-\\$\\{slug\\}"`));
+    }
+});
+
+test('the settings page mounts outside the extensions drawer', () => {
+    const createUI = functionSection(sources['ui.js'], 'createUI');
+
+    // The launcher stays in the host drawer; the page itself must go to
+    // <body>, otherwise it inherits the drawer's width and scroll height,
+    // which is the boxed-in layout this replaced.
+    assert.match(createUI, /getElementById\('extensions_settings'\)\?\.insertAdjacentHTML\('beforeend', buildSettingsLauncherHtml\(\)\)/);
+    assert.match(createUI, /document\.body\.insertAdjacentHTML\('beforeend', buildSettingsPanelHtml\(\)\)/);
+    assert.match(createUI, /bindSettingsPage\(\)/);
+    // The old fixed-height inner scroller must not come back.
+    assert.doesNotMatch(sources['ui.js'], /inline-drawer-content/);
+});
+
+test('the settings page keeps a closable, focus-restoring dialog contract', () => {
+    const source = sources['ui.js'];
+    const close = functionSection(source, 'closeSettingsPage');
+    const bind = functionSection(source, 'bindSettingsPage');
+
+    assert.match(source, /role="dialog" aria-modal="true" aria-labelledby="dc-page-title"/);
+    assert.match(close, /opener\?\.offsetParent\) opener\.focus\(\)/);
+    assert.match(bind, /e\.key === 'Escape'/);
+    // Scrim mousedown must suppress the browser's own focus move, or the
+    // restore in closeSettingsPage is undone right after it runs.
+    assert.match(bind, /e\.preventDefault\(\);\s*\n\s*closeSettingsPage\(\)/);
+});
+
 test('edited attribution review acceptance stays atomic', () => {
     const acceptFromUi = functionSection(sources['ui.js'], 'acceptAttributionReviewFromUi');
 
