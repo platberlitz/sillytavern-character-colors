@@ -8,7 +8,7 @@ import { resolveCharacterKeyByNameOrAlias, scanAllMessages } from './color-block
 import { DOM_RETRY_REFRESH_DELAYS, acceptAttributionReview, cancelMessageDomFollowupRepairs, clearMessageDomRepairTimer, clearStreamingAttributionOverrides, decorateAllMessages, decorateMessageDomFromCurrentRender, dismissAttributionReview, getMessageQuoteOverrideOptions, listAttributionReviews, pruneAttributionReviews, refreshAndDecorateMessageDom, rejectAttributionReview, scheduleDomRefreshSeries, scheduleDomSettleRefresh, scheduleMessageDomFollowupRepair, setMessageQuoteOverride, setupChatObserver, setupChatRootObserver, startDomHealthCheck, stopDomHealthCheck, undecorateAllMessages } from './dom-engine.js';
 import { loadGoogleFont, scheduleCustomFontRefresh, syncRemoteFontLoadingPolicy } from './fonts.js';
 import { getColorVisionSimulationForTarget, getGradientRenderState, getVisualRenderState } from './gradient-rendering.js';
-import { BUILTIN_GRADIENT_PRESETS, DEFAULT_GRADIENT_ANGLE, DEFAULT_GRADIENT_DURATION, DEFAULT_GRADIENT_POSITION, MAX_GRADIENT_STOPS, cloneGradient, getBuiltInGradientPreset, getGradientSignature, normalizeGradient, normalizeGradientPresetName } from './gradients.js';
+import { BUILTIN_GRADIENT_PRESETS, DEFAULT_GRADIENT_ANGLE, DEFAULT_GRADIENT_DURATION, DEFAULT_GRADIENT_POSITION, GRADIENT_TYPES, MAX_GRADIENT_STOPS, cloneGradient, getBuiltInGradientPreset, getGradientSignature, normalizeGradient, normalizeGradientPresetName } from './gradients.js';
 import { GROUP_PROFILE_AUTOMATION_KEYS, deleteGroupProfile, getGroupProfile, normalizeGroupKey, normalizeGroupName, renameGroupProfile, setGroupProfile } from './group-profiles.js';
 import { createRestoreSnapshot, redo, saveHistory, showUndoToast, undo } from './history.js';
 import { applyFastColorUiUpdates, applyLiveColorChangesFromSnapshot, captureEffectiveColorSnapshot, colorizeMessages, commit, flushChatSave, flushColorStateSave, queueColorStateSave, recolorAllMessages, repaintDomAfterCharacterDataChange } from './live-colors.js';
@@ -1364,13 +1364,22 @@ function buildGradientEditorHtml(key, entry) {
             <button type="button" class="dc-gradient-remove-stop menu_button dc-danger-button" data-key="${safeKey}" aria-label="Remove gradient stop ${index + 2}"${gradient.stops.length === 1 ? ' disabled' : ''}>Remove</button>
         </div>`),
     ].join('');
+    // Conic is the only type that uses both: the angle starts the sweep and the
+    // origin is the pivot it sweeps around.
+    const angleControl = `<label>${gradient.type === 'conic' ? 'Start angle' : 'Exact angle'} <input type="number" class="dc-gradient-angle text_pole" data-key="${safeKey}" min="0" max="360" step="0.1" value="${gradient.angle}" aria-label="${gradient.type === 'conic' ? 'Conic gradient start angle' : 'Exact linear gradient angle'} for ${safeName}">°</label>`;
+    const originControls = `<label>Origin X <input type="number" class="dc-gradient-origin-x text_pole" data-key="${safeKey}" min="0" max="100" step="0.1" value="${gradient.x}" aria-label="Gradient horizontal origin for ${safeName}">%</label>
+                <label>Origin Y <input type="number" class="dc-gradient-origin-y text_pole" data-key="${safeKey}" min="0" max="100" step="0.1" value="${gradient.y}" aria-label="Gradient vertical origin for ${safeName}">%</label>`;
     const geometryControls = gradient.type === 'linear'
         ? `<div class="dc-gradient-geometry dc-gradient-linear-controls">
-                <label>Exact angle <input type="number" class="dc-gradient-angle text_pole" data-key="${safeKey}" min="0" max="360" step="0.1" value="${gradient.angle}" aria-label="Exact linear gradient angle for ${safeName}">°</label>
+                ${angleControl}
             </div>`
-        : `<div class="dc-gradient-geometry dc-gradient-radial-controls">
-                <label>Origin X <input type="number" class="dc-gradient-origin-x text_pole" data-key="${safeKey}" min="0" max="100" step="0.1" value="${gradient.x}" aria-label="Radial gradient horizontal origin for ${safeName}">%</label>
-                <label>Origin Y <input type="number" class="dc-gradient-origin-y text_pole" data-key="${safeKey}" min="0" max="100" step="0.1" value="${gradient.y}" aria-label="Radial gradient vertical origin for ${safeName}">%</label>
+        : gradient.type === 'conic'
+            ? `<div class="dc-gradient-geometry dc-gradient-conic-controls">
+                ${angleControl}
+                ${originControls}
+            </div>`
+            : `<div class="dc-gradient-geometry dc-gradient-radial-controls">
+                ${originControls}
             </div>`;
     const customPresetOptions = buildGradientPresetOptionsHtml({ customOnly: true });
     return `
@@ -1385,6 +1394,7 @@ function buildGradientEditorHtml(key, entry) {
                     <select class="dc-gradient-type text_pole" data-key="${safeKey}" data-focus-id="gradient-type" aria-label="Gradient type for ${safeName}">
                         <option value="linear"${gradient.type === 'linear' ? ' selected' : ''}>Linear</option>
                         <option value="radial"${gradient.type === 'radial' ? ' selected' : ''}>Radial</option>
+                        <option value="conic"${gradient.type === 'conic' ? ' selected' : ''}>Conic</option>
                     </select>
                 </label>
                 ${gradient.type === 'linear' ? `<label>Direction <select class="dc-gradient-direction text_pole" data-key="${safeKey}" aria-label="Linear gradient direction for ${safeName}">${buildGradientDirectionOptions(gradient.angle)}</select></label>` : ''}
@@ -1843,7 +1853,8 @@ function synchronizeGradientColorControls(control, editor) {
 function readGradientFromEditor(editor, entry) {
     const current = cloneGradient(entry?.gradient);
     if (!editor || !current) return null;
-    const type = editor.querySelector('.dc-gradient-type')?.value === 'radial' ? 'radial' : 'linear';
+    const selectedType = editor.querySelector('.dc-gradient-type')?.value;
+    const type = GRADIENT_TYPES.includes(selectedType) ? selectedType : 'linear';
     const stops = [...editor.querySelectorAll('.dc-gradient-stop[data-gradient-secondary="true"]')].map((row, index) => {
         const fallback = current.stops[index] || current.stops[current.stops.length - 1];
         const baseColor = normalizeHexColor(row.querySelector('.dc-gradient-stop-color')?.value, fallback?.baseColor || getBaseColor(entry));
@@ -2017,7 +2028,7 @@ function updateNarratorGradientFromControl(style, control) {
     const gradient = cloneGradient(style.gradient);
     if (!gradient) return style;
     const number = Number(control.value);
-    if (control.id === 'dc-narrator-gradient-type') gradient.type = control.value === 'radial' ? 'radial' : 'linear';
+    if (control.id === 'dc-narrator-gradient-type') gradient.type = GRADIENT_TYPES.includes(control.value) ? control.value : 'linear';
     else if (control.id === 'dc-narrator-gradient-angle' && Number.isFinite(number)) gradient.angle = number;
     else if (control.id === 'dc-narrator-gradient-x' && Number.isFinite(number)) gradient.x = number;
     else if (control.id === 'dc-narrator-gradient-y' && Number.isFinite(number)) gradient.y = number;
@@ -2129,9 +2140,13 @@ function renderNarratorEditor() {
     const disabled = style.enabled ? '' : ' disabled';
     const generator = normalizeEntryGradientGenerator(style.gradientGenerator, gradient);
     const generatorStatus = generator ? `Seeded variation ${generator.iteration}` : 'Manual gradient';
+    const narratorAngle = gradient ? `<label>${gradient.type === 'conic' ? 'Start angle' : 'Angle'} <input id="dc-narrator-gradient-angle" type="number" class="text_pole" min="0" max="360" step="0.1" value="${gradient.angle}"${disabled}>°</label>` : '';
+    const narratorOrigin = gradient ? `<label>Origin X <input id="dc-narrator-gradient-x" type="number" class="text_pole" min="0" max="100" step="0.1" value="${gradient.x}"${disabled}>%</label><label>Origin Y <input id="dc-narrator-gradient-y" type="number" class="text_pole" min="0" max="100" step="0.1" value="${gradient.y}"${disabled}>%</label>` : '';
     const geometry = gradient?.type === 'radial'
-        ? `<label>Origin X <input id="dc-narrator-gradient-x" type="number" class="text_pole" min="0" max="100" step="0.1" value="${gradient.x}"${disabled}>%</label><label>Origin Y <input id="dc-narrator-gradient-y" type="number" class="text_pole" min="0" max="100" step="0.1" value="${gradient.y}"${disabled}>%</label>`
-        : gradient ? `<label>Angle <input id="dc-narrator-gradient-angle" type="number" class="text_pole" min="0" max="360" step="0.1" value="${gradient.angle}"${disabled}>°</label>` : '';
+        ? narratorOrigin
+        : gradient?.type === 'conic'
+            ? `${narratorAngle}${narratorOrigin}`
+            : narratorAngle;
     const stopRows = gradient ? gradient.stops.map((stop, index) => `<div class="dc-narrator-stop"><label>Stop ${index + 2} <input type="color" class="dc-narrator-stop-color" data-stop-index="${index}" value="${stop.baseColor}"${disabled}></label><label>Position <input type="number" class="dc-narrator-stop-position text_pole" data-stop-index="${index}" min="0" max="100" step="0.1" value="${stop.position}"${disabled}>%</label><button type="button" class="dc-narrator-gradient-remove-stop menu_button dc-danger-button" data-stop-index="${index}"${disabled}${gradient.stops.length === 1 ? ' disabled' : ''}>Remove</button></div>`).join('') : '';
     host.innerHTML = `
         <label class="checkbox_label dc-narrator-enable"><input type="checkbox" id="dc-narrator-enabled"${style.enabled ? ' checked' : ''}><span>Color narration</span></label>
@@ -2143,7 +2158,7 @@ function renderNarratorEditor() {
             <button type="button" id="dc-narrator-gradient-apply-preset" class="menu_button"${disabled}>Apply</button>
             <div id="dc-narrator-preview" class="dc-narrator-preview${gradient ? ' dc-gradient-surface' : ''}" role="img" aria-label="Narration visual preview" style="${escapeAttr(buildGradientSurfaceStyle(visual))}"></div>
         </div>
-        ${gradient ? `<div class="dc-narrator-gradient-controls"><label>Type <select id="dc-narrator-gradient-type" class="text_pole"${disabled}><option value="linear"${gradient.type === 'linear' ? ' selected' : ''}>Linear</option><option value="radial"${gradient.type === 'radial' ? ' selected' : ''}>Radial</option></select></label>${geometry}<label>Primary position <input id="dc-narrator-gradient-primary-position" type="number" class="text_pole" min="0" max="100" step="0.1" value="${gradient.primaryPosition}"${disabled}>%</label><label class="checkbox_label"><input type="checkbox" id="dc-narrator-gradient-animation"${gradient.animation.enabled ? ' checked' : ''}${disabled}><span>Drift colors</span></label><span class="dc-gradient-generator-status">${escapeHtml(generatorStatus)}</span></div><div class="dc-narrator-stops">${stopRows}<button type="button" id="dc-narrator-gradient-add-stop" class="menu_button"${disabled}${gradient.stops.length + 1 >= MAX_GRADIENT_STOPS ? ' disabled' : ''}>Add stop (${gradient.stops.length + 1}/${MAX_GRADIENT_STOPS})</button></div>` : ''}`;
+        ${gradient ? `<div class="dc-narrator-gradient-controls"><label>Type <select id="dc-narrator-gradient-type" class="text_pole"${disabled}><option value="linear"${gradient.type === 'linear' ? ' selected' : ''}>Linear</option><option value="radial"${gradient.type === 'radial' ? ' selected' : ''}>Radial</option><option value="conic"${gradient.type === 'conic' ? ' selected' : ''}>Conic</option></select></label>${geometry}<label>Primary position <input id="dc-narrator-gradient-primary-position" type="number" class="text_pole" min="0" max="100" step="0.1" value="${gradient.primaryPosition}"${disabled}>%</label><label class="checkbox_label"><input type="checkbox" id="dc-narrator-gradient-animation"${gradient.animation.enabled ? ' checked' : ''}${disabled}><span>Drift colors</span></label><span class="dc-gradient-generator-status">${escapeHtml(generatorStatus)}</span></div><div class="dc-narrator-stops">${stopRows}<button type="button" id="dc-narrator-gradient-add-stop" class="menu_button"${disabled}${gradient.stops.length + 1 >= MAX_GRADIENT_STOPS ? ' disabled' : ''}>Add stop (${gradient.stops.length + 1}/${MAX_GRADIENT_STOPS})</button></div>` : ''}`;
     setGradientPresentation(host.querySelector('#dc-narrator-preview'), visual);
     bindNarratorEditorControls(host);
     restoreScrollPositions(scrollPositions);
@@ -2270,6 +2285,14 @@ function getGradientPresetCatalog() {
     return [...builtIns, ...customs];
 }
 
+function describeGradientGeometry(gradient) {
+    if (gradient.type === 'radial') return `Radial at ${gradient.x}%, ${gradient.y}%`;
+    // Conic is defined by both numbers, so naming only one of them would
+    // describe a different gradient than the one being previewed.
+    if (gradient.type === 'conic') return `Conic from ${gradient.angle} degrees at ${gradient.x}%, ${gradient.y}%`;
+    return `Linear ${gradient.angle} degrees`;
+}
+
 function formatGradientMotion(preset) {
     const animation = preset.gradient.animation;
     if (!animation.enabled && settings.driftAllGradientColors) return 'Static preset; global drift active';
@@ -2324,7 +2347,7 @@ export function renderGradientPresetGallery(preferredPreset = '', focusId = '') 
         </div>
         ${selected ? `<div class="dc-gradient-gallery-preview">
             <div class="dc-gradient-gallery-preview-sample${selectedClasses}" role="img" aria-label="${escapeAttr(selected.name)} preview in the current color-vision preview" style="${escapeAttr(buildGradientSurfaceStyle(selected.preset, { allowAnimation: gradientGalleryMotionActive }))}"></div>
-            <div class="dc-gradient-gallery-details"><strong>${escapeHtml(selected.name)}</strong><span>${selectedGradient.type === 'linear' ? `Linear ${selectedGradient.angle} degrees` : `Radial at ${selectedGradient.x}%, ${selectedGradient.y}%`} · ${selectedGradient.stops.length + 1} stops · ${escapeHtml(formatGradientMotion(selected.preset))}</span></div>
+            <div class="dc-gradient-gallery-details"><strong>${escapeHtml(selected.name)}</strong><span>${describeGradientGeometry(selectedGradient)} · ${selectedGradient.stops.length + 1} stops · ${escapeHtml(formatGradientMotion(selected.preset))}</span></div>
             <button type="button" id="dc-gradient-gallery-motion" class="menu_button" data-gallery-focus="motion" aria-pressed="${gradientGalleryMotionActive}"${selectedGradient.animation.enabled || settings.driftAllGradientColors ? '' : ' disabled'}>${gradientGalleryMotionActive ? 'Pause preview' : 'Play motion'}</button>
         </div>
         <div class="dc-gradient-gallery-apply">

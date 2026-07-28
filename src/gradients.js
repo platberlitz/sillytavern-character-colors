@@ -1,5 +1,11 @@
 // gradients.js - canonical gradient data helpers shared by state, storage, and rendering.
 
+// Conic reads `angle` as the sweep start and `x`/`y` as the pivot, so it uses
+// every geometry field the other two types already carry. Unknown types are
+// rejected rather than coerced: a gradient that cannot be rendered must not be
+// stored as one that can.
+export const GRADIENT_TYPES = Object.freeze(['linear', 'radial', 'conic']);
+
 export const MAX_GRADIENT_STOPS = 5;
 export const MAX_GRADIENT_SECONDARY_STOPS = MAX_GRADIENT_STOPS - 1;
 export const DEFAULT_GRADIENT_ANGLE = 90;
@@ -38,9 +44,23 @@ function normalizeGradientStop(stop) {
     };
 }
 
+/**
+ * Map a [0,1) sample onto a gradient type.
+ *
+ * Linear keeps the majority because it is the one that stays legible behind
+ * short runs of dialogue text; conic is the rarest because a full hue sweep
+ * across a few words is striking once and noisy everywhere.
+ */
+export function pickRandomGradientType(sample) {
+    const value = Number.isFinite(sample) ? Math.min(0.999999, Math.max(0, sample)) : 0;
+    if (value < 0.15) return 'conic';
+    if (value < 0.4) return 'radial';
+    return 'linear';
+}
+
 export function normalizeGradient(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-    if (value.type !== 'linear' && value.type !== 'radial') return null;
+    if (!GRADIENT_TYPES.includes(value.type)) return null;
 
     const stops = Array.isArray(value.stops)
         ? value.stops.map(normalizeGradientStop).filter(Boolean).slice(0, MAX_GRADIENT_SECONDARY_STOPS)
@@ -221,7 +241,7 @@ export function buildRandomGradient(primaryColor, options = {}, random = Math.ra
     }
 
     return normalizeGradient({
-        type: randomSample(random) < 0.3 ? 'radial' : 'linear',
+        type: pickRandomGradientType(randomSample(random)),
         angle: Number((randomSample(random) * 360).toFixed(1)),
         x: Math.round(20 + (randomSample(random) * 60)),
         y: Math.round(20 + (randomSample(random) * 60)),
@@ -327,6 +347,11 @@ export function buildGradientCss(entry) {
         .join(', ');
     if (gradient.type === 'radial') {
         return `radial-gradient(circle at ${formatCssNumber(gradient.x)}% ${formatCssNumber(gradient.y)}%, ${colorStops})`;
+    }
+    if (gradient.type === 'conic') {
+        // Stop positions stay percentages: CSS maps 0-100% onto the full turn,
+        // so the same stop data drives all three types unchanged.
+        return `conic-gradient(from ${formatCssNumber(gradient.angle)}deg at ${formatCssNumber(gradient.x)}% ${formatCssNumber(gradient.y)}%, ${colorStops})`;
     }
     return `linear-gradient(${formatCssNumber(gradient.angle)}deg, ${colorStops})`;
 }
@@ -556,6 +581,323 @@ export const BUILTIN_GRADIENT_PRESETS = Object.freeze({
                 { baseColor: '#cbd5e1', color: '#cbd5e1', position: 32 },
                 { baseColor: '#64748b', color: '#64748b', position: 68 },
                 { baseColor: '#0f172a', color: '#0f172a', position: 100 },
+            ],
+            animation: { enabled: false, duration: 8, reverse: false },
+        },
+    })),
+
+    // --- Conic: a sweep around a pivot, which no linear or radial stop
+    // arrangement can reproduce. Kept to a handful because a full hue rotation
+    // across a few words of dialogue is striking once and noisy in bulk.
+
+    'spectral-wheel': freezePreset(normalizeGradientPreset({
+        baseColor: '#ff4d6d',
+        color: '#ff4d6d',
+        gradient: {
+            // First and last stops are the same hue so the sweep closes with no
+            // seam where 100% meets 0%.
+            type: 'conic', angle: 0, x: 50, y: 50, primaryPosition: 0,
+            stops: [
+                { baseColor: '#ffd166', color: '#ffd166', position: 25 },
+                { baseColor: '#06d6a0', color: '#06d6a0', position: 50 },
+                { baseColor: '#4cc9f0', color: '#4cc9f0', position: 75 },
+                { baseColor: '#ff4d6d', color: '#ff4d6d', position: 100 },
+            ],
+            animation: { enabled: true, duration: 18, reverse: false },
+        },
+    })),
+    'chromatic-aberration': freezePreset(normalizeGradientPreset({
+        baseColor: '#f8f9ff',
+        color: '#f8f9ff',
+        gradient: {
+            // RGB fringing: pale core, split channels, back to pale.
+            type: 'conic', angle: 210, x: 50, y: 50, primaryPosition: 0,
+            stops: [
+                { baseColor: '#ff2d55', color: '#ff2d55', position: 30 },
+                { baseColor: '#30d158', color: '#30d158', position: 55 },
+                { baseColor: '#0a84ff', color: '#0a84ff', position: 80 },
+                { baseColor: '#f8f9ff', color: '#f8f9ff', position: 100 },
+            ],
+            animation: { enabled: true, duration: 11, reverse: true },
+        },
+    })),
+    'beacon-sweep': freezePreset(normalizeGradientPreset({
+        baseColor: '#fffbe6',
+        color: '#fffbe6',
+        gradient: {
+            // A paired hard stop cuts one bright wedge out of the sweep, like a
+            // lamp turning. Five stops cannot make more spokes than this.
+            type: 'conic', angle: 45, x: 50, y: 48, primaryPosition: 0,
+            stops: [
+                { baseColor: '#fffbe6', color: '#fffbe6', position: 12 },
+                { baseColor: '#f59e0b', color: '#f59e0b', position: 12 },
+                { baseColor: '#f59e0b', color: '#f59e0b', position: 38 },
+                { baseColor: '#7c2d12', color: '#7c2d12', position: 100 },
+            ],
+            animation: { enabled: true, duration: 24, reverse: false },
+        },
+    })),
+    'oil-slick': freezePreset(normalizeGradientPreset({
+        baseColor: '#1b1b2f',
+        color: '#1b1b2f',
+        gradient: {
+            type: 'conic', angle: 128, x: 42, y: 58, primaryPosition: 0,
+            stops: [
+                { baseColor: '#00c2a8', color: '#00c2a8', position: 22 },
+                { baseColor: '#7b2ff7', color: '#7b2ff7', position: 48 },
+                { baseColor: '#f72585', color: '#f72585', position: 70 },
+                { baseColor: '#1b1b2f', color: '#1b1b2f', position: 100 },
+            ],
+            animation: { enabled: true, duration: 15, reverse: true },
+        },
+    })),
+    'nixie-sweep': freezePreset(normalizeGradientPreset({
+        baseColor: '#ffb347',
+        color: '#ffb347',
+        gradient: {
+            // Neon-orange cathode glow falling off into unlit tube.
+            type: 'conic', angle: 270, x: 50, y: 50, primaryPosition: 0,
+            stops: [
+                { baseColor: '#ff7b00', color: '#ff7b00', position: 30 },
+                { baseColor: '#8c2f00', color: '#8c2f00', position: 62 },
+                { baseColor: '#1a0f0a', color: '#1a0f0a', position: 100 },
+            ],
+            animation: { enabled: true, duration: 20, reverse: false },
+        },
+    })),
+
+    // --- Hard-banded: stops sharing a position render as a cut, not a blend.
+
+    'heraldic-bands': freezePreset(normalizeGradientPreset({
+        baseColor: '#2d1b4e',
+        color: '#2d1b4e',
+        gradient: {
+            type: 'linear', angle: 90, x: 50, y: 50, primaryPosition: 0,
+            stops: [
+                { baseColor: '#2d1b4e', color: '#2d1b4e', position: 33 },
+                { baseColor: '#c9184a', color: '#c9184a', position: 33 },
+                { baseColor: '#c9184a', color: '#c9184a', position: 66 },
+                { baseColor: '#ffb703', color: '#ffb703', position: 66 },
+            ],
+            animation: { enabled: false, duration: 8, reverse: false },
+        },
+    })),
+    'thermal-imaging': freezePreset(normalizeGradientPreset({
+        baseColor: '#03071e',
+        color: '#03071e',
+        gradient: {
+            // False-colour ramp: cold floor through to white-hot.
+            type: 'linear', angle: 90, x: 50, y: 50, primaryPosition: 0,
+            stops: [
+                { baseColor: '#370617', color: '#370617', position: 22 },
+                { baseColor: '#dc2f02', color: '#dc2f02', position: 52 },
+                { baseColor: '#ffba08', color: '#ffba08', position: 78 },
+                { baseColor: '#fff3b0', color: '#fff3b0', position: 100 },
+            ],
+            animation: { enabled: false, duration: 8, reverse: false },
+        },
+    })),
+    'stained-glass': freezePreset(normalizeGradientPreset({
+        baseColor: '#0b132b',
+        color: '#0b132b',
+        gradient: {
+            // Leaded panes: saturated blocks separated by dark came lines.
+            type: 'linear', angle: 62, x: 50, y: 50, primaryPosition: 0,
+            stops: [
+                { baseColor: '#1c7293', color: '#1c7293', position: 26 },
+                { baseColor: '#0b132b', color: '#0b132b', position: 30 },
+                { baseColor: '#9d0208', color: '#9d0208', position: 64 },
+                { baseColor: '#e9c46a', color: '#e9c46a', position: 100 },
+            ],
+            animation: { enabled: false, duration: 8, reverse: false },
+        },
+    })),
+
+    // --- Mineral and pigment: named after the material rather than a mood.
+
+    'cinnabar-verdigris': freezePreset(normalizeGradientPreset({
+        baseColor: '#e34234',
+        color: '#e34234',
+        gradient: {
+            // Two pigments that corrode toward each other: vermilion into
+            // oxidised copper.
+            type: 'linear', angle: 138, x: 50, y: 50, primaryPosition: 0,
+            stops: [
+                { baseColor: '#a53f2b', color: '#a53f2b', position: 34 },
+                { baseColor: '#2f6f6a', color: '#2f6f6a', position: 68 },
+                { baseColor: '#43aa8b', color: '#43aa8b', position: 100 },
+            ],
+            animation: { enabled: false, duration: 8, reverse: false },
+        },
+    })),
+    'orpiment-realgar': freezePreset(normalizeGradientPreset({
+        baseColor: '#ffd23f',
+        color: '#ffd23f',
+        gradient: {
+            // Arsenic sulphides: the yellow one weathers into the orange one.
+            type: 'linear', angle: 96, x: 50, y: 50, primaryPosition: 0,
+            stops: [
+                { baseColor: '#f4a259', color: '#f4a259', position: 40 },
+                { baseColor: '#bc4749', color: '#bc4749', position: 74 },
+                { baseColor: '#582f0e', color: '#582f0e', position: 100 },
+            ],
+            animation: { enabled: false, duration: 8, reverse: false },
+        },
+    })),
+    'labradorite': freezePreset(normalizeGradientPreset({
+        baseColor: '#c9d6df',
+        color: '#c9d6df',
+        gradient: {
+            // Schiller: the flash sits off-centre and the stone is dark
+            // everywhere else.
+            type: 'radial', angle: 90, x: 26, y: 74, primaryPosition: 0,
+            stops: [
+                { baseColor: '#4ea8de', color: '#4ea8de', position: 26 },
+                { baseColor: '#3d348b', color: '#3d348b', position: 54 },
+                { baseColor: '#1a1423', color: '#1a1423', position: 100 },
+            ],
+            animation: { enabled: true, duration: 17, reverse: true },
+        },
+    })),
+    'malachite-vein': freezePreset(normalizeGradientPreset({
+        baseColor: '#d8f3dc',
+        color: '#d8f3dc',
+        gradient: {
+            type: 'radial', angle: 90, x: 68, y: 22, primaryPosition: 0,
+            stops: [
+                { baseColor: '#52b788', color: '#52b788', position: 30 },
+                { baseColor: '#1b4332', color: '#1b4332', position: 58 },
+                { baseColor: '#081c15', color: '#081c15', position: 100 },
+            ],
+            animation: { enabled: false, duration: 8, reverse: false },
+        },
+    })),
+    'tarnished-brass': freezePreset(normalizeGradientPreset({
+        baseColor: '#f2e8cf',
+        color: '#f2e8cf',
+        gradient: {
+            type: 'linear', angle: 168, x: 50, y: 50, primaryPosition: 0,
+            stops: [
+                { baseColor: '#c9a227', color: '#c9a227', position: 30 },
+                { baseColor: '#6b705c', color: '#6b705c', position: 62 },
+                { baseColor: '#283618', color: '#283618', position: 100 },
+            ],
+            animation: { enabled: false, duration: 8, reverse: false },
+        },
+    })),
+
+    // --- Light without a sun: emission, decay, and the dark.
+
+    'abyssal-glow': freezePreset(normalizeGradientPreset({
+        baseColor: '#7ae7c7',
+        color: '#7ae7c7',
+        gradient: {
+            // Bioluminescence: a small cold light and a great deal of water.
+            type: 'radial', angle: 90, x: 50, y: 82, primaryPosition: 0,
+            stops: [
+                { baseColor: '#1f7a8c', color: '#1f7a8c', position: 24 },
+                { baseColor: '#022b3a', color: '#022b3a', position: 56 },
+                { baseColor: '#000814', color: '#000814', position: 100 },
+            ],
+            animation: { enabled: true, duration: 21, reverse: true },
+        },
+    })),
+    'cherenkov-blue': freezePreset(normalizeGradientPreset({
+        baseColor: '#caf0f8',
+        color: '#caf0f8',
+        gradient: {
+            type: 'radial', angle: 90, x: 50, y: 50, primaryPosition: 0,
+            stops: [
+                { baseColor: '#48cae4', color: '#48cae4', position: 22 },
+                { baseColor: '#0077b6', color: '#0077b6', position: 48 },
+                { baseColor: '#03045e', color: '#03045e', position: 100 },
+            ],
+            animation: { enabled: true, duration: 9, reverse: false },
+        },
+    })),
+    'blacklight-poster': freezePreset(normalizeGradientPreset({
+        baseColor: '#b5179e',
+        color: '#b5179e',
+        gradient: {
+            // Fluorescent inks over near-black: high chroma, low lightness.
+            type: 'linear', angle: 118, x: 50, y: 50, primaryPosition: 0,
+            stops: [
+                { baseColor: '#7209b7', color: '#7209b7', position: 32 },
+                { baseColor: '#3a0ca3', color: '#3a0ca3', position: 62 },
+                { baseColor: '#10002b', color: '#10002b', position: 100 },
+            ],
+            animation: { enabled: true, duration: 12, reverse: true },
+        },
+    })),
+    'event-horizon': freezePreset(normalizeGradientPreset({
+        baseColor: '#ffedd5',
+        color: '#ffedd5',
+        gradient: {
+            // Accretion disc: a thin bright rim collapsing straight to nothing.
+            type: 'radial', angle: 90, x: 50, y: 50, primaryPosition: 0,
+            stops: [
+                { baseColor: '#fb8500', color: '#fb8500', position: 14 },
+                { baseColor: '#6a040f', color: '#6a040f', position: 34 },
+                { baseColor: '#03071e', color: '#03071e', position: 62 },
+                { baseColor: '#000000', color: '#000000', position: 100 },
+            ],
+            animation: { enabled: true, duration: 26, reverse: false },
+        },
+    })),
+    'crt-phosphor': freezePreset(normalizeGradientPreset({
+        baseColor: '#ccff33',
+        color: '#ccff33',
+        gradient: {
+            // P1 green burning down into an unlit tube.
+            type: 'linear', angle: 90, x: 50, y: 50, primaryPosition: 0,
+            stops: [
+                { baseColor: '#70e000', color: '#70e000', position: 28 },
+                { baseColor: '#38b000', color: '#38b000', position: 52 },
+                { baseColor: '#004b23', color: '#004b23', position: 100 },
+            ],
+            animation: { enabled: true, duration: 6, reverse: true },
+        },
+    })),
+
+    // --- Organic and decaying.
+
+    'mycelium-bloom': freezePreset(normalizeGradientPreset({
+        baseColor: '#ede0d4',
+        color: '#ede0d4',
+        gradient: {
+            type: 'radial', angle: 90, x: 18, y: 20, primaryPosition: 0,
+            stops: [
+                { baseColor: '#b08968', color: '#b08968', position: 34 },
+                { baseColor: '#7f5539', color: '#7f5539', position: 66 },
+                { baseColor: '#3b2417', color: '#3b2417', position: 100 },
+            ],
+            animation: { enabled: false, duration: 8, reverse: false },
+        },
+    })),
+    'foxfire': freezePreset(normalizeGradientPreset({
+        baseColor: '#d9ed92',
+        color: '#d9ed92',
+        gradient: {
+            // Rotting wood that glows: sickly green over damp dark.
+            type: 'radial', angle: 90, x: 62, y: 66, primaryPosition: 0,
+            stops: [
+                { baseColor: '#99d98c', color: '#99d98c', position: 26 },
+                { baseColor: '#34a0a4', color: '#34a0a4', position: 52 },
+                { baseColor: '#184e77', color: '#184e77', position: 100 },
+            ],
+            animation: { enabled: true, duration: 19, reverse: true },
+        },
+    })),
+    'antique-vellum': freezePreset(normalizeGradientPreset({
+        baseColor: '#fefae0',
+        color: '#fefae0',
+        gradient: {
+            // Foxed paper: clean centre, staining toward the edges.
+            type: 'radial', angle: 90, x: 44, y: 40, primaryPosition: 0,
+            stops: [
+                { baseColor: '#e6ccb2', color: '#e6ccb2', position: 42 },
+                { baseColor: '#a68a64', color: '#a68a64', position: 74 },
+                { baseColor: '#582f0e', color: '#582f0e', position: 100 },
             ],
             animation: { enabled: false, duration: 8, reverse: false },
         },
