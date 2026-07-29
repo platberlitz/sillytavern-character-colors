@@ -1128,9 +1128,9 @@ body.dc-fullscreen-open {
 #dc-ext .dc-alias-chip {
     display: inline-flex;
     align-items: center;
-    gap: 4px;
+    gap: 2px;
     border-radius: 999px;
-    padding: 2px 8px;
+    padding: 1px 4px 1px 10px;
     background: var(--dc-surface-soft);
     border: 1px solid var(--dc-border);
     font-size: 0.78em;
@@ -1142,6 +1142,7 @@ body.dc-fullscreen-open {
 }
 
 #dc-ext .dc-alias-remove {
+    position: relative;
     cursor: pointer;
     display: inline-grid;
     place-items: center;
@@ -1153,6 +1154,14 @@ body.dc-fullscreen-open {
     border-radius: 50%;
     background: transparent;
     color: inherit;
+    font-size: 1em;
+    line-height: 1;
+}
+
+#dc-ext .dc-alias-remove::after {
+    content: '';
+    position: absolute;
+    inset: -4px;
 }
 
 #dc-ext .dc-alias-chip .dc-alias-remove:hover {
@@ -2550,12 +2559,6 @@ body.dc-fullscreen-open {
         min-width: 44px !important;
         min-height: 44px !important;
         max-height: 44px !important;
-    }
-
-    #dc-ext .dc-alias-remove {
-        width: 44px;
-        height: 44px;
-        min-width: 44px;
     }
 
     #dc-ext input[type="range"] {
