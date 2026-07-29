@@ -96,9 +96,10 @@ Adding an existing canonical name or alias reveals its current row instead of si
 - Select an Auto, Dark, or Light target surface and a palette for newly generated colors.
 - Adjust the current table's brightness; the value previews while dragging and applies when released.
 - Enable dialogue highlights, the floating legend, automatic recoloring after edits, or bounded remote Google Font loading. Remote font requests are off by default.
+- Bold all colored text renders every colored dialogue, narrator, and font-tag segment in bold. Per-character italic is kept, and turning it off restores each character's own text style.
 - Effective colors are adjusted against the rendered chat surface for at least 4.5:1 text contrast. Speaker metadata remains available to assistive technology without adding visible name tags to dialogue.
 - Scan on load only when the current character list is empty, or scan each new message.
-- Automatically lock detected speakers, assign random gradients to new NPCs or every new character, and optionally drift every gradient.
+- Automatically lock detected speakers, assign random gradients to new NPCs or every new character, and optionally drift every gradient. Generated gradients are kept perceptually distinct from the colors other characters already use.
 - Enable manual dialogue reassignment by pointer, long press, or keyboard.
 - Reduce routine success notifications without suppressing required validation and safety feedback.
 
@@ -127,7 +128,7 @@ Local-mode assignments are stored as per-chat quote overrides. LLM-mode assignme
 
 ## Maintenance and Danger Zone
 
-Maintenance provides Undo/Redo, similar-color repair, unlocked-color regeneration, theme flipping, and reviewed setting-default restoration.
+Maintenance provides Undo/Redo, similar-color repair, unlocked-color regeneration, gradient re-randomization, theme flipping, and reviewed setting-default restoration. Re-randomizing gradients skips locked characters and characters without a gradient.
 
 Danger Zone deletion tools show target and pinned counts before acting:
 

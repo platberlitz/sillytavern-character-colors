@@ -14,7 +14,7 @@ import { createRestoreSnapshot, redo, saveHistory, showUndoToast, undo } from '.
 import { applyFastColorUiUpdates, applyLiveColorChangesFromSnapshot, captureEffectiveColorSnapshot, colorizeMessages, commit, flushChatSave, flushColorStateSave, queueColorStateSave, recolorAllMessages, repaintDomAfterCharacterDataChange } from './live-colors.js';
 import { registerKeyboardShortcuts } from './main.js';
 import { getTransientNarratorCount, getNarratorVisual, normalizeNarratorStyle, setNarratorStyle } from './narrator-style.js';
-import { applyGradientPreset, applyThemeReadabilityAndBrightness, buildCharacterEntry, collectDuplicateColorKeys, createGradientRandomMasterSeed, createRandomGradient, deleteColorPreset, deleteCustomPalette, detectTheme, flipColorsForTheme, generateCustomPaletteFromWords, getBaseColor, getCustomPaletteMeta, getCustomPalettes, getEntryEffectiveColor, getNextColor, getPerceptualConflictReport, getPresets, invalidateThemeCache, loadColorPreset, refreshPaletteDropdown, refreshPresetDropdown, regenerateAllColors, removeCharacterKeys, repairPerceptualConflicts, saveColorPreset, saveCustomPalette, setEntryFromBaseColor, setEntryGradient, showHarmonyPopup, suggestColorForName, swapEntryColorData, syncAllEffectiveColors } from './palettes.js';
+import { applyGradientPreset, applyThemeReadabilityAndBrightness, buildCharacterEntry, collectDuplicateColorKeys, createGradientRandomMasterSeed, createRandomGradient, deleteColorPreset, deleteCustomPalette, detectTheme, flipColorsForTheme, generateCustomPaletteFromWords, getBaseColor, getCustomPaletteMeta, getCustomPalettes, getEntryEffectiveColor, getNextColor, getPerceptualConflictReport, getPresets, invalidateThemeCache, loadColorPreset, refreshPaletteDropdown, refreshPresetDropdown, regenerateAllColors, regenerateAllGradients, removeCharacterKeys, repairPerceptualConflicts, saveColorPreset, saveCustomPalette, setEntryFromBaseColor, setEntryGradient, showHarmonyPopup, suggestColorForName, swapEntryColorData, syncAllEffectiveColors } from './palettes.js';
 import { injectPrompt, updateSystemPromptDisplay } from './prompts.js';
 import { escapeHtml, getContext } from './st-api.js';
 import { autoRecolorHintShown, characterColors, expandedCharacterRows, groupProfiles, isDomEngine, searchTerm, selectedCharacterKeys, setAutoRecolorHintShown, setCharacterColors, setGroupProfiles, setSearchTerm, setSwapMode, settings, swapMode } from './state.js';
@@ -3619,6 +3619,7 @@ export function syncUIWithSettings() {
     if ($('dc-auto-random-all-gradients')) $('dc-auto-random-all-gradients').checked = settings.autoRandomAllGradients === true;
     if ($('dc-auto-random-gradients')) $('dc-auto-random-gradients').disabled = settings.autoRandomAllGradients === true;
     if ($('dc-drift-all-gradients')) $('dc-drift-all-gradients').checked = settings.driftAllGradientColors === true;
+    if ($('dc-force-bold')) $('dc-force-bold').checked = settings.forceBoldText === true;
     if ($('dc-allow-remote-fonts')) $('dc-allow-remote-fonts').checked = settings.allowRemoteFonts === true;
     if ($('dc-auto-recolor')) $('dc-auto-recolor').checked = settings.autoRecolor !== false;
     if ($('dc-auto-colorize')) $('dc-auto-colorize').checked = settings.autoColorize || false;
@@ -3916,7 +3917,7 @@ function buildSettingsPanelHtml() {
                     <div id="dc-cvd-preview-status" class="dc-preview-status" role="status" aria-live="polite">Preview off</div>
                     <div class="dc-field-row dc-gradient-seed-control"><label class="dc-inline-label" for="dc-gradient-master-seed">Random gradient seed</label><input id="dc-gradient-master-seed" class="text_pole" type="text" readonly aria-describedby="dc-gradient-seed-note"><button type="button" id="dc-gradient-new-seed" class="menu_button">New seed</button><small id="dc-gradient-seed-note">Changes future deterministic randomizations; current gradients stay unchanged.</small></div>
                     <div class="dc-remote-font-policy"><label class="checkbox_label"><input type="checkbox" id="dc-allow-remote-fonts" aria-describedby="dc-remote-fonts-note"><span>Allow remote Google Fonts</span></label><small id="dc-remote-fonts-note">Off by default. Saved font names always remain; when enabled, only used names can make capped requests to Google. Otherwise, fonts resolve locally.</small></div>
-                    <div class="dc-toggle-grid"><label class="checkbox_label"><input type="checkbox" id="dc-highlight"><span>Highlight dialogue</span></label><label class="checkbox_label"><input type="checkbox" id="dc-legend"><span>Show floating legend</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-recolor"><span>Auto-recolor after changes</span></label></div>
+                    <div class="dc-toggle-grid"><label class="checkbox_label"><input type="checkbox" id="dc-highlight"><span>Highlight dialogue</span></label><label class="checkbox_label"><input type="checkbox" id="dc-legend"><span>Show floating legend</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-recolor"><span>Auto-recolor after changes</span></label><label class="checkbox_label"><input type="checkbox" id="dc-force-bold" data-help="Renders every colored dialogue, narrator and font-tag segment in bold. Per-character italic is kept."><span>Bold all colored text</span></label></div>
                 </div>
             </details>
             <details class="dc-section" id="dc-page-engine" data-dc-page="engine" data-dc-disclosure="engine" role="tabpanel" aria-labelledby="dc-tab-engine" tabindex="-1">
@@ -3964,7 +3965,7 @@ function buildSettingsPanelHtml() {
             </details>
             <details class="dc-section" id="dc-page-maintenance" data-dc-page="maintenance" data-dc-disclosure="maintenance" role="tabpanel" aria-labelledby="dc-tab-maintenance" tabindex="-1">
                 <summary>Maintenance</summary>
-                <div class="dc-stack"><div class="dc-button-row"><button id="dc-undo" class="menu_button">Undo</button><button id="dc-redo" class="menu_button">Redo</button><button id="dc-fix-conflicts" class="menu_button">Check color conflicts</button></div><div class="dc-button-row"><button id="dc-regen" class="menu_button">Regenerate unlocked</button><button id="dc-flip-theme" class="menu_button">Flip for theme</button><button id="dc-restore-defaults" class="menu_button dc-danger-button">Restore setting defaults</button></div></div>
+                <div class="dc-stack"><div class="dc-button-row"><button id="dc-undo" class="menu_button">Undo</button><button id="dc-redo" class="menu_button">Redo</button><button id="dc-fix-conflicts" class="menu_button">Check color conflicts</button></div><div class="dc-button-row"><button id="dc-regen" class="menu_button">Regenerate unlocked</button><button id="dc-rerandom-gradients" class="menu_button">Re-randomize gradients</button><button id="dc-flip-theme" class="menu_button">Flip for theme</button><button id="dc-restore-defaults" class="menu_button dc-danger-button">Restore setting defaults</button></div></div>
             </details>
             <details class="dc-section dc-danger-zone" id="dc-page-danger" data-dc-page="danger" data-dc-disclosure="danger" role="tabpanel" aria-labelledby="dc-tab-danger" tabindex="-1">
                 <summary>Danger zone</summary>
@@ -4331,6 +4332,12 @@ function bindSettingsPanelControls($) {
         renderNarratorEditor();
         repaintDomAfterCharacterDataChange(0);
     };
+    $('dc-force-bold').onchange = e => {
+        settings.forceBoldText = e.target.checked;
+        saveData();
+        scheduleDomRefreshSeries(0);
+        scheduleCustomFontRefresh(0);
+    };
     $('dc-allow-remote-fonts').onchange = e => {
         const enabled = e.target.checked === true;
         settings.allowRemoteFonts = enabled;
@@ -4627,6 +4634,21 @@ function bindSettingsPanelControls($) {
             opener: e.currentTarget,
         });
         if (confirmed) regenerateAllColors();
+    };
+    $('dc-rerandom-gradients').onclick = async e => {
+        const targetCount = Object.values(characterColors).filter(entry => entry.gradient && !entry.locked).length;
+        if (!targetCount) { toast.info('No unlocked gradients to re-randomize'); return; }
+        const confirmed = await confirmReviewedAction({
+            title: 'Re-randomize gradients?',
+            description: `${targetCount} gradient${targetCount === 1 ? '' : 's'} will change. Locked characters and characters without a gradient are skipped.`,
+            confirmLabel: 'Re-randomize gradients',
+            danger: true,
+            opener: e.currentTarget,
+        });
+        if (!confirmed) return;
+        regenerateAllGradients();
+        updateCharList();
+        repaintDomAfterCharacterDataChange(0);
     };
     $('dc-flip-theme').onclick = flipColorsForTheme;
     $('dc-restore-defaults').onclick = async e => {

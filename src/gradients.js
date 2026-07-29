@@ -12,6 +12,11 @@ export const DEFAULT_GRADIENT_ANGLE = 90;
 export const DEFAULT_GRADIENT_POSITION = 50;
 // Animation duration is stored in seconds.
 export const DEFAULT_GRADIENT_DURATION = 8;
+// Matches the conflict threshold the perceptual report already uses, so a generated
+// gradient does not immediately register as a conflict against an existing character.
+export const GRADIENT_CROSS_CHARACTER_DELTA_E = 8;
+export const GRADIENT_PALETTE_HUE_SPREAD = 30;
+export const MAX_RESERVED_GRADIENT_COLORS = 64;
 
 function normalizeHex(value, fallback = null) {
     const color = String(value ?? '').trim();
@@ -108,6 +113,33 @@ function colorsAreDistinct(left, right) {
     return distanceSquared >= 2025;
 }
 
+function srgbToLinear(value) {
+    const normalized = value / 255;
+    return normalized <= 0.04045 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
+}
+
+// Oklab lives here rather than in utils.js because this module is the dependency-free
+// leaf both the generator and the perceptual conflict report can reach.
+export function colorToOklab(color) {
+    const [red, green, blue] = parseHexRgb(color).map(srgbToLinear);
+    const lRoot = Math.cbrt((0.4122214708 * red) + (0.5363325363 * green) + (0.0514459929 * blue));
+    const mRoot = Math.cbrt((0.2119034982 * red) + (0.6806995451 * green) + (0.1073969566 * blue));
+    const sRoot = Math.cbrt((0.0883024619 * red) + (0.2817188376 * green) + (0.6299787005 * blue));
+    return [
+        (0.2104542553 * lRoot) + (0.793617785 * mRoot) - (0.0040720468 * sRoot),
+        (1.9779984951 * lRoot) - (2.428592205 * mRoot) + (0.4505937099 * sRoot),
+        (0.0259040371 * lRoot) + (0.7827717662 * mRoot) - (0.808675766 * sRoot),
+    ];
+}
+
+export function oklabDistance(left, right) {
+    return Math.sqrt(left.reduce((total, channel, index) => total + ((channel - right[index]) ** 2), 0)) * 100;
+}
+
+export function colorDistanceOklab(leftColor, rightColor) {
+    return oklabDistance(colorToOklab(leftColor), colorToOklab(rightColor));
+}
+
 function hexToHsl(color) {
     const [rawRed, rawGreen, rawBlue] = parseHexRgb(color);
     const red = rawRed / 255;
@@ -171,10 +203,38 @@ function buildRgbLatticeColor(index) {
     return `#${[red, green, blue].map(channel => channel.toString(16).padStart(2, '0')).join('')}`;
 }
 
-function colorIsAvailable(candidate, selectedColors, selectedRenderedColors, transformColor) {
+function colorIsAvailable(candidate, selectedColors, selectedRenderedColors, transformColor, reservedOklab) {
     const rendered = normalizeHex(transformColor(candidate), candidate);
-    return selectedColors.every(selected => colorsAreDistinct(selected, candidate))
-        && selectedRenderedColors.every(selected => selected !== rendered);
+    if (!selectedColors.every(selected => colorsAreDistinct(selected, candidate))) return false;
+    if (!selectedRenderedColors.every(selected => selected !== rendered)) return false;
+    if (!reservedOklab?.length) return true;
+    const renderedOklab = colorToOklab(rendered);
+    return reservedOklab.every(reserved => oklabDistance(renderedOklab, reserved) >= GRADIENT_CROSS_CHARACTER_DELTA_E);
+}
+
+// Four tiers, cheapest and most theme-faithful first: shuffled palette, seeded HSL
+// variations of the primary, a golden-angle walk, then an exhaustive RGB lattice.
+function selectStopColor(context, index, reservedOklab) {
+    const { palette, primary, selectedColors, selectedRenderedColors, transformColor, random } = context;
+    const available = candidate => colorIsAvailable(candidate, selectedColors, selectedRenderedColors, transformColor, reservedOklab);
+
+    while (palette.length) {
+        const paletteCandidate = palette.shift();
+        if (available(paletteCandidate)) return paletteCandidate;
+    }
+    for (let attempt = 0; attempt < 24; attempt++) {
+        const nextColor = buildFallbackRandomColor(primary, index + attempt, random);
+        if (available(nextColor)) return nextColor;
+    }
+    for (let attempt = 0; attempt < 72; attempt++) {
+        const nextColor = buildDeterministicFallbackColor(primary, index + attempt);
+        if (available(nextColor)) return nextColor;
+    }
+    for (let attempt = 0; attempt < 216; attempt++) {
+        const nextColor = buildRgbLatticeColor(attempt);
+        if (available(nextColor)) return nextColor;
+    }
+    return null;
 }
 
 export function buildRandomGradient(primaryColor, options = {}, random = Math.random) {
@@ -183,10 +243,26 @@ export function buildRandomGradient(primaryColor, options = {}, random = Math.ra
     const palette = [...new Set((Array.isArray(options.palette) ? options.palette : [])
         .map(color => normalizeHex(color, null))
         .filter(Boolean))];
+    // A bounded per-gradient hue rotation keeps two characters drawing the same
+    // eight theme colors from landing on the same palette, without turning a narrow
+    // theme into a different one. Only consumed when the caller opts in, so preset
+    // and test callers keep their existing draw sequence.
+    if (options.hueSpread === true && palette.length) {
+        const hueRotation = (randomSample(random) - 0.5) * 2 * GRADIENT_PALETTE_HUE_SPREAD;
+        for (let index = 0; index < palette.length; index++) {
+            const [hue, saturation, lightness] = hexToHsl(palette[index]);
+            palette[index] = hslToHex(hue + hueRotation, saturation, lightness);
+        }
+    }
     for (let index = palette.length - 1; index > 0; index--) {
         const swapIndex = Math.floor(randomSample(random) * (index + 1));
         [palette[index], palette[swapIndex]] = [palette[swapIndex], palette[index]];
     }
+    const reservedOklab = [...new Set((Array.isArray(options.reservedColors) ? options.reservedColors : [])
+        .map(color => normalizeHex(color, null))
+        .filter(Boolean))]
+        .slice(0, MAX_RESERVED_GRADIENT_COLORS)
+        .map(colorToOklab);
 
     const requestedTotal = Number(options.totalStops);
     const totalStops = Number.isFinite(requestedTotal)
@@ -198,32 +274,17 @@ export function buildRandomGradient(primaryColor, options = {}, random = Math.ra
     const stops = [];
     let previousPosition = 0;
 
+    const stopContext = { palette, primary, selectedColors, selectedRenderedColors, transformColor, random };
+
     for (let index = 0; index < secondaryCount; index++) {
-        let candidate = null;
-        while (palette.length && !candidate) {
-            const paletteCandidate = palette.shift();
-            if (colorIsAvailable(paletteCandidate, selectedColors, selectedRenderedColors, transformColor)) {
-                candidate = paletteCandidate;
-            }
-        }
-        for (let attempt = 0; attempt < 24 && !candidate; attempt++) {
-            const nextColor = buildFallbackRandomColor(primary, index + attempt, random);
-            if (colorIsAvailable(nextColor, selectedColors, selectedRenderedColors, transformColor)) {
-                candidate = nextColor;
-                break;
-            }
-        }
-        for (let attempt = 0; attempt < 72 && !candidate; attempt++) {
-            const nextColor = buildDeterministicFallbackColor(primary, index + attempt);
-            if (colorIsAvailable(nextColor, selectedColors, selectedRenderedColors, transformColor)) {
-                candidate = nextColor;
-            }
-        }
-        for (let attempt = 0; attempt < 216 && !candidate; attempt++) {
-            const nextColor = buildRgbLatticeColor(attempt);
-            if (colorIsAvailable(nextColor, selectedColors, selectedRenderedColors, transformColor)) {
-                candidate = nextColor;
-            }
+        // Staying distinct from other characters is a preference, not a constraint:
+        // a crowded palette must still yield a gradient rather than throw. The retry
+        // restores the palette the first pass drained so it stays theme-faithful.
+        const remainingPalette = [...palette];
+        let candidate = selectStopColor(stopContext, index, reservedOklab);
+        if (!candidate && reservedOklab.length) {
+            palette.splice(0, palette.length, ...remainingPalette);
+            candidate = selectStopColor(stopContext, index, null);
         }
         if (!candidate) throw new Error('Could not generate distinct gradient colors.');
         selectedColors.push(candidate);

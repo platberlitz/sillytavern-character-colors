@@ -1,3 +1,6 @@
+// text-style-rendering.js - owned inline font-weight/font-style application for decorated text.
+import { settings } from './state.js';
+
 export const TEXT_STYLE_MARKER_ATTRIBUTE = 'data-dc-text-style';
 
 const OWNED_PROPERTIES = Object.freeze([
@@ -7,9 +10,14 @@ const OWNED_PROPERTIES = Object.freeze([
 
 const VALID_STYLES = new Set(['', 'bold', 'italic', 'bold italic']);
 
+// The global bold override is resolved here rather than at each call site so every
+// decorated surface (dialogue, narrator, font tags) picks it up from one place, and
+// so the owned-property bookkeeping still restores the original weight when it is off.
 function normalizeTextStyle(value) {
     const style = typeof value === 'object' && value !== null ? value.style : value;
-    return VALID_STYLES.has(style) ? style : '';
+    const resolved = VALID_STYLES.has(style) ? style : '';
+    if (settings.forceBoldText !== true) return resolved;
+    return resolved.includes('italic') ? 'bold italic' : 'bold';
 }
 
 function readOwnedState(element, attribute) {

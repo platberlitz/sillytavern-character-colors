@@ -1,5 +1,6 @@
 // perceptual-conflicts.js - gradient sampling and generic visual conflict reports.
 import { COLOR_VISION_MODES, normalizeColorVisionSimulation } from './color-vision.js';
+import { colorToOklab, oklabDistance } from './gradients.js';
 import { resolveVisual } from './visual-resolver.js';
 
 export const PERCEPTUAL_CONFLICT_REPORT_VERSION = 'dc-perceptual-conflict-v1';
@@ -68,31 +69,6 @@ export function sampleGradient(entry, options = {}) {
         });
     }
     return samples;
-}
-
-function srgbToLinear(value) {
-    const normalized = value / 255;
-    return normalized <= 0.04045 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
-}
-
-function colorToOklab(color) {
-    const [red, green, blue] = hexToRgb(color).map(srgbToLinear);
-    const lRoot = Math.cbrt((0.4122214708 * red) + (0.5363325363 * green) + (0.0514459929 * blue));
-    const mRoot = Math.cbrt((0.2119034982 * red) + (0.6806995451 * green) + (0.1073969566 * blue));
-    const sRoot = Math.cbrt((0.0883024619 * red) + (0.2817188376 * green) + (0.6299787005 * blue));
-    return [
-        (0.2104542553 * lRoot) + (0.793617785 * mRoot) - (0.0040720468 * sRoot),
-        (1.9779984951 * lRoot) - (2.428592205 * mRoot) + (0.4505937099 * sRoot),
-        (0.0259040371 * lRoot) + (0.7827717662 * mRoot) - (0.808675766 * sRoot),
-    ];
-}
-
-function oklabDistance(left, right) {
-    return Math.sqrt(left.reduce((total, channel, index) => total + ((channel - right[index]) ** 2), 0)) * 100;
-}
-
-export function colorDistanceOklab(leftColor, rightColor) {
-    return oklabDistance(colorToOklab(leftColor), colorToOklab(rightColor));
 }
 
 function normalizeBoundedLimit(value, fallback, maximum, minimum = 1) {

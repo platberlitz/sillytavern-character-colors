@@ -334,6 +334,27 @@ export function regenerateAllColors() {
     toast.success('Colors regenerated');
 }
 
+// Ascending dialogue count means the most-seen characters are generated last, when the
+// reserved set is largest, so they are the ones pushed furthest from everyone else.
+export function regenerateAllGradients() {
+    const sortedEntries = Object.entries(characterColors)
+        .filter(([, entry]) => entry.gradient && !entry.locked)
+        .sort((a, b) => (a[1].dialogueCount || 0) - (b[1].dialogueCount || 0));
+    const changedKeys = [];
+    const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
+
+    for (const [key, entry] of sortedEntries) {
+        const gradient = createRandomGradient(entry);
+        if (!gradient) continue;
+        setEntryGradient(entry, gradient, { preserveGenerator: true });
+        changedKeys.push(key);
+    }
+    applyLiveColorChangesFromSnapshot(snapshot, changedKeys);
+    commit();
+    toast.success(`Re-randomized ${changedKeys.length} gradient${changedKeys.length === 1 ? '' : 's'}`);
+    return changedKeys;
+}
+
 // Phase 4B: Improved conflict resolution feedback listing pairs
 export function autoResolveConflicts() {
     const result = repairPerceptualConflicts();
@@ -1348,6 +1369,23 @@ export function ensureGradientRandomMasterSeed() {
     return settings.gradientRandomMasterSeed;
 }
 
+// Every color other characters already display, so a new gradient can be pushed away
+// from them. Rendered colors are used because that is what a reader actually compares.
+export function collectReservedGradientColors(excludeName = '') {
+    const excluded = canonicalizeGradientCharacterName(excludeName);
+    const colors = new Set();
+    for (const entry of Object.values(characterColors)) {
+        if (!entry || canonicalizeGradientCharacterName(entry.name) === excluded) continue;
+        const baseColor = normalizeHexColor(getEntryEffectiveColor(entry), null);
+        if (baseColor) colors.add(baseColor);
+        for (const stop of entry.gradient?.stops || []) {
+            const stopColor = normalizeHexColor(stop.color || stop.baseColor, null);
+            if (stopColor) colors.add(stopColor);
+        }
+    }
+    return [...colors];
+}
+
 export function createRandomGradient(entry, options = {}) {
     if (!entry) return null;
     const animation = options.preserveAnimation === false ? null : normalizeGradient(entry.gradient)?.animation;
@@ -1365,6 +1403,8 @@ export function createRandomGradient(entry, options = {}) {
         animation: animation || undefined,
         totalStops: options.totalStops,
         transformColor: applyThemeReadabilityAndBrightness,
+        hueSpread: true,
+        reservedColors: collectReservedGradientColors(entry.name),
     });
     entry.gradientGenerator = generated.generator;
     return synchronizeGradientEffectiveColors(generated.gradient, applyThemeReadabilityAndBrightness);

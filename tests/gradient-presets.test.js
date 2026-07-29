@@ -3,13 +3,17 @@ import test from 'node:test';
 
 import {
     BUILTIN_GRADIENT_PRESETS,
+    GRADIENT_CROSS_CHARACTER_DELTA_E,
     GRADIENT_TYPES,
     MAX_GRADIENT_STOPS,
     buildGradientCss,
+    buildRandomGradient,
+    colorDistanceOklab,
     getBuiltInGradientPreset,
     normalizeGradient,
     pickRandomGradientType,
 } from '../src/gradients.js';
+import { createGradientRandom } from '../src/seeded-gradient-generator.js';
 
 const presetEntries = Object.entries(BUILTIN_GRADIENT_PRESETS);
 
@@ -126,4 +130,58 @@ test('preset names are kebab-case and unique', () => {
     for (const name of names) {
         assert.match(name, /^[a-z0-9]+(-[a-z0-9]+)*$/, `${name} is not kebab-case`);
     }
+});
+
+const seededRandom = seed => createGradientRandom({ algorithm: 'dc-gradient-v1', seed, iteration: 0 });
+
+test('reserved colors push generated stops away from other characters', () => {
+    const palette = ['#e0607e', '#60a5e0', '#7fd18a', '#f0c674'];
+    const gradient = buildRandomGradient('#333333', {
+        palette,
+        reservedColors: palette,
+        totalStops: 4,
+    }, seededRandom('reserved-test'));
+    for (const stop of gradient.stops) {
+        for (const reserved of palette) {
+            const deltaE = colorDistanceOklab(stop.color, reserved);
+            assert.ok(
+                deltaE >= GRADIENT_CROSS_CHARACTER_DELTA_E,
+                `${stop.color} is only ${deltaE.toFixed(2)} from reserved ${reserved}`,
+            );
+        }
+    }
+});
+
+test('an exhausted palette still yields a gradient rather than throwing', () => {
+    // Reserving the whole visible space must degrade to a best effort, not an error:
+    // a character without a gradient is worse than one that is merely similar.
+    const reservedColors = [];
+    for (let red = 0; red < 256; red += 17) {
+        for (let green = 0; green < 256; green += 17) {
+            for (let blue = 0; blue < 256; blue += 17) {
+                reservedColors.push(`#${[red, green, blue].map(channel => channel.toString(16).padStart(2, '0')).join('')}`);
+            }
+        }
+    }
+    const gradient = buildRandomGradient('#884422', { palette: ['#112233'], reservedColors, totalStops: 3 });
+    assert.ok(gradient);
+    assert.equal(gradient.stops.length, 2);
+});
+
+test('hue spread widens the colors two characters can draw from one palette', () => {
+    const palette = ['#e0607e', '#60a5e0', '#7fd18a', '#f0c674', '#b98ae0', '#e08a5c', '#5cd6c8', '#8a95e0'];
+    const seeds = ['alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot'];
+    const collect = hueSpread => {
+        const colors = new Set();
+        for (const seed of seeds) {
+            const gradient = buildRandomGradient('#333333', { palette, totalStops: 3, hueSpread }, seededRandom(seed));
+            for (const stop of gradient.stops) colors.add(stop.color);
+        }
+        return colors;
+    };
+    // Without spread every character can only ever emit one of the eight palette colors.
+    const plain = collect(false);
+    assert.ok(plain.size <= palette.length);
+    const spread = collect(true);
+    assert.ok(spread.size > plain.size, `expected more variety, got ${spread.size} vs ${plain.size}`);
 });
