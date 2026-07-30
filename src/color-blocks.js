@@ -202,6 +202,20 @@ export function buildUniqueKnownColorStatsLookup() {
     return lookup;
 }
 
+// Occurrence counts rather than the distinct-color set, so DOM mode can count
+// a font-tagged message per tag the way it counts every other message per quote.
+export function countFontColorOccurrencesFromText(text) {
+    const counts = new Map();
+    const source = String(text ?? '');
+    const regex = /<font(?=\s|\/?>)[^<>]*\bcolor\s*=\s*["']?(#[0-9a-fA-F]{6})["']?[^<>]*\/?>/gi;
+    let match;
+    while ((match = regex.exec(source)) !== null) {
+        const color = match[1].toLowerCase();
+        counts.set(color, (counts.get(color) || 0) + 1);
+    }
+    return counts;
+}
+
 export function countFontColorStatsFromKnownColors(text, countedKeys = new Set(), colorLookup = buildUniqueKnownColorStatsLookup()) {
     let count = 0;
     const existingKeys = countedKeys instanceof Set ? countedKeys : new Set(countedKeys || []);

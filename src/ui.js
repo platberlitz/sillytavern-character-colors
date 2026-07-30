@@ -3691,6 +3691,8 @@ export function syncUIWithSettings() {
     if ($('dc-attr-max-tokens')) $('dc-attr-max-tokens').value = Number.isFinite(settings.attributionMaxTokens) && settings.attributionMaxTokens > 0 ? settings.attributionMaxTokens : 4096;
     if ($('dc-attr-passes')) $('dc-attr-passes').value = getAttributionVerifyPasses();
     if ($('dc-stealth-colors')) $('dc-stealth-colors').checked = settings.domStealthColors !== false;
+    if ($('dc-mark-uncertain')) $('dc-mark-uncertain').checked = settings.markUncertainDialogue === true;
+    document.body?.classList?.toggle('dc-mark-uncertain', settings.markUncertainDialogue === true);
     if ($('dc-right-click')) $('dc-right-click').checked = settings.enableRightClick;
     if ($('dc-legend')) $('dc-legend').checked = settings.showLegend;
     if ($('dc-disable-toasts')) $('dc-disable-toasts').checked = settings.disableToasts || false;
@@ -3993,7 +3995,7 @@ function buildSettingsPanelHtml() {
                         <div id="dc-system-prompt-container" style="display:none;"><label for="dc-system-prompt-text" class="dc-inline-label">Macro text</label><textarea id="dc-system-prompt-text" readonly class="text_pole dc-macro-text">{{dialoguecolors}}</textarea><button id="dc-copy-system-prompt" class="menu_button">Copy macro</button></div>
                     </div>
                     <div class="dc-dom-only dc-stack" style="display:none;">
-                        <label class="checkbox_label"><input type="checkbox" id="dc-stealth-colors"><span>Ask for hidden speaker color blocks</span></label><label class="checkbox_label"><input type="checkbox" id="dc-llm-attr-check"><span>Verify attribution automatically</span></label><label class="checkbox_label"><input type="checkbox" id="dc-llm-attr-parallel"><span>Verify during streaming pauses</span></label><label class="checkbox_label"><input type="checkbox" id="dc-attr-accept-all" aria-describedby="dc-attr-review-policy-note"><span>Accept proposed corrections automatically</span></label><small id="dc-attr-review-policy-note">Off by default: verifier suggestions wait for human review. Explicit legacy-auto settings keep this enabled.</small><label class="checkbox_label"><input type="checkbox" id="dc-attr-conservative"><span>Only fill unknown attribution</span></label>
+                        <label class="checkbox_label"><input type="checkbox" id="dc-stealth-colors"><span>Ask for hidden speaker color blocks</span></label><label class="checkbox_label"><input type="checkbox" id="dc-llm-attr-check"><span>Verify attribution automatically</span></label><label class="checkbox_label"><input type="checkbox" id="dc-llm-attr-parallel"><span>Verify during streaming pauses</span></label><label class="checkbox_label"><input type="checkbox" id="dc-attr-accept-all" aria-describedby="dc-attr-review-policy-note"><span>Accept proposed corrections automatically</span></label><small id="dc-attr-review-policy-note">Off by default: verifier suggestions wait for human review. Explicit legacy-auto settings keep this enabled.</small><label class="checkbox_label"><input type="checkbox" id="dc-attr-conservative"><span>Only fill unknown attribution</span></label><label class="checkbox_label"><input type="checkbox" id="dc-mark-uncertain" aria-describedby="dc-mark-uncertain-note"><span>Underline uncertain dialogue</span></label><small id="dc-mark-uncertain-note">Marks locally attributed quotes the heuristics were least sure about with a dotted underline. Right-click a marked quote to reassign it.</small>
                         <div class="dc-field-row"><label class="dc-inline-label" for="dc-attr-profile">Verify profile</label><select id="dc-attr-profile" class="text_pole"><option value="">Use main chat AI</option></select></div><div class="dc-field-row"><label class="dc-inline-label" for="dc-attr-max-tokens">Verify token limit</label><input type="number" id="dc-attr-max-tokens" min="256" max="32768" value="4096" class="text_pole"></div>
                         <div class="dc-field-row"><label class="dc-inline-label" for="dc-attr-passes">Agreement passes</label><input type="number" id="dc-attr-passes" min="1" max="5" value="1" class="text_pole" aria-describedby="dc-attr-passes-note"></div><small id="dc-attr-passes-note">Verify each message this many times and keep only the corrections most passes agree on. Raise this for fast models that answer differently each run; it multiplies tokens per verification.</small>
                     </div>
@@ -4458,6 +4460,11 @@ function bindSettingsPanelControls($) {
         saveData();
     };
     $('dc-stealth-colors').onchange = e => { settings.domStealthColors = e.target.checked; saveData(); injectPrompt(); };
+    $('dc-mark-uncertain').onchange = e => {
+        settings.markUncertainDialogue = e.target.checked;
+        document.body.classList.toggle('dc-mark-uncertain', e.target.checked);
+        saveData();
+    };
     $('dc-right-click').onchange = e => { settings.enableRightClick = e.target.checked; saveData(); };
     $('dc-legend').onchange = e => { settings.showLegend = e.target.checked; saveData(); updateLegend(); };
     $('dc-storage-scope').onchange = e => { handleStorageScopeChange(e.target); };

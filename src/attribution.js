@@ -39,7 +39,7 @@ export const speakingVerbs = new Set([
     'giggle', 'giggles', 'giggled', 'giggling',
     'laugh', 'laughs', 'laughed', 'laughing',
     'chuckle', 'chuckles', 'chuckled', 'chuckling',
-    'snicker', 'snickers', 'snickered', 'snivering', 'snickering',
+    'snicker', 'snickers', 'snickered', 'snickering',
     'smirk', 'smirks', 'smirked', 'smirking',
     'grin', 'grins', 'grinned', 'grinning',
     'smile', 'smiles', 'smiled', 'smiling',
@@ -90,12 +90,46 @@ export const speakingVerbs = new Set([
     'tease', 'teases', 'teased', 'teasing',
     'scold', 'scolds', 'scolded', 'scolding',
     'warn', 'warns', 'warned', 'warning',
-    'protest', 'protests', 'protested', 'protesting'
+    'protest', 'protests', 'protested', 'protesting',
+    'state', 'states', 'stated', 'stating',
+    'declare', 'declares', 'declared', 'declaring',
+    'announce', 'announces', 'announced', 'announcing',
+    'admit', 'admits', 'admitted', 'admitting',
+    'confess', 'confesses', 'confessed', 'confessing',
+    'explain', 'explains', 'explained', 'explaining',
+    'clarify', 'clarifies', 'clarified', 'clarifying',
+    'confirm', 'confirms', 'confirmed', 'confirming',
+    'deny', 'denies', 'denied', 'denying',
+    'object', 'objects', 'objected', 'objecting',
+    'argue', 'argues', 'argued', 'arguing',
+    'remark', 'remarks', 'remarked', 'remarking',
+    'blurt', 'blurts', 'blurted', 'blurting',
+    'venture', 'ventures', 'ventured', 'venturing',
+    'drawl', 'drawls', 'drawled', 'drawling',
+    'deadpan', 'deadpans', 'deadpanned', 'deadpanning',
+    'chirp', 'chirps', 'chirped', 'chirping',
+    'huff', 'huffs', 'huffed', 'huffing',
+    'correct', 'corrects', 'corrected', 'correcting',
+    'press', 'presses', 'pressed', 'pressing',
+    'counter', 'counters', 'countered', 'countering',
+    'conclude', 'concludes', 'concluded', 'concluding',
+    'offer', 'offers', 'offered', 'offering',
+    'repeat', 'repeats', 'repeated', 'repeating',
+    'echo', 'echoes', 'echoed', 'echoing',
+    'remind', 'reminds', 'reminded', 'reminding',
+    'urge', 'urges', 'urged', 'urging',
+    'purr', 'purrs', 'purred', 'purring',
+    'whine', 'whines', 'whined', 'whining'
 ]);
 
 export const passivePrepositions = new Set([
     'to', 'at', 'with', 'from', 'behind', 'beside', 'next', 'near', 'against', 'toward', 'towards', 'for', 'of', 'about', 'upon', 'on', 'under', 'above', 'by', 'in', 'into', 'onto', 'through', 'across', 'around'
 ]);
+
+// Subject pronouns only. Object and possessive forms ("her", "his") are
+// deliberately excluded: they mark the addressee or an owner, never the
+// speaker, and binding them would recolour the wrong side of a scene.
+export const pronounSubjects = new Set(['he', 'she', 'they', 'it']);
 
 // Cache compiled per-speaker name-match regexes.  Invalidated when the
 // character list changes (loadData/addCharacter/deleteCharacter/renameCharacter).
@@ -119,7 +153,10 @@ export const speakerRegexCache = new Map();
 
 export function clearSpeakerRegexCache() { speakerRegexCache.clear(); }
 
-export function findClosestMentionedSpeakerInContext(maskedText, windowStart, windowEnd, segmentStart, segmentEnd, lookup, sortedLookupKeys, defaultSpeaker = null) {
+// Returns the winning candidate with its scoring intact ({ assignment,
+// strength, distance, side, name }) so callers can derive an honest
+// confidence instead of a flat per-tier constant.
+export function findSpeakerCandidateInContext(maskedText, windowStart, windowEnd, segmentStart, segmentEnd, lookup, sortedLookupKeys, defaultSpeaker = null) {
     const text = String(maskedText ?? '');
     const boundedStart = Math.max(0, Math.min(text.length, windowStart));
     const boundedEnd = Math.max(boundedStart, Math.min(text.length, windowEnd));
@@ -173,16 +210,22 @@ export function findClosestMentionedSpeakerInContext(maskedText, windowStart, wi
             const isPostWordSpeakingVerb = speakingVerbs.has(postWord);
             const isPreWordSpeakingVerb = speakingVerbs.has(preWord);
 
-            const isStrongTag = isRightBeforeQuote || isPostWordSpeakingVerb || isPreWordSpeakingVerb || hasPostColon || (isRightAfterQuote && isPostWordSpeakingVerb);
+            // A tag glued to the quote ("Bob: ...", 'Bob said "..."', '"...," said Bob')
+            // is the only positional evidence strong enough to outrank a
+            // speaking verb found loose in the probe window.
+            const isAdjacentTag = isRightBeforeQuote || hasPostColon || (isRightAfterQuote && isPostWordSpeakingVerb);
+            const isSpeakingVerbTag = isPostWordSpeakingVerb || isPreWordSpeakingVerb;
 
             let strength = 2; // Moderate (subject of sentence/action)
-            if (isStrongTag) {
-                strength = 3; // Strongest (explicit speaking)
+            if (isAdjacentTag) {
+                strength = 4; // Strongest (speech tag touching the quote)
+            } else if (isSpeakingVerbTag) {
+                strength = 3; // Strong (speaking verb nearby)
             } else if (endsWithPossessive || isPassivePreposition) {
                 strength = 1; // Weak (passive mention or possessive)
             }
 
-            const candidate = { assignment, distance, side, strength };
+            const candidate = { assignment, distance, side, strength, name: assignment.name || speakerKey };
             if (isBetterSpeakerCandidate(candidate, best)) best = candidate;
         }
     }
@@ -191,7 +234,67 @@ export function findClosestMentionedSpeakerInContext(maskedText, windowStart, wi
         return null;
     }
 
-    return best?.assignment || null;
+    return best;
+}
+
+export function findClosestMentionedSpeakerInContext(maskedText, windowStart, windowEnd, segmentStart, segmentEnd, lookup, sortedLookupKeys, defaultSpeaker = null) {
+    const candidate = findSpeakerCandidateInContext(maskedText, windowStart, windowEnd, segmentStart, segmentEnd, lookup, sortedLookupKeys, defaultSpeaker);
+    return candidate?.assignment || null;
+}
+
+// Distance decays confidence gently: a tag right next to the quote is worth
+// more than the same evidence 200 characters away, but never enough to drop
+// a strong tag below a weak one.
+export function scoreSpeakerCandidateConfidence(candidate) {
+    const base = candidate?.strength >= 4 ? 0.92
+        : candidate?.strength === 3 ? 0.86
+            : candidate?.strength === 2 ? 0.68
+                : 0.4;
+    const distance = Number.isFinite(candidate?.distance) ? Math.max(0, candidate.distance) : 0;
+    const penalty = Math.min(0.12, distance / 600);
+    return Math.min(0.95, Math.max(0.35, base - penalty));
+}
+
+// True when a subject pronoun stands in for the speaker on this quote, i.e.
+// the pronoun is glued to the quote or paired with a speaking verb. Object
+// forms never reach here, so "he handed it to her" cannot trigger a bind.
+export function findPronounSpeechTag(maskedText, segmentStart, segmentEnd, paragraph) {
+    const text = String(maskedText ?? '');
+    const rangeStart = Math.max(0, Math.min(text.length, paragraph?.start ?? 0));
+    const rangeEnd = Math.max(rangeStart, Math.min(text.length, paragraph?.end ?? text.length));
+    const before = makeLengthPreservingSearchText(text.slice(rangeStart, Math.max(rangeStart, Math.min(segmentStart, rangeEnd))));
+    const after = makeLengthPreservingSearchText(text.slice(Math.min(rangeEnd, Math.max(segmentEnd, rangeStart)), rangeEnd));
+
+    // "..." she said. / "..." said she
+    const afterMatch = after.match(/^[\s:,-]{0,6}([a-zA-Z]+)\b\s*([a-zA-Z]+)?/);
+    if (afterMatch) {
+        const first = afterMatch[1].toLowerCase();
+        const second = (afterMatch[2] || '').toLowerCase();
+        if (pronounSubjects.has(first) && speakingVerbs.has(second)) return { pronoun: first, side: 'after', offset: segmentEnd };
+        if (speakingVerbs.has(first) && pronounSubjects.has(second)) return { pronoun: second, side: 'after', offset: segmentEnd };
+    }
+
+    // She said, "..." / She: "..."
+    const beforeMatch = before.match(/\b([a-zA-Z]+)\b(?:\s+([a-zA-Z]+)\b)?[\s:,-]{0,6}$/);
+    if (beforeMatch) {
+        const last = (beforeMatch[2] || beforeMatch[1]).toLowerCase();
+        const previous = beforeMatch[2] ? beforeMatch[1].toLowerCase() : '';
+        if (pronounSubjects.has(last)) return { pronoun: last, side: 'before', offset: segmentStart };
+        if (speakingVerbs.has(last) && pronounSubjects.has(previous)) return { pronoun: previous, side: 'before', offset: segmentStart };
+    }
+
+    return null;
+}
+
+// Bind a pronoun speech tag to the nearest preceding name in the same
+// paragraph that is not itself a possessive or an addressee. Gender-free by
+// design: no pronoun-to-character mapping is stored or guessed.
+export function bindPronounSpeakerInParagraph(maskedText, segmentStart, segmentEnd, paragraph, lookup, sortedLookupKeys) {
+    const tag = findPronounSpeechTag(maskedText, segmentStart, segmentEnd, paragraph);
+    if (!tag) return null;
+    const candidate = findSpeakerCandidateInContext(maskedText, paragraph?.start ?? 0, tag.offset, tag.offset, tag.offset, lookup, sortedLookupKeys, null);
+    if (!candidate || candidate.side !== 'before' || candidate.strength < 2) return null;
+    return { ...candidate, pronoun: tag.pronoun };
 }
 
 export function ensureCharacterEntry(name, color) {
@@ -301,11 +404,15 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
     }
 
     const maskedText = buildMaskedDialogueText(raw, collectedSegments);
+    // Four deep rather than two: a three-way scene used to evict the third
+    // speaker before it could ever be alternated back to. Selection still
+    // walks backwards to the most recent distinct key, so two-speaker
+    // ping-pong resolves exactly as before.
     const rememberSpeaker = assignment => {
         if (!assignment?.key) return;
         const lastKey = recentSpeakerKeys[recentSpeakerKeys.length - 1];
         if (lastKey !== assignment.key) recentSpeakerKeys.push(assignment.key);
-        while (recentSpeakerKeys.length > 2) recentSpeakerKeys.shift();
+        while (recentSpeakerKeys.length > 4) recentSpeakerKeys.shift();
     };
     const getAlternatingAssignment = () => {
         if (!lastResolvedSpeakerKey) return null;
@@ -317,6 +424,33 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
         return null;
     };
     let previousParagraph = null;
+    let previousConfidence = 0;
+
+    // True when the narration names a known character other than the message
+    // speaker, which is the classic "an NPC speaks inside someone else's
+    // message" shape. Computed once per message, not per segment.
+    let competingNamedKeys = null;
+    const hasCompetingNamedSpeaker = speakerKey => {
+        if (competingNamedKeys === null) {
+            competingNamedKeys = new Set();
+            const searchText = makeLengthPreservingSearchText(maskedText);
+            for (const key of sortedLookupKeys) {
+                const assignment = lookup.get(key);
+                if (!assignment?.key) continue;
+                let regex = speakerRegexCache.get(key);
+                if (!regex) {
+                    regex = new RegExp(`\\b${escapeRegex(key)}(?:'s?)?\\b`, 'gi');
+                    speakerRegexCache.set(key, regex);
+                }
+                regex.lastIndex = 0;
+                if (regex.test(searchText)) competingNamedKeys.add(assignment.key);
+            }
+        }
+        for (const key of competingNamedKeys) {
+            if (key !== speakerKey) return true;
+        }
+        return false;
+    };
 
     // Determine if we are attributing the active streaming message to check/save cached assignments
     let isStreamingMsg = false;
@@ -384,26 +518,56 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
         if (!assignment) {
             const windowStart = Math.max(segment.paragraph.start, segment.start - 240);
             const windowEnd = Math.min(segment.paragraph.end, segment.end + 120);
-            assignment = findClosestMentionedSpeakerInContext(maskedText, windowStart, windowEnd, segment.start, segment.end, lookup, sortedLookupKeys, defaultSpeaker);
+            const candidate = findSpeakerCandidateInContext(maskedText, windowStart, windowEnd, segment.start, segment.end, lookup, sortedLookupKeys, defaultSpeaker);
+            assignment = candidate?.assignment || null;
             if (assignment) {
                 attributionMetadata = createSegmentProvenance(
                     ATTRIBUTION_SOURCE.EXPLICIT_MENTION,
                     'context-proximity',
-                    0.85,
-                    [{ type: 'nearby-speaker-mention' }],
+                    scoreSpeakerCandidateConfidence(candidate),
+                    [{
+                        type: 'nearby-speaker-mention',
+                        speaker: candidate.name,
+                        distance: candidate.distance,
+                        strength: candidate.strength,
+                        method: candidate.side,
+                    }],
                 );
             }
         }
 
-        // Tier 3: carry only within the same paragraph/line.
+        // Tier 2.5: a pronoun speech tag bound to the nearest preceding name in
+        // the same paragraph. Always weaker than a literal mention.
+        if (!assignment) {
+            const bound = bindPronounSpeakerInParagraph(maskedText, segment.start, segment.end, segment.paragraph, lookup, sortedLookupKeys);
+            assignment = bound?.assignment || null;
+            if (assignment) {
+                attributionMetadata = createSegmentProvenance(
+                    ATTRIBUTION_SOURCE.EXPLICIT_MENTION,
+                    'pronoun-proximity',
+                    Math.max(0.35, 0.58 - Math.min(0.12, Math.max(0, bound.distance) / 600)),
+                    [{
+                        type: 'pronoun-speech-tag',
+                        speaker: bound.name,
+                        detail: bound.pronoun,
+                        distance: bound.distance,
+                        strength: bound.strength,
+                    }],
+                );
+            }
+        }
+
+        // Tier 3: carry only within the same paragraph/line. Doubt propagates:
+        // a carried speaker can never read as more certain than the segment it
+        // was carried from.
         if (!assignment && sameParagraphAsPrevious && lastResolvedSpeakerKey) {
             assignment = lookup.get(lastResolvedSpeakerKey) || null;
             if (assignment) {
                 attributionMetadata = createSegmentProvenance(
                     ATTRIBUTION_SOURCE.PARAGRAPH_CARRY,
                     'same-paragraph-carry',
-                    0.7,
-                    [{ type: 'same-paragraph-speaker' }],
+                    Math.min(0.7, previousConfidence),
+                    [{ type: 'same-paragraph-speaker', speaker: assignment.name }],
                 );
             }
         }
@@ -412,25 +576,28 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
         if (!assignment && !sameParagraphAsPrevious) {
             assignment = getAlternatingAssignment();
             if (assignment) {
+                const distinctRecent = new Set(recentSpeakerKeys.filter(Boolean)).size;
                 attributionMetadata = createSegmentProvenance(
                     ATTRIBUTION_SOURCE.ALTERNATION,
                     'recent-speaker-alternation',
-                    0.45,
-                    [{ type: 'recent-speaker-alternation' }],
+                    distinctRecent >= 3 ? 0.3 : Math.min(0.45, previousConfidence),
+                    [{ type: 'recent-speaker-alternation', speaker: assignment.name, strength: distinctRecent }],
                 );
             }
         }
 
-        // Tier 5: default message speaker.
+        // Tier 5: default message speaker. Another known character named in the
+        // narration means this is a guess, not a default.
         if (!assignment) {
             assignment = defaultSpeaker || ensureDefaultSpeaker();
             if (assignment) {
                 const fromColorBlock = defaultSpeakerSource === ATTRIBUTION_SOURCE.COLOR_BLOCK;
+                const contested = !fromColorBlock && hasCompetingNamedSpeaker(assignment.key);
                 attributionMetadata = createSegmentProvenance(
                     fromColorBlock ? ATTRIBUTION_SOURCE.COLOR_BLOCK : ATTRIBUTION_SOURCE.MESSAGE_SPEAKER,
                     fromColorBlock ? 'sole-color-assignment' : 'message-speaker-default',
-                    fromColorBlock ? 0.75 : 0.6,
-                    [{ type: fromColorBlock ? 'sole-color-assignment' : 'message-speaker' }],
+                    fromColorBlock ? 0.75 : (contested ? 0.45 : 0.6),
+                    [{ type: fromColorBlock ? 'sole-color-assignment' : 'message-speaker', speaker: assignment.name }],
                 );
             }
         }
@@ -459,6 +626,7 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
             ...attributionMetadata,
         });
         previousParagraph = segment.paragraph;
+        if (assignment) previousConfidence = attributionMetadata.confidence;
     }
 
     return result;

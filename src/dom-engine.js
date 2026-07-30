@@ -1,8 +1,8 @@
 // dom-engine.js - extracted from index.js (mechanical split)
 import { attributeDialogueSegments } from './attribution.js';
-import { ATTRIBUTION_REVIEW_STATUS, ATTRIBUTION_SOURCE, ATTRIBUTION_VERIFICATION_STATUS, createAttributionStore, createMessageFingerprint, deleteAttributionOverrideRecord, isLegacyAttributionOverrideEntry, normalizeAttributionConfidence, normalizeAttributionSource } from './attribution-store.js';
+import { ATTRIBUTION_REVIEW_STATUS, ATTRIBUTION_SOURCE, ATTRIBUTION_VERIFICATION_STATUS, createAttributionStore, createMessageFingerprint, deleteAttributionOverrideRecord, getAttributionConfidenceBand, isLegacyAttributionOverrideEntry, normalizeAttributionConfidence, normalizeAttributionSource } from './attribution-store.js';
 import { unregisterGradientAnimationRoot } from './animation-controller.js';
-import { collectFontColorsFromText, resolveCharacterKeyByNameOrAlias } from './color-blocks.js';
+import { buildUniqueKnownColorStatsLookup, collectFontColorsFromText, countFontColorOccurrencesFromText, resolveCharacterKeyByNameOrAlias } from './color-blocks.js';
 import { applyCustomFontsToFontTags, applyCustomFontsToMessageElements, clearCustomFontsFromFontTags, loadGoogleFont, scheduleCardStyle, scheduleCustomFontRefresh } from './fonts.js';
 import { applyGradientText, clearGradientText, getVisualRenderState } from './gradient-rendering.js';
 import { queueColorStateSave } from './live-colors.js';
@@ -232,8 +232,10 @@ export function getMessageDomReadiness(mesElement, msg, mesIndex) {
         matchedSegments++;
         if (seg.assignment && el.getAttribute('data-dc-speaker') === seg.assignment.key) correctDecorations++;
     };
-    matchSegmentsToElements(quoteSegments, qElements, seg => normalizeSegmentText(seg.text), countMatch);
-    matchSegmentsToElements(emphasisSegments, emElements, seg => normalizeSegmentText(seg.text.slice(1, -1)), countMatch);
+    // Must use the same matching rules as decorateMessageDom, or readiness will
+    // keep demanding re-renders for messages that decorated fine.
+    matchSegmentsToElements(quoteSegments, qElements, seg => normalizeSegmentText(seg.text), countMatch, { allowAnchoredFallback: true });
+    matchSegmentsToElements(emphasisSegments, emElements, seg => normalizeSegmentText(seg.text.slice(1, -1)), countMatch, { allowAnchoredFallback: true });
     return {
         ready: totalSegments === 0 || matchedSegments >= totalSegments,
         totalSegments,
@@ -1053,9 +1055,23 @@ export function refreshDomDialogueCounts(chat = getContext()?.chat || []) {
     const nextCounts = {};
     let createdCharacters = false;
 
+    let fontColorLookup = null;
+
     for (let i = 0; i < chat.length; i++) {
         const msg = chat[i];
-        if (!msg || msg.is_system || !msg.mes || collectFontColorsFromText(msg.mes).size) continue;
+        if (!msg || msg.is_system || !msg.mes) continue;
+        // Font-tagged messages are never decorated, but their saved tags still
+        // say who spoke; count them from the tags instead of dropping the whole
+        // message out of the statistics.
+        if (collectFontColorsFromText(msg.mes).size) {
+            if (!fontColorLookup) fontColorLookup = buildUniqueKnownColorStatsLookup();
+            for (const [color, count] of countFontColorOccurrencesFromText(msg.mes)) {
+                const key = fontColorLookup.get(color)?.key;
+                if (!key || !characterColors[key]) continue;
+                nextCounts[key] = (nextCounts[key] || 0) + count;
+            }
+            continue;
+        }
         const attribution = attributeDialogueSegments(msg.mes, msg.name, {
             autoAddMessageSpeaker: true,
             ...getMessageQuoteOverrideOptions(i, msg),
@@ -1081,23 +1097,68 @@ export function refreshDomDialogueCounts(chat = getContext()?.chat || []) {
     return { changed, createdCharacters };
 }
 
-export function matchSegmentsToElements(segments, elements, getTargetText, onMatch) {
+export function matchSegmentsToElements(segments, elements, getTargetText, onMatch, options = {}) {
+    // Exact matches claim their element, so the optional second pass can only
+    // ever fill the gaps they leave behind.
+    const claimed = new Array(elements.length).fill(false);
+    const unmatched = [];
     let elementIndex = 0;
+
     for (const seg of segments) {
-        if (elementIndex >= elements.length) break;
         const target = getTargetText(seg);
-        if (!target) continue;
+        if (elementIndex >= elements.length) {
+            unmatched.push({ seg, target, after: elementIndex });
+            continue;
+        }
         let foundIndex = -1;
         for (let i = elementIndex; i < elements.length; i++) {
-            if (normalizeSegmentText(elements[i].textContent) === target) {
-                foundIndex = i;
-                break;
-            }
+            if (normalizeSegmentText(elements[i].textContent) === target) { foundIndex = i; break; }
         }
-        if (foundIndex === -1) continue;
+        if (foundIndex === -1) {
+            unmatched.push({ seg, target, after: elementIndex });
+            continue;
+        }
+        claimed[foundIndex] = true;
         onMatch(seg, elements[foundIndex]);
+        // An empty target still consumes its element. Skipping it left every
+        // later segment matching one element too early.
         elementIndex = foundIndex + 1;
     }
+
+    if (options.allowAnchoredFallback !== true || !unmatched.length) return;
+
+    for (const pending of unmatched) {
+        if (!pending.target) continue;
+        // Bound the search to the unclaimed run starting where this segment
+        // would have sat, stopping at the next element an exact match claimed.
+        let lower = pending.after;
+        while (lower < elements.length && claimed[lower]) lower++;
+        let chosen = -1;
+        let candidates = 0;
+        for (let i = lower; i < elements.length && !claimed[i]; i++) {
+            candidates++;
+            if (chosen !== -1) continue;
+            if (isApproximateSegmentTextMatch(pending.target, normalizeSegmentText(elements[i].textContent))) chosen = i;
+        }
+        // A single unclaimed element between two anchors can only belong to
+        // this segment, so accept it even when the text was rewritten wholesale.
+        if (chosen === -1 && candidates === 1 && unmatched.filter(other => other.after === pending.after).length === 1) {
+            chosen = lower < elements.length && !claimed[lower] ? lower : -1;
+        }
+        if (chosen === -1) continue;
+        claimed[chosen] = true;
+        onMatch(pending.seg, elements[chosen]);
+    }
+}
+
+// Containment with a length floor: entity decoding, macro expansion and regex
+// scripts change a quote's rendered text without changing which quote it is.
+export function isApproximateSegmentTextMatch(target, rendered) {
+    if (!target || !rendered) return false;
+    const longer = rendered.length >= target.length ? rendered : target;
+    const shorter = rendered.length >= target.length ? target : rendered;
+    if (!longer.includes(shorter)) return false;
+    return shorter.length / longer.length >= 0.6;
 }
 
 export function resolveDomSegmentIndexForElement(segmentEl, mesIndex, msg) {
@@ -1146,6 +1207,7 @@ export function clearSegmentDecoration(el) {
     el.style.fontFamily = '';
     if (!el.getAttribute('style')) el.removeAttribute('style');
     el.removeAttribute('data-dc-colored');
+    el.removeAttribute('data-dc-confidence');
     el.removeAttribute('data-dc-speaker');
     el.removeAttribute('data-dc-speaker-name');
     el.removeAttribute('data-dc-font');
@@ -1297,6 +1359,7 @@ export function decorateMessageDom(mesElement, msg, mesIndex) {
         const gradientResult = applyGradientText(el, entry, { highlightColor, target: 'chat' });
         if (settings.highlightMode && !gradientResult.applied) el.style.backgroundColor = highlightColor;
         el.setAttribute('data-dc-colored', '1');
+        el.setAttribute('data-dc-confidence', getAttributionConfidenceBand(seg.confidence));
         el.setAttribute('data-dc-speaker', seg.assignment.key);
         const speakerName = entry?.name || seg.assignment.name || seg.assignment.key;
         el.setAttribute('data-dc-speaker-name', speakerName);
@@ -1314,8 +1377,8 @@ export function decorateMessageDom(mesElement, msg, mesIndex) {
     const expectedDecorations = quoteSegments.filter(seg => seg.assignment).length + emphasisSegments.filter(seg => seg.assignment).length;
     let matchedDecorations = 0;
 
-    matchSegmentsToElements(quoteSegments, qElements, seg => normalizeSegmentText(seg.text), applyDecoration);
-    matchSegmentsToElements(emphasisSegments, emElements, seg => normalizeSegmentText(seg.text.slice(1, -1)), applyDecoration);
+    matchSegmentsToElements(quoteSegments, qElements, seg => normalizeSegmentText(seg.text), applyDecoration, { allowAnchoredFallback: true });
+    matchSegmentsToElements(emphasisSegments, emElements, seg => normalizeSegmentText(seg.text.slice(1, -1)), applyDecoration, { allowAnchoredFallback: true });
     matchedDecorations = mesText.querySelectorAll('[data-dc-colored]').length;
 
     const narrator = getNarratorVisual(settings, applyThemeReadabilityAndBrightness);

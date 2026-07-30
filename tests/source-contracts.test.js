@@ -213,6 +213,22 @@ test('unmatchable messages get a bounded best-effort decoration', () => {
     assert.match(healthCheck, /clearDecoratedWatcher\(mesElement\);[\s\S]*?healthRefreshAttempts\.delete\(`\$\{repairIndex\}/);
 });
 
+test('override targeting never uses the approximate element fallback', () => {
+    const resolveSegment = functionSection(sources['dom-engine.js'], 'resolveDomSegmentIndexForElement');
+    const readiness = functionSection(sources['dom-engine.js'], 'getMessageDomReadiness');
+    const decorate = functionSection(sources['dom-engine.js'], 'decorateMessageDom');
+
+    // Decoration may guess which <q> a segment became, because the worst case
+    // is a miscoloured quote the user can right-click. Resolving the segment
+    // index behind an override must not: a wrong index writes a persisted
+    // override against a quote the user never clicked.
+    assert.doesNotMatch(resolveSegment, /allowAnchoredFallback/);
+    // Readiness has to score with the same rules decoration applies, or a
+    // fallback-decorated message reads as unready and re-renders forever.
+    assert.match(readiness, /allowAnchoredFallback: true/);
+    assert.match(decorate, /allowAnchoredFallback: true/);
+});
+
 test('every settings page section has a matching nav tab', () => {
     const source = sources['ui.js'];
     const navSlugs = [...source.matchAll(/\{ slug: '([a-z]+)', label: '[^']+' \}/g)].map(m => m[1]);

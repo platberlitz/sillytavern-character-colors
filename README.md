@@ -49,6 +49,21 @@ Local mode attributes and colors rendered quotes and thoughts without editing `m
 
 **Stealth speaker color blocks** can ask the model for hidden `[COLORS:...]` metadata without visible font tags. Optional LLM attribution verification can review the latest or visible rendered messages and save corrections in chat metadata.
 
+#### Local attribution
+
+Attribution runs entirely on your machine and needs no model calls. Each quote is resolved by the first rule that fits, strongest first:
+
+1. A manual override you saved by right-clicking a quote.
+2. A name near the quote — `Alice said, "..."`, `"...," Alice said`, `Alice: "..."`. An explicit speech tag beats a bare mention, a nearby mention beats a distant one, and a name that is only possessive (`Alice's coat`) or an addressee (`turned to Alice`) is ignored rather than treated as the speaker.
+3. A pronoun speech tag (`"...," she said`) bound to the nearest preceding name in the same paragraph that is not itself possessive or an addressee. This is gender-free: no pronoun-to-character mapping is stored or guessed, so it is always scored lower than a literal name.
+4. The previous speaker, when the quote sits on the same line.
+5. Alternation between recent speakers across new lines.
+6. The message's own speaker.
+
+Every quote carries a confidence derived from the evidence that resolved it, not a fixed number per rule — distance, tag strength, and how crowded the scene is all move it, and a carried or alternated speaker can never read as more certain than the quote it came from. Right-click any quote to see its source and confidence, and to correct it. Correcting one quote pins its neighbours as they were, so a fix never cascades.
+
+**Underline uncertain dialogue** (Engine settings) draws a dotted underline under the quotes the heuristics were least sure about, so the ones worth checking are visible at a glance.
+
 #### Verification accuracy
 
 Small, fast models often answer the same message differently on each run, which shows up as attribution that changes every time you press Verify. **Agreement passes** (Engine settings) verifies each message several times and keeps only the corrections that most passes agree on. A pass that proposes nothing for a segment counts as a vote to leave it alone, so with 3 passes a correction has to be proposed at least twice, with the same speaker, to be applied.

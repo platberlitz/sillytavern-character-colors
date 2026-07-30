@@ -356,6 +356,12 @@ body.dc-fullscreen-open {
     transition: color 0.15s ease, background-color 0.15s ease;
 }
 
+body.dc-mark-uncertain [data-dc-colored][data-dc-confidence="low"] {
+    text-decoration: underline dotted currentColor;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 2px;
+}
+
 #dc-verify-attr:disabled {
     opacity: 0.7;
     cursor: wait;
@@ -1914,6 +1920,10 @@ body.dc-fullscreen-open {
 @media (forced-colors: active) {
     [data-dc-narrator] {
         color: CanvasText !important;
+    }
+
+    body.dc-mark-uncertain [data-dc-colored][data-dc-confidence="low"] {
+        text-decoration-color: CanvasText !important;
     }
 
     .dc-gradient-text {

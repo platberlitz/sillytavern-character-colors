@@ -151,6 +151,15 @@ export function normalizeAttributionConfidence(value, fallback = 0) {
 
 export const normalizeConfidence = normalizeAttributionConfidence;
 
+// Coarse band for markers and styling. Kept separate from the verifier's
+// auto-apply threshold so tuning one never silently moves the other.
+export function getAttributionConfidenceBand(value) {
+    const confidence = normalizeAttributionConfidence(value, 0);
+    if (confidence >= 0.75) return 'high';
+    if (confidence >= 0.5) return 'medium';
+    return 'low';
+}
+
 export function normalizeAttributionEvidence(value) {
     const items = Array.isArray(value) ? value : (value === null || value === undefined ? [] : [value]);
     const evidence = [];
