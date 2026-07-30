@@ -156,11 +156,18 @@ export function clearSpeakerRegexCache() { speakerRegexCache.clear(); }
 // Returns the winning candidate with its scoring intact ({ assignment,
 // strength, distance, side, name }) so callers can derive an honest
 // confidence instead of a flat per-tier constant.
-export function findSpeakerCandidateInContext(maskedText, windowStart, windowEnd, segmentStart, segmentEnd, lookup, sortedLookupKeys, defaultSpeaker = null) {
+export function findSpeakerCandidateInContext(maskedText, windowStart, windowEnd, segmentStart, segmentEnd, lookup, sortedLookupKeys, defaultSpeaker = null, options = {}) {
     const text = String(maskedText ?? '');
     const boundedStart = Math.max(0, Math.min(text.length, windowStart));
     const boundedEnd = Math.max(boundedStart, Math.min(text.length, windowEnd));
     if (boundedStart >= boundedEnd) return null;
+
+    // A name reached only by stepping over another quote is that quote's tag,
+    // not this one's: in '"Sit down." "I would rather stand," Alice said.'
+    // the trailing tag belongs to the second quote alone.
+    const otherSegments = Array.isArray(options.segments) ? options.segments : [];
+    const isSeparatedBySegment = (gapStart, gapEnd) => otherSegments.some(other =>
+        other.start >= gapStart && other.end <= gapEnd && !(other.start === segmentStart && other.end === segmentEnd));
 
     const cleanWindow = makeLengthPreservingSearchText(text.slice(boundedStart, boundedEnd));
     let best = null;
@@ -181,9 +188,11 @@ export function findSpeakerCandidateInContext(maskedText, windowStart, windowEnd
             let side = '';
             let distance = Infinity;
             if (matchEnd <= segmentStart) {
+                if (isSeparatedBySegment(matchEnd, segmentStart)) continue;
                 side = 'before';
                 distance = segmentStart - matchEnd;
             } else if (matchStart >= segmentEnd) {
+                if (isSeparatedBySegment(segmentEnd, matchStart)) continue;
                 side = 'after';
                 distance = matchStart - segmentEnd;
             } else {
@@ -240,6 +249,42 @@ export function findSpeakerCandidateInContext(maskedText, windowStart, windowEnd
 export function findClosestMentionedSpeakerInContext(maskedText, windowStart, windowEnd, segmentStart, segmentEnd, lookup, sortedLookupKeys, defaultSpeaker = null) {
     const candidate = findSpeakerCandidateInContext(maskedText, windowStart, windowEnd, segmentStart, segmentEnd, lookup, sortedLookupKeys, defaultSpeaker);
     return candidate?.assignment || null;
+}
+
+// Models write a paragraph per speaker: the paragraph opens by naming whoever
+// is acting, quotes them, and never repeats the name. So the paragraph's
+// subject is the first name in it that is neither possessive ("Alice's coat")
+// nor the object of a preposition ("handed it to Alice") -- both of those mark
+// someone being acted upon rather than acting.
+export function findParagraphSubjectSpeaker(maskedText, paragraph, lookup, sortedLookupKeys) {
+    const text = String(maskedText ?? '');
+    const rangeStart = Math.max(0, Math.min(text.length, paragraph?.start ?? 0));
+    const rangeEnd = Math.max(rangeStart, Math.min(text.length, paragraph?.end ?? text.length));
+    if (rangeStart >= rangeEnd) return null;
+
+    const cleanRange = makeLengthPreservingSearchText(text.slice(rangeStart, rangeEnd));
+    let best = null;
+
+    for (const speakerKey of sortedLookupKeys) {
+        const assignment = lookup.get(speakerKey);
+        if (!assignment) continue;
+        let regex = speakerRegexCache.get(speakerKey);
+        if (!regex) {
+            regex = new RegExp(`\\b${escapeRegex(speakerKey)}(?:'s?)?\\b`, 'gi');
+            speakerRegexCache.set(speakerKey, regex);
+        }
+        regex.lastIndex = 0;
+        let match;
+        while ((match = regex.exec(cleanRange)) !== null) {
+            if (best && match.index >= best.index) break;
+            if (/'s?$/i.test(match[0])) continue;
+            const preMatch = cleanRange.slice(Math.max(0, match.index - 30), match.index).match(/\b([a-zA-Z]+)\b\s*$/);
+            if (preMatch && passivePrepositions.has(preMatch[1].toLowerCase())) continue;
+            best = { assignment, name: assignment.name || speakerKey, index: match.index, offset: rangeStart + match.index };
+        }
+    }
+
+    return best;
 }
 
 // Distance decays confidence gently: a tag right next to the quote is worth
@@ -422,6 +467,11 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
     }
 
     const maskedText = buildMaskedDialogueText(raw, collectedSegments);
+    // Models very often put the acting character's name inside the action
+    // itself ("*Bob shrugs.* \"Fine.\""). maskedText blanks emphasis along with
+    // quotes, so the paragraph-subject tier reads a text where only real
+    // speech is hidden and narration -- asterisked or not -- is still legible.
+    const narrationText = buildMaskedDialogueText(raw, collectedSegments.filter(segment => segment.delimiter !== '*' && segment.delimiter !== '_'));
     // Four deep rather than two: a three-way scene used to evict the third
     // speaker before it could ever be alternated back to. Selection still
     // walks backwards to the most recent distinct key, so two-speaker
@@ -443,6 +493,15 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
     };
     let previousParagraph = null;
     let previousConfidence = 0;
+
+    const paragraphSubjects = new Map();
+    const getParagraphSubject = paragraph => {
+        const key = `${paragraph.start}:${paragraph.end}`;
+        if (!paragraphSubjects.has(key)) {
+            paragraphSubjects.set(key, findParagraphSubjectSpeaker(narrationText, paragraph, lookup, sortedLookupKeys));
+        }
+        return paragraphSubjects.get(key);
+    };
 
     // True when the narration names a known character other than the message
     // speaker, which is the classic "an NPC speaks inside someone else's
@@ -542,8 +601,12 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
         if (!assignment) {
             const windowStart = Math.max(segment.paragraph.start, segment.start - 240);
             const windowEnd = Math.min(segment.paragraph.end, segment.end + 120);
-            const candidate = findSpeakerCandidateInContext(maskedText, windowStart, windowEnd, segment.start, segment.end, lookup, sortedLookupKeys, defaultSpeaker);
-            assignment = candidate?.assignment || null;
+            const candidate = findSpeakerCandidateInContext(maskedText, windowStart, windowEnd, segment.start, segment.end, lookup, sortedLookupKeys, defaultSpeaker, { segments: collectedSegments });
+            // A possessive or an addressee ("he glanced at Alice") is weaker
+            // evidence than the name the paragraph opened on, so let the
+            // subject tier answer instead of colouring the wrong character.
+            const outrankedBySubject = candidate?.strength <= 1 && !!getParagraphSubject(segment.paragraph);
+            assignment = outrankedBySubject ? null : (candidate?.assignment || null);
             if (assignment) {
                 attributionMetadata = createSegmentProvenance(
                     ATTRIBUTION_SOURCE.EXPLICIT_MENTION,
@@ -577,6 +640,23 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
                         distance: bound.distance,
                         strength: bound.strength,
                     }],
+                );
+            }
+        }
+
+        // Tier 2.75: the character the paragraph is about. Weaker than any
+        // speech tag, but stronger than carrying or alternating, because a
+        // paragraph that opens on a name is that character's turn even when
+        // the quote sits far from it or ahead of it.
+        if (!assignment) {
+            const subject = getParagraphSubject(segment.paragraph);
+            assignment = subject?.assignment || null;
+            if (assignment) {
+                attributionMetadata = createSegmentProvenance(
+                    ATTRIBUTION_SOURCE.PARAGRAPH_SUBJECT,
+                    'paragraph-subject',
+                    0.55,
+                    [{ type: 'paragraph-subject', speaker: subject.name, start: subject.offset }],
                 );
             }
         }

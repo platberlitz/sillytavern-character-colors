@@ -38,6 +38,7 @@ function formatAttributionSource(source) {
         frozen: 'Pinned by a manual edit',
         'explicit-mention': 'Explicit mention',
         'streaming-cache': 'Streaming cache',
+        'paragraph-subject': 'Paragraph subject',
         'paragraph-carry': 'Paragraph carry',
         alternation: 'Speaker alternation',
         'message-speaker': 'Message speaker',

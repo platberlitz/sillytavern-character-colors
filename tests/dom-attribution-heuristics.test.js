@@ -176,6 +176,71 @@ test('a pronoun speech tag binds to the nearest preceding name, below a literal 
     });
 });
 
+test('the paragraph subject speaks when no tag reaches the quote', () => {
+    // The shape models actually write: name the actor once, then quote them
+    // somewhere in the same paragraph, never repeating the name.
+    const filler = 'The room stayed quiet for a while and nothing at all happened in it. '.repeat(5);
+    withCharacters(['Dana', 'Alice'], () => {
+        for (const text of [
+            `Alice set her glass down. ${filler}"We should go."`,
+            `"We should go." ${filler}Alice finally stood.`,
+        ]) {
+            const [result] = attribute(text, 'Dana');
+            assert.equal(result.speaker, 'Alice', `paragraph subject lost for ${JSON.stringify(text.slice(0, 40))}`);
+            assert.equal(result.source, ATTRIBUTION_SOURCE.PARAGRAPH_SUBJECT);
+            assert.equal(result.method, 'paragraph-subject');
+            assert.equal(result.evidence[0].type, 'paragraph-subject');
+            assert.equal(result.evidence[0].speaker, 'Alice');
+        }
+    });
+});
+
+test('a name inside an asterisk action still owns the paragraph', () => {
+    withCharacters(['Dana', 'Alice', 'Carol'], () => {
+        const results = attribute('*Alice leans back.* "You are late."\n\n*Carol drops her bag.* "Traffic."', 'Dana');
+        assert.deepEqual(results.map(entry => entry.speaker), ['Alice', 'Carol']);
+        assert.equal(results[0].source, ATTRIBUTION_SOURCE.PARAGRAPH_SUBJECT);
+        assert.equal(results[1].source, ATTRIBUTION_SOURCE.PARAGRAPH_SUBJECT);
+    });
+});
+
+test('the paragraph subject never outranks a real speech tag', () => {
+    withCharacters(['Dana', 'Alice', 'Carol'], () => {
+        const [tagged] = attribute('Alice poured the tea. Carol said, "Sit down."', 'Dana');
+        assert.equal(tagged.speaker, 'Carol');
+        assert.equal(tagged.source, ATTRIBUTION_SOURCE.EXPLICIT_MENTION);
+
+        // A subject is a guess, so it must stay below every tagged mention.
+        const [subject] = attribute('Alice poured the tea slowly and waited. "Sit down."', 'Dana');
+        assert.equal(subject.speaker, 'Alice');
+        assert.ok(subject.confidence < tagged.confidence, `${subject.confidence} !< ${tagged.confidence}`);
+        assert.equal(getAttributionConfidenceBand(subject.confidence), 'medium');
+    });
+});
+
+test('an addressee or possessive loses the paragraph to its subject', () => {
+    // Far enough that only the weak mention is in reach of the quote, and with
+    // an unregistered narrator so there is no default speaker to veto it.
+    const filler = 'The road unspooled ahead of them and neither of them said a word. '.repeat(4);
+    withCharacters(['Alice', 'Carol'], () => {
+        for (const text of [
+            `Alice started the engine. ${filler}The map ended up with Carol. "Buckle up."`,
+            `Alice pushed the door open. ${filler}The floor was buried under Carol's things. "Mind the mess."`,
+        ]) {
+            const [result] = attribute(text, 'Narrator');
+            assert.equal(result.speaker, 'Alice', `weak mention won for ${JSON.stringify(text.slice(0, 40))}`);
+            assert.equal(result.source, ATTRIBUTION_SOURCE.PARAGRAPH_SUBJECT);
+        }
+    });
+});
+
+test('a trailing speech tag belongs to the quote it touches, not its neighbour', () => {
+    withCharacters(['Dana', 'Alice', 'Carol'], () => {
+        const results = attribute('Alice poured the tea. "Sit down." "I would rather stand," Carol said.', 'Dana');
+        assert.deepEqual(results.map(entry => entry.speaker), ['Alice', 'Carol']);
+    });
+});
+
 test('a pronoun with no usable antecedent falls through instead of guessing', () => {
     withCharacters(['Dana', 'Alice'], () => {
         // No name at all in the paragraph.
