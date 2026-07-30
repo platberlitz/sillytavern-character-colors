@@ -10,6 +10,8 @@
     --dc-danger-soft: rgba(194, 85, 85, 0.14);
     --dc-keep: #d9ba5a;
     --dc-keep-soft: rgba(217, 186, 90, 0.16);
+    --dc-track: color-mix(in srgb, var(--dc-accent) 22%, transparent);
+    --dc-thumb-ring: color-mix(in srgb, var(--dc-accent) 28%, transparent);
     max-height: none;
     overflow: visible;
     container-name: dialogue-colors;
@@ -331,9 +333,83 @@ body.dc-fullscreen-open {
     flex: 0 0 auto !important;
 }
 
+/* SillyTavern paints the range track with a fixed white tint and only the thumb
+   follows the theme, so the panel draws both itself from the theme tokens. The
+   element stays taller than the track so the hit area is not 8px. */
 #dc-ext input[type="range"] {
+    -webkit-appearance: none;
+    appearance: none;
     height: 20px !important;
+    padding: 0 !important;
+    border: none !important;
+    background: transparent !important;
     cursor: pointer;
+}
+
+/* Vendor track/thumb selectors stay in separate rules: an engine drops the whole
+   rule when it does not recognise one selector in a list. */
+#dc-ext input[type="range"]::-webkit-slider-runnable-track {
+    height: 8px;
+    box-sizing: border-box;
+    border: 1px solid var(--dc-border);
+    border-radius: 999px;
+    background: var(--dc-track);
+}
+
+#dc-ext input[type="range"]::-moz-range-track {
+    height: 8px;
+    box-sizing: border-box;
+    border: 1px solid var(--dc-border);
+    border-radius: 999px;
+    background: var(--dc-track);
+}
+
+/* Firefox fills the track below the thumb on its own; matching the track keeps
+   both engines on the same uniform bar. */
+#dc-ext input[type="range"]::-moz-range-progress {
+    height: 8px;
+    box-sizing: border-box;
+    border-radius: 999px;
+    background: var(--dc-track);
+}
+
+#dc-ext input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    /* Centres the thumb on the 8px track: (8 - 14) / 2, less the 1px border. */
+    margin-top: -4px;
+    border: none !important;
+    border-radius: 50%;
+    background: var(--dc-accent) !important;
+    box-shadow: 0 0 0 1px var(--dc-thumb-ring);
+    transition: box-shadow 0.15s ease;
+}
+
+#dc-ext input[type="range"]::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    border: none !important;
+    border-radius: 50%;
+    background: var(--dc-accent) !important;
+    box-shadow: 0 0 0 1px var(--dc-thumb-ring);
+    transition: box-shadow 0.15s ease;
+}
+
+#dc-ext input[type="range"]:hover::-webkit-slider-thumb,
+#dc-ext input[type="range"]:active::-webkit-slider-thumb {
+    box-shadow: 0 0 0 4px var(--dc-thumb-ring);
+}
+
+#dc-ext input[type="range"]:hover::-moz-range-thumb,
+#dc-ext input[type="range"]:active::-moz-range-thumb {
+    box-shadow: 0 0 0 4px var(--dc-thumb-ring);
+}
+
+#dc-ext input[type="range"]:focus-visible {
+    outline: 2px solid var(--dc-accent);
+    outline-offset: 2px;
 }
 
 #dc-ext input[type="number"] {
@@ -2579,6 +2655,17 @@ body.dc-mark-uncertain [data-dc-colored][data-dc-confidence="low"] {
 
     #dc-ext input[type="range"] {
         min-height: 44px !important;
+    }
+
+    #dc-ext input[type="range"]::-webkit-slider-thumb {
+        width: 18px;
+        height: 18px;
+        margin-top: -6px;
+    }
+
+    #dc-ext input[type="range"]::-moz-range-thumb {
+        width: 18px;
+        height: 18px;
     }
 
     #dc-legend-float .dc-legend-reset,
