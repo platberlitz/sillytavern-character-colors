@@ -1,5 +1,5 @@
 // attribution.js - extracted from index.js (mechanical split)
-import { buildDialogueRegex, buildNameColorLookup, parseNamedColorAssignmentsFromText, registerLookupAssignment, resolveCharacterKeyByNameOrAlias, resolveSingleSpeakerAssignment } from './color-blocks.js';
+import { buildDialogueRegex, buildNameColorLookup, DIALOGUE_SKIP_GROUP, parseNamedColorAssignmentsFromText, registerLookupAssignment, resolveCharacterKeyByNameOrAlias, resolveSingleSpeakerAssignment } from './color-blocks.js';
 import { ATTRIBUTION_SOURCE, normalizeAttributionConfidence, normalizeAttributionEvidence, normalizeAttributionSource } from './attribution-store.js';
 import { buildCharacterEntry, getEntryEffectiveColor } from './palettes.js';
 import { normalizeRegistryIdentity, normalizeRegistryIdentityName } from './group-profiles.js';
@@ -282,6 +282,10 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
     dialogueRegex.lastIndex = 0;
 
     while ((match = dialogueRegex.exec(raw)) !== null) {
+        // Code spans, fences and style blocks are matched only so that quotes
+        // inside them are consumed instead of segmented, mirroring how
+        // SillyTavern skips them when it renders <q> elements.
+        if (match.groups?.[DIALOGUE_SKIP_GROUP] !== undefined) continue;
         result.hadDialogueMatches = true;
         segmentIndex++;
         const offset = match.index;

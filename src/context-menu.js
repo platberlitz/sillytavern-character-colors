@@ -1,5 +1,6 @@
 // context-menu.js - extracted from index.js (mechanical split)
 import { attributeDialogueSegments } from './attribution.js';
+import { ATTRIBUTION_SOURCE } from './attribution-store.js';
 import { resolveCharacterKeyByNameOrAlias } from './color-blocks.js';
 import { cancelMessageDomFollowupRepairs, clearMessageDomRepairTimer, clearStreamingAttributionOverrides, decorateMessageDomFromCurrentRender, deleteMessageQuoteOverride, getMessageIndexFromElement, getMessageQuoteOverrideEntry, getMessageQuoteOverrideOptions, matchSegmentsToElements, refreshAndDecorateMessageDom, refreshMessageDom, resolveDomSegmentIndexForElement, restoreMessageQuoteOverrideEntry, scheduleMessageDomFollowupRepair, setMessageQuoteOverride } from './dom-engine.js';
 import { scheduleCustomFontRefresh } from './fonts.js';
@@ -34,6 +35,7 @@ function formatAttributionSource(source) {
         review: 'Reviewed suggestion',
         manual: 'Manual assignment',
         override: 'Saved override',
+        frozen: 'Pinned by a manual edit',
         'explicit-mention': 'Explicit mention',
         'streaming-cache': 'Streaming cache',
         'paragraph-carry': 'Paragraph carry',
@@ -74,18 +76,44 @@ function getDomAttributionDetails(targetEl) {
     const segment = attribution.segments.find(item => item.index === segmentIndex);
     if (!segment) return null;
     const override = getMessageQuoteOverrideEntry(messageIndex, message, false);
+    const segmentKey = String(segmentIndex);
+    // Frozen entries are snapshots this extension wrote to protect a real
+    // override elsewhere in the message, so they must not read as user intent.
+    const hasStoredSpeaker = !!override?.segments
+        && Object.prototype.hasOwnProperty.call(override.segments, segmentKey)
+        && override.sources?.[segmentKey] !== ATTRIBUTION_SOURCE.FROZEN;
     return {
         messageIndex,
         message,
         segmentIndex,
         source: segment?.provenance?.source || '',
         confidence: Number(segment?.confidence),
-        hasOverride: !!override?.segments && Object.prototype.hasOwnProperty.call(override.segments, String(segmentIndex)),
+        hasOverride: hasStoredSpeaker,
         segmentText: segment.text,
         segmentDelimiter: segment.delimiter,
         speakerKey: segment.assignment?.key || '',
         speakerColor: segment.assignment?.color || null,
     };
+}
+
+// The attribution heuristics carry speakers across neighbouring quotes, so
+// pinning one segment would otherwise re-colour the ones around it. Capture
+// what every other segment resolves to right now and store that alongside the
+// override, mirroring decoration's attribution options so the snapshot matches
+// the colours the user is looking at.
+function buildFrozenSiblingSegments(messageIndex, message, segmentIndex) {
+    const attribution = attributeDialogueSegments(message?.mes, message?.name, {
+        autoAddMessageSpeaker: true,
+        ...getMessageQuoteOverrideOptions(messageIndex, message),
+        mesIndex: messageIndex,
+    });
+    const frozen = {};
+    for (const segment of attribution.segments) {
+        if (segment.index === segmentIndex) continue;
+        const name = segment.assignment?.name || segment.assignment?.key;
+        if (name) frozen[String(segment.index)] = name;
+    }
+    return frozen;
 }
 
 function getDomAssignmentMessageId(message) {
@@ -403,6 +431,11 @@ function showMenu(e, fontTag, qElement = null) {
             }
 
             if (isDomSegment) {
+                if (!domAssignmentTarget) {
+                    toast.warning('Could not match this quote to the message text, so it cannot be reassigned.');
+                    closeMenu();
+                    return;
+                }
                 if (!isDomAssignmentSourceCurrent(domAssignmentTarget)) {
                     toast.warning('Message changed; reopen the assignment menu.');
                     closeMenu();
@@ -416,7 +449,8 @@ function showMenu(e, fontTag, qElement = null) {
                     mesIndex,
                     snapshot: JSON.parse(JSON.stringify(getMessageQuoteOverrideEntry(mesIndex, msg, false) || null)),
                 };
-                if (!setMessageQuoteOverride(mesIndex, msg, segmentIndex, name, { source: 'manual' })) {
+                const freezeSegments = buildFrozenSiblingSegments(mesIndex, msg, segmentIndex);
+                if (!setMessageQuoteOverride(mesIndex, msg, segmentIndex, name, { source: 'manual', freezeSegments })) {
                     toast.error('Could not save quote override.');
                     closeMenu();
                     return;

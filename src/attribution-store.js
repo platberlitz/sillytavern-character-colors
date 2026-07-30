@@ -32,6 +32,10 @@ export const ATTRIBUTION_SOURCE = Object.freeze({
     LLM: 'llm',
     REVIEW: 'review',
     OVERRIDE: 'override',
+    // Auto-attribution snapshotted when a message's first manual override is
+    // saved, so pinning one quote cannot re-attribute its neighbours through
+    // the paragraph-carry and alternation heuristics.
+    FROZEN: 'frozen',
     EXPLICIT_MENTION: 'explicit-mention',
     STREAMING_CACHE: 'streaming-cache',
     PARAGRAPH_CARRY: 'paragraph-carry',

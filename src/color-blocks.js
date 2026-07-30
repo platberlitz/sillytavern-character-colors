@@ -405,8 +405,30 @@ export function refreshTransientNarratorCount(chat = getContext()?.chat || []) {
     return setTransientNarratorCount(present ? total : null, chat);
 }
 
+// SillyTavern wraps these pairs in <q> unconditionally, whatever the thought
+// symbols are set to (public/script.js, the quote replace in messageFormatting).
+// Segmenting a different set of pairs desynchronises segment indices from the
+// rendered <q> elements, which makes a manual override land on the wrong quote.
+const RENDERED_QUOTE_PAIRS = Object.freeze([
+    ['"', '"'],
+    ['\u201C', '\u201D'],
+    ['\u00AB', '\u00BB'],
+    ['\u300C', '\u300D'],
+    ['\u300E', '\u300F'],
+    ['\uFF02', '\uFF02'],
+]);
+
+// The leading alternatives of SillyTavern's quote regex, which swallow code and
+// style spans before any quote inside them can match. Copied verbatim so both
+// sides skip the same regions.
+const RENDERED_QUOTE_SKIP_PATTERN = '<style>[\\s\\S]*?<\\/style>|```[\\s\\S]*?```|~~~[\\s\\S]*?~~~|``[\\s\\S]*?``|`[\\s\\S]*?`';
+
+// Alternation named group marking a skipped region rather than a dialogue
+// segment. Consumers must discard these matches.
+export const DIALOGUE_SKIP_GROUP = 'dcSkip';
+
 export function buildDialogueRegex() {
-    const delimiters = new Set(['"', '“']);
+    const delimiters = new Set();
     for (const ch of getThoughtDelimiterSymbols()) {
         delimiters.add(ch);
     }
@@ -436,6 +458,17 @@ export function buildDialogueRegex() {
     const patterns = [];
     const processedAsymmetricPairs = new Set();
 
+    // Quote pairs come first and are never conditional, so segment order and
+    // count line up with the <q> elements SillyTavern rendered. The character
+    // classes exclude line breaks because SillyTavern's quote regex runs without
+    // the dotAll flag, so a quote it renders can never span a line.
+    for (const [openChar, closeChar] of RENDERED_QUOTE_PAIRS) {
+        processedAsymmetricPairs.add(`${openChar}:${closeChar}`);
+        const escapedOpen = escapeRegex(openChar);
+        const escapedClose = escapeRegex(closeChar);
+        patterns.push(`${escapedOpen}([^${escapedClose}\\n\\r]*)${escapedClose}`);
+    }
+
     for (const delimiter of delimiters) {
         const isOpening = ASYMMETRIC_MAP[delimiter] !== undefined;
         const isClosing = REVERSE_ASYMMETRIC_MAP[delimiter] !== undefined;
@@ -454,6 +487,8 @@ export function buildDialogueRegex() {
             const escapedClose = escapeRegex(closeChar);
             patterns.push(`${escapedOpen}([^${escapedClose}]+)${escapedClose}`);
         } else {
+            if (processedAsymmetricPairs.has(`${delimiter}:${delimiter}`)) continue;
+            processedAsymmetricPairs.add(`${delimiter}:${delimiter}`);
             const escaped = escapeRegex(delimiter);
             // Reject doubled delimiters (e.g. markdown **bold** or __bold__) so a
             // bold span is not misattributed as a thought/delimiter segment; such
@@ -462,7 +497,11 @@ export function buildDialogueRegex() {
             patterns.push(`(?<!${escaped})${escaped}([^${escaped}]+)${escaped}(?!${escaped})`);
         }
     }
-    return patterns.length ? new RegExp(`(${patterns.join('|')})`, 'g') : null;
+    if (!patterns.length) return null;
+    // The skip alternative is first so a quote inside a code or style span is
+    // consumed as a skipped region, exactly as SillyTavern consumes it before
+    // it can become a <q>.
+    return new RegExp(`(?<${DIALOGUE_SKIP_GROUP}>${RENDERED_QUOTE_SKIP_PATTERN})|(${patterns.join('|')})`, 'g');
 }
 
 export function registerLookupAssignment(lookup, name, color, aliases = [], preserveExisting = false, font = '') {

@@ -844,14 +844,28 @@ export function setMessageQuoteOverride(mesIndex, msg, segmentIndex, speakerName
     if (messageQuoteOverrideEntryMatches(existingEntry, msg)) {
         migrateLegacyMessageQuoteOverrideEntry(existingEntry, msg);
     }
-    const baseEntry = messageQuoteOverrideEntryMatches(existingEntry, msg)
-        ? existingEntry
-        : createMessageQuoteOverrideEntry(msg);
+    const entryIsNew = !messageQuoteOverrideEntryMatches(existingEntry, msg);
+    const baseEntry = entryIsNew ? createMessageQuoteOverrideEntry(msg) : existingEntry;
     const entry = {
         ...baseEntry,
         segments: { ...(isPlainObject(baseEntry.segments) ? baseEntry.segments : {}) },
         sources: { ...(isPlainObject(baseEntry.sources) ? baseEntry.sources : {}) },
     };
+    // Snapshot the sibling segments' current auto-attribution the first time a
+    // message gets an override. Without this, the paragraph-carry and
+    // alternation tiers read the new override back and silently re-colour
+    // neighbouring quotes that the user never touched. Only seed on a fresh
+    // entry, otherwise clearing an override would immediately re-freeze it.
+    if (entryIsNew && isPlainObject(normalizedOptions.freezeSegments)) {
+        for (const [frozenKey, frozenSpeaker] of Object.entries(normalizedOptions.freezeSegments)) {
+            const frozenIndex = Number(frozenKey);
+            if (frozenKey === segmentKey || !Number.isInteger(frozenIndex) || frozenIndex < 0) continue;
+            const frozenName = String(frozenSpeaker ?? '').trim();
+            if (!frozenName) continue;
+            entry.segments[frozenKey] = frozenName;
+            entry.sources[frozenKey] = ATTRIBUTION_SOURCE.FROZEN;
+        }
+    }
     entry.segments[segmentKey] = speaker;
     entry.sources[segmentKey] = source;
     if (confidence !== undefined) {
@@ -905,6 +919,17 @@ export function deleteMessageQuoteOverride(mesIndex, msg, segmentIndex) {
     const map = getQuoteOverridesMap(false);
     const entry = getMessageQuoteOverrideEntry(mesIndex, msg, false);
     if (!map || !entry || !deleteAttributionOverrideRecord(map, mesIndex, segmentIndex)) return false;
+    // Frozen siblings only exist to protect a real override. Once the last
+    // non-frozen override on a message is gone, drop them so the message
+    // returns to fully automatic attribution.
+    const sources = isPlainObject(entry.sources) ? entry.sources : {};
+    const hasRealOverride = Object.keys(isPlainObject(entry.segments) ? entry.segments : {})
+        .some(key => sources[key] !== ATTRIBUTION_SOURCE.FROZEN);
+    if (!hasRealOverride) {
+        for (const key of Object.keys(entry.segments || {})) {
+            if (sources[key] === ATTRIBUTION_SOURCE.FROZEN) deleteAttributionOverrideRecord(map, mesIndex, key);
+        }
+    }
     streamingHeuristicCache.clear();
     saveChatMetadata();
     return true;
@@ -1106,12 +1131,11 @@ export function resolveDomSegmentIndexForElement(segmentEl, mesIndex, msg) {
             if (el === segmentEl) resolvedIndex = seg.index;
         }
     );
-    if (Number.isFinite(resolvedIndex)) return resolvedIndex;
-
-    // If SillyTavern's rendered text differs slightly from msg.mes, fall back
-    // to ordinal mapping so manual DOM overrides can still recover coloring.
-    const ordinal = elements.indexOf(segmentEl);
-    return ordinal >= 0 && segments[ordinal] ? segments[ordinal].index : NaN;
+    // No ordinal fallback: when this extension's segmentation disagrees with
+    // SillyTavern's rendered quotes, positional mapping can hand two different
+    // elements the same segment index, and an override written against it would
+    // recolour a quote the user never clicked. Refusing to guess is safer.
+    return resolvedIndex;
 }
 
 export function clearSegmentDecoration(el) {

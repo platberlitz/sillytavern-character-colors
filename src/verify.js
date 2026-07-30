@@ -716,7 +716,10 @@ export function getAttributionReviewPolicy(value = settings.attributionReviewPol
 }
 
 export function isHumanAttributionOverride(source) {
-    return source !== ATTRIBUTION_SOURCE.LLM;
+    // Frozen entries are auto-attribution this extension snapshotted to keep a
+    // manual override from spilling onto its neighbours, so the verifier is
+    // still free to correct them.
+    return source !== ATTRIBUTION_SOURCE.LLM && source !== ATTRIBUTION_SOURCE.FROZEN;
 }
 
 /**
