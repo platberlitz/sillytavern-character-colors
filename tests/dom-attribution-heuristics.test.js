@@ -197,10 +197,166 @@ test('the paragraph subject speaks when no tag reaches the quote', () => {
 
 test('a name inside an asterisk action still owns the paragraph', () => {
     withCharacters(['Dana', 'Alice', 'Carol'], () => {
-        const results = attribute('*Alice leans back.* "You are late."\n\n*Carol drops her bag.* "Traffic."', 'Dana');
+        for (const text of [
+            '*Alice leans back.* "You are late."\n\n*Carol drops her bag.* "Traffic."',
+            // Both beats on one line: the paragraph subject alone answers Alice
+            // for both quotes, so the beat next to each quote has to be read.
+            '*Alice leans back.* "You are late." *Carol drops her bag.* "Traffic."',
+        ]) {
+            const results = attribute(text, 'Dana');
+            assert.deepEqual(results.map(entry => entry.speaker), ['Alice', 'Carol'], `wrong speakers for ${JSON.stringify(text)}`);
+            // A beat touching the quote is proximity evidence, not a guess about
+            // the paragraph, so it reports as such and scores above a subject.
+            assert.equal(results[0].source, ATTRIBUTION_SOURCE.EXPLICIT_MENTION);
+            assert.equal(results[0].method, 'context-proximity');
+            assert.ok(results[0].confidence > 0.55, `${results[0].confidence} !> 0.55`);
+        }
+    });
+});
+
+test('the paragraph subject is the name that opens a sentence, not the first one', () => {
+    withCharacters(['Dana', 'Alice', 'Carol'], () => {
+        // Carol is named first, but only inside a thought. Alice is the one
+        // acting, so the paragraph -- and the quote below it -- is hers.
+        const [result] = attribute('*Where is Carol?* Alice checked the hall.\n\n"Not here."', 'Dana');
+        assert.equal(result.speaker, 'Alice');
+        assert.equal(result.source, ATTRIBUTION_SOURCE.PARAGRAPH_SUBJECT);
+    });
+});
+
+test('a beat on the line above speaks for the bare quote below it', () => {
+    withCharacters(['Dana', 'Alice', 'Carol'], () => {
+        for (const text of [
+            'Alice folded her arms and stepped back from the table.\n\n"I am not doing this."',
+            'Alice folded her arms.\n"I am not doing this."',
+            '*Alice looks up from her book.*\n"I am not doing this."',
+            // A bare name on its own line is the label form of the same shape.
+            'Alice\n"I am not doing this."',
+        ]) {
+            const [result] = attribute(text, 'Dana');
+            assert.equal(result.speaker, 'Alice', `beat lost the quote for ${JSON.stringify(text)}`);
+            assert.equal(result.source, ATTRIBUTION_SOURCE.PARAGRAPH_SUBJECT);
+            assert.equal(result.method, 'preceding-paragraph-subject');
+            assert.equal(result.evidence[0].type, 'preceding-paragraph-subject');
+            assert.equal(result.evidence[0].speaker, 'Alice');
+        }
+    });
+});
+
+test('the walk back to a beat crosses scene lines but stops at speech and runs out', () => {
+    withCharacters(['Dana', 'Alice', 'Carol'], () => {
+        // Nameless scene narration between the beat and the quote is not a turn,
+        // so the beat is still in reach -- but at lower confidence per line.
+        const [near] = attribute('Alice moved to the window.\n\n"We should wait."', 'Dana');
+        const [far] = attribute('Alice moved to the window.\n\nThe rain had not stopped.\n\n"We should wait."', 'Dana');
+        assert.equal(far.speaker, 'Alice');
+        assert.ok(far.confidence < near.confidence, `${far.confidence} !< ${near.confidence}`);
+
+        // Too far back to be this quote's beat.
+        const [exhausted] = attribute('Alice left.\n\nRain.\n\nWind.\n\nCold.\n\n"Hm."', 'Dana');
+        assert.equal(exhausted.source, ATTRIBUTION_SOURCE.MESSAGE_SPEAKER);
+
+        // Once a line has spoken, prose hands the next line to somebody else.
+        const spoken = attribute('Alice said, "One."\n"Two."', 'Dana');
+        assert.equal(spoken[1].speaker, 'Dana');
+        assert.equal(spoken[1].source, ATTRIBUTION_SOURCE.ALTERNATION);
+    });
+});
+
+test('a pronoun tag reaches an antecedent on the line above', () => {
+    withCharacters(['Dana', 'Alice', 'Carol'], () => {
+        const [result] = attribute('Alice stood by the door.\n\n"Are you ready?" she asked.', 'Dana');
+        assert.equal(result.speaker, 'Alice');
+        assert.equal(result.method, 'pronoun-proximity');
+        assert.equal(result.evidence[0].detail, 'she');
+    });
+});
+
+test('a reaction beat after a quote never outranks the speech tag before it', () => {
+    withCharacters(['Dana', 'Alice', 'Carol'], () => {
+        // 'frowned' is a beat verb, not a reporting verb: Carol is reacting to
+        // what Alice whispered, not saying it.
+        const [reacted] = attribute('Alice whispered. "Something." Carol frowned.', 'Dana');
+        assert.equal(reacted.speaker, 'Alice');
+
+        // A real trailing speech tag still wins outright.
+        const [tagged] = attribute('Alice whispered. "Something," Carol said.', 'Dana');
+        assert.equal(tagged.speaker, 'Carol');
+        assert.ok(tagged.confidence > reacted.confidence, `${tagged.confidence} !> ${reacted.confidence}`);
+
+        // With no competing beat before it, the trailing beat still resolves.
+        const [alone] = attribute('"Something." Carol crossed her arms.', 'Dana');
+        assert.equal(alone.speaker, 'Carol');
+    });
+});
+
+test('a tag between two quotes goes to the one that invited it', () => {
+    withCharacters(['Dana', 'Alice', 'Carol'], () => {
+        // The first quote closes on a full stop, so 'Carol groaned' opens a new
+        // sentence and belongs to the quote that sentence runs into.
+        const closed = attribute('Alice laughed. "Sure." Carol groaned. "No."', 'Dana');
+        assert.deepEqual(closed.map(entry => entry.speaker), ['Alice', 'Carol']);
+
+        // The first quote breaks off mid-sentence, so the tag is still its own.
+        const open = attribute('"Sure," Carol said. "No."', 'Dana');
+        assert.deepEqual(open.map(entry => entry.speaker), ['Carol', 'Carol']);
+    });
+});
+
+test('a name the quote calls out is the listener, not the speaker', () => {
+    withCharacters(['Dana', 'Alice', 'Carol'], () => {
+        // Alice acts on the line above, but the quote addresses her by name, so
+        // the beat cannot be the speaker.
+        const [addressed] = attribute('Alice folded her arms.\n\n"Alice, wait."', 'Carol');
+        assert.notEqual(addressed.speaker, 'Alice');
+
+        // A name that is simply part of the sentence is not an address.
+        const [mentioned] = attribute('Alice folded her arms.\n\n"I saw Carol yesterday."', 'Dana');
+        assert.equal(mentioned.speaker, 'Alice');
+
+        // Nothing else to fall back on: keep the colour, but say it is a guess.
+        withCharacters(['Alice'], () => {
+            const [cornered] = attribute('"Alice, wait."', 'Alice');
+            assert.equal(cornered.speaker, 'Alice');
+            assert.equal(cornered.band, 'low');
+            assert.equal(cornered.evidence[0].type, 'addressed-in-quote');
+        });
+    });
+});
+
+test('whoever the last quote addressed answers it', () => {
+    withCharacters(['Dana', 'Alice', 'Carol'], () => {
+        // Three speakers in the ring makes plain alternation a coin flip; the
+        // name the question called out is real evidence instead.
+        const results = attribute('Alice said, "Carol, are you coming?"\n"In a minute."', 'Dana');
         assert.deepEqual(results.map(entry => entry.speaker), ['Alice', 'Carol']);
-        assert.equal(results[0].source, ATTRIBUTION_SOURCE.PARAGRAPH_SUBJECT);
-        assert.equal(results[1].source, ATTRIBUTION_SOURCE.PARAGRAPH_SUBJECT);
+        assert.equal(results[1].method, 'addressed-speaker-reply');
+        assert.ok(results[1].confidence > 0.45, `${results[1].confidence} !> 0.45`);
+    });
+});
+
+test('punctuation around a speaker label does not cost it its adjacency', () => {
+    withCharacters(['Dana', 'Alice'], () => {
+        const plain = attribute('Alice: "Hello there friend."', 'Dana')[0];
+        for (const text of [
+            '[Alice]: "Hello there friend."',
+            '**Alice**: "Hello there friend."',
+            '(Alice) "Hello there friend."',
+        ]) {
+            const [result] = attribute(text, 'Dana');
+            assert.equal(result.speaker, 'Alice', `label lost for ${JSON.stringify(text)}`);
+            assert.equal(result.band, 'high', `${JSON.stringify(text)} scored ${result.confidence}`);
+            assert.ok(result.confidence >= plain.confidence - 0.05, `${result.confidence} vs plain ${plain.confidence}`);
+        }
+    });
+});
+
+test('a neighbouring word is not read through a quote', () => {
+    withCharacters(['Dana', 'Alice', 'Bob'], () => {
+        // 'sighed' closes Alice's sentence. Reading it past the quote presented
+        // it as Bob's speech tag and handed him the line.
+        const [result] = attribute('Alice sighed. "Sure." Bob was in the doorway.', 'Dana');
+        assert.equal(result.speaker, 'Alice');
     });
 });
 
@@ -248,10 +404,31 @@ test('a pronoun with no usable antecedent falls through instead of guessing', ()
         assert.equal(bare.speaker, 'Dana');
         assert.equal(bare.source, ATTRIBUTION_SOURCE.MESSAGE_SPEAKER);
 
-        // The only name is possessive, which the binder refuses as an antecedent.
-        const [possessive] = attribute('Alice\'s hand trembled. "I cannot do it," she said.', 'Dana');
+        // The only name owns a prop, which never puts its owner in the scene.
+        const [possessive] = attribute('Alice\'s letter sat unopened on the desk. "I cannot do it," she said.', 'Dana');
         assert.equal(possessive.speaker, 'Dana');
         assert.equal(possessive.source, ATTRIBUTION_SOURCE.MESSAGE_SPEAKER);
+    });
+});
+
+test('a possessive body part or voice puts its owner in the scene, a prop does not', () => {
+    withCharacters(['Dana', 'Alice'], () => {
+        for (const text of [
+            'Alice\'s eyes narrowed. "Get out."',
+            'Alice\'s voice dropped to nothing. "Get out."',
+            'Alice\'s hand trembled. "I cannot do it," she said.',
+        ]) {
+            const [result] = attribute(text, 'Dana');
+            assert.equal(result.speaker, 'Alice', `owner lost the quote for ${JSON.stringify(text)}`);
+        }
+
+        for (const text of [
+            'Alice\'s coat lay across the chair. "Hello there friend."',
+            'Alice\'s letter sat unopened on the desk. "Hello there friend."',
+        ]) {
+            const [result] = attribute(text, 'Dana');
+            assert.equal(result.speaker, 'Dana', `prop owner stole the quote for ${JSON.stringify(text)}`);
+        }
     });
 });
 
@@ -285,8 +462,9 @@ test('carried and alternated speakers never read as more certain than their sour
         );
 
         // A contested default (another known character named in the narration)
-        // is a guess, so it must not present as a plain default.
-        const [contested] = attribute('Alice was elsewhere entirely.\n"A one"', 'Dana');
+        // is a guess, so it must not present as a plain default. The rival is an
+        // addressee here, so no tier can hand her the quote outright.
+        const [contested] = attribute('The note had been left for Alice.\n"A one"', 'Dana');
         const [uncontested] = attribute('"A one"', 'Dana');
         assert.equal(contested.speaker, 'Dana');
         assert.equal(uncontested.speaker, 'Dana');

@@ -6,12 +6,20 @@ import { normalizeRegistryIdentity, normalizeRegistryIdentityName } from './grou
 import { formatColorBlockPair } from './prompts.js';
 import { escapeRegex } from './st-api.js';
 import { characterColors, streamingSession } from './state.js';
-import { buildMaskedDialogueText, getDialogueParagraphRange, isCompositeSpeakerLabel, isSameDialogueParagraph, makeLengthPreservingSearchText, normalizeSegmentText } from './utils.js';
+import { buildMaskedDialogueText, getDialogueParagraphRange, getPrecedingParagraphRange, isCompositeSpeakerLabel, isSameDialogueParagraph, makeLengthPreservingSearchText, normalizeSegmentText } from './utils.js';
 
 // Invalidates derived caches (speaker mention regexes). Called on chat change and UI init.
 export function clearDomCache() { clearSpeakerRegexCache(); }
 
-export const speakingVerbs = new Set([
+// Verbs that report speech. A name bound to one of these is a speech tag, the
+// strongest textual evidence a quote can carry.
+//
+// Deliberately excludes the beat verbs a character can perform while somebody
+// else talks -- smile, grin, smirk, nod, shrug, frown, pout, gesture, motion,
+// wave, point, turn. Scoring those as speech tags let a bystander reacting
+// after a quote ('Alice whispered. "Something." Carol frowned.') outrank the
+// character who actually spoke. They still resolve quotes, as action beats.
+export const speechVerbs = new Set([
     'say', 'says', 'said', 'saying',
     'ask', 'asks', 'asked', 'asking',
     'reply', 'replies', 'replied', 'replying',
@@ -40,13 +48,6 @@ export const speakingVerbs = new Set([
     'laugh', 'laughs', 'laughed', 'laughing',
     'chuckle', 'chuckles', 'chuckled', 'chuckling',
     'snicker', 'snickers', 'snickered', 'snickering',
-    'smirk', 'smirks', 'smirked', 'smirking',
-    'grin', 'grins', 'grinned', 'grinning',
-    'smile', 'smiles', 'smiled', 'smiling',
-    'nod', 'nods', 'nodded', 'nodding',
-    'shrug', 'shrugs', 'shrugged', 'shrugging',
-    'frown', 'frowns', 'frowned', 'frowning',
-    'pout', 'pouts', 'pouted', 'pouting',
     'sneer', 'sneers', 'sneered', 'sneering',
     'scoff', 'scoffs', 'scoffed', 'scoffing',
     'growl', 'growls', 'growled', 'growling',
@@ -69,11 +70,6 @@ export const speakingVerbs = new Set([
     'demand', 'demands', 'demanded', 'demanding',
     'plead', 'pleads', 'pleaded', 'pleading',
     'beg', 'begs', 'begged', 'begging',
-    'gesture', 'gestures', 'gestured', 'gesturing',
-    'motion', 'motions', 'motioned', 'motioning',
-    'wave', 'waves', 'waved', 'waving',
-    'point', 'points', 'pointed', 'pointing',
-    'turn', 'turns', 'turned', 'turning',
     'snort', 'snorts', 'snorted', 'snorting',
     'quip', 'quips', 'quipped', 'quipping',
     'exclaim', 'exclaims', 'exclaimed', 'exclaiming',
@@ -119,7 +115,89 @@ export const speakingVerbs = new Set([
     'remind', 'reminds', 'reminded', 'reminding',
     'urge', 'urges', 'urged', 'urging',
     'purr', 'purrs', 'purred', 'purring',
-    'whine', 'whines', 'whined', 'whining'
+    'whine', 'whines', 'whined', 'whining',
+    'utter', 'utters', 'uttered', 'uttering',
+    'inquire', 'inquires', 'inquired', 'inquiring',
+    'grumble', 'grumbles', 'grumbled', 'grumbling',
+    'complain', 'complains', 'complained', 'complaining',
+    'apologize', 'apologizes', 'apologized', 'apologizing',
+    'apologise', 'apologises', 'apologised', 'apologising',
+    'assure', 'assures', 'assured', 'assuring',
+    'promise', 'promises', 'promised', 'promising',
+    'threaten', 'threatens', 'threatened', 'threatening',
+    'command', 'commands', 'commanded', 'commanding',
+    'order', 'orders', 'ordered', 'ordering',
+    'greet', 'greets', 'greeted', 'greeting',
+    'joke', 'jokes', 'joked', 'joking',
+    'swear', 'swears', 'swore', 'swearing',
+    'curse', 'curses', 'cursed', 'cursing',
+    'hum', 'hums', 'hummed', 'humming',
+    'cough', 'coughs', 'coughed', 'coughing',
+    'wail', 'wails', 'wailed', 'wailing',
+    'howl', 'howls', 'howled', 'howling',
+    'shriek', 'shrieks', 'shrieked', 'shrieking',
+    'squeal', 'squeals', 'squealed', 'squealing',
+    'sing', 'sings', 'sang', 'singing',
+    'chant', 'chants', 'chanted', 'chanting',
+    'vow', 'vows', 'vowed', 'vowing',
+    'concede', 'concedes', 'conceded', 'conceding',
+    'chide', 'chides', 'chided', 'chiding',
+    'marvel', 'marvels', 'marvelled', 'marveled', 'marvelling', 'marveling',
+    'coo', 'coos', 'cooed', 'cooing',
+    'croon', 'croons', 'crooned', 'crooning',
+    'prompt', 'prompts', 'prompted', 'prompting'
+]);
+
+// Kept as the union: a pronoun standing next to the quote is already strong
+// enough evidence that either kind of verb confirms it ("she smiled" opens a
+// beat just as reliably as "she said" tags one).
+export const actionBeatVerbs = new Set([
+    'smirk', 'smirks', 'smirked', 'smirking',
+    'grin', 'grins', 'grinned', 'grinning',
+    'smile', 'smiles', 'smiled', 'smiling',
+    'nod', 'nods', 'nodded', 'nodding',
+    'shrug', 'shrugs', 'shrugged', 'shrugging',
+    'frown', 'frowns', 'frowned', 'frowning',
+    'pout', 'pouts', 'pouted', 'pouting',
+    'gesture', 'gestures', 'gestured', 'gesturing',
+    'motion', 'motions', 'motioned', 'motioning',
+    'wave', 'waves', 'waved', 'waving',
+    'point', 'points', 'pointed', 'pointing',
+    'turn', 'turns', 'turned', 'turning',
+    'glance', 'glances', 'glanced', 'glancing',
+    'stare', 'stares', 'stared', 'staring',
+    'blink', 'blinks', 'blinked', 'blinking',
+    'lean', 'leans', 'leaned', 'leant', 'leaning',
+    'step', 'steps', 'stepped', 'stepping',
+    'tilt', 'tilts', 'tilted', 'tilting',
+    'raise', 'raises', 'raised', 'raising',
+    'reach', 'reaches', 'reached', 'reaching',
+    'rise', 'rises', 'rose', 'rising',
+    'stand', 'stands', 'stood', 'standing',
+    'sit', 'sits', 'sat', 'sitting',
+    'pause', 'pauses', 'paused', 'pausing',
+    'hesitate', 'hesitates', 'hesitated', 'hesitating',
+    'shake', 'shakes', 'shook', 'shaking',
+    'swallow', 'swallows', 'swallowed', 'swallowing',
+    'wince', 'winces', 'winced', 'wincing',
+    'flinch', 'flinches', 'flinched', 'flinching',
+    'straighten', 'straightens', 'straightened', 'straightening',
+    'cross', 'crosses', 'crossed', 'crossing',
+    'fold', 'folds', 'folded', 'folding'
+]);
+
+export const speakingVerbs = new Set([...speechVerbs, ...actionBeatVerbs]);
+
+// Things a person owns that act on their behalf: "Alice's voice dropped" and
+// "Alice's eyes narrowed" name Alice as the one acting, while "Alice's coat lay
+// across the chair" names a prop and leaves her out of the scene entirely.
+export const speakerPossessedNouns = new Set([
+    'voice', 'tone', 'whisper', 'breath', 'breathing', 'words', 'word', 'reply', 'answer', 'question', 'laugh', 'laughter', 'chuckle', 'sigh', 'gasp', 'growl', 'snort', 'accent', 'drawl',
+    'eye', 'eyes', 'gaze', 'stare', 'glance', 'look', 'expression', 'face', 'features', 'brow', 'brows', 'eyebrow', 'eyebrows', 'lip', 'lips', 'mouth', 'jaw', 'chin', 'cheek', 'cheeks', 'nose', 'ear', 'ears',
+    'smile', 'grin', 'smirk', 'frown', 'scowl', 'pout', 'sneer',
+    'head', 'hair', 'neck', 'throat', 'shoulder', 'shoulders', 'arm', 'arms', 'elbow', 'elbows', 'hand', 'hands', 'finger', 'fingers', 'fingertips', 'fist', 'fists', 'knuckles', 'palm', 'palms', 'nails', 'claws',
+    'chest', 'back', 'spine', 'hip', 'hips', 'leg', 'legs', 'knee', 'knees', 'foot', 'feet', 'heel', 'heels', 'tail', 'wings', 'horns',
+    'heart', 'pulse', 'stomach', 'skin', 'posture', 'stance', 'grip', 'touch'
 ]);
 
 export const passivePrepositions = new Set([
@@ -134,10 +212,26 @@ export const pronounSubjects = new Set(['he', 'she', 'they', 'it']);
 // Cache compiled per-speaker name-match regexes.  Invalidated when the
 // character list changes (loadData/addCharacter/deleteCharacter/renameCharacter).
 
+// Evidence strength, strongest first. The gaps matter: an action beat can never
+// climb over a speech tag, and a possessive prop or an addressee can never climb
+// over anything.
+export const SPEAKER_STRENGTH = Object.freeze({
+    ADJACENT_TAG: 5,   // 'Alice: "..."', 'Alice said "..."', '"...," said Alice'
+    SPEECH_VERB: 4,    // a reporting verb bound to the name a little further off
+    ACTION_BEAT: 3,    // the name acts in the sentence that touches the quote
+    MENTION: 2,        // the name is simply present in the probe window
+    WEAK: 1,           // a prop possessive or the object of a preposition
+});
+
 export function isBetterSpeakerCandidate(candidate, best) {
     if (!best) return true;
     if (candidate.strength > best.strength) return true;
     if (candidate.strength < best.strength) return false;
+    // Below a real speech tag the prose convention flips: the beat that sets a
+    // quote up owns it, and whoever moves afterwards is reacting to it.
+    if (candidate.strength <= SPEAKER_STRENGTH.ACTION_BEAT && candidate.side !== best.side) {
+        return candidate.side === 'before';
+    }
     const afterTagWindow = 30;
     const nearTie = 20;
     const candidateAfterTag = candidate.side === 'after' && candidate.distance <= afterTagWindow;
@@ -147,11 +241,26 @@ export function isBetterSpeakerCandidate(candidate, best) {
     return candidate.distance < best.distance;
 }
 
+// Label syntaxes wrap the name in punctuation SillyTavern users write by hand:
+// '**Alice:**', '[Alice]:', '<Alice>', '(Alice)', '— Alice'. None of it is
+// narration, so none of it should push a speaker label out of adjacency.
+const ADJACENT_GAP_PATTERN = /^[\s:,\-–—*_~()[\]<>|«»]*$/;
+const LABEL_COLON_PATTERN = /^[\s*_~)\]>|]*:/;
+// A sentence that ends exactly where the quote begins, with one terminator and
+// nothing but closing punctuation after it.
+const SENTENCE_TOUCHES_QUOTE_PATTERN = /^[^.!?…\n\r]*[.!?…]?[\s"'*_~)\]>|»]*$/;
+// Nothing but a previous sentence's terminator and openers stand before the
+// name, so the name opens the sentence and is its subject.
+const SENTENCE_LEADING_PATTERN = /(?:^|[.!?…])[\s"'*_~([{<>|«»\-–—]*$/;
+
 // Cache compiled per-speaker name-match regexes.  Invalidated when the
 // character list changes (loadData/addCharacter/deleteCharacter/renameCharacter).
 export const speakerRegexCache = new Map();
 
-export function clearSpeakerRegexCache() { speakerRegexCache.clear(); }
+export function clearSpeakerRegexCache() {
+    speakerRegexCache.clear();
+    vocativeRegexCache.clear();
+}
 
 // Returns the winning candidate with its scoring intact ({ assignment,
 // strength, distance, side, name }) so callers can derive an honest
@@ -168,6 +277,22 @@ export function findSpeakerCandidateInContext(maskedText, windowStart, windowEnd
     const otherSegments = Array.isArray(options.segments) ? options.segments : [];
     const isSeparatedBySegment = (gapStart, gapEnd) => otherSegments.some(other =>
         other.start >= gapStart && other.end <= gapEnd && !(other.start === segmentStart && other.end === segmentEnd));
+
+    // Neighbouring words have to be read on this side of the nearest quote.
+    // Reading through one let the verb of an earlier sentence ('Alice laughed.
+    // "Sure." Bob rolled his eyes.') present itself as Bob's speech tag.
+    const paragraphStart = Math.max(0, Math.min(text.length, options.paragraphStart ?? 0));
+    const contextStart = position => otherSegments.reduce(
+        (bound, other) => (other.end <= position && other.end > bound ? other.end : bound), paragraphStart);
+    const contextEnd = position => otherSegments.reduce(
+        (bound, other) => (other.start >= position && other.start < bound ? other.start : bound), text.length);
+
+    // A tag pinned between two quotes belongs to whichever one invited it. A
+    // quote that breaks off mid-sentence ('"Sure," Carol said.') is still
+    // waiting for its tag; one that closes on a full stop is finished, so the
+    // name after it opens a new sentence and tags the quote that sentence runs
+    // into -- '"Sure." Carol groaned. "No."' is Carol groaning "No", not "Sure".
+    const quoteEndsMidSentence = /[,;:—–-]\s*["'”’»)\]*_~]*$/.test(String(options.segmentText ?? ''));
 
     const cleanWindow = makeLengthPreservingSearchText(text.slice(boundedStart, boundedEnd));
     let best = null;
@@ -200,46 +325,67 @@ export function findSpeakerCandidateInContext(maskedText, windowStart, windowEnd
             }
 
             // --- COMPUTE STRENGTH ---
-            const textBefore = text.slice(Math.max(0, matchStart - 30), matchStart);
-            const preMatch = textBefore.match(/\b([a-zA-Z]+)\b\s*$/);
+            const sentenceHead = text.slice(contextStart(matchStart), matchStart);
+            const preMatch = sentenceHead.slice(-30).match(/\b([a-zA-Z]+)\b\s*$/);
             const preWord = preMatch ? preMatch[1].toLowerCase() : '';
 
-            const textAfter = text.slice(matchEnd, Math.min(text.length, matchEnd + 40));
+            const textAfter = text.slice(matchEnd, Math.min(contextEnd(matchEnd), matchEnd + 40));
             const postMatch = textAfter.match(/^\s*([a-zA-Z]+)\b/);
             const postWord = postMatch ? postMatch[1].toLowerCase() : '';
 
-            const hasPostColon = /^\s*:/.test(textAfter);
+            const hasPostColon = LABEL_COLON_PATTERN.test(textAfter);
 
-            const isRightBeforeQuote = (matchEnd <= segmentStart) && (segmentStart - matchEnd <= 6) && /^[ \t\r\n:,-]*$/.test(text.slice(matchEnd, segmentStart));
-            const isRightAfterQuote = (matchStart >= segmentEnd) && (matchStart - segmentEnd <= 6) && /^[ \t\r\n:,-]*$/.test(text.slice(segmentEnd, matchStart));
+            const isRightBeforeQuote = (matchEnd <= segmentStart) && (segmentStart - matchEnd <= 6) && ADJACENT_GAP_PATTERN.test(text.slice(matchEnd, segmentStart));
+            const isRightAfterQuote = (matchStart >= segmentEnd) && (matchStart - segmentEnd <= 6) && ADJACENT_GAP_PATTERN.test(text.slice(segmentEnd, matchStart));
 
-            const endsWithPossessive = match[0].endsWith("'s") || match[0].endsWith("'S") || match[0].endsWith("'");
+            const endsWithPossessive = /['’]s?$/i.test(match[0]);
+            // "Alice's voice went flat" is Alice acting; "Alice's coat lay there"
+            // is a prop, and its owner may not even be in the room.
+            const isSpeakerPossessive = endsWithPossessive && speakerPossessedNouns.has(postWord);
             const isPassivePreposition = passivePrepositions.has(preWord);
 
-            const isPostWordSpeakingVerb = speakingVerbs.has(postWord);
-            const isPreWordSpeakingVerb = speakingVerbs.has(preWord);
+            const isPostWordSpeechVerb = speechVerbs.has(postWord);
+            const isPreWordSpeechVerb = speechVerbs.has(preWord);
 
             // A tag glued to the quote ("Bob: ...", 'Bob said "..."', '"...," said Bob')
             // is the only positional evidence strong enough to outrank a
-            // speaking verb found loose in the probe window.
-            const isAdjacentTag = isRightBeforeQuote || hasPostColon || (isRightAfterQuote && isPostWordSpeakingVerb);
-            const isSpeakingVerbTag = isPostWordSpeakingVerb || isPreWordSpeakingVerb;
+            // speech verb found loose in the probe window.
+            const isAdjacentTag = isRightBeforeQuote || hasPostColon || (isRightAfterQuote && isPostWordSpeechVerb);
+            const isSpeechVerbTag = isPostWordSpeechVerb || isPreWordSpeechVerb;
+            const isWeakMention = isPassivePreposition || (endsWithPossessive && !isSpeakerPossessive);
 
-            let strength = 2; // Moderate (subject of sentence/action)
+            // An action beat is the sentence that runs straight into the quote
+            // with this name as its subject -- 'Alice folded her arms. "Fine."'
+            // and its mirror '"Fine." Alice folded her arms.' Models write far
+            // more of these than they write literal speech tags.
+            const touchesQuote = side === 'after'
+                ? isRightAfterQuote
+                : SENTENCE_TOUCHES_QUOTE_PATTERN.test(text.slice(matchEnd, segmentStart));
+            const isActionBeat = touchesQuote
+                && (side === 'after' || SENTENCE_LEADING_PATTERN.test(sentenceHead) || actionBeatVerbs.has(postWord));
+
+            const followingQuoteStart = contextEnd(matchEnd);
+            const tagsFollowingQuote = side === 'after' && !quoteEndsMidSentence && followingQuoteStart < text.length
+                && SENTENCE_TOUCHES_QUOTE_PATTERN.test(text.slice(matchEnd, followingQuoteStart));
+
+            let strength = SPEAKER_STRENGTH.MENTION;
             if (isAdjacentTag) {
-                strength = 4; // Strongest (speech tag touching the quote)
-            } else if (isSpeakingVerbTag) {
-                strength = 3; // Strong (speaking verb nearby)
-            } else if (endsWithPossessive || isPassivePreposition) {
-                strength = 1; // Weak (passive mention or possessive)
+                strength = SPEAKER_STRENGTH.ADJACENT_TAG;
+            } else if (isSpeechVerbTag) {
+                strength = SPEAKER_STRENGTH.SPEECH_VERB;
+            } else if (isWeakMention) {
+                strength = SPEAKER_STRENGTH.WEAK;
+            } else if (isActionBeat) {
+                strength = SPEAKER_STRENGTH.ACTION_BEAT;
             }
+            if (tagsFollowingQuote) strength = Math.min(strength, SPEAKER_STRENGTH.MENTION);
 
             const candidate = { assignment, distance, side, strength, name: assignment.name || speakerKey };
             if (isBetterSpeakerCandidate(candidate, best)) best = candidate;
         }
     }
 
-    if (best && best.strength <= 1 && defaultSpeaker) {
+    if (best && best.strength <= SPEAKER_STRENGTH.WEAK && defaultSpeaker) {
         return null;
     }
 
@@ -256,6 +402,10 @@ export function findClosestMentionedSpeakerInContext(maskedText, windowStart, wi
 // subject is the first name in it that is neither possessive ("Alice's coat")
 // nor the object of a preposition ("handed it to Alice") -- both of those mark
 // someone being acted upon rather than acting.
+//
+// A name that opens a sentence outranks an earlier one buried inside one, so
+// "*Where is Carol?* Alice checked the hall." is Alice's paragraph even though
+// Carol is named first.
 export function findParagraphSubjectSpeaker(maskedText, paragraph, lookup, sortedLookupKeys) {
     const text = String(maskedText ?? '');
     const rangeStart = Math.max(0, Math.min(text.length, paragraph?.start ?? 0));
@@ -276,11 +426,17 @@ export function findParagraphSubjectSpeaker(maskedText, paragraph, lookup, sorte
         regex.lastIndex = 0;
         let match;
         while ((match = regex.exec(cleanRange)) !== null) {
-            if (best && match.index >= best.index) break;
-            if (/'s?$/i.test(match[0])) continue;
+            if (best?.leading && match.index >= best.index) break;
+            if (/['’]s?$/i.test(match[0])) {
+                // "Alice's gaze swept the room" still opens on Alice acting.
+                const owned = cleanRange.slice(match.index + match[0].length).match(/^\s*([a-zA-Z]+)/);
+                if (!owned || !speakerPossessedNouns.has(owned[1].toLowerCase())) continue;
+            }
             const preMatch = cleanRange.slice(Math.max(0, match.index - 30), match.index).match(/\b([a-zA-Z]+)\b\s*$/);
             if (preMatch && passivePrepositions.has(preMatch[1].toLowerCase())) continue;
-            best = { assignment, name: assignment.name || speakerKey, index: match.index, offset: rangeStart + match.index };
+            const leading = SENTENCE_LEADING_PATTERN.test(cleanRange.slice(0, match.index));
+            if (best && !(leading && !best.leading) && !(leading === best.leading && match.index < best.index)) continue;
+            best = { assignment, name: assignment.name || speakerKey, index: match.index, offset: rangeStart + match.index, leading };
         }
     }
 
@@ -291,10 +447,11 @@ export function findParagraphSubjectSpeaker(maskedText, paragraph, lookup, sorte
 // more than the same evidence 200 characters away, but never enough to drop
 // a strong tag below a weak one.
 export function scoreSpeakerCandidateConfidence(candidate) {
-    const base = candidate?.strength >= 4 ? 0.92
-        : candidate?.strength === 3 ? 0.86
-            : candidate?.strength === 2 ? 0.68
-                : 0.4;
+    const base = candidate?.strength >= SPEAKER_STRENGTH.ADJACENT_TAG ? 0.92
+        : candidate?.strength === SPEAKER_STRENGTH.SPEECH_VERB ? 0.86
+            : candidate?.strength === SPEAKER_STRENGTH.ACTION_BEAT ? 0.78
+                : candidate?.strength === SPEAKER_STRENGTH.MENTION ? 0.62
+                    : 0.4;
     const distance = Number.isFinite(candidate?.distance) ? Math.max(0, candidate.distance) : 0;
     const penalty = Math.min(0.12, distance / 600);
     return Math.min(0.95, Math.max(0.35, base - penalty));
@@ -331,15 +488,55 @@ export function findPronounSpeechTag(maskedText, segmentStart, segmentEnd, parag
     return null;
 }
 
-// Bind a pronoun speech tag to the nearest preceding name in the same
-// paragraph that is not itself a possessive or an addressee. Gender-free by
-// design: no pronoun-to-character mapping is stored or guessed.
-export function bindPronounSpeakerInParagraph(maskedText, segmentStart, segmentEnd, paragraph, lookup, sortedLookupKeys) {
+// Bind a pronoun speech tag to the nearest preceding name that is not itself a
+// prop possessive or an addressee. Gender-free by design: no pronoun-to-
+// character mapping is stored or guessed.
+//
+// The antecedent may sit in an earlier line -- 'Alice stood by the door.' then
+// a blank line then '"Are you ready?" she asked.' is one of the most common
+// shapes there is -- so options.antecedentStart may widen the search backwards,
+// and options.antecedentText may swap in a text where narration is legible.
+export function bindPronounSpeakerInParagraph(maskedText, segmentStart, segmentEnd, paragraph, lookup, sortedLookupKeys, options = {}) {
     const tag = findPronounSpeechTag(maskedText, segmentStart, segmentEnd, paragraph);
     if (!tag) return null;
-    const candidate = findSpeakerCandidateInContext(maskedText, paragraph?.start ?? 0, tag.offset, tag.offset, tag.offset, lookup, sortedLookupKeys, null);
-    if (!candidate || candidate.side !== 'before' || candidate.strength < 2) return null;
+    const paragraphStart = paragraph?.start ?? 0;
+    const searchText = options.antecedentText ?? maskedText;
+    const searchStart = Math.max(0, Math.min(paragraphStart, options.antecedentStart ?? paragraphStart));
+    // The probe ends where the quote starts even for a trailing tag: reaching
+    // past it would have to step over the quote to find any name at all.
+    const candidate = findSpeakerCandidateInContext(
+        searchText, searchStart, segmentStart, segmentStart, segmentStart, lookup, sortedLookupKeys, null,
+        { segments: options.segments, paragraphStart: searchStart },
+    );
+    if (!candidate || candidate.side !== 'before' || candidate.strength < SPEAKER_STRENGTH.MENTION) return null;
     return { ...candidate, pronoun: tag.pronoun };
+}
+
+// A name used as direct address inside the quote names the listener: nobody
+// calls their own name to get their own attention. It fires on '"Alice, wait."',
+// '"Come here, Alice."' and '"Hey Alice, look at this."', but not on a name that
+// is simply part of the sentence ('"I saw Alice yesterday."').
+export const vocativeRegexCache = new Map();
+
+export function findAddressedSpeakerKeys(segmentText, lookup, sortedLookupKeys) {
+    const addressed = new Set();
+    const text = makeLengthPreservingSearchText(String(segmentText ?? ''));
+    if (!text.trim()) return addressed;
+    for (const speakerKey of sortedLookupKeys) {
+        const assignment = lookup.get(speakerKey);
+        if (!assignment?.key || addressed.has(assignment.key)) continue;
+        let regex = vocativeRegexCache.get(speakerKey);
+        if (!regex) {
+            regex = new RegExp(
+                `(?:^[\\s"'“”«»‘’(\\[]*|[,;:]\\s*|\\b(?:oh|hey|hi|hello|yo|well|please|thanks|sorry|look|listen|wait|stop|yes|no|goodbye|bye)[,!\\s]+)`
+                + `${escapeRegex(speakerKey)}\\b\\s*(?=[,!?.:…—–-]|["'“”«»‘’)\\]\\s]*$)`,
+                'i',
+            );
+            vocativeRegexCache.set(speakerKey, regex);
+        }
+        if (regex.test(text)) addressed.add(assignment.key);
+    }
+    return addressed;
 }
 
 export function ensureCharacterEntry(name, color) {
@@ -482,17 +679,21 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
         if (lastKey !== assignment.key) recentSpeakerKeys.push(assignment.key);
         while (recentSpeakerKeys.length > 4) recentSpeakerKeys.shift();
     };
-    const getAlternatingAssignment = () => {
+    const getAlternatingAssignment = (isEligible = () => true) => {
         if (!lastResolvedSpeakerKey) return null;
         for (let i = recentSpeakerKeys.length - 2; i >= 0; i--) {
             const key = recentSpeakerKeys[i];
-            if (key && key !== lastResolvedSpeakerKey) return lookup.get(key) || null;
+            if (key && key !== lastResolvedSpeakerKey && isEligible(key)) return lookup.get(key) || null;
         }
-        if (defaultSpeaker?.key && defaultSpeaker.key !== lastResolvedSpeakerKey) return defaultSpeaker;
+        if (defaultSpeaker?.key && defaultSpeaker.key !== lastResolvedSpeakerKey && isEligible(defaultSpeaker.key)) return defaultSpeaker;
         return null;
     };
     let previousParagraph = null;
     let previousConfidence = 0;
+    let previouslyAddressedKeys = new Set();
+
+    const isSpeechSegment = segment => segment.delimiter !== '*' && segment.delimiter !== '_';
+    const speechSegments = collectedSegments.filter(isSpeechSegment);
 
     const paragraphSubjects = new Map();
     const getParagraphSubject = paragraph => {
@@ -503,14 +704,50 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
         return paragraphSubjects.get(key);
     };
 
+    // Models break an action beat and its dialogue apart with a newline at least
+    // as often as they keep them on one line:
+    //
+    //     Alice folded her arms.
+    //
+    //     "I am not doing this."
+    //
+    // Nothing in the quote's own line names anyone, so every in-paragraph tier
+    // misses and the quote used to fall through to alternation or the message
+    // default. Walk back to the nearest narration line instead and let its actor
+    // speak. The walk stops at a line that already holds speech, because prose
+    // hands the next line to somebody else once a character has had their turn.
+    const PRECEDING_SUBJECT_HOPS = 3;
+    const precedingSubjects = new Map();
+    const getPrecedingNarrationSubject = paragraph => {
+        const cacheKey = `${paragraph.start}:${paragraph.end}`;
+        if (precedingSubjects.has(cacheKey)) return precedingSubjects.get(cacheKey);
+        let found = null;
+        let cursor = paragraph.start;
+        for (let hops = 0; hops < PRECEDING_SUBJECT_HOPS; hops++) {
+            const previous = getPrecedingParagraphRange(raw, cursor);
+            if (!previous) break;
+            if (speechSegments.some(other => other.start < previous.end && other.end > previous.start)) break;
+            const subject = findParagraphSubjectSpeaker(narrationText, previous, lookup, sortedLookupKeys);
+            if (subject) {
+                found = { ...subject, hops, paragraph: previous };
+                break;
+            }
+            cursor = previous.start;
+        }
+        precedingSubjects.set(cacheKey, found);
+        return found;
+    };
+
     // True when the narration names a known character other than the message
     // speaker, which is the classic "an NPC speaks inside someone else's
     // message" shape. Computed once per message, not per segment.
     let competingNamedKeys = null;
-    const hasCompetingNamedSpeaker = speakerKey => {
+    const getCompetingNamedKeys = () => {
         if (competingNamedKeys === null) {
             competingNamedKeys = new Set();
-            const searchText = makeLengthPreservingSearchText(maskedText);
+            // narrationText rather than maskedText: a rival named only inside an
+            // asterisked action is every bit as present in the scene.
+            const searchText = makeLengthPreservingSearchText(narrationText);
             for (const key of sortedLookupKeys) {
                 const assignment = lookup.get(key);
                 if (!assignment?.key) continue;
@@ -523,7 +760,10 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
                 if (regex.test(searchText)) competingNamedKeys.add(assignment.key);
             }
         }
-        for (const key of competingNamedKeys) {
+        return competingNamedKeys;
+    };
+    const hasCompetingNamedSpeaker = speakerKey => {
+        for (const key of getCompetingNamedKeys()) {
             if (key !== speakerKey) return true;
         }
         return false;
@@ -597,15 +837,36 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
             }
         }
 
+        // A character the quote calls by name is being spoken to, so every tier
+        // that is guessing rather than reading a tag has to rule them out.
+        let addressedKeys = null;
+        const isAddressedInQuote = key => {
+            if (addressedKeys === null) addressedKeys = findAddressedSpeakerKeys(segment.text, lookup, sortedLookupKeys);
+            return !!key && addressedKeys.has(key);
+        };
+
         // Tier 2: masked, paragraph-scoped proximity near the quote.
         if (!assignment) {
             const windowStart = Math.max(segment.paragraph.start, segment.start - 240);
             const windowEnd = Math.min(segment.paragraph.end, segment.end + 120);
-            const candidate = findSpeakerCandidateInContext(maskedText, windowStart, windowEnd, segment.start, segment.end, lookup, sortedLookupKeys, defaultSpeaker, { segments: collectedSegments });
+            const probeOptions = { segments: collectedSegments, paragraphStart: segment.paragraph.start, segmentText: segment.text };
+            let candidate = findSpeakerCandidateInContext(maskedText, windowStart, windowEnd, segment.start, segment.end, lookup, sortedLookupKeys, defaultSpeaker, probeOptions);
+            // Emphasis is masked alongside speech, so a beat written as
+            // '*Carol drops her bag.* "Traffic."' hides the only name there is.
+            // Re-probe the narration text for those, and demand a real beat or
+            // tag from it so a name merely mentioned inside a thought cannot
+            // claim the quote.
+            const hasEmphasisNearby = collectedSegments.some(other => !isSpeechSegment(other)
+                && other.start < segment.paragraph.end && other.end > segment.paragraph.start);
+            if (hasEmphasisNearby && !(candidate?.strength >= SPEAKER_STRENGTH.ACTION_BEAT)) {
+                const narrated = findSpeakerCandidateInContext(narrationText, windowStart, windowEnd, segment.start, segment.end, lookup, sortedLookupKeys, defaultSpeaker, { ...probeOptions, segments: speechSegments });
+                if (narrated?.strength >= SPEAKER_STRENGTH.ACTION_BEAT) candidate = narrated;
+            }
+            if (candidate && candidate.strength < SPEAKER_STRENGTH.SPEECH_VERB && isAddressedInQuote(candidate.assignment.key)) candidate = null;
             // A possessive or an addressee ("he glanced at Alice") is weaker
             // evidence than the name the paragraph opened on, so let the
             // subject tier answer instead of colouring the wrong character.
-            const outrankedBySubject = candidate?.strength <= 1 && !!getParagraphSubject(segment.paragraph);
+            const outrankedBySubject = candidate?.strength <= SPEAKER_STRENGTH.WEAK && !!getParagraphSubject(segment.paragraph);
             assignment = outrankedBySubject ? null : (candidate?.assignment || null);
             if (assignment) {
                 attributionMetadata = createSegmentProvenance(
@@ -623,11 +884,17 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
             }
         }
 
-        // Tier 2.5: a pronoun speech tag bound to the nearest preceding name in
-        // the same paragraph. Always weaker than a literal mention.
+        // Tier 2.5: a pronoun speech tag bound to the nearest preceding name.
+        // Always weaker than a literal mention. The antecedent may sit in an
+        // earlier narration line, which is where models usually put it.
         if (!assignment) {
-            const bound = bindPronounSpeakerInParagraph(maskedText, segment.start, segment.end, segment.paragraph, lookup, sortedLookupKeys);
-            assignment = bound?.assignment || null;
+            const antecedent = getPrecedingNarrationSubject(segment.paragraph);
+            const bound = bindPronounSpeakerInParagraph(maskedText, segment.start, segment.end, segment.paragraph, lookup, sortedLookupKeys, {
+                antecedentText: narrationText,
+                antecedentStart: antecedent?.paragraph?.start ?? segment.paragraph.start,
+                segments: speechSegments,
+            });
+            assignment = bound && !isAddressedInQuote(bound.assignment.key) ? bound.assignment : null;
             if (assignment) {
                 attributionMetadata = createSegmentProvenance(
                     ATTRIBUTION_SOURCE.EXPLICIT_MENTION,
@@ -650,7 +917,7 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
         // the quote sits far from it or ahead of it.
         if (!assignment) {
             const subject = getParagraphSubject(segment.paragraph);
-            assignment = subject?.assignment || null;
+            assignment = subject && !isAddressedInQuote(subject.assignment.key) ? subject.assignment : null;
             if (assignment) {
                 attributionMetadata = createSegmentProvenance(
                     ATTRIBUTION_SOURCE.PARAGRAPH_SUBJECT,
@@ -665,7 +932,8 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
         // a carried speaker can never read as more certain than the segment it
         // was carried from.
         if (!assignment && sameParagraphAsPrevious && lastResolvedSpeakerKey) {
-            assignment = lookup.get(lastResolvedSpeakerKey) || null;
+            const carried = lookup.get(lastResolvedSpeakerKey) || null;
+            assignment = carried && !isAddressedInQuote(carried.key) ? carried : null;
             if (assignment) {
                 attributionMetadata = createSegmentProvenance(
                     ATTRIBUTION_SOURCE.PARAGRAPH_CARRY,
@@ -676,9 +944,44 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
             }
         }
 
+        // Tier 3.5: the actor of the narration line above. This is the shape the
+        // in-paragraph tiers structurally cannot see -- a beat, a newline, then
+        // a bare quote -- and it is far better evidence than alternating.
+        if (!assignment) {
+            const preceding = getPrecedingNarrationSubject(segment.paragraph);
+            assignment = preceding && !isAddressedInQuote(preceding.assignment.key) ? preceding.assignment : null;
+            if (assignment) {
+                attributionMetadata = createSegmentProvenance(
+                    ATTRIBUTION_SOURCE.PARAGRAPH_SUBJECT,
+                    'preceding-paragraph-subject',
+                    Math.max(0.38, 0.55 - preceding.hops * 0.08),
+                    [{ type: 'preceding-paragraph-subject', speaker: preceding.name, start: preceding.offset, distance: preceding.hops }],
+                );
+            }
+        }
+
+        // Tier 3.75: the previous quote called somebody by name, so the reply on
+        // the next line is theirs. Evidence-backed where plain alternation is a
+        // coin flip, which is what a scene with three or more speakers gives.
+        if (!assignment && !sameParagraphAsPrevious && previouslyAddressedKeys.size === 1) {
+            const [addressedKey] = previouslyAddressedKeys;
+            const replier = addressedKey !== lastResolvedSpeakerKey && !isAddressedInQuote(addressedKey)
+                ? lookup.get(addressedKey) || null
+                : null;
+            assignment = replier;
+            if (assignment) {
+                attributionMetadata = createSegmentProvenance(
+                    ATTRIBUTION_SOURCE.ALTERNATION,
+                    'addressed-speaker-reply',
+                    0.6,
+                    [{ type: 'addressed-speaker-reply', speaker: assignment.name }],
+                );
+            }
+        }
+
         // Tier 4: alternate speakers across unattributed new paragraphs.
         if (!assignment && !sameParagraphAsPrevious) {
-            assignment = getAlternatingAssignment();
+            assignment = getAlternatingAssignment(key => !isAddressedInQuote(key));
             if (assignment) {
                 const distinctRecent = new Set(recentSpeakerKeys.filter(Boolean)).size;
                 attributionMetadata = createSegmentProvenance(
@@ -691,17 +994,23 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
         }
 
         // Tier 5: default message speaker. Another known character named in the
-        // narration means this is a guess, not a default.
+        // narration means this is a guess, not a default, and the quote calling
+        // the default speaker by name means it is very probably wrong -- but a
+        // colourless quote helps nobody, so say so in the confidence instead.
         if (!assignment) {
             assignment = defaultSpeaker || ensureDefaultSpeaker();
             if (assignment) {
                 const fromColorBlock = defaultSpeakerSource === ATTRIBUTION_SOURCE.COLOR_BLOCK;
+                const addressed = isAddressedInQuote(assignment.key);
                 const contested = !fromColorBlock && hasCompetingNamedSpeaker(assignment.key);
+                const confidence = addressed ? 0.3 : (fromColorBlock ? 0.75 : (contested ? 0.45 : 0.6));
                 attributionMetadata = createSegmentProvenance(
                     fromColorBlock ? ATTRIBUTION_SOURCE.COLOR_BLOCK : ATTRIBUTION_SOURCE.MESSAGE_SPEAKER,
                     fromColorBlock ? 'sole-color-assignment' : 'message-speaker-default',
-                    fromColorBlock ? 0.75 : (contested ? 0.45 : 0.6),
-                    [{ type: fromColorBlock ? 'sole-color-assignment' : 'message-speaker', speaker: assignment.name }],
+                    confidence,
+                    addressed
+                        ? [{ type: 'addressed-in-quote', speaker: assignment.name }]
+                        : [{ type: fromColorBlock ? 'sole-color-assignment' : 'message-speaker', speaker: assignment.name }],
                 );
             }
         }
@@ -730,6 +1039,9 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
             ...attributionMetadata,
         });
         previousParagraph = segment.paragraph;
+        if (isSpeechSegment(segment)) {
+            previouslyAddressedKeys = addressedKeys ?? findAddressedSpeakerKeys(segment.text, lookup, sortedLookupKeys);
+        }
         if (assignment) previousConfidence = attributionMetadata.confidence;
     }
 

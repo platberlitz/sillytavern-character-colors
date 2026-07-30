@@ -54,11 +54,16 @@ Local mode attributes and colors rendered quotes and thoughts without editing `m
 Attribution runs entirely on your machine and needs no model calls. Each quote is resolved by the first rule that fits, strongest first:
 
 1. A manual override you saved by right-clicking a quote.
-2. A name near the quote — `Alice said, "..."`, `"...," Alice said`, `Alice: "..."`. An explicit speech tag beats a bare mention, a nearby mention beats a distant one, and a name that is only possessive (`Alice's coat`) or an addressee (`turned to Alice`) is ignored rather than treated as the speaker.
-3. A pronoun speech tag (`"...," she said`) bound to the nearest preceding name in the same paragraph that is not itself possessive or an addressee. This is gender-free: no pronoun-to-character mapping is stored or guessed, so it is always scored lower than a literal name.
-4. The previous speaker, when the quote sits on the same line.
-5. Alternation between recent speakers across new lines.
-6. The message's own speaker.
+2. A name near the quote. A speech tag or label glued to it (`Alice said, "..."`, `"...," Alice said`, `Alice: "..."`, `[Alice]:`, `**Alice**:`) is strongest, then a reporting verb bound to the name a little further off, then an action beat — the sentence that runs straight into the quote with that name acting (`Alice folded her arms. "Fine."` and its mirror `"Fine." Alice folded her arms.`). Beat verbs like *smiled*, *nodded* and *frowned* resolve a quote but never outrank a reporting verb, so a bystander reacting afterwards cannot take the line from whoever spoke. A name that only owns a prop (`Alice's coat`) or is an addressee (`turned to Alice`) is ignored, though one that owns a body part or a voice (`Alice's eyes narrowed`) counts as her acting.
+3. A pronoun speech tag (`"...," she said`) bound to the nearest preceding name that is not itself a prop owner or an addressee, including one on an earlier line. This is gender-free: no pronoun-to-character mapping is stored or guessed, so it is always scored lower than a literal name.
+4. The character the paragraph is about: the first name in it that opens a sentence, read through asterisked actions as well as plain narration.
+5. The character acting on the line above. Models break a beat and its dialogue apart with a newline constantly, and a bare quote under `Alice folded her arms.` is hers. The walk back crosses nameless scene lines at falling confidence and stops as soon as it reaches a line that already contains speech.
+6. The previous speaker, when the quote sits on the same line.
+7. Whoever the previous quote called out by name, when a reply follows on a new line.
+8. Alternation between recent speakers across new lines.
+9. The message's own speaker.
+
+A name the quote itself calls out (`"Alice, wait."`, `"Come here, Alice."`) marks the listener, so from rule 4 down that character is ruled out as the speaker. A name that merely appears in the sentence (`"I saw Alice yesterday."`) is not an address and changes nothing.
 
 Every quote carries a confidence derived from the evidence that resolved it, not a fixed number per rule — distance, tag strength, and how crowded the scene is all move it, and a carried or alternated speaker can never read as more certain than the quote it came from. Right-click any quote to see its source and confidence, and to correct it. Correcting one quote pins its neighbours as they were, so a fix never cascades.
 

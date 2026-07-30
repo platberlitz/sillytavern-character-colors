@@ -268,6 +268,29 @@ export function getDialogueParagraphRange(text, start, end) {
     return { start: rangeStart, end: rangeEnd };
 }
 
+// The nearest non-blank line above `start`, or null at the top of the message.
+// Models break a beat and its dialogue apart with a newline far more often than
+// they keep them on one line, so resolving a quote frequently means reading the
+// line above it rather than only the one it sits on.
+export function getPrecedingParagraphRange(text, start) {
+    const raw = String(text ?? '');
+    let cursor = Math.max(0, Math.min(raw.length, start)) - 1;
+    while (cursor >= 0) {
+        while (cursor >= 0 && (raw[cursor] === '\n' || raw[cursor] === '\r')) cursor--;
+        if (cursor < 0) return null;
+        let lineStart = 0;
+        for (let i = cursor; i >= 0; i--) {
+            if (raw[i] === '\n' || raw[i] === '\r') {
+                lineStart = i + 1;
+                break;
+            }
+        }
+        if (raw.slice(lineStart, cursor + 1).trim()) return { start: lineStart, end: cursor + 1 };
+        cursor = lineStart - 1;
+    }
+    return null;
+}
+
 export function isSameDialogueParagraph(left, right) {
     return !!left && !!right && left.start === right.start && left.end === right.end;
 }
