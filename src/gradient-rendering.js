@@ -107,7 +107,7 @@ export function clearGradientText(element) {
         }
     }
     if (!element.getAttribute('style')) element.removeAttribute('style');
-    refreshGradientAnimationState();
+    if (changed) refreshGradientAnimationState();
     return changed;
 }
 
@@ -139,7 +139,11 @@ export function applyGradientText(element, entry, options = {}) {
         changed = true;
     }
 
+    // Registration is idempotent, but the refresh strips and re-adds
+    // dc-gradient-running on every animated element, which restarts the
+    // animation from zero. During streaming this runs several times a second,
+    // so it only fires when this element actually changed.
     registerGradientAnimationElement(element);
-    refreshGradientAnimationState();
+    if (changed) refreshGradientAnimationState();
     return { applied: true, changed, state };
 }

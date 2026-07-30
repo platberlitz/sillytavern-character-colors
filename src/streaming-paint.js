@@ -31,6 +31,11 @@ function resolveStreamingTarget() {
     return !!mesText;
 }
 
+function observeStreamingTarget() {
+    if (!streamingSession.active || !streamingSession.observer || !streamingSession.mesText) return;
+    streamingSession.observer.observe(streamingSession.mesText, { childList: true, subtree: true, characterData: true });
+}
+
 export function paintStreamingMessage() {
     if (!streamingSession.active || streamingSession.painting) return false;
     if (!settings.enabled || !isDomEngine()) return false;
@@ -41,6 +46,11 @@ export function paintStreamingMessage() {
 
     const mesText = streamingSession.mesText;
     streamingSession.painting = true;
+    // Our own writes are mutations too, and the callback for them arrives in a
+    // later microtask when the painting flag is already back down. Disconnecting
+    // drops the pending record queue, so we never repaint in reaction to
+    // ourselves - which is what turned a colour refresh into a DOM storm.
+    streamingSession.observer?.disconnect();
     try {
         if (mesText.querySelector('font[color]') || collectFontColorsFromText(msg.mes).size) {
             applyCustomFontsToFontTags(mesText, msg.mes);
@@ -69,6 +79,7 @@ export function paintStreamingMessage() {
         return true;
     } finally {
         streamingSession.painting = false;
+        observeStreamingTarget();
     }
 }
 

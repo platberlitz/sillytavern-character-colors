@@ -230,6 +230,12 @@ test('the streaming painter owns its message alone', () => {
     // observer, and isDecoratingDom is already restored by then.
     assert.match(paint, /if \(!streamingSession\.active \|\| streamingSession\.painting\) return false/);
     assert.match(paint, /streamingSession\.painting = true;[\s\S]*?finally \{\s*streamingSession\.painting = false;/);
+    // The flag alone is not enough: mutation records queued by our own writes
+    // are delivered in a later microtask, once painting is already false. The
+    // observer has to be detached across the write and reattached after it, or
+    // every paint schedules the next one and the message never settles.
+    assert.match(paint, /streamingSession\.observer\?\.disconnect\(\);[\s\S]*?try \{/);
+    assert.match(paint, /finally \{[\s\S]*?observeStreamingTarget\(\);\s*\}/);
 
     // No timers in the token handler: the repaint has to run inside the host's
     // own write frame, and only a MutationObserver gets us there.

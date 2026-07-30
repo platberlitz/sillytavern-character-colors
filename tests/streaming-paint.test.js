@@ -173,7 +173,15 @@ function fakeElement(text) {
                 return target[property] ?? '';
             },
         }),
-        classList: { add() {}, remove() {}, contains: () => false },
+        classList: (() => {
+            const classes = new Set();
+            return {
+                add: name => classes.add(name),
+                remove: name => classes.delete(name),
+                contains: name => classes.has(name),
+                toggle: (name, on) => { if (on) classes.add(name); else classes.delete(name); },
+            };
+        })(),
         getAttribute: name => (attributes.has(name) ? attributes.get(name) : null),
         setAttribute(name, value) { el.writes++; attributes.set(name, String(value)); },
         removeAttribute(name) { attributes.delete(name); },
@@ -216,6 +224,43 @@ test('a wiped tick repaints to the same colour without a clear pass', () => {
         assert.ok(first[0]);
         assert.equal(second[0], first[0]);
     });
+});
+
+test('repainting an unchanged gradient does not restart its animation', async () => {
+    // The running class is stripped and re-added on every refresh, which
+    // restarts the animation from zero. Refreshes are coalesced per frame, so a
+    // paint that changed nothing must not request a frame at all.
+    const originalRaf = globalThis.requestAnimationFrame;
+    const originalDocument = globalThis.document;
+    let frames = 0;
+    let pending = null;
+    // Frames must resolve the way the browser does - after the caller returns -
+    // or the controller's own "a refresh is already queued" guard would hide the
+    // repeated restarts this test exists to catch.
+    globalThis.requestAnimationFrame = callback => { frames++; pending = callback; return frames; };
+    const flushFrame = () => { const callback = pending; pending = null; callback?.(); };
+    globalThis.document = { hidden: false, addEventListener() {}, removeEventListener() {}, querySelectorAll: () => [] };
+    try {
+        const { applyGradientText } = await import('../src/gradient-rendering.js');
+        const entry = {
+            color: '#ff0000',
+            baseColor: '#ff0000',
+            gradient: { type: 'linear', stops: [{ color: '#ff0000', position: 0 }, { color: '#00ff00', position: 100 }], animation: { enabled: true, durationSeconds: 4 } },
+        };
+        const element = fakeElement('Hello');
+        applyGradientText(element, entry, { target: 'chat' });
+        flushFrame();
+        const afterFirstPaint = frames;
+
+        for (let tick = 0; tick < 5; tick++) {
+            applyGradientText(element, entry, { target: 'chat' });
+            flushFrame();
+        }
+        assert.equal(frames - afterFirstPaint, 0);
+    } finally {
+        globalThis.requestAnimationFrame = originalRaf;
+        globalThis.document = originalDocument;
+    }
 });
 
 test('ending the session drops the frozen assignments and the observer', () => {
