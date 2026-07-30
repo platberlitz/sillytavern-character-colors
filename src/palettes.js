@@ -155,35 +155,58 @@ export function shouldOverwritePalette() {
 
 // Phase 3B: Optimized conflict check with pre-computed HSL and early-out
 
+// A palette slot counts as taken when the color it would actually render as is already
+// on screen. Comparing raw ladder values against stored base colors does not work: the
+// stored value has been through a lossy readability pass, so it never matches and the
+// ladder hands out its first slot forever.
+function isPaletteSlotTaken(candidateColor, reservedColors) {
+    return isAssignedColorConflict(applyThemeReadabilityAndBrightness(candidateColor), reservedColors);
+}
+
+const PALETTE_JITTER_ATTEMPTS = 12;
+
 // Phase 5C: Handle custom palettes in getNextColor
 export function getNextColor() {
+    const reservedColors = collectReservedGradientColors();
     if (settings.colorTheme?.startsWith('custom:')) {
         const paletteName = settings.colorTheme.slice(7);
         const customs = getCustomPalettes();
         const palette = customs[paletteName];
         if (palette) {
-            const usedColors = Object.values(characterColors).map(c => getBaseColor(c));
             for (const color of palette) {
                 const normalizedColor = normalizeHexColor(color);
-                if (!usedColors.includes(normalizedColor)) return normalizedColor;
+                if (!isPaletteSlotTaken(normalizedColor, reservedColors)) return normalizedColor;
             }
-            const base = palette[Math.floor(Math.random() * palette.length)];
-            const [h, s, l] = hexToHsl(base);
-            return hslToHex((h + Math.random() * 60 - 30 + 360) % 360, s, l);
+            const jitterCustomSlot = () => {
+                const base = palette[Math.floor(Math.random() * palette.length)];
+                const [h, s, l] = hexToHsl(base);
+                return hslToHex((h + Math.random() * 60 - 30 + 360) % 360, s, l);
+            };
+            for (let attempt = 0; attempt < PALETTE_JITTER_ATTEMPTS; attempt++) {
+                const jittered = jitterCustomSlot();
+                if (!isPaletteSlotTaken(jittered, reservedColors)) return jittered;
+            }
+            return jitterCustomSlot();
         }
     }
     const theme = COLOR_THEMES[settings.colorTheme] || COLOR_THEMES.pastel;
-    const usedColors = Object.values(characterColors).map(c => getBaseColor(c));
     const mode = settings.themeMode === 'auto' ? detectTheme() : settings.themeMode;
     const isDark = mode === 'dark';
     cachedIsDark = isDark;
     for (const [h, s, l] of theme) {
         const adjustedL = isDark ? Math.min(l + 15, 85) : Math.max(l - 15, 35);
         const color = hslToHex(h, s, adjustedL);
-        if (!usedColors.includes(color)) return color;
+        if (!isPaletteSlotTaken(color, reservedColors)) return color;
     }
-    const [h, s, l] = theme[Math.floor(Math.random() * theme.length)];
-    return hslToHex((h + Math.random() * 60 - 30 + 360) % 360, s, isDark ? 75 : 40);
+    const jitterThemeSlot = () => {
+        const [h, s] = theme[Math.floor(Math.random() * theme.length)];
+        return hslToHex((h + Math.random() * 60 - 30 + 360) % 360, s, isDark ? 75 : 40);
+    };
+    for (let attempt = 0; attempt < PALETTE_JITTER_ATTEMPTS; attempt++) {
+        const jittered = jitterThemeSlot();
+        if (!isPaletteSlotTaken(jittered, reservedColors)) return jittered;
+    }
+    return jitterThemeSlot();
 }
 
 // Pre-compiled color name mapping for faster lookups
