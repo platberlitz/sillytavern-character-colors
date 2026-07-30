@@ -12,7 +12,7 @@ import { buildMinimalPromptInstruction, injectPrompt } from './prompts.js';
 import { eventSource, event_types, getContext } from './st-api.js';
 import { attributionChatGeneration, autoSyncPendingRecord, characterColors, expandedCharacterRows, isDomEngine, isStreamingGenerationActive, lastCharKey, lastProcessedMessageSignature, pendingAttributionVerifications, runtimeState, selectedCharacterKeys, setAttributionChatGeneration, setIsStreamingGenerationActive, setLastCharKey, setLastProcessedMessageSignature, setPendingAttributionVerifications, setSwapMode, settings, swapMode } from './state.js';
 import { beginStreamingPaint, endStreamingPaint } from './streaming-paint.js';
-import { confirmAutoSyncRecord, doAutoSyncMarkersMatch, ensureRegexScript, getAutoSyncRecord, getCharKey, getStorageKey, initAutoSync, loadData, migrateLegacyLocalStorageIfNeeded, migrateRenamedCharacterStorage, tryLoadFromCard, updateAutoSyncUI } from './storage.js';
+import { confirmAutoSyncRecord, doAutoSyncMarkersMatch, ensureRegexScript, getAutoSyncRecord, getCharKey, getStorageKey, initAutoSync, loadData, migrateLegacyLocalStorageIfNeeded, migrateRenamedCharacterStorage, restorePinnedPersonaColor, tryLoadFromCard, updateAutoSyncUI } from './storage.js';
 import { applyThemeOrBrightnessChange, clearAutoColorizeIndicators, createUI, ensurePersonaCharacter, renamePersonaCharacter, syncUIWithSettings, updateCharList } from './ui.js';
 import { cancelStreamingAttributionVerification, clearAutoAttributionVerificationQueue, queueAutoAttributionVerificationForRenderedMessages, scheduleStreamingAttributionVerification } from './verify.js';
 
@@ -191,8 +191,11 @@ export function registerEventHandlers() {
                 .catch(error => console.warn('[Dialogue Colors] Character storage rename migration failed.', error));
         },
         personaChanged: () => {
-            if (settings.autoPersonaCharacter !== true) return;
-            ensurePersonaCharacter({ silent: true });
+            // Each persona keeps its own pinned color, so a switch has to swap the pin in
+            // before anything repaints, whether or not the persona entry is auto-created.
+            const restored = restorePinnedPersonaColor();
+            if (settings.autoPersonaCharacter === true) ensurePersonaCharacter({ silent: true });
+            else if (!restored) return;
             updateCharList();
         },
         personaRenamed: payload => {

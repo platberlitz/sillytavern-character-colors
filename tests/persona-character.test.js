@@ -94,6 +94,7 @@ const { setTestContext } = await import(stApiUrl);
 const { ensurePersonaCharacter, isPersonaEntry, renamePersonaCharacter } = await import('../src/ui.js');
 const { isColorableMessage } = await import('../src/live-colors.js');
 const { getPersonaName } = await import('../src/palettes.js');
+const { getPinnedPersonaColors, pinCurrentPersonaColor, renamePinnedPersonaColor, restorePinnedPersonaColor } = await import('../src/storage.js');
 // Saving replaces the registry object wholesale, so it has to be read off the module
 // namespace rather than captured once.
 const state = await import('../src/state.js');
@@ -110,10 +111,13 @@ function withPersona(personaName, run) {
     const previousColors = { ...registry() };
     for (const key of Object.keys(registry())) delete registry()[key];
     Object.assign(settings, DEFAULT_SETTINGS);
+    const pins = getPinnedPersonaColors();
+    for (const key of Object.keys(pins)) delete pins[key];
     setTestContext({ chat: [], chatMetadata: {}, name1: personaName });
     try {
         return run();
     } finally {
+        for (const key of Object.keys(getPinnedPersonaColors())) delete getPinnedPersonaColors()[key];
         for (const key of Object.keys(registry())) delete registry()[key];
         Object.assign(registry(), previousColors);
         Object.assign(settings, DEFAULT_SETTINGS);
@@ -207,6 +211,91 @@ test('a rename onto an existing character is refused', () => {
         assert.equal(renamePersonaCharacter('Marisol', 'Diego'), false);
         assert.equal(registry().marisol.name, 'Marisol');
         assert.equal(registry().diego.name, 'Diego');
+    });
+});
+
+test('the persona color is only pinned once the option is on', () => {
+    withPersona('Marisol', () => {
+        ensurePersonaCharacter({ silent: true });
+        assert.equal(pinCurrentPersonaColor(), false);
+        assert.deepEqual(getPinnedPersonaColors(), {});
+        settings.persistPersonaColor = true;
+        assert.equal(pinCurrentPersonaColor(), true);
+        assert.equal(getPinnedPersonaColors().marisol.baseColor, registry().marisol.baseColor);
+    });
+});
+
+test('a new scope gets the pinned persona color back, exactly', () => {
+    withPersona('Marisol', () => {
+        settings.persistPersonaColor = true;
+        ensurePersonaCharacter({ silent: true });
+        registry().marisol.baseColor = '#ff00aa';
+        registry().marisol.color = '#ff00aa';
+        pinCurrentPersonaColor();
+        // A scope switch wipes the registry and reloads whatever that scope stored.
+        for (const key of Object.keys(registry())) delete registry()[key];
+        registry().diego = { name: 'Diego', baseColor: '#ff00aa', color: '#ff00aa' };
+        assert.equal(restorePinnedPersonaColor(), true);
+        assert.equal(registry().marisol.name, 'Marisol');
+        assert.equal(registry().marisol.baseColor, '#ff00aa');
+    });
+});
+
+test('restoring overwrites a color the new scope had for the persona', () => {
+    withPersona('Marisol', () => {
+        settings.persistPersonaColor = true;
+        ensurePersonaCharacter({ silent: true });
+        registry().marisol.baseColor = '#ff00aa';
+        registry().marisol.color = '#ff00aa';
+        pinCurrentPersonaColor();
+        registry().marisol.baseColor = '#123456';
+        registry().marisol.color = '#123456';
+        assert.equal(restorePinnedPersonaColor(), true);
+        assert.equal(registry().marisol.baseColor, '#ff00aa');
+        assert.equal(restorePinnedPersonaColor(), false);
+    });
+});
+
+test('each persona keeps its own pin', () => {
+    withPersona('Marisol', () => {
+        settings.persistPersonaColor = true;
+        ensurePersonaCharacter({ silent: true });
+        registry().marisol.baseColor = '#ff00aa';
+        registry().marisol.color = '#ff00aa';
+        pinCurrentPersonaColor();
+        setTestContext({ chat: [], chatMetadata: {}, name1: 'Diego' });
+        ensurePersonaCharacter({ silent: true });
+        registry().diego.baseColor = '#00ccdd';
+        registry().diego.color = '#00ccdd';
+        pinCurrentPersonaColor();
+        assert.equal(getPinnedPersonaColors().marisol.baseColor, '#ff00aa');
+        assert.equal(getPinnedPersonaColors().diego.baseColor, '#00ccdd');
+    });
+});
+
+test('nothing is restored while the option is off', () => {
+    withPersona('Marisol', () => {
+        settings.persistPersonaColor = true;
+        ensurePersonaCharacter({ silent: true });
+        pinCurrentPersonaColor();
+        settings.persistPersonaColor = false;
+        for (const key of Object.keys(registry())) delete registry()[key];
+        assert.equal(restorePinnedPersonaColor(), false);
+        assert.deepEqual(Object.keys(registry()), []);
+    });
+});
+
+test('renaming the persona carries its pin along', () => {
+    withPersona('Marisol', () => {
+        settings.persistPersonaColor = true;
+        ensurePersonaCharacter({ silent: true });
+        registry().marisol.baseColor = '#ff00aa';
+        registry().marisol.color = '#ff00aa';
+        pinCurrentPersonaColor();
+        assert.equal(renamePinnedPersonaColor('Marisol', 'Marisol Vega'), true);
+        assert.equal(getPinnedPersonaColors().marisol, undefined);
+        assert.equal(getPinnedPersonaColors()['marisol vega'].name, 'Marisol Vega');
+        assert.equal(getPinnedPersonaColors()['marisol vega'].baseColor, '#ff00aa');
     });
 });
 
