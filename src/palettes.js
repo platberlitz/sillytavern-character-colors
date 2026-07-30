@@ -10,7 +10,7 @@ import { injectPrompt } from './prompts.js';
 import { createPerceptualConflictReport } from './perceptual-conflicts.js';
 import { NARRATOR_VISUAL_ID, getNarratorVisual, setNarratorStyle } from './narrator-style.js';
 import { GRADIENT_GENERATOR_ALGORITHM, advanceGradientGenerator, generateSeededGradient, normalizeGradientGenerator } from './seeded-gradient-generator.js';
-import { escapeHtml, generateQuietPrompt, getContext } from './st-api.js';
+import { escapeHtml, generateQuietPrompt, getContext, power_user } from './st-api.js';
 import { characterColors, expandedCharacterRows, groupProfiles, setCharacterColors, setExpandedCharacterRows, setGroupProfiles, setSwapMode, settings, swapMode } from './state.js';
 import { getAutoSyncRecord, isPlainObject, persistModuleStore, saveData, saveGlobalSettingsSnapshot } from './storage.js';
 import { VALID_STYLES, colorDistance, hexToHsl, hslToHex, normalizeAliases, normalizeCharacterEntry, normalizeEntryGradientGenerator, normalizeGoogleFontName, normalizeHexColor, toast } from './utils.js';
@@ -1458,6 +1458,18 @@ function getCurrentGroupCharacterNames(context) {
     return names;
 }
 
+// SillyTavern resolves the persona label the same way: the per-avatar name when one
+// is set, otherwise the active user name.
+export function getPersonaName() {
+    try {
+        const context = getContext();
+        const avatarName = power_user?.personas?.[context?.userAvatar];
+        return normalizeRegistryIdentityName(avatarName || context?.name1 || '');
+    } catch {
+        return '';
+    }
+}
+
 function isPrimaryConversationIdentity(name) {
     const normalizedName = String(name ?? '').trim().toLowerCase();
     if (!normalizedName) return false;
@@ -1465,9 +1477,8 @@ function isPrimaryConversationIdentity(name) {
         const context = getContext();
         const currentCharacter = context?.characters?.[context?.characterId];
         const primaryNames = [
+            getPersonaName(),
             context?.name1,
-            context?.userName,
-            context?.user_name,
             context?.name2,
             currentCharacter?.name,
             ...getCurrentGroupCharacterNames(context),

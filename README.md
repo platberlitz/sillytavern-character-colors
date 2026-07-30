@@ -25,6 +25,7 @@ A SillyTavern extension that gives each character's dialogue a consistent visual
 - **Narrator style**: configure dedicated narrator colors, gradients, and text styles. Narrator styling works across LLM prompts, DOM rendering, legend, statistics, and conflict reports.
 - **Attribution reviews**: verifier suggestions are queued for explicit human review by default. Accept, edit, or reject suggestions segment by segment or in bulk.
 - **Automatic NPC gradients**: optionally randomize gradients for newly discovered NPCs while excluding the current card, group cards, and user persona. Off by default.
+- **Persona coloring**: color your own dialogue too. "Add my persona" under Characters → Advanced adds the active persona as a tracked character, marked with a **You** badge and sorted to the top. The "Color my persona's dialogue" toggle under Automation keeps that entry in step with persona switches and renames; in LLM engine mode it also lets color tags be written into your own message text, which no other user message ever receives. Off by default.
 - **Automatic gradients for every new character**: a separate default-off override can randomize gradients for every newly created entry.
 - **Global gradient drift**: optionally animate every gradient without changing each character's individual Drift setting. Off by default.
 - **Fonts and text styles**: assign installed font families and Normal, Bold, Italic, or Bold Italic styling per character. Optional remote Google Font loading is disclosed, disabled by default, and bounded when enabled.
@@ -164,7 +165,8 @@ LLM mode supports prompt depth, system/user role, and two delivery modes:
 - **Prose feels worse in LLM mode**: use a system prompt role, increase prompt depth, use the manual macro, or switch to Local mode.
 - **The model ignores color tags**: confirm the engine is LLM and the extension is enabled. Try a different prompt role or use Colorize missing.
 - **Local colors disappear on refresh**: Local mode is render-only. Use LLM mode for persisted solid tags.
-- **Auto-colorize does not run**: it only triggers when the latest non-user message contains no color block or existing font tags.
+- **Auto-colorize does not run**: it only triggers when the latest colorable message contains no color block or existing font tags. Your own messages are only colorable when "Color my persona's dialogue" is on.
+- **My persona has no color in LLM mode**: adding the persona is not enough on its own. LLM mode colors text by editing message content, so it leaves your messages alone until "Color my persona's dialogue" is enabled. Local mode colors them without editing anything.
 - **An LLM profile is unavailable**: connection profiles require a compatible SillyTavern ConnectionManagerRequestService.
 - **A selected font is not visible**: install it locally, or explicitly enable remote Google Font loading under Appearance and Automation.
 - **Gradient drift is paused**: the device's Reduce Motion preference intentionally disables it.

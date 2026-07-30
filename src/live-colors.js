@@ -1,12 +1,12 @@
 // live-colors.js - extracted from index.js (mechanical split)
 import { clearSpeakerRegexCache, colorizeMessageText, ensureCharacterEntry } from './attribution.js';
-import { collectFontColorsFromText, countFontColorStatsFromKnownColors, parseColorAssignmentsFromText, processColorBlocksInText, refreshTransientNarratorCount, stripColorBlockFromElement } from './color-blocks.js';
+import { collectFontColorsFromText, countFontColorStatsFromKnownColors, parseColorAssignmentsFromText, processColorBlocksInText, refreshTransientNarratorCount, resolveCharacterKeyByNameOrAlias, stripColorBlockFromElement } from './color-blocks.js';
 import { DOM_RETRY_REFRESH_DELAYS, decorateAllMessages, refreshMessageDom, scheduleDomRefreshSeries, scheduleDomSettleRefresh } from './dom-engine.js';
 import { scheduleCustomFontRefresh } from './fonts.js';
 import { saveHistory } from './history.js';
 import { callLLMWithProfile, classifyLlmRequestError } from './llm.js';
 import { getNarratorVisual } from './narrator-style.js';
-import { applyThemeReadabilityAndBrightness, getBaseColor, getEntryEffectiveColor, invalidateThemeCache, syncAllEffectiveColors } from './palettes.js';
+import { applyThemeReadabilityAndBrightness, getBaseColor, getEntryEffectiveColor, getPersonaName, invalidateThemeCache, syncAllEffectiveColors } from './palettes.js';
 import { buildColorMetadataPromptLines, buildLLMColorizeRules, buildThoughtSymbolColorPromptRule, getThoughtDelimiterSymbols, injectPrompt } from './prompts.js';
 import { generateQuietPrompt, getContext } from './st-api.js';
 import { COLOR_STATE_SAVE_DELAY_MS, LIVE_CHAT_SAVE_DELAY_MS, attributionChatGeneration, characterColors, colorStateSaveTimer, isAutoColorizing, isColorizing, isDomEngine, isRecoloring, lastProcessedMessageSignature, liveChatSaveTimer, pendingColorStateHistory, pendingColorStateInjectPrompt, pendingColorStateSaveData, pendingColorStateUpdateList, setColorStateSaveTimer, setIsAutoColorizing, setIsColorizing, setIsRecoloring, setLastProcessedMessageSignature, setLiveChatSaveTimer, setPendingColorStateHistory, setPendingColorStateInjectPrompt, setPendingColorStateSaveData, setPendingColorStateUpdateList, setPendingLiveChatSave, settings } from './state.js';
@@ -30,6 +30,20 @@ const COLORIZE_BATCH_MAX_ATTEMPTS = 2;
 const COLORIZE_MAX_INDIVIDUAL_LLM_FALLBACKS = 2;
 const COLORIZE_RUN_MAX_LLM_REQUESTS = 4;
 const COLORIZE_RUN_MAX_LLM_RETRIES = 1;
+
+// The LLM engine rewrites message text in place, so user-authored messages are normally
+// left alone. When persona coloring is switched on the user has opted into having their
+// own lines tagged, but only their own: any other user message stays untouched.
+export function isColorableMessage(msg) {
+    if (!msg) return false;
+    if (!msg.is_user) return true;
+    if (settings.autoPersonaCharacter !== true) return false;
+    const personaName = getPersonaName();
+    if (!personaName) return false;
+    const personaKey = resolveCharacterKeyByNameOrAlias(personaName);
+    const messageKey = resolveCharacterKeyByNameOrAlias(String(msg.name ?? '').trim());
+    return !!personaKey && personaKey === messageKey;
+}
 
 function normalizeContextId(value) {
     if (typeof value === 'string') return value.trim() || null;
@@ -466,7 +480,7 @@ export function applyLiveColorReplacements(replacements, options = {}) {
     let changedCount = 0;
     for (let i = 0; i < chat.length; i++) {
         const msg = chat[i];
-        if (!msg || msg.is_user) continue;
+        if (!isColorableMessage(msg)) continue;
         const messageReplacements = buildMessageLiveReplacements(msg.mes || '', fallbackReplacements, nameToNewColor, globalAssignments);
         if (!Object.keys(messageReplacements).length) continue;
         const result = updateTextColorReferences(msg.mes || '', messageReplacements);
@@ -1074,12 +1088,12 @@ export async function recolorAllMessages() {
         const narrator = getNarratorVisual(settings, applyThemeReadabilityAndBrightness);
         if (narrator) nameToNewColor.narrator = narrator.color;
 
-        // Step 3: Process each non-user message
+        // Step 3: Process each colorable message
         let recoloredCount = 0;
         let ambiguousSkippedCount = 0;
         for (let i = 0; i < chat.length; i++) {
             const msg = chat[i];
-            if (!msg || msg.is_user) continue;
+            if (!isColorableMessage(msg)) continue;
             const rawText = msg.mes || '';
             if (!rawText) continue;
 
@@ -1229,10 +1243,10 @@ export async function colorizeMessages(targetMode = 'all') {
         syncAllEffectiveColors();
         let createdCharacters = false;
 
-        // Pre-register all unique non-user speaker names so attribution can find them
+        // Pre-register all unique colorable speaker names so attribution can find them
         const allSpeakers = new Set();
         for (const msg of chat) {
-            if (msg && !msg.is_user && msg.name) allSpeakers.add(msg.name.trim());
+            if (isColorableMessage(msg) && msg.name) allSpeakers.add(msg.name.trim());
         }
         for (const speakerName of allSpeakers) {
             if (!speakerName || isCompositeSpeakerLabel(speakerName)) continue;
@@ -1249,7 +1263,7 @@ export async function colorizeMessages(targetMode = 'all') {
         const eligibleEntries = [];
         for (let i = startIdx; i < chat.length; i++) {
             const msg = chat[i];
-            if (!msg || msg.is_user) continue;
+            if (!isColorableMessage(msg)) continue;
             const rawText = msg.mes || '';
             if (!rawText) continue;
             const existingFontColors = collectFontColorsFromText(rawText);
@@ -1464,7 +1478,7 @@ export function onNewMessage() {
             scheduleDomRefreshSeries();
             return;
         }
-        if (settings.autoColorize && !lastMsg.is_user && isAutoColorizing && !/\[COLORS?:[^\]]*\]/i.test(text)) {
+        if (settings.autoColorize && isColorableMessage(lastMsg) && isAutoColorizing && !/\[COLORS?:[^\]]*\]/i.test(text)) {
             pendingAutoColorizeRetry = true;
             setLastProcessedMessageSignature('');
             return;
@@ -1530,12 +1544,12 @@ export function onNewMessage() {
         }
 
         // Auto-colorize fallback: if model produced no color output at all
-        if (!foundColorBlock && settings.autoColorize && !lastMsg.is_user && isAutoColorizing) {
+        if (!foundColorBlock && settings.autoColorize && isColorableMessage(lastMsg) && isAutoColorizing) {
             pendingAutoColorizeRetry = true;
             setLastProcessedMessageSignature('');
             return;
         }
-        if (!foundColorBlock && settings.autoColorize && !lastMsg.is_user) {
+        if (!foundColorBlock && settings.autoColorize && isColorableMessage(lastMsg)) {
             const hasExistingColors = collectFontColorsFromText(text).size > 0;
             if (!hasExistingColors) {
                 setIsAutoColorizing(true);
@@ -1561,9 +1575,9 @@ export function onNewMessage() {
                 };
                 try {
                     syncAllEffectiveColors();
-                    // Pre-register all unique non-user speaker names for attribution
+                    // Pre-register all unique colorable speaker names for attribution
                     for (const msg of chat) {
-                        if (msg && !msg.is_user && msg.name) {
+                        if (isColorableMessage(msg) && msg.name) {
                             const speakerName = msg.name.trim();
                             if (speakerName && !isCompositeSpeakerLabel(speakerName)) {
                                 ensureCharacterEntry(speakerName);

@@ -12,7 +12,7 @@ import { buildMinimalPromptInstruction, injectPrompt } from './prompts.js';
 import { eventSource, event_types, getContext } from './st-api.js';
 import { attributionChatGeneration, autoSyncPendingRecord, characterColors, expandedCharacterRows, isDomEngine, isStreamingGenerationActive, lastCharKey, lastProcessedMessageSignature, pendingAttributionVerifications, runtimeState, selectedCharacterKeys, setAttributionChatGeneration, setIsStreamingGenerationActive, setLastCharKey, setLastProcessedMessageSignature, setPendingAttributionVerifications, setSwapMode, settings, streamingHeuristicCache, swapMode } from './state.js';
 import { confirmAutoSyncRecord, doAutoSyncMarkersMatch, ensureRegexScript, getAutoSyncRecord, getCharKey, getStorageKey, initAutoSync, loadData, migrateLegacyLocalStorageIfNeeded, migrateRenamedCharacterStorage, tryLoadFromCard, updateAutoSyncUI } from './storage.js';
-import { applyThemeOrBrightnessChange, clearAutoColorizeIndicators, createUI, syncUIWithSettings, updateCharList } from './ui.js';
+import { applyThemeOrBrightnessChange, clearAutoColorizeIndicators, createUI, ensurePersonaCharacter, renamePersonaCharacter, syncUIWithSettings, updateCharList } from './ui.js';
 import { cancelStreamingAttributionVerification, clearAutoAttributionVerificationQueue, queueAutoAttributionVerificationForRenderedMessages, scheduleStreamingAttributionVerification } from './verify.js';
 
 let lastAppliedAutoTheme = null;
@@ -72,6 +72,7 @@ export function handleChatChanged() {
         setLastProcessedMessageSignature('');
         syncUIWithSettings();
     }
+    if (settings.autoPersonaCharacter === true) ensurePersonaCharacter({ silent: true });
     updateCharList();
     injectPrompt();
     stripColorBlocksFromDisplay();
@@ -182,6 +183,14 @@ export function registerEventHandlers() {
                 })
                 .catch(error => console.warn('[Dialogue Colors] Character storage rename migration failed.', error));
         },
+        personaChanged: () => {
+            if (settings.autoPersonaCharacter !== true) return;
+            ensurePersonaCharacter({ silent: true });
+            updateCharList();
+        },
+        personaRenamed: payload => {
+            if (renamePersonaCharacter(payload?.oldName, payload?.newName)) updateCharList();
+        },
         settingsUpdated: () => {
             clearTimeout(themeRefreshTimer);
             themeRefreshTimer = setTimeout(() => {
@@ -216,6 +225,9 @@ export function registerEventHandlers() {
     if (event_types.GROUP_CHAT_CREATED) eventSource.on(event_types.GROUP_CHAT_CREATED, runtimeState.eventHandlers.chatCreated);
     eventSource.on(event_types.CHAT_CHANGED, runtimeState.eventHandlers.chatChanged);
     if (event_types.CHARACTER_RENAMED) eventSource.on(event_types.CHARACTER_RENAMED, runtimeState.eventHandlers.characterRenamed);
+    if (event_types.PERSONA_CHANGED) eventSource.on(event_types.PERSONA_CHANGED, runtimeState.eventHandlers.personaChanged);
+    if (event_types.PERSONA_UPDATED) eventSource.on(event_types.PERSONA_UPDATED, runtimeState.eventHandlers.personaChanged);
+    if (event_types.PERSONA_RENAMED) eventSource.on(event_types.PERSONA_RENAMED, runtimeState.eventHandlers.personaRenamed);
     eventSource.on(event_types.SETTINGS_UPDATED, runtimeState.eventHandlers.settingsUpdated);
     eventSource.on(event_types.CHAT_CHANGED, () => populateProfileDropdown());
     runtimeState.eventsRegistered = true;

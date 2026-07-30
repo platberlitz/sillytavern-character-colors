@@ -9,12 +9,12 @@ import { DOM_RETRY_REFRESH_DELAYS, acceptAttributionReview, cancelMessageDomFoll
 import { loadGoogleFont, scheduleCustomFontRefresh, syncRemoteFontLoadingPolicy } from './fonts.js';
 import { getColorVisionSimulationForTarget, getGradientRenderState, getVisualRenderState } from './gradient-rendering.js';
 import { BUILTIN_GRADIENT_PRESETS, DEFAULT_GRADIENT_ANGLE, DEFAULT_GRADIENT_DURATION, DEFAULT_GRADIENT_POSITION, GRADIENT_TYPES, MAX_GRADIENT_STOPS, cloneGradient, getBuiltInGradientPreset, getGradientSignature, normalizeGradient, normalizeGradientPresetName } from './gradients.js';
-import { GROUP_PROFILE_AUTOMATION_KEYS, deleteGroupProfile, getGroupProfile, normalizeGroupKey, normalizeGroupName, renameGroupProfile, setGroupProfile } from './group-profiles.js';
+import { GROUP_PROFILE_AUTOMATION_KEYS, deleteGroupProfile, getGroupProfile, normalizeGroupKey, normalizeGroupName, normalizeRegistryIdentity, normalizeRegistryIdentityName, renameGroupProfile, setGroupProfile } from './group-profiles.js';
 import { createRestoreSnapshot, redo, saveHistory, showUndoToast, undo } from './history.js';
 import { applyFastColorUiUpdates, applyLiveColorChangesFromSnapshot, captureEffectiveColorSnapshot, colorizeMessages, commit, flushChatSave, flushColorStateSave, queueColorStateSave, recolorAllMessages, repaintDomAfterCharacterDataChange } from './live-colors.js';
 import { registerKeyboardShortcuts } from './main.js';
 import { getTransientNarratorCount, getNarratorVisual, normalizeNarratorStyle, setNarratorStyle } from './narrator-style.js';
-import { applyGradientPreset, applyThemeReadabilityAndBrightness, buildCharacterEntry, collectDuplicateColorKeys, createGradientRandomMasterSeed, createRandomGradient, deleteColorPreset, deleteCustomPalette, detectTheme, flipColorsForTheme, generateCustomPaletteFromWords, getBaseColor, getCustomPaletteMeta, getCustomPalettes, getEntryEffectiveColor, getNextColor, getPerceptualConflictReport, getPresets, invalidateThemeCache, loadColorPreset, refreshPaletteDropdown, refreshPresetDropdown, regenerateAllColors, regenerateAllGradients, removeCharacterKeys, repairPerceptualConflicts, saveColorPreset, saveCustomPalette, setEntryFromBaseColor, setEntryGradient, showHarmonyPopup, suggestColorForName, swapEntryColorData, syncAllEffectiveColors } from './palettes.js';
+import { applyGradientPreset, applyThemeReadabilityAndBrightness, buildCharacterEntry, collectDuplicateColorKeys, createGradientRandomMasterSeed, createRandomGradient, deleteColorPreset, deleteCustomPalette, detectTheme, flipColorsForTheme, generateCustomPaletteFromWords, getBaseColor, getCustomPaletteMeta, getCustomPalettes, getEntryEffectiveColor, getNextColor, getPerceptualConflictReport, getPersonaName, getPresets, invalidateThemeCache, loadColorPreset, refreshPaletteDropdown, refreshPresetDropdown, regenerateAllColors, regenerateAllGradients, removeCharacterKeys, repairPerceptualConflicts, saveColorPreset, saveCustomPalette, setEntryFromBaseColor, setEntryGradient, showHarmonyPopup, suggestColorForName, swapEntryColorData, syncAllEffectiveColors } from './palettes.js';
 import { injectPrompt, updateSystemPromptDisplay } from './prompts.js';
 import { escapeHtml, getContext } from './st-api.js';
 import { autoRecolorHintShown, characterColors, expandedCharacterRows, groupProfiles, isDomEngine, searchTerm, selectedCharacterKeys, setAutoRecolorHintShown, setCharacterColors, setGroupProfiles, setSearchTerm, setSwapMode, settings, swapMode } from './state.js';
@@ -330,6 +330,19 @@ export function createCanvasGradientFill(ctx, entry, bounds, options = {}) {
 }
 
 // Phase 6B: Group sorting support
+function matchesPersonaIdentity(entry, personaIdentity) {
+    if (!entry) return false;
+    if (normalizeRegistryIdentity(entry.name) === personaIdentity) return true;
+    return (entry.aliases || []).some(alias => normalizeRegistryIdentity(alias) === personaIdentity);
+}
+
+// The persona is easy to lose among detected NPCs, so it is flagged and floated to
+// the top of the list. Matching by identity keeps aliases working.
+export function isPersonaEntry(entry) {
+    const personaIdentity = normalizeRegistryIdentity(getPersonaName());
+    return !!personaIdentity && matchesPersonaIdentity(entry, personaIdentity);
+}
+
 export function getSortedEntries() {
     const needle = searchTerm.trim().toLowerCase();
     const entries = Object.entries(characterColors).filter(([, entry]) => {
@@ -337,6 +350,8 @@ export function getSortedEntries() {
         return [entry.name, entry.group, entry.font, ...(entry.aliases || []), entry.keep ? 'kept pinned' : '', entry.locked ? 'locked' : '']
             .some(value => String(value || '').toLowerCase().includes(needle));
     });
+    const personaIdentity = normalizeRegistryIdentity(getPersonaName());
+    const isPersona = entry => !!personaIdentity && matchesPersonaIdentity(entry, personaIdentity);
     entries.sort((a, b) => {
         if (settings.sortMode === 'group') {
             const leftGroup = normalizeGroupKey(a[1].group);
@@ -345,9 +360,11 @@ export function getSortedEntries() {
                 : leftGroup && !rightGroup ? -1
                     : leftGroup.localeCompare(rightGroup);
             if (groupComparison) return groupComparison;
+            if (isPersona(a[1]) !== isPersona(b[1])) return isPersona(b[1]) ? 1 : -1;
             if (!!b[1].keep !== !!a[1].keep) return Number(b[1].keep) - Number(a[1].keep);
             return a[1].name.localeCompare(b[1].name);
         }
+        if (isPersona(a[1]) !== isPersona(b[1])) return isPersona(b[1]) ? 1 : -1;
         if (!!b[1].keep !== !!a[1].keep) return Number(b[1].keep) - Number(a[1].keep);
         if (settings.sortMode === 'count') return (b[1].dialogueCount || 0) - (a[1].dialogueCount || 0) || a[1].name.localeCompare(b[1].name);
         return a[1].name.localeCompare(b[1].name);
@@ -1508,6 +1525,7 @@ export function buildCharRowHtml(k, v) {
     if (fontFamily) loadGoogleFont(fontName);
     const fontStyle = fontFamily ? `font-family:${escapeAttr(fontFamily)};` : '';
     const statusBadges = [
+        isPersonaEntry(v) ? '<span class="dc-status-chip dc-status-chip-persona" title="Your active persona">You</span>' : '',
         v.locked ? '<span class="dc-status-chip dc-status-chip-lock">Locked</span>' : '',
         v.group ? `<span class="dc-status-chip">${escapeHtml(v.group)}</span>` : '',
         v.style ? `<span class="dc-status-chip">${escapeHtml(styleLabel)}</span>` : '',
@@ -1569,6 +1587,7 @@ export function buildCharRowSignature(k, v) {
         selectedCharacterKeys.has(k) ? 1 : 0,
         v.keep ? 1 : 0,
         v.locked ? 1 : 0,
+        isPersonaEntry(v) ? 1 : 0,
         v.group || '',
         v.style || '',
         normalizeGoogleFontName(v.font),
@@ -3079,6 +3098,47 @@ export function autoAssignFromCard() {
     }
 }
 
+// Adds the active persona to the registry so the user can color their own dialogue.
+// Silent mode is the automatic path and stays quiet; the button path reports back and
+// falls through to addCharacter's reveal behaviour when the entry already exists.
+export function ensurePersonaCharacter({ silent = false } = {}) {
+    try {
+        const name = getPersonaName();
+        if (!name || name.toLowerCase() === 'narrator') {
+            if (!silent) toast.info('No active persona to add.');
+            return;
+        }
+        if (resolveCharacterKeyByNameOrAlias(name)) {
+            if (!silent) addCharacter(name);
+            return;
+        }
+        const result = addCharacter(name, undefined, { origin: 'persona' });
+        if (result?.added && !silent) toast.success(`Added ${escapeHtml(name)}`);
+    } catch (error) {
+        console.warn('[Dialogue Colors] Could not add the active persona.', error);
+    }
+}
+
+// Follows a persona rename so the color the user picked stays with them, rather than
+// stranding the old entry and auto-assigning a fresh color to the new name.
+export function renamePersonaCharacter(oldName, newName) {
+    const previousKey = resolveCharacterKeyByNameOrAlias(oldName);
+    const nextName = normalizeRegistryIdentityName(String(newName ?? ''));
+    const nextKey = normalizeRegistryIdentity(nextName);
+    if (!previousKey || !nextName || !nextKey || previousKey === nextKey) return false;
+    if (characterColors[nextKey]) return false;
+    const entry = characterColors[previousKey];
+    if (!entry) return false;
+    entry.name = nextName;
+    characterColors[nextKey] = entry;
+    delete characterColors[previousKey];
+    if (expandedCharacterRows.delete(previousKey)) expandedCharacterRows.add(nextKey);
+    clearSpeakerRegexCache();
+    commit();
+    repaintDomAfterCharacterDataChange(0);
+    return true;
+}
+
 export function updateStorageScopeStatus() {
     const scope = getCurrentStorageScope();
     const descriptor = getStorageScopeDescriptor(scope);
@@ -3615,6 +3675,7 @@ export function syncUIWithSettings() {
     if ($('dc-autoscan')) $('dc-autoscan').checked = settings.autoScanOnLoad !== false;
     if ($('dc-autoscan-new')) $('dc-autoscan-new').checked = settings.autoScanNewMessages !== false;
     if ($('dc-auto-lock')) $('dc-auto-lock').checked = settings.autoLockDetected !== false;
+    if ($('dc-auto-persona')) $('dc-auto-persona').checked = settings.autoPersonaCharacter === true;
     if ($('dc-auto-random-gradients')) $('dc-auto-random-gradients').checked = settings.autoRandomNpcGradients === true;
     if ($('dc-auto-random-all-gradients')) $('dc-auto-random-all-gradients').checked = settings.autoRandomAllGradients === true;
     if ($('dc-auto-random-gradients')) $('dc-auto-random-gradients').disabled = settings.autoRandomAllGradients === true;
@@ -3882,6 +3943,7 @@ function buildSettingsPanelHtml() {
                             <label class="dc-visually-hidden" for="dc-add-group">Initial group</label><input type="text" id="dc-add-group" placeholder="Initial group (optional)" class="text_pole" list="dc-group-profile-labels" maxlength="80">
                             <button id="dc-card" class="menu_button">Add current card</button>
                             <button id="dc-avatar-color" class="menu_button">Avatar color</button>
+                            <button id="dc-add-persona" class="menu_button">Add my persona</button>
                         </div>
                     </details>
                     <small><span id="dc-count">0</span> tracked characters</small>
@@ -3942,7 +4004,7 @@ function buildSettingsPanelHtml() {
             </details>
             <details class="dc-section" id="dc-page-automation" data-dc-page="automation" data-dc-disclosure="automation" role="tabpanel" aria-labelledby="dc-tab-automation" tabindex="-1">
                 <summary>Automation</summary>
-                <div class="dc-toggle-grid"><label class="checkbox_label"><input type="checkbox" id="dc-autoscan"><span>Scan when the character list is empty</span></label><label class="checkbox_label"><input type="checkbox" id="dc-autoscan-new"><span>Scan new messages</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-lock"><span>Lock new characters</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-random-gradients"><span>Random gradients for new NPCs</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-random-all-gradients"><span>Random gradients for every new character</span></label><label class="checkbox_label"><input type="checkbox" id="dc-drift-all-gradients"><span>Drift every gradient color</span></label><label class="checkbox_label dc-llm-only"><input type="checkbox" id="dc-auto-colorize"><span>Colorize missing tags automatically</span></label><label class="checkbox_label"><input type="checkbox" id="dc-right-click"><span>Manual dialogue reassignment</span></label><label class="checkbox_label"><input type="checkbox" id="dc-disable-toasts"><span>Reduce routine notifications</span></label></div>
+                <div class="dc-toggle-grid"><label class="checkbox_label"><input type="checkbox" id="dc-autoscan"><span>Scan when the character list is empty</span></label><label class="checkbox_label"><input type="checkbox" id="dc-autoscan-new"><span>Scan new messages</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-lock"><span>Lock new characters</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-persona" data-help="Adds your active persona to the character list so your own dialogue gets colored. In the LLM engine this writes color tags into your own messages."><span>Color my persona's dialogue</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-random-gradients"><span>Random gradients for new NPCs</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-random-all-gradients"><span>Random gradients for every new character</span></label><label class="checkbox_label"><input type="checkbox" id="dc-drift-all-gradients"><span>Drift every gradient color</span></label><label class="checkbox_label dc-llm-only"><input type="checkbox" id="dc-auto-colorize"><span>Colorize missing tags automatically</span></label><label class="checkbox_label"><input type="checkbox" id="dc-right-click"><span>Manual dialogue reassignment</span></label><label class="checkbox_label"><input type="checkbox" id="dc-disable-toasts"><span>Reduce routine notifications</span></label></div>
             </details>
             <details class="dc-section" id="dc-page-library" data-dc-page="library" data-dc-disclosure="library" role="tabpanel" aria-labelledby="dc-tab-library" tabindex="-1">
                 <summary>Style library</summary>
@@ -4319,6 +4381,12 @@ function bindSettingsPanelControls($) {
     $('dc-autoscan').onchange = e => { settings.autoScanOnLoad = e.target.checked; saveData(); };
     $('dc-autoscan-new').onchange = e => { settings.autoScanNewMessages = e.target.checked; saveData(); };
     $('dc-auto-lock').onchange = e => { settings.autoLockDetected = e.target.checked; saveData(); };
+    $('dc-auto-persona').onchange = e => {
+        settings.autoPersonaCharacter = e.target.checked;
+        saveData();
+        if (e.target.checked) ensurePersonaCharacter({ silent: true });
+        updateCharList();
+    };
     $('dc-auto-random-gradients').onchange = e => { settings.autoRandomNpcGradients = e.target.checked; saveData(); };
     $('dc-auto-random-all-gradients').onchange = e => {
         settings.autoRandomAllGradients = e.target.checked;
@@ -4719,6 +4787,7 @@ function bindSettingsPanelControls($) {
         if (analysis) await reviewAndApplyStylePack(analysis, $('dc-style-pack-import'));
     };
     $('dc-card').onclick = autoAssignFromCard;
+    $('dc-add-persona').onclick = () => ensurePersonaCharacter();
     $('dc-avatar-color').onclick = async () => {
         try {
             const ctx = getContext();

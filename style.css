@@ -1069,6 +1069,12 @@ body.dc-fullscreen-open {
     background: color-mix(in srgb, var(--dc-accent) 12%, var(--dc-surface-soft));
 }
 
+#dc-ext .dc-status-chip-persona {
+    border-color: color-mix(in srgb, var(--dc-accent) 70%, var(--dc-border));
+    background: color-mix(in srgb, var(--dc-accent) 26%, var(--dc-surface-soft));
+    font-weight: 600;
+}
+
 #dc-ext .dc-color-swatch {
     position: relative;
     width: 26px;
