@@ -12,6 +12,7 @@ const sourceNames = [
     'main.js',
     'palettes.js',
     'storage.js',
+    'streaming-paint.js',
     'ui.js',
     'utils.js',
     'verify.js',
@@ -211,6 +212,39 @@ test('unmatchable messages get a bounded best-effort decoration', () => {
     assert.match(healthCheck, /if \(exhausted\) healthRefreshAttempts\.set\(attemptsKey, attempts \+ 1\);\s*\n\s*else healthRefreshAttempts\.delete\(attemptsKey\)/);
     // A host re-render wipes decorations, so the budget must reset with them.
     assert.match(healthCheck, /clearDecoratedWatcher\(mesElement\);[\s\S]*?healthRefreshAttempts\.delete\(`\$\{repairIndex\}/);
+});
+
+test('the streaming painter owns its message alone', () => {
+    // Every timer-driven scheduler repaints a frame or more after the host has
+    // already rewritten .mes_text, which is the flicker. While a paint session
+    // is armed they must all skip that one index.
+    for (const name of ['scheduleMessageDomRepair', 'scheduleMessageDomFollowupRepair', 'queueObservedMessageDecoration', 'attachMessageSettleObserver', 'watchDecoratedMessage', 'runDomHealthCheck', 'decorateAllMessages', 'decorateObservedMessages']) {
+        assert.match(functionSection(sources['dom-engine.js'], name), /isStreamingOwnedMessage\(/, `${name} must stand down for the streaming painter`);
+    }
+
+    const paint = functionSection(sources['streaming-paint.js'], 'paintStreamingMessage');
+    // A clear pass is what makes the text visibly flash: it lands as its own
+    // mutation, and the host may paint before the re-apply half runs.
+    assert.doesNotMatch(paint, /undecorateMessageDom|clearSegmentDecoration|clearNarratorTextSpans/);
+    // Re-entrancy has to be blocked synchronously; our own writes re-trigger the
+    // observer, and isDecoratingDom is already restored by then.
+    assert.match(paint, /if \(!streamingSession\.active \|\| streamingSession\.painting\) return false/);
+    assert.match(paint, /streamingSession\.painting = true;[\s\S]*?finally \{\s*streamingSession\.painting = false;/);
+
+    // No timers in the token handler: the repaint has to run inside the host's
+    // own write frame, and only a MutationObserver gets us there.
+    const register = functionSection(sources['main.js'], 'registerEventHandlers');
+    const streamToken = /streamToken: \(\) => \{[^}]*\}/.exec(register);
+    assert.ok(streamToken, 'missing stream-token handler');
+    assert.match(streamToken[0], /beginStreamingPaint\(\)/);
+    assert.doesNotMatch(streamToken[0], /schedule(DecorateLast|CustomFontRefresh|DomRefreshSeries)/);
+    assert.match(functionSection(sources['streaming-paint.js'], 'beginStreamingPaint'), /new MutationObserver/);
+
+    // Frozen assignments describe one specific message body, so a swipe, a chat
+    // change and the end of generation must all drop them.
+    assert.match(functionSection(sources['main.js'], 'handleMessageUpdated'), /endStreamingPaint\(\)/);
+    assert.match(functionSection(sources['main.js'], 'handleChatChanged'), /endStreamingPaint\(\)/);
+    assert.match(register, /setIsStreamingGenerationActive\(false\);\s*\n\s*endStreamingPaint\(\)/);
 });
 
 test('override targeting never uses the approximate element fallback', () => {

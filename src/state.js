@@ -165,7 +165,18 @@ export let attributionVerificationEpoch = 0;
 
 export const streamingAttributionOverrides = new Map();
 
-export const streamingHeuristicCache = new Map();
+// Streaming paints run inside SillyTavern's own write frame, so this holds the
+// live message target plus the assignments already shown to the user. Freezing
+// them is what stops visible text from changing colour mid-stream.
+export const streamingSession = {
+    active: false,
+    mesIndex: -1,
+    assignments: new Map(),
+    mesElement: null,
+    mesText: null,
+    observer: null,
+    painting: false,
+};
 
 export const LIVE_CHAT_SAVE_DELAY_MS = 350;
 
@@ -277,6 +288,16 @@ export function setIsAutoColorizing(value) { isAutoColorizing = value; return va
 export function setIsColorizing(value) { isColorizing = value; return value; }
 export function setIsRecoloring(value) { isRecoloring = value; return value; }
 export function setIsStreamingGenerationActive(value) { isStreamingGenerationActive = value; return value; }
+export function resetStreamingSession() {
+    streamingSession.observer?.disconnect?.();
+    streamingSession.active = false;
+    streamingSession.mesIndex = -1;
+    streamingSession.assignments.clear();
+    streamingSession.mesElement = null;
+    streamingSession.mesText = null;
+    streamingSession.observer = null;
+    streamingSession.painting = false;
+}
 export function setIsVerifyingAttribution(value) { isVerifyingAttribution = value; return value; }
 export function setLastCharKey(value) { lastCharKey = value; return value; }
 export function setLastProcessedMessageSignature(value) { lastProcessedMessageSignature = value; return value; }

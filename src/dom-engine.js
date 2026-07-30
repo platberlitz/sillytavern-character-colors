@@ -9,7 +9,7 @@ import { queueColorStateSave } from './live-colors.js';
 import { getNarratorVisual } from './narrator-style.js';
 import { applyThemeReadabilityAndBrightness } from './palettes.js';
 import { converter, escapeHtml, eventSource, event_types, getContext } from './st-api.js';
-import { ATTRIBUTION_VERIFIER_VERSION, AUTO_ATTRIBUTION_VERIFY_DELAY_MS, attributionChatGeneration, characterColors, isDomEngine, runtimeState, settings, streamingAttributionOverrides, streamingHeuristicCache } from './state.js';
+import { ATTRIBUTION_VERIFIER_VERSION, AUTO_ATTRIBUTION_VERIFY_DELAY_MS, attributionChatGeneration, characterColors, isDomEngine, runtimeState, settings, streamingAttributionOverrides, streamingSession } from './state.js';
 import { isPlainObject } from './storage.js';
 import { applyTextStyle, clearTextStyle } from './text-style-rendering.js';
 import { updateLegend } from './ui.js';
@@ -378,6 +378,7 @@ export function cancelMessageDomFollowupRepairs(messageIndex) {
 export function scheduleMessageDomFollowupRepair(messageIndex, repainted) {
     const index = Number(messageIndex);
     if (!Number.isFinite(index) || index < 0) return;
+    if (isStreamingOwnedMessage(index)) return;
     if (suspendMessageDomWorkForEdit(getMessageElementByIndex(index), index)) return;
     const target = captureMessageDomTarget(index);
     if (!target) return;
@@ -466,6 +467,7 @@ export function scheduleMessageDomRepair(mesIndex, options = {}) {
     const index = Number(mesIndex);
     if (!Number.isFinite(index) || index < 0) return false;
 
+    if (isStreamingOwnedMessage(index)) return false;
     if (suspendMessageDomWorkForEdit(getMessageElementByIndex(index), index)) return false;
     const target = captureMessageDomTarget(index);
     if (!target) return false;
@@ -531,19 +533,13 @@ export const OVERRIDES_METADATA_KEY = 'dialogue_colors_overrides';
 
 export let decorateAllTimer = null;
 
-export let decorateLastTimer = null;
-
 export let isDecoratingDom = false;
 
 export let decorateAllFirstCallTime = 0;
 
-export let decorateLastFirstCallTime = 0;
-
 export let observedDecorationFirstCallTime = 0;
 
 export const DECORATE_ALL_MAX_WAIT = 500;
-
-export const DECORATE_LAST_MAX_WAIT = 250;
 
 export const OBSERVED_DECORATION_MAX_WAIT = 250;
 
@@ -578,6 +574,13 @@ export function getEditingMessageElement(mesElement, mesIndex) {
         ? resolvedElement
         : resolvedElement.querySelector?.(MESSAGE_EDIT_TEXTAREA_SELECTOR);
     return editTextarea?.closest?.('.mes[mesid]') || null;
+}
+
+// The streaming painter owns exactly one message and repaints it inside the
+// host's own write frame. Every other scheduler must leave that index alone,
+// or its clear->rebuild pass lands a frame later and shows uncoloured text.
+export function isStreamingOwnedMessage(mesIndex) {
+    return streamingSession.active && Number(mesIndex) === streamingSession.mesIndex;
 }
 
 export function suspendMessageDomWorkForEdit(mesElement, mesIndex) {
@@ -688,30 +691,18 @@ export function getMessageQuoteOverrideOptions(mesIndex, msg) {
     };
 }
 
-export function hasMessageQuoteOverridesForDecoration(mesIndex, msg) {
-    const overrides = getMessageQuoteOverridesForDecoration(mesIndex, msg);
-    return !!overrides && Object.keys(overrides).length > 0;
-}
-
 export function setStreamingAttributionOverride(mesIndex, msg, segmentIndex, speakerName, options = {}) {
     const entry = getStreamingAttributionOverrideEntry(mesIndex, msg, true);
     if (!entry) return false;
     entry.segments[String(segmentIndex)] = String(speakerName);
     entry.sources[String(segmentIndex)] = options.source || 'llm';
-    streamingHeuristicCache.clear();
+    streamingSession.assignments.clear();
     return true;
 }
 
 export function clearStreamingAttributionOverrides(mesIndex = null) {
     if (mesIndex === null || mesIndex === undefined) streamingAttributionOverrides.clear();
     else streamingAttributionOverrides.delete(String(mesIndex));
-}
-
-export function hasMessageQuoteOverridesForLatestMessage() {
-    const chat = getContext()?.chat || [];
-    const mesIndex = chat.length - 1;
-    if (mesIndex < 0) return false;
-    return hasMessageQuoteOverridesForDecoration(mesIndex, chat[mesIndex]);
 }
 
 function getStoredMessageFingerprint(entry) {
@@ -912,7 +903,7 @@ export function setMessageQuoteOverride(mesIndex, msg, segmentIndex, speakerName
     } catch (_) {
         return false;
     }
-    streamingHeuristicCache.clear();
+    streamingSession.assignments.clear();
     saveChatMetadata();
     return true;
 }
@@ -932,7 +923,7 @@ export function deleteMessageQuoteOverride(mesIndex, msg, segmentIndex) {
             if (sources[key] === ATTRIBUTION_SOURCE.FROZEN) deleteAttributionOverrideRecord(map, mesIndex, key);
         }
     }
-    streamingHeuristicCache.clear();
+    streamingSession.assignments.clear();
     saveChatMetadata();
     return true;
 }
@@ -943,7 +934,7 @@ export function restoreMessageQuoteOverrideEntry(mesIndex, snapshot) {
     const key = String(mesIndex);
     if (snapshot && isPlainObject(snapshot)) map[key] = JSON.parse(JSON.stringify(snapshot));
     else delete map[key];
-    streamingHeuristicCache.clear();
+    streamingSession.assignments.clear();
     saveChatMetadata();
     return true;
 }
@@ -1021,7 +1012,7 @@ export function listAttributionReviews(options = {}) {
 export function acceptAttributionReview(id, options = {}) {
     const decision = getAttributionReviewAdapter().accept(id, options);
     if (decision?.status === ATTRIBUTION_REVIEW_STATUS.ACCEPTED) {
-        streamingHeuristicCache.clear();
+        streamingSession.assignments.clear();
         markAttributionReviewDecisionStatus(decision);
     }
     return decision;
@@ -1199,6 +1190,49 @@ export function resolveDomSegmentIndexForElement(segmentEl, mesIndex, msg) {
     return resolvedIndex;
 }
 
+function setStyleIfChanged(el, property, value) {
+    if (el.style[property] !== value) el.style[property] = value;
+}
+
+function setAttributeIfChanged(el, name, value) {
+    if (el.getAttribute(name) !== value) el.setAttribute(name, value);
+}
+
+// Writes only what differs. Streaming paints run without a preceding clear pass,
+// so a no-op repaint must not touch the DOM at all - re-setting the gradient
+// classes restarts the animation and re-setting attributes wakes the observers.
+export function applySegmentDecoration(seg, el) {
+    setAttributeIfChanged(el, 'data-dc-seg', String(seg.index));
+    if (!seg.assignment) return false;
+    const entryKey = characterColors[seg.assignment.key]
+        ? seg.assignment.key
+        : resolveCharacterKeyByNameOrAlias(seg.assignment.name || seg.assignment.key);
+    const entry = entryKey ? characterColors[entryKey] : null;
+    const displayVisual = getVisualRenderState(entry || { color: seg.assignment.color, baseColor: seg.assignment.color }, { target: 'chat' });
+    setStyleIfChanged(el, 'color', displayVisual.fallbackColor);
+    applyTextStyle(el, entry?.style);
+    const font = entry?.font || seg.assignment.font;
+    const family = getGoogleFontFamily(font);
+    if (family) {
+        loadGoogleFont(font);
+        setStyleIfChanged(el, 'fontFamily', family);
+        setAttributeIfChanged(el, 'data-dc-font', '1');
+    }
+    const highlightColor = settings.highlightMode ? `${displayVisual.fallbackColor}26` : '';
+    const gradientResult = applyGradientText(el, entry, { highlightColor, target: 'chat' });
+    if (settings.highlightMode && !gradientResult.applied) setStyleIfChanged(el, 'backgroundColor', highlightColor);
+    setAttributeIfChanged(el, 'data-dc-colored', '1');
+    setAttributeIfChanged(el, 'data-dc-confidence', getAttributionConfidenceBand(seg.confidence));
+    setAttributeIfChanged(el, 'data-dc-speaker', seg.assignment.key);
+    const speakerName = entry?.name || seg.assignment.name || seg.assignment.key;
+    setAttributeIfChanged(el, 'data-dc-speaker-name', speakerName);
+    if (!el.hasAttribute('aria-label')) {
+        el.setAttribute('aria-label', `${speakerName}: ${el.textContent.trim()}`);
+        el.setAttribute('data-dc-aria-label', '1');
+    }
+    return true;
+}
+
 export function clearSegmentDecoration(el) {
     clearGradientText(el);
     clearTextStyle(el);
@@ -1339,35 +1373,7 @@ export function decorateMessageDom(mesElement, msg, mesIndex) {
 
     let decorated = false;
     const applyDecoration = (seg, el) => {
-        el.setAttribute('data-dc-seg', String(seg.index));
-        if (!seg.assignment) return;
-        const entryKey = characterColors[seg.assignment.key]
-            ? seg.assignment.key
-            : resolveCharacterKeyByNameOrAlias(seg.assignment.name || seg.assignment.key);
-        const entry = entryKey ? characterColors[entryKey] : null;
-        const displayVisual = getVisualRenderState(entry || { color: seg.assignment.color, baseColor: seg.assignment.color }, { target: 'chat' });
-        el.style.color = displayVisual.fallbackColor;
-        applyTextStyle(el, entry?.style);
-        const font = entry?.font || seg.assignment.font;
-        const family = getGoogleFontFamily(font);
-        if (family) {
-            loadGoogleFont(font);
-            el.style.fontFamily = family;
-            el.setAttribute('data-dc-font', '1');
-        }
-        const highlightColor = settings.highlightMode ? `${displayVisual.fallbackColor}26` : '';
-        const gradientResult = applyGradientText(el, entry, { highlightColor, target: 'chat' });
-        if (settings.highlightMode && !gradientResult.applied) el.style.backgroundColor = highlightColor;
-        el.setAttribute('data-dc-colored', '1');
-        el.setAttribute('data-dc-confidence', getAttributionConfidenceBand(seg.confidence));
-        el.setAttribute('data-dc-speaker', seg.assignment.key);
-        const speakerName = entry?.name || seg.assignment.name || seg.assignment.key;
-        el.setAttribute('data-dc-speaker-name', speakerName);
-        if (!el.hasAttribute('aria-label')) {
-            el.setAttribute('aria-label', `${speakerName}: ${el.textContent.trim()}`);
-            el.setAttribute('data-dc-aria-label', '1');
-        }
-        decorated = true;
+        decorated = applySegmentDecoration(seg, el) || decorated;
     };
 
     const quoteSegments = attribution.segments.filter(seg => seg.delimiter !== '*' && seg.delimiter !== '_');
@@ -1466,6 +1472,7 @@ export const MESSAGE_SETTLE_MAX_WAIT_MS = 3000;
 
 export function attachMessageSettleObserver(mesElement, mesIndex) {
     if (!mesElement?.isConnected) return;
+    if (isStreamingOwnedMessage(mesIndex)) return;
     if (suspendMessageDomWorkForEdit(mesElement, mesIndex)) return;
     // Keep the original deadline bounded. Reattaching after every failed
     // decoration would restart the timeout forever on permanently mismatched
@@ -1516,6 +1523,7 @@ export function attachMessageSettleObserver(mesElement, mesIndex) {
 
 export function watchDecoratedMessage(mesElement, mesIndex) {
     if (!mesElement?.isConnected) return;
+    if (isStreamingOwnedMessage(mesIndex)) return;
     if (suspendMessageDomWorkForEdit(mesElement, mesIndex)) return;
     // Tear down any existing watcher for this element first.
     clearDecoratedWatcher(mesElement);
@@ -1667,6 +1675,7 @@ export function runDomHealthCheck() {
             continue;
         }
         const repairIndex = Number(mesElement.getAttribute('mesid'));
+        if (isStreamingOwnedMessage(repairIndex)) continue;
         if (suspendMessageDomWorkForEdit(mesElement, repairIndex)) continue;
         if (watcher?.mesText !== currentMesText) {
             clearDecoratedWatcher(mesElement);
@@ -1688,6 +1697,7 @@ export function runDomHealthCheck() {
         if (!Number.isFinite(mesIndex) || mesIndex < 0) continue;
         if (runtimeState.messageDomRepairTimers.has(mesIndex)) continue;
         const msg = chat[mesIndex];
+        if (isStreamingOwnedMessage(mesIndex)) continue;
         if (suspendMessageDomWorkForEdit(mesElement, mesIndex)) continue;
         const attemptsKey = `${mesIndex}:${hashMessageText(msg?.mes)}`;
         const attempts = healthRefreshAttempts.get(attemptsKey) || 0;
@@ -1806,6 +1816,7 @@ export function decorateAllMessages() {
             const mesIndex = Number(mesElement.getAttribute('mesid'));
             const msg = chat[mesIndex];
             if (!msg) return;
+            if (isStreamingOwnedMessage(mesIndex)) return;
             const result = decorateMessageDom(mesElement, msg, mesIndex);
             if (result.createdCharacters) changedColorData = true;
             // If the message's quotes/emphasis have not rendered yet, attach a
@@ -1851,6 +1862,7 @@ export function decorateObservedMessages(elements, options = {}) {
         for (const mesElement of elements) {
             if (!mesElement?.isConnected) continue;
             const mesIndex = Number(mesElement.getAttribute('mesid'));
+            if (isStreamingOwnedMessage(mesIndex)) continue;
             if (suspendMessageDomWorkForEdit(mesElement, mesIndex)) continue;
             verificationElements.push(mesElement);
             const result = decorateMessageElementByIndex(mesElement, mesIndex);
@@ -1875,14 +1887,6 @@ export function decorateObservedMessages(elements, options = {}) {
     if (options.queueVerification !== false) queueAutoAttributionVerificationForElements(verificationElements);
 }
 
-export function decorateLastMessageDom() {
-    if (!settings.enabled || !isDomEngine()) return;
-    const messages = document.querySelectorAll('#chat .mes[mesid]');
-    const mesElement = messages[messages.length - 1];
-    if (!mesElement) return;
-    decorateObservedMessages([mesElement]);
-}
-
 export function scheduleDecorateAll(delay = 100) {
     if (!isDomEngine()) return;
     startDomHealthCheck();
@@ -1894,20 +1898,6 @@ export function scheduleDecorateAll(delay = 100) {
         decorateAllTimer = null;
         decorateAllFirstCallTime = 0;
         decorateAllMessages();
-    }, effectiveDelay);
-}
-
-export function scheduleDecorateLast(delay = 80) {
-    if (!settings.enabled || !isDomEngine()) return;
-    startDomHealthCheck();
-    const now = Date.now();
-    if (!decorateLastFirstCallTime) decorateLastFirstCallTime = now;
-    clearTimeout(decorateLastTimer);
-    const effectiveDelay = Math.min(delay, Math.max(0, DECORATE_LAST_MAX_WAIT - (now - decorateLastFirstCallTime)));
-    decorateLastTimer = setTimeout(() => {
-        decorateLastTimer = null;
-        decorateLastFirstCallTime = 0;
-        decorateLastMessageDom();
     }, effectiveDelay);
 }
 
@@ -1924,6 +1914,7 @@ export function disconnectChatObserver() {
 export function queueObservedMessageDecoration(mesElement) {
     if (!mesElement || !settings.enabled || !isDomEngine()) return;
     const mesIndex = Number(mesElement.getAttribute('mesid'));
+    if (isStreamingOwnedMessage(mesIndex)) return;
     if (suspendMessageDomWorkForEdit(mesElement, mesIndex)) return;
     const now = Date.now();
     if (!observedDecorationFirstCallTime) observedDecorationFirstCallTime = now;

@@ -2,7 +2,7 @@
 import { clearDomCache } from './attribution.js';
 import { scanAllMessages, stripColorBlocksFromDisplay } from './color-blocks.js';
 import { setupContextMenu } from './context-menu.js';
-import { DOM_RETRY_REFRESH_DELAYS, POST_MUTATION_DOM_REPAIR_DELAY_MS, clearDecoratedWatchers, decorateAllMessages, hasMessageQuoteOverridesForLatestMessage, scheduleDecorateLast, scheduleDomRefreshSeries, scheduleDomSettleRefresh, scheduleMessageDomRepair, setupChatObserver, setupChatRootObserver, startDomHealthCheck, stopDomHealthCheck } from './dom-engine.js';
+import { DOM_RETRY_REFRESH_DELAYS, POST_MUTATION_DOM_REPAIR_DELAY_MS, clearDecoratedWatchers, decorateAllMessages, scheduleDomRefreshSeries, scheduleDomSettleRefresh, scheduleMessageDomRepair, setupChatObserver, setupChatRootObserver, startDomHealthCheck, stopDomHealthCheck } from './dom-engine.js';
 import { scheduleCustomFontRefresh } from './fonts.js';
 import { redo, undo } from './history.js';
 import { commit, onNewMessage, resumePendingChatSave } from './live-colors.js';
@@ -10,7 +10,8 @@ import { consumeMainAiQuietGenerationEnd, populateProfileDropdown } from './llm.
 import { detectTheme, getReadableSurfaceSignature, invalidateThemeCache } from './palettes.js';
 import { buildMinimalPromptInstruction, injectPrompt } from './prompts.js';
 import { eventSource, event_types, getContext } from './st-api.js';
-import { attributionChatGeneration, autoSyncPendingRecord, characterColors, expandedCharacterRows, isDomEngine, isStreamingGenerationActive, lastCharKey, lastProcessedMessageSignature, pendingAttributionVerifications, runtimeState, selectedCharacterKeys, setAttributionChatGeneration, setIsStreamingGenerationActive, setLastCharKey, setLastProcessedMessageSignature, setPendingAttributionVerifications, setSwapMode, settings, streamingHeuristicCache, swapMode } from './state.js';
+import { attributionChatGeneration, autoSyncPendingRecord, characterColors, expandedCharacterRows, isDomEngine, isStreamingGenerationActive, lastCharKey, lastProcessedMessageSignature, pendingAttributionVerifications, runtimeState, selectedCharacterKeys, setAttributionChatGeneration, setIsStreamingGenerationActive, setLastCharKey, setLastProcessedMessageSignature, setPendingAttributionVerifications, setSwapMode, settings, swapMode } from './state.js';
+import { beginStreamingPaint, endStreamingPaint } from './streaming-paint.js';
 import { confirmAutoSyncRecord, doAutoSyncMarkersMatch, ensureRegexScript, getAutoSyncRecord, getCharKey, getStorageKey, initAutoSync, loadData, migrateLegacyLocalStorageIfNeeded, migrateRenamedCharacterStorage, tryLoadFromCard, updateAutoSyncUI } from './storage.js';
 import { applyThemeOrBrightnessChange, clearAutoColorizeIndicators, createUI, ensurePersonaCharacter, renamePersonaCharacter, syncUIWithSettings, updateCharList } from './ui.js';
 import { cancelStreamingAttributionVerification, clearAutoAttributionVerificationQueue, queueAutoAttributionVerificationForRenderedMessages, scheduleStreamingAttributionVerification } from './verify.js';
@@ -55,7 +56,7 @@ export function handleChatChanged() {
     setAttributionChatGeneration(attributionChatGeneration + 1);
     setIsStreamingGenerationActive(false);
     cancelStreamingAttributionVerification({ clearOverrides: true });
-    streamingHeuristicCache.clear();
+    endStreamingPaint();
     setPendingAttributionVerifications([]);
     clearAutoAttributionVerificationQueue({ clearCooldown: true });
     clearAutoColorizeIndicators();
@@ -119,6 +120,9 @@ export function handleChatChanged() {
 }
 
 export function handleMessageUpdated(mesIndex) {
+    // A swipe reuses the same mesid with an entirely different body, so the
+    // frozen streaming assignments and the cached target must both be dropped.
+    endStreamingPaint();
     const index = Number(mesIndex);
     if (Number.isFinite(index) && index >= 0) {
         scheduleMessageDomRepair(index, {
@@ -155,20 +159,23 @@ export function registerEventHandlers() {
         characterMessageRendered: () => { onNewMessage(); scheduleDomRefreshSeries(120); scheduleCustomFontRefresh(120); },
         messageRendered: () => { scheduleDomRefreshSeries(120); scheduleCustomFontRefresh(120); },
         messageUpdated: handleMessageUpdated,
-        streamToken: () => { setIsStreamingGenerationActive(true); scheduleDecorateLast(hasMessageQuoteOverridesForLatestMessage() ? 0 : 80); scheduleCustomFontRefresh(120); scheduleStreamingAttributionVerification(); },
+        // No timers here: beginStreamingPaint installs a MutationObserver so the
+        // repaint lands in the same frame as the host's .mes_text rewrite.
+        streamToken: () => { setIsStreamingGenerationActive(true); beginStreamingPaint(); scheduleStreamingAttributionVerification(); },
         generationEnded: () => {
             // GENERATION_ENDED has no type payload. A preceding non-quiet start
             // takes priority over an overlapping extension quiet request.
             let isQuietEnd = false;
             if (loudGenerationActive) loudGenerationActive = false;
             else isQuietEnd = consumeMainAiQuietGenerationEnd();
-            // Streaming teardown runs even for quiet ends: the heuristic cache is
-            // keyed by character offset only, so leaving it populated lets stale
-            // entries be replayed onto a different message body.
+            // Streaming teardown runs even for quiet ends, or the frozen
+            // assignments get replayed onto a different message body.
             setIsStreamingGenerationActive(false);
-            streamingHeuristicCache.clear();
+            endStreamingPaint();
             cancelStreamingAttributionVerification();
             if (isQuietEnd) return;
+            // Frozen mid-stream guesses are corrected here, in one pass, once
+            // the full text (and its trailing speech tags) is available.
             scheduleDomRefreshSeries(0);
             scheduleCustomFontRefresh(0);
             // Run post-generation verification sweep for unverified rendered messages.

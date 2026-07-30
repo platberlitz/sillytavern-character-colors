@@ -4,9 +4,9 @@ import { ATTRIBUTION_SOURCE, normalizeAttributionConfidence, normalizeAttributio
 import { buildCharacterEntry, getEntryEffectiveColor } from './palettes.js';
 import { normalizeRegistryIdentity, normalizeRegistryIdentityName } from './group-profiles.js';
 import { formatColorBlockPair } from './prompts.js';
-import { escapeRegex, getContext } from './st-api.js';
-import { characterColors, isStreamingGenerationActive, streamingHeuristicCache } from './state.js';
-import { buildMaskedDialogueText, getDialogueParagraphRange, isCompositeSpeakerLabel, isSameDialogueParagraph, makeLengthPreservingSearchText } from './utils.js';
+import { escapeRegex } from './st-api.js';
+import { characterColors, streamingSession } from './state.js';
+import { buildMaskedDialogueText, getDialogueParagraphRange, isCompositeSpeakerLabel, isSameDialogueParagraph, makeLengthPreservingSearchText, normalizeSegmentText } from './utils.js';
 
 // Invalidates derived caches (speaker mention regexes). Called on chat change and UI init.
 export function clearDomCache() { clearSpeakerRegexCache(); }
@@ -340,12 +340,30 @@ function createSegmentProvenance(source, method, confidence, evidence) {
     };
 }
 
+// Mirrors SillyTavern's balanceStreamingMarkdown: it closes an odd delimiter
+// before formatting, so a half-typed quote is already a complete <q> in the DOM.
+// Parsing the unbalanced text instead leaves us one segment short every tick,
+// which shifts indices and re-targets matches.
+export function balanceStreamingText(text) {
+    let balanced = String(text ?? '');
+    for (const char of ['*', '"']) {
+        let count = 0;
+        for (let i = 0; i < balanced.length; i++) {
+            if (balanced[i] === char) count++;
+        }
+        if (count % 2 === 1) balanced = balanced.trimEnd() + char;
+    }
+    return balanced;
+}
+
 export function attributeDialogueSegments(rawText, messageSpeakerName = '', options = {}) {
     const result = { segments: [], hadDialogueMatches: false, hadResolvableSpeaker: false, createdCharacters: false, usedAssignments: [] };
     const dialogueRegex = buildDialogueRegex();
     if (!dialogueRegex) return result;
 
-    const raw = String(rawText ?? '');
+    const raw = options.streaming === true
+        ? balanceStreamingText(rawText)
+        : String(rawText ?? '');
     const localAssignments = parseNamedColorAssignmentsFromText(raw);
     const lookup = buildNameColorLookup(localAssignments);
     const sortedLookupKeys = Array.from(lookup.keys())
@@ -452,16 +470,22 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
         return false;
     };
 
-    // Determine if we are attributing the active streaming message to check/save cached assignments
-    let isStreamingMsg = false;
-    if (isStreamingGenerationActive && options.mesIndex !== undefined) {
-        const chat = getContext()?.chat || [];
-        if (options.mesIndex === chat.length - 1) {
-            isStreamingMsg = true;
-        }
-    }
+    // Only the streaming painter opts in. Keying off a global flag let unrelated
+    // callers read and write the same cache with different options, so whichever
+    // scheduler won the race decided the speaker.
+    const isStreamingMsg = options.streaming === true && options.mesIndex === streamingSession.mesIndex;
+    const stickyKeyCounts = isStreamingMsg ? new Map() : null;
+    const nextStickyKey = segment => {
+        const text = normalizeSegmentText(segment.text);
+        const ordinal = stickyKeyCounts.get(text) || 0;
+        stickyKeyCounts.set(text, ordinal + 1);
+        return `${text}#${ordinal}`;
+    };
 
     for (const segment of collectedSegments) {
+        // Offsets shift on every token, so the sticky key is the segment's own
+        // text plus how many identical quotes precede it.
+        const stickyKey = isStreamingMsg ? nextStickyKey(segment) : '';
         const sameParagraphAsPrevious = isSameDialogueParagraph(segment.paragraph, previousParagraph);
         let assignment = null;
         let attributionMetadata = createSegmentProvenance(
@@ -502,14 +526,14 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
             }
         }
 
-        if (!assignment && isStreamingMsg && streamingHeuristicCache.has(segment.start)) {
-            assignment = streamingHeuristicCache.get(segment.start);
+        if (!assignment && isStreamingMsg && streamingSession.assignments.has(stickyKey)) {
+            assignment = streamingSession.assignments.get(stickyKey);
             if (assignment) {
                 attributionMetadata = createSegmentProvenance(
                     ATTRIBUTION_SOURCE.STREAMING_CACHE,
                     'streaming-cache',
                     0.8,
-                    [{ type: 'cached-segment-offset', start: segment.start }],
+                    [{ type: 'cached-segment-text', key: stickyKey }],
                 );
             }
         }
@@ -603,7 +627,7 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
         }
 
         if (isStreamingMsg && assignment) {
-            streamingHeuristicCache.set(segment.start, assignment);
+            streamingSession.assignments.set(stickyKey, assignment);
         }
 
         if (assignment) {
