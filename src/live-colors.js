@@ -613,7 +613,10 @@ export function refreshEffectiveColorsAfterRestore() {
 }
 
 export function queueColorStateSave(options = {}) {
-    setPendingColorStateSaveData(true);
+    // `data: false` queues the UI half only, for callers whose change is
+    // display-only and must not write anything to disk. A pending real save
+    // already queued by another caller still wins.
+    setPendingColorStateSaveData(pendingColorStateSaveData || options.data !== false);
     setPendingColorStateHistory(pendingColorStateHistory || options.history !== false);
     setPendingColorStateUpdateList(pendingColorStateUpdateList || options.updateList !== false);
     setPendingColorStateInjectPrompt(pendingColorStateInjectPrompt || options.injectPrompt !== false);

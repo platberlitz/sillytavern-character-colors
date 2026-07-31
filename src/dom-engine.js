@@ -1,6 +1,6 @@
 // dom-engine.js - extracted from index.js (mechanical split)
 import { attributeDialogueSegments } from './attribution.js';
-import { ATTRIBUTION_REVIEW_STATUS, ATTRIBUTION_SOURCE, ATTRIBUTION_VERIFICATION_STATUS, createAttributionStore, createMessageFingerprint, deleteAttributionOverrideRecord, getAttributionConfidenceBand, isLegacyAttributionOverrideEntry, normalizeAttributionConfidence, normalizeAttributionSource } from './attribution-store.js';
+import { ATTRIBUTION_REVIEW_METADATA_KEY, ATTRIBUTION_REVIEW_STATUS, ATTRIBUTION_SOURCE, ATTRIBUTION_VERIFICATION_STATUS, createAttributionStore, createMessageFingerprint, deleteAttributionOverrideRecord, getAttributionConfidenceBand, isLegacyAttributionOverrideEntry, normalizeAttributionConfidence, normalizeAttributionSource } from './attribution-store.js';
 import { unregisterGradientAnimationRoot } from './animation-controller.js';
 import { buildUniqueKnownColorStatsLookup, collectFontColorsFromText, countFontColorOccurrencesFromText, resolveCharacterKeyByNameOrAlias } from './color-blocks.js';
 import { applyCustomFontsToFontTags, applyCustomFontsToMessageElements, clearCustomFontsFromFontTags, loadGoogleFont, scheduleCardStyle, scheduleCustomFontRefresh } from './fonts.js';
@@ -616,6 +616,8 @@ export function getChatMetadataStore() {
     return isPlainObject(metadata) ? metadata : null;
 }
 
+let lastSavedChatMetadataScope = null;
+
 export function saveChatMetadata() {
     const ctx = getContext();
     try {
@@ -624,10 +626,41 @@ export function saveChatMetadata() {
             : typeof ctx?.saveMetadata === 'function'
                 ? ctx.saveMetadata()
                 : null;
+        lastSavedChatMetadataScope = snapshotChatMetadataScope();
         result?.catch?.(error => console.warn('[Dialogue Colors] Failed to save chat metadata:', error));
     } catch (error) {
         console.warn('[Dialogue Colors] Failed to save chat metadata:', error);
     }
+}
+
+// A chat metadata save is a full rewrite of the chat file - the host stores
+// chat_metadata in the file header - so a write that changes nothing still
+// deletes and recreates the user's chat on disk. Everything this module writes
+// lives under two keys, so serialising just those before and after a mutation
+// is enough to tell a real edit from a no-op.
+export function snapshotChatMetadataScope(metadata = getChatMetadataStore()) {
+    if (!metadata) return null;
+    try {
+        return JSON.stringify([
+            metadata[OVERRIDES_METADATA_KEY] ?? null,
+            metadata[ATTRIBUTION_REVIEW_METADATA_KEY] ?? null,
+        ]);
+    } catch (_) {
+        return null;
+    }
+}
+
+// Saves only when the snapshot proves something changed. Callers that could not
+// snapshot before mutating pass null and fall back to the last state we handed
+// to the host. A snapshot that could not be taken on either side is treated as
+// "unknown", which saves, so a serialisation failure can never silently drop a
+// real edit.
+export function saveChatMetadataIfChanged(before, metadata = getChatMetadataStore()) {
+    const after = snapshotChatMetadataScope(metadata);
+    const baseline = before === null || before === undefined ? lastSavedChatMetadataScope : before;
+    if (baseline !== null && baseline !== undefined && after !== null && baseline === after) return false;
+    saveChatMetadata();
+    return true;
 }
 
 export function getQuoteOverridesMap(create = false) {
@@ -830,6 +863,7 @@ export function setMessageQuoteOverride(mesIndex, msg, segmentIndex, speakerName
 
     const metadata = getChatMetadataStore();
     if (!metadata) return false;
+    const metadataBefore = snapshotChatMetadataScope(metadata);
     const existingMap = isPlainObject(metadata[OVERRIDES_METADATA_KEY]) ? metadata[OVERRIDES_METADATA_KEY] : null;
     const messageKey = String(index);
     const segmentKey = String(normalizedSegmentIndex);
@@ -888,8 +922,13 @@ export function setMessageQuoteOverride(mesIndex, msg, segmentIndex, speakerName
         delete entry.verifiedAt;
         delete entry.verifiedVersion;
     } else {
+        // Keep the original stamp when this entry already carries the same
+        // verdict for the same text: a fresh Date.now() on every re-apply makes
+        // an identical write look like a change and forces a chat file rewrite.
+        if (entry.verifiedHash !== entry.hash || entry.verifiedVersion !== ATTRIBUTION_VERIFIER_VERSION) {
+            entry.verifiedAt = Date.now();
+        }
         entry.verifiedHash = entry.hash;
-        entry.verifiedAt = Date.now();
         entry.verifiedVersion = ATTRIBUTION_VERIFIER_VERSION;
         if (!Object.values(ATTRIBUTION_VERIFICATION_STATUS).includes(entry.verificationStatus)) {
             entry.verificationStatus = source === ATTRIBUTION_SOURCE.LLM
@@ -904,13 +943,14 @@ export function setMessageQuoteOverride(mesIndex, msg, segmentIndex, speakerName
         return false;
     }
     streamingSession.assignments.clear();
-    saveChatMetadata();
+    saveChatMetadataIfChanged(metadataBefore, metadata);
     return true;
 }
 
 export function deleteMessageQuoteOverride(mesIndex, msg, segmentIndex) {
     const map = getQuoteOverridesMap(false);
     const entry = getMessageQuoteOverrideEntry(mesIndex, msg, false);
+    const metadataBefore = snapshotChatMetadataScope();
     if (!map || !entry || !deleteAttributionOverrideRecord(map, mesIndex, segmentIndex)) return false;
     // Frozen siblings only exist to protect a real override. Once the last
     // non-frozen override on a message is gone, drop them so the message
@@ -924,36 +964,82 @@ export function deleteMessageQuoteOverride(mesIndex, msg, segmentIndex) {
         }
     }
     streamingSession.assignments.clear();
-    saveChatMetadata();
+    saveChatMetadataIfChanged(metadataBefore);
     return true;
 }
 
 export function restoreMessageQuoteOverrideEntry(mesIndex, snapshot) {
+    const metadataBefore = snapshotChatMetadataScope();
     const map = getQuoteOverridesMap(true);
     if (!map) return false;
     const key = String(mesIndex);
     if (snapshot && isPlainObject(snapshot)) map[key] = JSON.parse(JSON.stringify(snapshot));
     else delete map[key];
     streamingSession.assignments.clear();
-    saveChatMetadata();
+    saveChatMetadataIfChanged(metadataBefore);
     return true;
 }
 
-export function markMessageAttributionVerified(mesIndex, msg, verificationStatus = ATTRIBUTION_VERIFICATION_STATUS.CLEAN) {
-    const entry = getMessageQuoteOverrideEntry(mesIndex, msg, true);
-    if (!entry) return false;
-    applyMessageAttributionIdentity(entry, msg);
-    entry.verifiedHash = entry.hash;
-    entry.verifiedAt = Date.now();
-    entry.verifiedVersion = ATTRIBUTION_VERIFIER_VERSION;
-    entry.verificationStatus = Object.values(ATTRIBUTION_VERIFICATION_STATUS).includes(verificationStatus)
+// Verdicts the local pass re-derives for free are remembered here instead of in
+// chat metadata. Cleared whenever the chat changes; an edited message misses on
+// its own because the key carries the message's text hash and fingerprint.
+const sessionVerifiedMessages = new Map();
+
+function getSessionVerificationKey(msg) {
+    const identity = getMessageAttributionIdentity(msg);
+    return `${identity.hash}|${identity.messageFingerprint}|${identity.textLength}`;
+}
+
+function hasSessionAttributionVerification(mesIndex, msg) {
+    if (!msg) return false;
+    const stored = sessionVerifiedMessages.get(String(mesIndex));
+    return !!stored && stored === getSessionVerificationKey(msg);
+}
+
+export function clearSessionAttributionVerifications() {
+    sessionVerifiedMessages.clear();
+    // The saved-scope baseline describes the chat we are leaving; keeping it
+    // could let an unrelated chat's identical-looking metadata skip a real save.
+    lastSavedChatMetadataScope = null;
+}
+
+export function markMessageAttributionVerified(mesIndex, msg, verificationStatus = ATTRIBUTION_VERIFICATION_STATUS.CLEAN, options = {}) {
+    const status = Object.values(ATTRIBUTION_VERIFICATION_STATUS).includes(verificationStatus)
         ? verificationStatus
         : ATTRIBUTION_VERIFICATION_STATUS.CLEAN;
-    saveChatMetadata();
+    const index = Number(mesIndex);
+    if (!Number.isInteger(index) || index < 0 || !msg) return false;
+    // A clean verdict that cost no LLM call and covers a message with no stored
+    // attribution data is not worth a chat file rewrite - the next load
+    // recomputes it locally in microseconds. Remember it for this session only.
+    if (options.persist === false && status === ATTRIBUTION_VERIFICATION_STATUS.CLEAN
+        && !getMessageQuoteOverrideEntry(index, msg, false)) {
+        sessionVerifiedMessages.set(String(index), getSessionVerificationKey(msg));
+        return true;
+    }
+    const metadataBefore = snapshotChatMetadataScope();
+    const entry = getMessageQuoteOverrideEntry(index, msg, true);
+    if (!entry) return false;
+    applyMessageAttributionIdentity(entry, msg);
+    // Re-verifying a message that already holds this exact verdict must leave
+    // the entry byte-identical, or the save below has something to write on
+    // every single pass.
+    const alreadyVerified = entry.verifiedHash === entry.hash
+        && entry.verifiedVersion === ATTRIBUTION_VERIFIER_VERSION
+        && entry.verificationStatus === status;
+    if (!alreadyVerified) {
+        entry.verifiedHash = entry.hash;
+        entry.verifiedAt = Date.now();
+        entry.verifiedVersion = ATTRIBUTION_VERIFIER_VERSION;
+        entry.verificationStatus = status;
+    }
+    sessionVerifiedMessages.delete(String(index));
+    saveChatMetadataIfChanged(metadataBefore);
     return true;
 }
 
 export function isMessageAttributionVerified(mesIndex, msg) {
+    if (hasSessionAttributionVerification(mesIndex, msg)) return true;
     const entry = getMessageQuoteOverrideEntry(mesIndex, msg, false);
     if (!entry || !messageQuoteOverrideEntryMatches(entry, msg)) return false;
     const hash = hashMessageText(getMessageText(msg));
@@ -986,7 +1072,10 @@ export function getAttributionReviewAdapter() {
         getMetadata: getChatMetadataStore,
         getChat: () => getContext()?.chat || [],
         getOverrideMap: () => getQuoteOverridesMap(true),
-        saveMetadata: saveChatMetadata,
+        // The store notifies after mutating, so there is no "before" to pass;
+        // fall back to the last scope handed to the host so a re-upsert of an
+        // identical review does not rewrite the chat file.
+        saveMetadata: metadata => saveChatMetadataIfChanged(null, metadata),
         extendedOverrides: true,
         validateAcceptance(review, operationOptions) {
             const requestedSpeaker = String(operationOptions?.speaker ?? review?.proposedSpeaker ?? '').trim();
@@ -1140,16 +1229,21 @@ export function refreshDomDialogueCounts(chat = getContext()?.chat || []) {
         if (!liveKeys.has(key)) dialogueCountCache.delete(key);
     }
 
-    let changed = createdCharacters;
+    // dialogueCount is a statistic about the chat that happens to be rendered,
+    // but the table holding it is shared by every chat on the card (and by every
+    // card under the global scope). Treating a recount as a storage change made
+    // each chat switch rewrite the user's settings for data that is recomputed
+    // on load anyway, so counts only ask for a list refresh now.
+    let countsChanged = false;
     for (const [key, entry] of Object.entries(characterColors)) {
         const nextCount = nextCounts[key] || 0;
         if ((entry.dialogueCount || 0) !== nextCount) {
             entry.dialogueCount = nextCount;
-            changed = true;
+            countsChanged = true;
         }
     }
 
-    return { changed, createdCharacters };
+    return { changed: createdCharacters, countsChanged, createdCharacters };
 }
 
 export function matchSegmentsToElements(segments, elements, getTargetText, onMatch, options = {}) {
@@ -1893,10 +1987,14 @@ export function decorateAllMessages() {
             }
         });
         if (changedColorData) {
-            // Decoration discovered new characters/counts. Persist via the
-            // debounced color-state saver instead of a synchronous heavy
+            // Decoration discovered new characters. Persist via the debounced
+            // color-state saver instead of a synchronous heavy
             // saveData()+updateCharList() on every render pass.
             queueColorStateSave({ history: false, injectPrompt: false });
+        } else if (countResult.countsChanged) {
+            // Only the per-chat dialogue tallies moved: refresh what the list
+            // shows without writing anything to disk.
+            queueColorStateSave({ data: false, history: false, injectPrompt: false });
         }
         updateLegend();
         queueAutoAttributionVerificationForRenderedMessages();

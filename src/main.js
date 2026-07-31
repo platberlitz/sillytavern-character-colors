@@ -2,7 +2,7 @@
 import { clearDomCache } from './attribution.js';
 import { scanAllMessages, stripColorBlocksFromDisplay } from './color-blocks.js';
 import { setupContextMenu } from './context-menu.js';
-import { DOM_RETRY_REFRESH_DELAYS, POST_MUTATION_DOM_REPAIR_DELAY_MS, clearDecoratedWatchers, clearDialogueCountCache, decorateAllMessages, scheduleDomRefreshSeries, scheduleDomSettleRefresh, scheduleMessageDomRepair, setupChatObserver, setupChatRootObserver, startDomHealthCheck, stopDomHealthCheck } from './dom-engine.js';
+import { DOM_RETRY_REFRESH_DELAYS, POST_MUTATION_DOM_REPAIR_DELAY_MS, clearDecoratedWatchers, clearDialogueCountCache, clearSessionAttributionVerifications, decorateAllMessages, scheduleDomRefreshSeries, scheduleDomSettleRefresh, scheduleMessageDomRepair, setupChatObserver, setupChatRootObserver, startDomHealthCheck, stopDomHealthCheck } from './dom-engine.js';
 import { scheduleCustomFontRefresh } from './fonts.js';
 import { redo, undo } from './history.js';
 import { commit, onNewMessage, resumePendingChatSave } from './live-colors.js';
@@ -62,6 +62,7 @@ export function handleChatChanged() {
     clearAutoColorizeIndicators();
     clearDomCache();
     clearDialogueCountCache();
+    clearSessionAttributionVerifications();
     stopDomHealthCheck();
     const currentCharKey = getCharKey();
     clearDecoratedWatchers();

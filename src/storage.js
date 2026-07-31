@@ -821,6 +821,10 @@ function clearModuleSettingsDebounce() {
     moduleSettingsDebounceTimer = null;
 }
 
+// The last module record the server confirmed it holds, used to skip writes that
+// would change nothing. Null means "unknown", which always writes.
+let lastServerVerifiedModuleRecord = null;
+
 function getModuleRecordSnapshot(source = getAutoSyncRecord(true)) {
     return buildAutoSyncRecord(cloneJsonValue(source));
 }
@@ -869,8 +873,10 @@ export function queueImmediateSettingsSave(expectedSource = getAutoSyncRecord(tr
             const matches = moduleMatches && regexMatches;
             if (matches) {
                 ordinaryModuleSaveRetryCount = 0;
+                lastServerVerifiedModuleRecord = getModuleRecordSnapshot(stored);
                 confirmAutoSyncRecord(stored, { serverVerified: true });
             } else if (ordinaryModuleSaveRetryCount < 3 && moduleRecordMatchesSnapshot(expected)) {
+                lastServerVerifiedModuleRecord = null;
                 ordinaryModuleSaveRetryCount++;
                 queueDebouncedModuleSettingsSave(expected, {
                     retry: true,
@@ -878,11 +884,13 @@ export function queueImmediateSettingsSave(expectedSource = getAutoSyncRecord(tr
                     delay: 250 * (2 ** (ordinaryModuleSaveRetryCount - 1)),
                 });
             } else {
+                lastServerVerifiedModuleRecord = null;
                 setAutoSyncError('Save could not be verified');
                 saveSettingsDebounced?.();
             }
             return matches;
         } catch (error) {
+            lastServerVerifiedModuleRecord = null;
             console.warn('[Dialogue Colors] Immediate settings save failed; falling back to a later save:', error);
             if (ordinaryModuleSaveRetryCount < 3 && moduleRecordMatchesSnapshot(expected)) {
                 ordinaryModuleSaveRetryCount++;
@@ -919,6 +927,12 @@ function runStorageOperation(operation) {
 export function persistModuleStore(record, { debounce = true, immediate = false } = {}) {
     const normalized = buildAutoSyncRecord(record || getAutoSyncRecord(true));
     extension_settings[MODULE_NAME] = normalized;
+    // Writing data the server has already confirmed it holds is pure I/O, and
+    // an immediate save costs a settings write plus a verification round-trip.
+    // Any real change makes this comparison fail, so a needed write still runs.
+    if (lastServerVerifiedModuleRecord !== null && recordsEqual(normalized, lastServerVerifiedModuleRecord)) {
+        return normalized;
+    }
     if (immediate) queueImmediateSettingsSave(normalized);
     else if (debounce) queueDebouncedModuleSettingsSave(normalized);
     return normalized;
@@ -1731,12 +1745,22 @@ export function setStoredColorData(key, colors, storedSettings = settings, optio
     const record = getAutoSyncRecord(true);
     record.version = COLOR_SCHEMA_VERSION;
     if (!isPlainObject(record.colorData)) record.colorData = Object.create(null);
-    record.colorData[key] = {
+    const previous = record.colorData[key];
+    const entry = {
         colors: normalizeCharacterColors(colors || {}),
         groupProfiles: normalizeGroupProfiles(options.groupProfiles === undefined ? groupProfiles : options.groupProfiles),
         settings: normalizeStoredSettings(storedSettings),
-        updatedAt: new Date().toISOString(),
     };
+    // A fresh timestamp on every write made an unchanged table look changed, so
+    // nothing downstream could recognise a no-op save - and it left the dates in
+    // the Storage Manager meaningless. Keep the old stamp for an identical payload.
+    const unchanged = isPlainObject(previous)
+        && typeof previous.updatedAt === 'string'
+        && jsonValuesEqual(previous.colors, entry.colors)
+        && jsonValuesEqual(previous.groupProfiles, entry.groupProfiles)
+        && jsonValuesEqual(previous.settings, entry.settings);
+    entry.updatedAt = unchanged ? previous.updatedAt : new Date().toISOString();
+    record.colorData[key] = entry;
     persistModuleStore(record, options);
 }
 

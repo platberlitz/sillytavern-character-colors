@@ -147,6 +147,8 @@ Local-mode assignments are stored as per-chat quote overrides. LLM-mode assignme
 - **Auto-sync** transports settings, scoped tables, palettes, assignment presets, gradient presets, and UI state.
 - **Storage Manager** lists Per chat, Per card, and Global tables with counts and dates. It cannot archive the active table and stores one recoverable archive batch.
 
+**Per card** names a scope, not a destination: it keys one table to the character card's identity inside the extension's own settings. Nothing is written into the card file unless you press **Save to card**. Colors, scoped tables, and settings live in SillyTavern's settings; manual quote reassignments and attribution verdicts live in chat metadata.
+
 ## Maintenance and Danger Zone
 
 Maintenance provides Undo/Redo, similar-color repair, unlocked-color regeneration, gradient re-randomization, theme flipping, and reviewed setting-default restoration. Re-randomizing gradients skips locked characters and characters without a gradient.
@@ -190,6 +192,8 @@ LLM mode supports prompt depth, system/user role, and two delivery modes:
 - **An LLM profile is unavailable**: connection profiles require a compatible SillyTavern ConnectionManagerRequestService.
 - **A selected font is not visible**: install it locally, or explicitly enable remote Google Font loading under Appearance and Automation.
 - **Gradient drift is paused**: the device's Reduce Motion preference intentionally disables it.
+- **My character card's creation date keeps resetting**: SillyTavern rewrites the card file itself every time you open or start a chat, so the file is replaced whether or not this extension is installed (`openCharacterChat` and `doNewChat` in `public/script.js` both end in `createOrEditCharacter`). This extension only writes a card when you press **Save to card**.
+- **Something is saved on every chat load**: it should not be. The extension writes settings only when a color, setting, or newly discovered character actually changes, and writes chat metadata only when a reassignment or verification verdict actually changes. Per-chat dialogue tallies are recomputed on load and are not a reason to save.
 
 ## License
 

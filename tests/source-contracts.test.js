@@ -503,3 +503,54 @@ test('browser-bound perceptual enrichment keeps readability findings separate', 
     assert.match(report, /report\.readabilityIssues\.push/);
     assert.match(report, /report\.issues\s*=\s*\[\.\.\.report\.conflicts,\s*\.\.\.report\.readabilityIssues\]/);
 });
+
+test('every attribution write reaches the host through the change gate', () => {
+    const domEngine = sources['dom-engine.js'];
+    // A chat metadata save rewrites the whole chat file, so the writers must
+    // compare before and after rather than saving on every pass. The only
+    // ungated call left is the legacy-entry migration, which by definition only
+    // runs when it just rewrote the entry.
+    for (const writer of [
+        'setMessageQuoteOverride',
+        'deleteMessageQuoteOverride',
+        'restoreMessageQuoteOverrideEntry',
+        'markMessageAttributionVerified',
+    ]) {
+        const section = functionSection(domEngine, writer);
+        assert.match(section, /saveChatMetadataIfChanged\(/, `${writer} must gate its save`);
+        assert.doesNotMatch(
+            section,
+            /(?<!IfChanged\()\bsaveChatMetadata\(\)/,
+            `${writer} must not save unconditionally`,
+        );
+    }
+
+    // The review store notifies after mutating, so it has no "before" to hand in
+    // and must fall back to the last scope given to the host.
+    assert.match(domEngine, /saveMetadata: metadata => saveChatMetadataIfChanged\(null, metadata\)/);
+
+    // Leaving a chat has to drop both caches, or the next chat could inherit a
+    // verdict or a save baseline that does not belong to it.
+    const clearSession = functionSection(domEngine, 'clearSessionAttributionVerifications');
+    assert.match(clearSession, /sessionVerifiedMessages\.clear\(\)/);
+    assert.match(clearSession, /lastSavedChatMetadataScope = null/);
+    assert.match(sources['main.js'], /clearSessionAttributionVerifications\(\)/);
+});
+
+test('per-chat dialogue tallies never ask for a settings write', () => {
+    const counts = functionSection(sources['dom-engine.js'], 'refreshDomDialogueCounts');
+
+    // The colour table is shared by every chat on a card, so a recount always
+    // differs after a chat switch. Only a newly discovered character is a real
+    // storage change; counts get the display-only queue.
+    assert.match(counts, /countsChanged = true/);
+    assert.match(counts, /return \{ changed: createdCharacters, countsChanged, createdCharacters \}/);
+    assert.match(
+        sources['dom-engine.js'],
+        /countResult\.countsChanged\)[\s\S]{0,200}?queueColorStateSave\(\{ data: false/,
+    );
+    assert.match(
+        sources['live-colors.js'],
+        /setPendingColorStateSaveData\(pendingColorStateSaveData \|\| options\.data !== false\)/,
+    );
+});

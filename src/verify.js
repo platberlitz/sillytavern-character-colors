@@ -834,7 +834,10 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
     if (!segments.length) {
         if (!isAttributionVerificationTargetCurrent(target)) return unchecked;
         if (!skipMarkVerified && !useTransientOverrides && isAttributionVerificationTargetCurrent(target)) {
-            markMessageAttributionVerified(mesIndex, msg, ATTRIBUTION_VERIFICATION_STATUS.CLEAN);
+            // Nothing to attribute means no model was consulted, so this verdict
+            // costs nothing to re-derive. Remembering it in memory keeps the
+            // chat file untouched for every narration-only message.
+            markMessageAttributionVerified(mesIndex, msg, ATTRIBUTION_VERIFICATION_STATUS.CLEAN, { persist: false });
             clearStreamingAttributionOverrides(mesIndex);
         }
         return { checked: true, corrections: 0, createdCharacters: false, queuedReviews: 0 };

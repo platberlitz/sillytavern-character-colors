@@ -553,10 +553,40 @@ test('DOM statistics count font-tagged messages from their saved tags', () => {
             { id: 'm2', name: 'Bob', mes: '"plain one"' },
         ];
         const result = refreshDomDialogueCounts(chat);
-        assert.equal(result.changed, true);
+        // Counts moved, but no character was discovered, so this must not ask
+        // for a storage write - see "recounting alone never reports a storage
+        // change" below.
+        assert.equal(result.countsChanged, true);
+        assert.equal(result.changed, false);
         // Two Alice tags in the font-tagged message, one Bob tag there plus one
         // decorated quote in the plain message.
         assert.equal(characterColors.alice.dialogueCount, 2);
         assert.equal(characterColors.bob.dialogueCount, 2);
+    });
+});
+
+test('recounting alone never reports a storage change', () => {
+    withCharacters(['Alice', 'Bob'], () => {
+        // Every chat on a card shares one colour table, so switching chats
+        // always lands different tallies in it. Reporting that as a storage
+        // change rewrote the user's settings on every single chat load.
+        const first = refreshDomDialogueCounts([{ id: 'm1', name: 'Bob', mes: '"one"' }]);
+        assert.equal(first.changed, false);
+        assert.equal(first.countsChanged, true);
+
+        const second = refreshDomDialogueCounts([
+            { id: 'm1', name: 'Bob', mes: '"one"' },
+            { id: 'm2', name: 'Bob', mes: '"two"' },
+        ]);
+        assert.equal(second.changed, false);
+        assert.equal(second.countsChanged, true);
+
+        // Recounting the same chat is not even a UI change.
+        const third = refreshDomDialogueCounts([
+            { id: 'm1', name: 'Bob', mes: '"one"' },
+            { id: 'm2', name: 'Bob', mes: '"two"' },
+        ]);
+        assert.equal(third.changed, false);
+        assert.equal(third.countsChanged, false);
     });
 });
