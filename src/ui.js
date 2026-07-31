@@ -14,11 +14,11 @@ import { createRestoreSnapshot, redo, saveHistory, showUndoToast, undo } from '.
 import { applyFastColorUiUpdates, applyLiveColorChangesFromSnapshot, captureEffectiveColorSnapshot, colorizeMessages, commit, flushChatSave, flushColorStateSave, queueColorStateSave, recolorAllMessages, repaintDomAfterCharacterDataChange } from './live-colors.js';
 import { registerKeyboardShortcuts } from './main.js';
 import { getTransientNarratorCount, getNarratorVisual, normalizeNarratorStyle, setNarratorStyle } from './narrator-style.js';
-import { applyGradientPreset, applyThemeReadabilityAndBrightness, buildCharacterEntry, collectDuplicateColorKeys, createGradientRandomMasterSeed, createRandomGradient, deleteColorPreset, deleteCustomPalette, detectTheme, flipColorsForTheme, generateCustomPaletteFromWords, getBaseColor, getCustomPaletteMeta, getCustomPalettes, getEntryEffectiveColor, getNextColor, getPerceptualConflictReport, getPersonaName, getPresets, invalidateThemeCache, loadColorPreset, refreshPaletteDropdown, refreshPresetDropdown, regenerateAllColors, regenerateAllGradients, removeCharacterKeys, repairPerceptualConflicts, saveColorPreset, saveCustomPalette, setEntryFromBaseColor, setEntryGradient, showHarmonyPopup, suggestColorForName, swapEntryColorData, syncAllEffectiveColors } from './palettes.js';
+import { applyGradientPreset, applyThemeReadabilityAndBrightness, buildCharacterEntry, collectDuplicateColorKeys, createGradientRandomMasterSeed, createRandomGradient, deleteColorPreset, deleteCustomPalette, detectTheme, flipColorsForTheme, generateCustomPaletteFromWords, getBaseColor, getCustomPaletteMeta, getCustomPalettes, getEntryEffectiveColor, getNextColor, getPerceptualConflictReport, getPersonaName, getPresets, invalidateThemeCache, loadColorPreset, refreshPaletteDropdown, refreshPresetDropdown, regenerateAllColors, regenerateAllGradients, removeCharacterKeys, repairPerceptualConflicts, resolveColorPresetName, saveColorPreset, saveCustomPalette, setEntryFromBaseColor, setEntryGradient, showHarmonyPopup, suggestColorForName, swapEntryColorData, syncAllEffectiveColors } from './palettes.js';
 import { injectPrompt, updateSystemPromptDisplay } from './prompts.js';
 import { escapeHtml, getContext } from './st-api.js';
 import { autoRecolorHintShown, characterColors, expandedCharacterRows, groupProfiles, isDomEngine, searchTerm, selectedCharacterKeys, setAutoRecolorHintShown, setCharacterColors, setGroupProfiles, setSearchTerm, setSwapMode, settings, swapMode } from './state.js';
-import { analyzeColorImport, analyzeSettingsImport, analyzeStylePackImport, applyCardData, applyColorImport, applySettingsImport, applyStylePackImport, archiveStoredColorData, deleteCustomGradientPreset, disableAutoSync, enableAutoSync, exportColors, exportSettings, getArchivedColorData, getCurrentStorageScope, getCustomGradientPresets, getLegendPosition, getStorageKey, getStorageLabelForKey, getStorageScopeDescriptor, getStylePackRegistry, getUserColorDataStore, normalizeColorDataEntry, normalizeToggleSettings, pinCurrentPersonaColor, readCardData, renameCustomGradientPreset, renamePinnedPersonaColor, restoreAllSettingsToDefaults, restoreArchivedColorData, saveCustomGradientPreset, saveData, saveLegendPosition, saveToCard, switchColorStorageScope, updateAutoSyncUI } from './storage.js';
+import { analyzeColorImport, analyzeSettingsImport, analyzeStylePackImport, applyCardData, applyColorImport, applySettingsImport, applyStylePackImport, archiveStoredColorData, deleteCustomGradientPreset, disableAutoSync, enableAutoSync, exportColors, exportSettings, getArchivedColorData, getCurrentStorageScope, getCustomGradientPresets, getLegendPosition, getStorageKey, getStorageLabelForKey, getStorageScopeDescriptor, getStylePackRegistry, getUserColorDataStore, normalizeColorDataEntry, normalizeToggleSettings, pinCurrentPersonaColor, readCardData, renameCustomGradientPreset, renamePinnedPersonaColor, restoreAllSettingsToDefaults, restoreArchivedColorData, restorePinnedPersonaColor, saveCustomGradientPreset, saveData, saveLegendPosition, saveToCard, switchColorStorageScope, updateAutoSyncUI } from './storage.js';
 import { buildStylePackEnvelope } from './style-pack-adapter.js';
 import { escapeAttr, getGoogleFontFamily, htmlToNode, normalizeEntryGradientGenerator, normalizeGoogleFontName, normalizeHexColor, normalizeManualColorInput, toast } from './utils.js';
 import { AUTO_HIGH_ATTRIBUTION_CONFIDENCE, cancelStreamingAttributionVerification, clearAutoAttributionVerificationQueue, getAttributionVerifyPasses, queueAutoAttributionVerificationForRenderedMessages, runAttributionVerification, verifyLatestAttributionsWithLLM, verifyVisibleAttributionsWithLLM } from './verify.js';
@@ -1213,10 +1213,13 @@ export function addCharacter(name, color, options = {}) {
         toast.error('Character names cannot contain brackets, commas, equals signs, parentheses, or line breaks.');
         return;
     }
-    const key = resolveCharacterKeyByNameOrAlias(name) || name.trim().toLowerCase();
+    // Never derive a registry key by lowercasing raw input: buildCharacterEntry keys
+    // on the normalized identity, so a name needing NFKC or whitespace collapse would
+    // be stored under a key that does not match its own entry.
+    let key = resolveCharacterKeyByNameOrAlias(name);
     const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
     let needsDomRepaint = false;
-    if (characterColors[key]) {
+    if (key && characterColors[key]) {
         if (color === undefined || color === null || color === '') {
             setSearchTerm('');
             const search = document.getElementById('dc-search');
@@ -1242,6 +1245,7 @@ export function addCharacter(name, color, options = {}) {
             dialogueCount: 0
         });
         if (!built.entry) return;
+        key = built.key;
         characterColors[key] = built.entry;
         clearSpeakerRegexCache();
         needsDomRepaint = true;
@@ -3120,6 +3124,30 @@ export function ensurePersonaCharacter({ silent = false } = {}) {
     }
 }
 
+// Swaps the pinned look for the active persona into the live registry.
+//
+// loadData() runs the same restore during a scope load and persists it itself, so
+// this is the runtime path only: a persona switch mutates (or creates) an entry in
+// an already-loaded table, which has to be saved and repainted like every other
+// color mutation rather than only refreshed in the settings list.
+export function applyRestoredPersonaColor() {
+    const previousKeys = Object.keys(characterColors);
+    const snapshot = captureEffectiveColorSnapshot(previousKeys);
+    if (!restorePinnedPersonaColor()) return false;
+    clearSpeakerRegexCache();
+    applyLiveColorChangesFromSnapshot(
+        snapshot,
+        [...new Set([...previousKeys, ...Object.keys(characterColors)])],
+        { saveImmediately: true },
+    );
+    saveHistory();
+    saveData({ preserveEffectiveColors: true });
+    updateStorageScopeStatus();
+    injectPrompt();
+    repaintDomAfterCharacterDataChange(0);
+    return true;
+}
+
 // Follows a persona rename so the color the user picked stays with them, rather than
 // stranding the old entry and auto-assigning a fresh color to the new name.
 export function renamePersonaCharacter(oldName, newName) {
@@ -4562,7 +4590,14 @@ function bindSettingsPanelControls($) {
     };
     $('dc-thought-symbols').oninput = e => { settings.thoughtSymbols = e.target.value; saveData(); injectPrompt(); scheduleDomRefreshSeries(); };
     $('dc-thought-clear').onclick = () => { settings.thoughtSymbols = ''; $('dc-thought-symbols').value = ''; saveData(); injectPrompt(); scheduleDomRefreshSeries(0); };
-    $('dc-prompt-depth').oninput = e => { settings.promptDepth = parseInt(e.target.value, 10) || 0; saveData(); injectPrompt(); };
+    $('dc-prompt-depth').oninput = e => {
+        // Typing bypasses the input's min/max, and the depth goes straight to
+        // setExtensionPrompt, so clamp to the declared range here as well.
+        const parsed = parseInt(e.target.value, 10);
+        settings.promptDepth = Number.isNaN(parsed) ? 0 : Math.min(99, Math.max(0, parsed));
+        saveData();
+        injectPrompt();
+    };
     $('dc-prompt-role').onchange = e => { settings.promptRole = e.target.value; saveData(); injectPrompt(); };
     $('dc-prompt-mode').onchange = e => { settings.promptMode = e.target.value; saveData(); injectPrompt(); };
     $('dc-copy-system-prompt').onclick = () => {
@@ -4571,7 +4606,7 @@ function bindSettingsPanelControls($) {
         textarea.select();
         document.execCommand('copy');
         $('dc-copy-system-prompt').textContent = 'Copied!';
-        setTimeout(() => { $('dc-copy-system-prompt').textContent = 'Copy Macro'; }, 1500);
+        setTimeout(() => { $('dc-copy-system-prompt').textContent = 'Copy macro'; }, 1500);
     };
     $('dc-scan').onclick = scanAllMessages;
     $('dc-clear').onclick = async e => {
@@ -4756,7 +4791,9 @@ function bindSettingsPanelControls($) {
         renameGroupProfileFromEditor();
     };
     $('dc-save-preset').onclick = async e => {
-        const name = $('dc-preset-name').value.trim();
+        // Resolved, not raw: storage normalizes the name, so testing the raw input
+        // would miss an overwrite whenever normalization changes it.
+        const name = resolveColorPresetName($('dc-preset-name').value);
         if (name && Object.prototype.hasOwnProperty.call(getPresets(), name)) {
             const replace = await confirmReviewedAction({
                 title: 'Replace assignment preset?',
@@ -4813,16 +4850,19 @@ function bindSettingsPanelControls($) {
             const avatarUrl = `/characters/${encodeURIComponent(char.avatar)}`;
             const color = await extractAvatarColor(avatarUrl);
             if (!color) { toast.error('Could not extract color'); return; }
-            const key = char.name.toLowerCase();
+            // Resolve through the registry rather than lowercasing the card name, so an
+            // existing entry is recolored instead of shadowed by a mismatched key.
+            const existingKey = resolveCharacterKeyByNameOrAlias(char.name);
             const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
             let needsDomRepaint = false;
-            if (characterColors[key]) {
-                setEntryFromBaseColor(characterColors[key], color);
-                applyLiveColorChangesFromSnapshot(snapshot, [key]);
+            if (existingKey && characterColors[existingKey]) {
+                setEntryFromBaseColor(characterColors[existingKey], color);
+                applyLiveColorChangesFromSnapshot(snapshot, [existingKey]);
             } else {
                 const built = buildCharacterEntry(char.name, { color, colorMode: 'base', origin: 'avatar', dialogueCount: 0 });
                 if (!built.entry) return;
-                characterColors[key] = built.entry;
+                characterColors[built.key] = built.entry;
+                clearSpeakerRegexCache();
                 needsDomRepaint = true;
             }
             commit();
@@ -4934,8 +4974,9 @@ function bindSettingsPanelControls($) {
                 count++;
             }
         });
-        if (count) saveHistory();
-        saveData(); updateCharList(); toast.info(`Locked ${count} characters`);
+        if (!count) { toast.info('Every character is already locked.'); return; }
+        saveHistory();
+        saveData(); updateCharList(); toast.info(`Locked ${count} character${count === 1 ? '' : 's'}.`);
     };
     $('dc-unlock-all').onclick = () => {
         let count = 0;
@@ -4945,8 +4986,9 @@ function bindSettingsPanelControls($) {
                 count++;
             }
         });
-        if (count) saveHistory();
-        saveData(); updateCharList(); toast.info(`Unlocked ${count} characters`);
+        if (!count) { toast.info('Every character is already unlocked.'); return; }
+        saveHistory();
+        saveData(); updateCharList(); toast.info(`Unlocked ${count} character${count === 1 ? '' : 's'}.`);
     };
     $('dc-reset').onclick = async e => {
         const unlockedCount = Object.values(characterColors).filter(entry => !entry.locked).length;

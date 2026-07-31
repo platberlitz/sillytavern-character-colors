@@ -108,6 +108,10 @@ export function normalizeToggleSettings() {
         ? attributionReviewPolicy
         : 'review';
     settings.attributionVerifyPasses = normalizeAttributionVerifyPasses(settings.attributionVerifyPasses);
+    // Matches the control's declared range, and repairs values an older build
+    // stored before the input handler clamped them.
+    const promptDepth = Number(settings.promptDepth);
+    settings.promptDepth = Number.isFinite(promptDepth) ? Math.max(0, Math.min(99, Math.round(promptDepth))) : 1;
     settings.gradientRandomMasterSeed = String(settings.gradientRandomMasterSeed ?? '')
         .replace(/[\u0000-\u001f\u007f]/g, '')
         .slice(0, 128);

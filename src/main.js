@@ -2,7 +2,7 @@
 import { clearDomCache } from './attribution.js';
 import { scanAllMessages, stripColorBlocksFromDisplay } from './color-blocks.js';
 import { setupContextMenu } from './context-menu.js';
-import { DOM_RETRY_REFRESH_DELAYS, POST_MUTATION_DOM_REPAIR_DELAY_MS, clearDecoratedWatchers, decorateAllMessages, scheduleDomRefreshSeries, scheduleDomSettleRefresh, scheduleMessageDomRepair, setupChatObserver, setupChatRootObserver, startDomHealthCheck, stopDomHealthCheck } from './dom-engine.js';
+import { DOM_RETRY_REFRESH_DELAYS, POST_MUTATION_DOM_REPAIR_DELAY_MS, clearDecoratedWatchers, clearDialogueCountCache, decorateAllMessages, scheduleDomRefreshSeries, scheduleDomSettleRefresh, scheduleMessageDomRepair, setupChatObserver, setupChatRootObserver, startDomHealthCheck, stopDomHealthCheck } from './dom-engine.js';
 import { scheduleCustomFontRefresh } from './fonts.js';
 import { redo, undo } from './history.js';
 import { commit, onNewMessage, resumePendingChatSave } from './live-colors.js';
@@ -12,8 +12,8 @@ import { buildMinimalPromptInstruction, injectPrompt } from './prompts.js';
 import { eventSource, event_types, getContext } from './st-api.js';
 import { attributionChatGeneration, autoSyncPendingRecord, characterColors, expandedCharacterRows, isDomEngine, isStreamingGenerationActive, lastCharKey, lastProcessedMessageSignature, pendingAttributionVerifications, runtimeState, selectedCharacterKeys, setAttributionChatGeneration, setIsStreamingGenerationActive, setLastCharKey, setLastProcessedMessageSignature, setPendingAttributionVerifications, setSwapMode, settings, swapMode } from './state.js';
 import { beginStreamingPaint, endStreamingPaint } from './streaming-paint.js';
-import { confirmAutoSyncRecord, doAutoSyncMarkersMatch, ensureRegexScript, getAutoSyncRecord, getCharKey, getStorageKey, initAutoSync, loadData, migrateLegacyLocalStorageIfNeeded, migrateRenamedCharacterStorage, restorePinnedPersonaColor, tryLoadFromCard, updateAutoSyncUI } from './storage.js';
-import { applyThemeOrBrightnessChange, clearAutoColorizeIndicators, createUI, ensurePersonaCharacter, renamePersonaCharacter, syncUIWithSettings, updateCharList } from './ui.js';
+import { confirmAutoSyncRecord, doAutoSyncMarkersMatch, ensureRegexScript, getAutoSyncRecord, getCharKey, getStorageKey, initAutoSync, loadData, migrateLegacyLocalStorageIfNeeded, migrateRenamedCharacterStorage, tryLoadFromCard, updateAutoSyncUI } from './storage.js';
+import { applyRestoredPersonaColor, applyThemeOrBrightnessChange, clearAutoColorizeIndicators, createUI, ensurePersonaCharacter, renamePersonaCharacter, syncUIWithSettings, updateCharList } from './ui.js';
 import { cancelStreamingAttributionVerification, clearAutoAttributionVerificationQueue, queueAutoAttributionVerificationForRenderedMessages, scheduleStreamingAttributionVerification } from './verify.js';
 
 let lastAppliedAutoTheme = null;
@@ -61,6 +61,7 @@ export function handleChatChanged() {
     clearAutoAttributionVerificationQueue({ clearCooldown: true });
     clearAutoColorizeIndicators();
     clearDomCache();
+    clearDialogueCountCache();
     stopDomHealthCheck();
     const currentCharKey = getCharKey();
     clearDecoratedWatchers();
@@ -193,7 +194,9 @@ export function registerEventHandlers() {
         personaChanged: () => {
             // Each persona keeps its own pinned color, so a switch has to swap the pin in
             // before anything repaints, whether or not the persona entry is auto-created.
-            const restored = restorePinnedPersonaColor();
+            // applyRestoredPersonaColor persists and repaints the swap; the settings list
+            // alone would leave the chat showing the previous persona's color.
+            const restored = applyRestoredPersonaColor();
             if (settings.autoPersonaCharacter === true) ensurePersonaCharacter({ silent: true });
             else if (!restored) return;
             updateCharList();

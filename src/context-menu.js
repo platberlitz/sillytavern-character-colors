@@ -372,9 +372,8 @@ function showMenu(e, fontTag, qElement = null) {
 
     nameInput.addEventListener('input', () => {
         nameInput.removeAttribute('aria-invalid');
-        const name = nameInput.value.trim();
-        const key = resolveCharacterKeyByNameOrAlias(name) || name.toLowerCase();
-        if (characterColors[key]) {
+        const key = resolveCharacterKeyByNameOrAlias(nameInput.value.trim());
+        if (key && characterColors[key]) {
             const existingColor = getEntryEffectiveColor(characterColors[key]);
             colorInput.value = existingColor;
         }
@@ -382,6 +381,11 @@ function showMenu(e, fontTag, qElement = null) {
 
     menu.querySelector('#dc-ctx-assign').onclick = async () => {
         const assignButton = menu.querySelector('#dc-ctx-assign');
+        // Read and validate before the try: readCharacterName marks the field and
+        // focuses it for correction, and the try's finally would close the dialog
+        // out from under the user along with everything they had typed.
+        const name = readCharacterName(nameInput);
+        if (name === null) return;
         const targetMesIndex = isDomSegment ? domAssignmentTarget?.messageIndex : getMessageIndexFromElement(targetEl);
         const targetMessage = getContext()?.chat?.[targetMesIndex];
         const originalMessageText = targetMessage?.mes;
@@ -392,18 +396,16 @@ function showMenu(e, fontTag, qElement = null) {
         let domRepaintTarget = null;
         assignButton.disabled = true;
         try {
-            const nameInput = menu.querySelector('#dc-ctx-name');
-            const colorInput = menu.querySelector('#dc-ctx-color');
-            const name = readCharacterName(nameInput);
-            if (name === null) return;
             const pickerColor = normalizeHexColor(colorInput.value, color);
             if (name) {
-            const key = resolveCharacterKeyByNameOrAlias(name) || name.toLowerCase();
+            // buildCharacterEntry keys on the normalized identity, so a raw lowercase
+            // fallback would store a new entry under a key that does not match itself.
+            let key = resolveCharacterKeyByNameOrAlias(name);
             let finalColor = pickerColor;
             let textUpdated = false;
             let assignmentSucceeded = false;
             let existingColorChanged = false;
-            const existingEntry = characterColors[key];
+            const existingEntry = key ? characterColors[key] : null;
             const existingSnapshot = existingEntry
                 ? captureEffectiveColorSnapshot(Object.keys(characterColors))
                 : null;
@@ -428,6 +430,7 @@ function showMenu(e, fontTag, qElement = null) {
                     dialogueCount: 1
                 });
                 if (!built.entry) { closeMenu(); return; }
+                key = built.key;
                 nextEntry = built.entry;
             }
 
@@ -652,9 +655,8 @@ function showSelectionMenu(e, selection, range, selectedText, mesEl) {
 
     nameInput.addEventListener('input', () => {
         nameInput.removeAttribute('aria-invalid');
-        const name = nameInput.value.trim();
-        const key = resolveCharacterKeyByNameOrAlias(name) || name.toLowerCase();
-        if (characterColors[key]) {
+        const key = resolveCharacterKeyByNameOrAlias(nameInput.value.trim());
+        if (key && characterColors[key]) {
             const existingColor = getEntryEffectiveColor(characterColors[key]);
             colorInput.value = existingColor;
             colorDot.style.background = existingColor;
@@ -681,17 +683,20 @@ function showSelectionMenu(e, selection, range, selectedText, mesEl) {
             return;
         }
 
-        const key = resolveCharacterKeyByNameOrAlias(name) || name.toLowerCase();
+        // buildCharacterEntry keys on the normalized identity, so a raw lowercase
+        // fallback would store a new entry under a key that does not match itself.
+        let key = resolveCharacterKeyByNameOrAlias(name);
+        const existingEntry = key ? characterColors[key] : null;
         let finalColor = pickerColor;
 
-        const existingSnapshot = characterColors[key]
+        const existingSnapshot = existingEntry
             ? captureEffectiveColorSnapshot(Object.keys(characterColors))
             : null;
 
         let existingColorChanged = false;
         let nextEntry = null;
-        if (characterColors[key]) {
-            nextEntry = JSON.parse(JSON.stringify(characterColors[key]));
+        if (existingEntry) {
+            nextEntry = JSON.parse(JSON.stringify(existingEntry));
             const existingColor = getEntryEffectiveColor(nextEntry);
             if (normalizeHexColor(pickerColor) !== normalizeHexColor(existingColor)) {
                 setEntryFromEffectiveColor(nextEntry, pickerColor);
@@ -706,6 +711,7 @@ function showSelectionMenu(e, selection, range, selectedText, mesEl) {
                 dialogueCount: 1
             });
             if (!built.entry) { closeMenu(); return; }
+            key = built.key;
             nextEntry = built.entry;
         }
 

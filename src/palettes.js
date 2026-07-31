@@ -2,7 +2,7 @@
 import { clearSpeakerRegexCache } from './attribution.js';
 import { simulateColorVision } from './color-vision.js';
 import { applyGradientPresetToEntry, cloneGradient, mapGradientStops, normalizeGradient, serializeGradient, synchronizeGradientEffectiveColors } from './gradients.js';
-import { applyGroupProfile, migrateLegacyRegistryEntries, normalizeGroupName, normalizeGroupProfiles, normalizeRegistryIdentity, normalizeRegistryIdentityName, resolveGroupAutomation, resolveGroupProfile } from './group-profiles.js';
+import { MAX_REGISTRY_IDENTITY_LENGTH, applyGroupProfile, migrateLegacyRegistryEntries, normalizeGroupName, normalizeGroupProfiles, normalizeRegistryIdentity, normalizeRegistryIdentityName, resolveGroupAutomation, resolveGroupProfile } from './group-profiles.js';
 import { createRestoreSnapshot, showUndoToast } from './history.js';
 import { applyLiveColorChangesFromSnapshot, captureEffectiveColorSnapshot, commit, repaintDomAfterCharacterDataChange } from './live-colors.js';
 import { callLLMWithProfile } from './llm.js';
@@ -563,11 +563,24 @@ export function flipColorsForTheme() {
     toast.success('Colors flipped for theme switch');
 }
 
+// Presets are persisted through the registry-identity normalizer, so a name it
+// rejects (reserved word, over-length, control characters) or rewrites (collapsed
+// whitespace) would be reported as saved and then never appear in the dropdown.
+// Resolve the stored name up front so callers can refuse the input instead.
+export function resolveColorPresetName(rawName) {
+    return normalizeRegistryIdentityName(String(rawName ?? ''), MAX_REGISTRY_IDENTITY_LENGTH);
+}
+
 // Phase 5A: Preset management with dropdown UI
 export function saveColorPreset() {
     const nameInput = document.getElementById('dc-preset-name');
-    const name = nameInput?.value?.trim();
-    if (!name) { toast.warning('Enter a preset name'); return; }
+    const name = resolveColorPresetName(nameInput?.value);
+    if (!name) {
+        toast.warning(String(nameInput?.value ?? '').trim()
+            ? `Preset names must be at most ${MAX_REGISTRY_IDENTITY_LENGTH} characters and cannot be a reserved word or contain control characters.`
+            : 'Enter a preset name');
+        return;
+    }
     const presets = getPresets();
     presets[name] = {
         version: 2,

@@ -1042,18 +1042,81 @@ export function getMessageIndexFromElement(el) {
     return Array.from(document.querySelectorAll('.mes')).indexOf(mesEl);
 }
 
+// Attribution is the expensive half of a decorate pass, and decorateAllMessages
+// runs it over the whole chat. A single chat change fires that pass roughly ten
+// times (the refresh series, the settle series, and the initial scan), so on a
+// long chat the same messages were re-attributed from scratch every time.
+//
+// A message's counts depend only on its text, speaker, index and saved overrides,
+// plus the attribution inputs the whole chat shares: the registry identities and
+// the configured thought delimiters. Colors are excluded deliberately - they never
+// decide which speaker key a segment resolves to.
+const dialogueCountCache = new Map();
+let dialogueCountInputsSignature = null;
+
+function getDialogueCountInputsSignature() {
+    const registry = Object.entries(characterColors)
+        .map(([key, entry]) => `${key}\u0001${entry?.name ?? ''}\u0001${(entry?.aliases || []).join('\u0002')}`)
+        .sort()
+        .join('\u0003');
+    return `${settings.thoughtSymbols ?? ''}\u0004${registry}`;
+}
+
+export function clearDialogueCountCache() {
+    dialogueCountCache.clear();
+    dialogueCountInputsSignature = null;
+}
+
+function getMessageDialogueCounts(msg, mesIndex, liveKeys) {
+    const overrideOptions = getMessageQuoteOverrideOptions(mesIndex, msg);
+    const cacheKey = [
+        mesIndex,
+        hashMessageText(getMessageText(msg)),
+        getMessageSpeaker(msg),
+        JSON.stringify(overrideOptions),
+    ].join('\u0001');
+    liveKeys.add(cacheKey);
+    const cached = dialogueCountCache.get(cacheKey);
+    if (cached) return cached;
+
+    const attribution = attributeDialogueSegments(msg.mes, msg.name, {
+        autoAddMessageSpeaker: true,
+        ...overrideOptions,
+        mesIndex,
+    });
+    const counts = new Map();
+    for (const seg of attribution.segments) {
+        const key = seg.assignment?.key;
+        if (!key) continue;
+        counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    // autoAddMessageSpeaker can create a character, which changes the registry and
+    // therefore the signature, so this entry is dropped before it could be re-read.
+    const entry = { counts, createdCharacters: attribution.createdCharacters };
+    dialogueCountCache.set(cacheKey, entry);
+    return entry;
+}
+
 export function refreshDomDialogueCounts(chat = getContext()?.chat || []) {
     const nextCounts = {};
     let createdCharacters = false;
 
     let fontColorLookup = null;
 
+    const inputsSignature = getDialogueCountInputsSignature();
+    if (inputsSignature !== dialogueCountInputsSignature) {
+        dialogueCountCache.clear();
+        dialogueCountInputsSignature = inputsSignature;
+    }
+    const liveKeys = new Set();
+
     for (let i = 0; i < chat.length; i++) {
         const msg = chat[i];
         if (!msg || msg.is_system || !msg.mes) continue;
         // Font-tagged messages are never decorated, but their saved tags still
         // say who spoke; count them from the tags instead of dropping the whole
-        // message out of the statistics.
+        // message out of the statistics. Left uncached: this branch resolves by
+        // rendered color, which the signature above deliberately ignores.
         if (collectFontColorsFromText(msg.mes).size) {
             if (!fontColorLookup) fontColorLookup = buildUniqueKnownColorStatsLookup();
             for (const [color, count] of countFontColorOccurrencesFromText(msg.mes)) {
@@ -1063,17 +1126,18 @@ export function refreshDomDialogueCounts(chat = getContext()?.chat || []) {
             }
             continue;
         }
-        const attribution = attributeDialogueSegments(msg.mes, msg.name, {
-            autoAddMessageSpeaker: true,
-            ...getMessageQuoteOverrideOptions(i, msg),
-            mesIndex: i,
-        });
-        if (attribution.createdCharacters) createdCharacters = true;
-        for (const seg of attribution.segments) {
-            const key = seg.assignment?.key;
-            if (!key || !characterColors[key]) continue;
-            nextCounts[key] = (nextCounts[key] || 0) + 1;
+        const message = getMessageDialogueCounts(msg, i, liveKeys);
+        if (message.createdCharacters) createdCharacters = true;
+        for (const [key, count] of message.counts) {
+            if (!characterColors[key]) continue;
+            nextCounts[key] = (nextCounts[key] || 0) + count;
         }
+    }
+
+    // Bound the cache to the chat that is actually loaded, so edited, swiped and
+    // deleted messages cannot accumulate.
+    for (const key of dialogueCountCache.keys()) {
+        if (!liveKeys.has(key)) dialogueCountCache.delete(key);
     }
 
     let changed = createdCharacters;
