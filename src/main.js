@@ -14,7 +14,7 @@ import { attributionChatGeneration, autoSyncPendingRecord, characterColors, expa
 import { beginStreamingPaint, endStreamingPaint } from './streaming-paint.js';
 import { confirmAutoSyncRecord, doAutoSyncMarkersMatch, ensureRegexScript, getAutoSyncRecord, getCharKey, getStorageKey, initAutoSync, loadData, migrateLegacyLocalStorageIfNeeded, migrateRenamedCharacterStorage, tryLoadFromCard, updateAutoSyncUI } from './storage.js';
 import { applyRestoredPersonaColor, applyThemeOrBrightnessChange, clearAutoColorizeIndicators, createUI, ensurePersonaCharacter, renamePersonaCharacter, syncUIWithSettings, updateCharList } from './ui.js';
-import { cancelStreamingAttributionVerification, clearAutoAttributionVerificationQueue, queueAutoAttributionVerificationForRenderedMessages, scheduleStreamingAttributionVerification } from './verify.js';
+import { cancelStreamingAttributionVerification, captureLoadedAttributionMessageBaseline, clearAutoAttributionVerificationQueue, queueAutoAttributionVerificationForRenderedMessages, scheduleStreamingAttributionVerification } from './verify.js';
 
 let lastAppliedAutoTheme = null;
 let lastAppliedAutoSurface = null;
@@ -59,6 +59,7 @@ export function handleChatChanged() {
     endStreamingPaint();
     setPendingAttributionVerifications([]);
     clearAutoAttributionVerificationQueue({ clearCooldown: true });
+    captureLoadedAttributionMessageBaseline();
     clearAutoColorizeIndicators();
     clearDomCache();
     clearDialogueCountCache();
@@ -279,6 +280,7 @@ export function registerDialogueColorsMacro() {
 export function init() {
     migrateLegacyLocalStorageIfNeeded();
     loadData();
+    captureLoadedAttributionMessageBaseline();
     invalidateThemeCache();
     lastAppliedAutoTheme = settings.themeMode === 'auto' ? detectTheme() : null;
     lastAppliedAutoSurface = settings.themeMode === 'auto' ? getReadableSurfaceSignature() : null;

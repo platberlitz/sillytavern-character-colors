@@ -37,7 +37,7 @@ export const saveMetadata = () => {};
 export const saveMetadataDebounced = () => {};
 `;
 
-globalThis.document ??= { body: {}, querySelector: () => null, querySelectorAll: () => [] };
+globalThis.document ??= { body: {}, getElementById: () => null, querySelector: () => null, querySelectorAll: () => [] };
 globalThis.getComputedStyle ??= () => ({ backgroundColor: 'rgb(0, 0, 0)' });
 
 const stApiUrl = `data:text/javascript;charset=utf-8,${encodeURIComponent(stApiStub)}`;
@@ -49,6 +49,7 @@ const hooks = registerHooks({
 });
 
 const stApi = await import(stApiUrl);
+const { settings } = await import('../src/state.js');
 const {
     clearSessionAttributionVerifications,
     isMessageAttributionVerified,
@@ -58,10 +59,18 @@ const {
     upsertAttributionReview,
 } = await import('../src/dom-engine.js');
 const { ATTRIBUTION_SOURCE, ATTRIBUTION_VERIFICATION_STATUS } = await import('../src/attribution-store.js');
+const {
+    captureLoadedAttributionMessageBaseline,
+    clearAutoAttributionVerificationQueue,
+    drainAutoAttributionVerificationQueue,
+    getAutoAttributionVerifyKey,
+    queueAutoAttributionVerificationForMessage,
+} = await import('../src/verify.js');
 hooks.deregister();
 
 const storageSource = await readFile(new URL('../src/storage.js', import.meta.url), 'utf8');
 const mainSource = await readFile(new URL('../src/main.js', import.meta.url), 'utf8');
+const verifySource = await readFile(new URL('../src/verify.js', import.meta.url), 'utf8');
 const OVERRIDES_KEY = 'dialogue_colors_overrides';
 const REVIEWS_KEY = 'dialogue_colors_attribution_reviews';
 
@@ -182,6 +191,94 @@ test('reading the review list leaves a chat with no review data untouched', () =
     });
 });
 
+test('automatic attribution skips loaded messages without suppressing new or edited messages', () => {
+    const original = {
+        enabled: settings.enabled,
+        coloringEngine: settings.coloringEngine,
+        llmAttributionCheck: settings.llmAttributionCheck,
+        llmAttributionParallel: settings.llmAttributionParallel,
+        autoScanOnLoad: settings.autoScanOnLoad,
+    };
+    const loaded = { id: 'loaded', name: 'Bob', mes: 'The loaded message.' };
+    const appended = { id: 'appended', name: 'Alice', mes: 'The new message.' };
+
+    try {
+        Object.assign(settings, {
+            enabled: true,
+            coloringEngine: 'dom',
+            llmAttributionCheck: true,
+            llmAttributionParallel: false,
+            autoScanOnLoad: false,
+        });
+        stApi.setTestContext({ chat: [loaded], chatMetadata: {} });
+        clearSessionAttributionVerifications();
+        captureLoadedAttributionMessageBaseline();
+
+        assert.equal(queueAutoAttributionVerificationForMessage(0, { delay: 60000 }), false);
+        assert.equal(queueAutoAttributionVerificationForMessage(0, { includeLoaded: true, delay: 60000 }), true);
+        clearAutoAttributionVerificationQueue({ clearCooldown: true });
+
+        settings.autoScanOnLoad = true;
+        assert.equal(queueAutoAttributionVerificationForMessage(0, { delay: 60000 }), true);
+        clearAutoAttributionVerificationQueue({ clearCooldown: true });
+        settings.autoScanOnLoad = false;
+
+        stApi.setTestContext({ chat: [loaded, appended], chatMetadata: {} });
+        assert.equal(queueAutoAttributionVerificationForMessage(1, { delay: 60000 }), true);
+        clearAutoAttributionVerificationQueue({ clearCooldown: true });
+
+        loaded.mes = 'The edited message.';
+        assert.equal(queueAutoAttributionVerificationForMessage(0, { delay: 60000 }), true);
+        assert.notEqual(
+            getAutoAttributionVerifyKey(0, { mes: 'Ab' }),
+            getAutoAttributionVerifyKey(0, { mes: 'BA' }),
+        );
+    } finally {
+        clearAutoAttributionVerificationQueue({ clearCooldown: true });
+        Object.assign(settings, original);
+        clearSessionAttributionVerifications();
+        stApi.setTestContext({ chat: [], chatMetadata: {} });
+        captureLoadedAttributionMessageBaseline();
+    }
+});
+
+test('an ordinary requeue preserves explicit permission to verify a loaded message', async () => {
+    const original = {
+        enabled: settings.enabled,
+        coloringEngine: settings.coloringEngine,
+        llmAttributionCheck: settings.llmAttributionCheck,
+        llmAttributionParallel: settings.llmAttributionParallel,
+        autoScanOnLoad: settings.autoScanOnLoad,
+    };
+    const loaded = { id: 'loaded', name: 'Bob', mes: 'The loaded narration.' };
+
+    try {
+        Object.assign(settings, {
+            enabled: true,
+            coloringEngine: 'dom',
+            llmAttributionCheck: true,
+            llmAttributionParallel: false,
+            autoScanOnLoad: true,
+        });
+        stApi.setTestContext({ chat: [loaded], chatMetadata: {} });
+        clearSessionAttributionVerifications();
+        captureLoadedAttributionMessageBaseline();
+
+        assert.equal(queueAutoAttributionVerificationForMessage(0, { includeLoaded: true, delay: 60000 }), true);
+        assert.equal(queueAutoAttributionVerificationForMessage(0, { delay: 60000 }), true);
+        settings.autoScanOnLoad = false;
+
+        await drainAutoAttributionVerificationQueue();
+        assert.equal(isMessageAttributionVerified(0, loaded), true);
+    } finally {
+        clearAutoAttributionVerificationQueue({ clearCooldown: true });
+        Object.assign(settings, original);
+        clearSessionAttributionVerifications();
+        stApi.setTestContext({ chat: [], chatMetadata: {} });
+        captureLoadedAttributionMessageBaseline();
+    }
+});
+
 test('queueing a review still attaches the store and saves', () => {
     const message = { id: 'm-1', name: 'Bob', mes: '"Hello there," she said.' };
     withCountedChat([message], ({ metadata, saves }) => {
@@ -214,6 +311,26 @@ test('a disabled extension tears down before it can resolve a storage key', () =
     assert.ok(charKey > guard, 'the guard must precede getCharKey()');
     assert.ok(storageKey > guard, 'the guard must precede getStorageKey()');
     assert.match(mainSource.slice(guard, charKey), /\n {8}return;\n {4}\}/);
+});
+
+test('chat lifecycle captures loaded messages before scheduling decoration', () => {
+    const handleChatChanged = mainSource.indexOf('export function handleChatChanged()');
+    const handleCapture = mainSource.indexOf('captureLoadedAttributionMessageBaseline();', handleChatChanged);
+    const handleSchedule = mainSource.indexOf('scheduleDomRefreshSeries(150);', handleChatChanged);
+    const init = mainSource.indexOf('export function init()');
+    const initCapture = mainSource.indexOf('captureLoadedAttributionMessageBaseline();', init);
+    const initSchedule = mainSource.indexOf('scheduleDomRefreshSeries(150);', init);
+
+    assert.ok(handleChatChanged >= 0 && handleCapture > handleChatChanged);
+    assert.ok(handleCapture < handleSchedule);
+    assert.ok(init >= 0 && initCapture > init);
+    assert.ok(initCapture < initSchedule);
+});
+
+test('loaded-message suppression also guards streaming and in-flight verification', () => {
+    assert.match(verifySource, /function isAttributionMessageIdentityCurrent[\s\S]*?isLoadedAttributionMessage\(msg\)/);
+    assert.match(verifySource, /export function scheduleStreamingAttributionVerification[\s\S]*?isLoadedAttributionMessage\(msg\)/);
+    assert.match(verifySource, /export async function runStreamingAttributionVerification[\s\S]*?isLoadedAttributionMessage\(msg\)/);
 });
 
 test('stored colour data keeps its timestamp when the payload is identical', () => {

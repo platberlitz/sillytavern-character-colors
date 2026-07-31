@@ -39,6 +39,8 @@ const RESERVED_VERIFIER_SPEAKER_NAMES = new Set([
 ]);
 const RESERVED_VERIFIER_SPEAKER_SYNTAX = /[\u0000-\u001f\u007f\[\]{}<>=,():;]/;
 const activeAttributionVerificationControllers = new Set();
+const loadedAttributionMessageTextsById = new Map();
+let loadedAttributionMessageTextByObject = new WeakMap();
 let blockedStreamingProviderGeneration = null;
 let streamingProviderFailureCount = 0;
 const MAX_STREAMING_PROVIDER_FAILURES = 2;
@@ -114,12 +116,36 @@ export function isAutoAttributionVerificationEnabled() {
 }
 
 export function getAutoAttributionVerifyKey(mesIndex, msg) {
-    return `${mesIndex}:${hashMessageText(msg?.mes)}`;
+    return `${mesIndex}:${String(msg?.mes ?? '')}`;
 }
 
 export function getAutoAttributionMessageId(msg) {
     const id = msg?.id ?? msg?.send_date ?? '';
     return id === null || id === undefined ? '' : String(id);
+}
+
+export function captureLoadedAttributionMessageBaseline(chat = getContext()?.chat) {
+    loadedAttributionMessageTextsById.clear();
+    loadedAttributionMessageTextByObject = new WeakMap();
+    if (!Array.isArray(chat)) return;
+    for (const msg of chat) {
+        if (!msg || typeof msg !== 'object') continue;
+        const text = String(msg.mes ?? '');
+        loadedAttributionMessageTextByObject.set(msg, text);
+        const messageId = getAutoAttributionMessageId(msg);
+        if (!messageId) continue;
+        const texts = loadedAttributionMessageTextsById.get(messageId) || new Set();
+        texts.add(text);
+        loadedAttributionMessageTextsById.set(messageId, texts);
+    }
+}
+
+function isLoadedAttributionMessage(msg) {
+    if (settings.autoScanOnLoad !== false || !msg || typeof msg !== 'object') return false;
+    const text = String(msg.mes ?? '');
+    if (loadedAttributionMessageTextByObject.get(msg) === text) return true;
+    const messageId = getAutoAttributionMessageId(msg);
+    return !!messageId && loadedAttributionMessageTextsById.get(messageId)?.has(text) === true;
 }
 
 function captureVerifierSettings(options = {}) {
@@ -134,6 +160,7 @@ function captureVerifierSettings(options = {}) {
         llmAttributionCheck: settings.llmAttributionCheck,
         llmAttributionParallel: settings.llmAttributionParallel,
         automatic,
+        includeLoaded: options.includeLoaded === true,
         transient: options.transientOverrides === true,
         streamingGeneration: options.transientOverrides === true ? streamingAttributionGeneration : null,
     };
@@ -178,6 +205,9 @@ function isAttributionMessageIdentityCurrent(identity, { allowAppendedText = fal
     if (!Array.isArray(chat) || chat !== identity.chat) return false;
     const msg = chat[identity.mesIndex];
     if (msg !== identity.message || getAutoAttributionMessageId(msg) !== identity.messageId) return false;
+    if (identity.verifierSettings.automatic
+        && !identity.verifierSettings.includeLoaded
+        && isLoadedAttributionMessage(msg)) return false;
     const currentText = String(msg?.mes ?? '');
     if (currentText === identity.text) return hashMessageText(currentText) === identity.messageHash;
     return allowAppendedText
@@ -210,13 +240,13 @@ const MAX_FAILED_ATTRIBUTION_VERIFY_RETRIES = 2;
 const FAILED_ATTRIBUTION_VERIFY_BACKOFF_MS = 600000; // 10 minutes backoff on failure/error
 const failedAutoAttributionVerifyAttempts = new Map(); // verify key -> { count, at }
 
-function recordAutoAttributionVerifyFailure(key) {
+function recordAutoAttributionVerifyFailure(key, mesIndex) {
     if (!key) return;
     const current = failedAutoAttributionVerifyAttempts.get(key) || { count: 0, at: Date.now() };
     const newCount = current.count + 1;
     failedAutoAttributionVerifyAttempts.set(key, { count: newCount, at: Date.now() });
     if (newCount >= MAX_FAILED_ATTRIBUTION_VERIFY_RETRIES) {
-        console.warn(`[Dialogue Colors] Auto attribution verification suspended for message (${key}) after ${newCount} failed/invalid attempts.`);
+        console.warn(`[Dialogue Colors] Auto attribution verification suspended for message ${mesIndex} after ${newCount} failed/invalid attempts.`);
     }
 }
 
@@ -250,6 +280,7 @@ export function shouldQueueAutoAttributionVerification(mesIndex, msg, options = 
     if (!isAutoAttributionVerificationEnabled()) return false;
     if (isStreamingGenerationActive && !options.allowDuringStreaming) return false;
     if (!Number.isFinite(mesIndex) || mesIndex < 0) return false;
+    if (!options.includeLoaded && isLoadedAttributionMessage(msg)) return false;
     if (suspendMessageDomWorkForEdit(getMessageElementByIndex(mesIndex), mesIndex)) return false;
     if (!isMessageEligibleForAttributionVerification(msg)
         || (!options.bypassVerified && isMessageAttributionVerified(mesIndex, msg))) return false;
@@ -298,13 +329,18 @@ export function queueAutoAttributionVerificationForMessage(mesIndex, options = {
 
     const key = getAutoAttributionVerifyKey(index, msg);
     const existing = pendingAutoAttributionVerifyIndices.get(key);
-    const identity = captureAttributionMessageIdentity(index, msg, { automatic: true }, chat);
+    const includeLoaded = options.includeLoaded === true || existing?.includeLoaded === true;
+    const identity = captureAttributionMessageIdentity(index, msg, {
+        automatic: true,
+        includeLoaded,
+    }, chat);
     pendingAutoAttributionVerifyIndices.set(key, {
         ...identity,
         key,
         mesIndex: index,
         force: options.force === true || existing?.force === true,
         bypassVerified: options.bypassVerified === true || existing?.bypassVerified === true,
+        includeLoaded,
     });
     boundPendingAutoAttributionVerifications();
     scheduleAutoAttributionVerificationDrain(options.delay ?? AUTO_ATTRIBUTION_VERIFY_DELAY_MS);
@@ -347,6 +383,7 @@ export function queueAutoAttributionVerificationAfterCorrections(mesIndex, resul
     return queueAutoAttributionVerificationForMessage(index, {
         force: true,
         bypassVerified: true,
+        includeLoaded: options.includeLoaded === true,
         delay: options.delay ?? AUTO_ATTRIBUTION_VERIFY_STABLE_RETRY_DELAY_MS,
     });
 }
@@ -385,6 +422,7 @@ export async function drainAutoAttributionVerificationQueue() {
             scheduleAutoAttributionVerificationDrain(AUTO_ATTRIBUTION_VERIFY_DELAY_MS);
             break;
         }
+        if (!item.includeLoaded && isLoadedAttributionMessage(item.message)) continue;
         if (!isAttributionMessageIdentityCurrent(item)) continue;
 
         const msg = item.message;
@@ -413,9 +451,12 @@ export async function drainAutoAttributionVerificationQueue() {
                         automatic: true,
                         quiet: true,
                         bypassVerified: item.bypassVerified === true,
+                        includeLoaded: item.includeLoaded === true,
                         expectedIdentity: item,
                     });
-                    queueAutoAttributionVerificationAfterCorrections(item.mesIndex, result);
+                    queueAutoAttributionVerificationAfterCorrections(item.mesIndex, result, {
+                        includeLoaded: item.includeLoaded,
+                    });
                     return result;
                 },
                 { automatic: true, queue: false, queueKey: `auto:${currentKey}`, cancellationEpoch: item.cancellationEpoch }
@@ -810,6 +851,7 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
     const ctx = getContext();
     const chat = ctx?.chat;
     const msg = Array.isArray(chat) ? chat[mesIndex] : null;
+    if (automatic && !options.includeLoaded && isLoadedAttributionMessage(msg)) return unchecked;
     if (options.expectedIdentity && (!isAttributionMessageIdentityCurrent(options.expectedIdentity)
         || options.expectedIdentity.mesIndex !== mesIndex
         || options.expectedIdentity.message !== msg)) return unchecked;
@@ -912,7 +954,7 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
                 || !isAttributionVerificationTargetCurrent(target, { allowAppendedText: useTransientOverrides });
             if (!cancelled) {
                 console.warn('[Dialogue Colors] LLM attribution verification failed:', e);
-                if (trackFailure) recordAutoAttributionVerifyFailure(verifyKey);
+                if (trackFailure) recordAutoAttributionVerifyFailure(verifyKey, mesIndex);
                 if (!quiet) toast.warning('Color verification failed (see console).');
             }
             return cancelled
@@ -937,7 +979,7 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
     }
 
     if (!ballots.length) {
-        if (trackFailure) recordAutoAttributionVerifyFailure(verifyKey);
+        if (trackFailure) recordAutoAttributionVerifyFailure(verifyKey, mesIndex);
         if (!quiet) toast.warning('Color verification failed (see console).');
         return unchecked;
     }
@@ -950,7 +992,7 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
     const validCorrections = reduceAttributionVerifierBallots(ballots);
     if (!hasCurrentVerifierSegments(target, currentAttribution.segments)) {
         if (trackFailure && isAttributionVerificationTargetCurrent(target, { allowAppendedText: useTransientOverrides })) {
-            recordAutoAttributionVerifyFailure(verifyKey);
+            recordAutoAttributionVerifyFailure(verifyKey, mesIndex);
         }
         return unchecked;
     }
@@ -1283,6 +1325,7 @@ export function scheduleStreamingAttributionVerification() {
     const mesIndex = chat.length - 1;
     const msg = chat[mesIndex];
     if (!isMessageEligibleForAttributionVerification(msg)) return;
+    if (isLoadedAttributionMessage(msg)) return;
 
     const generation = streamingAttributionGeneration;
     setStreamingAttributionVerifyTimer(setTimeout(() => {
@@ -1317,11 +1360,12 @@ export async function runStreamingAttributionVerification(mesIndex, generation) 
         const chat = getContext()?.chat;
         const msg = Array.isArray(chat) ? chat[mesIndex] : null;
         if (!isMessageEligibleForAttributionVerification(msg)) return { checked: false, corrections: 0, createdCharacters: false };
+        if (isLoadedAttributionMessage(msg)) return { checked: false, corrections: 0, createdCharacters: false };
         const verifyOptions = { automatic: true, skipMarkVerified: true, transientOverrides: true, quiet: true };
         const identity = captureAttributionMessageIdentity(mesIndex, msg, verifyOptions, chat);
         if (!isAttributionMessageIdentityCurrent(identity)) return { checked: false, corrections: 0, createdCharacters: false };
 
-        const verifyKey = `${mesIndex}:${hashMessageText(msg.mes)}`;
+        const verifyKey = getAutoAttributionVerifyKey(mesIndex, msg);
         if (verifyKey !== lastStreamingAttributionVerifyKey) {
             const result = await runAttributionVerification(
                 () => {

@@ -4461,13 +4461,13 @@ function bindSettingsPanelControls($) {
     $('dc-auto-colorize').onchange = e => { settings.autoColorize = e.target.checked; saveData(); };
     $('dc-llm-attr-check').onchange = e => {
         settings.llmAttributionCheck = e.target.checked;
-        if (settings.llmAttributionCheck) queueAutoAttributionVerificationForRenderedMessages({ force: true, delay: 0 });
+        if (settings.llmAttributionCheck) queueAutoAttributionVerificationForRenderedMessages({ force: true, includeLoaded: true, delay: 0 });
         else if (!settings.llmAttributionParallel) clearAutoAttributionVerificationQueue({ clearCooldown: true });
         saveData();
     };
     $('dc-llm-attr-parallel').onchange = e => {
         settings.llmAttributionParallel = e.target.checked;
-        if (settings.llmAttributionParallel) queueAutoAttributionVerificationForRenderedMessages({ force: true, delay: 0 });
+        if (settings.llmAttributionParallel) queueAutoAttributionVerificationForRenderedMessages({ force: true, includeLoaded: true, delay: 0 });
         else {
             cancelStreamingAttributionVerification({ clearOverrides: true });
             if (!settings.llmAttributionCheck) clearAutoAttributionVerificationQueue({ clearCooldown: true });
@@ -4479,7 +4479,7 @@ function bindSettingsPanelControls($) {
         $('dc-attr-accept-all').onchange = e => {
             settings.attributionReviewPolicy = e.target.checked ? 'legacy-auto' : 'review';
             if (settings.attributionReviewPolicy === 'legacy-auto' && settings.llmAttributionCheck) {
-                queueAutoAttributionVerificationForRenderedMessages({ force: true, delay: 0 });
+                queueAutoAttributionVerificationForRenderedMessages({ force: true, includeLoaded: true, delay: 0 });
             }
             saveData();
         };
