@@ -64,8 +64,18 @@ export function handleChatChanged() {
     clearDialogueCountCache();
     clearSessionAttributionVerifications();
     stopDomHealthCheck();
-    const currentCharKey = getCharKey();
     clearDecoratedWatchers();
+    // A disabled extension has nothing to load, scan or paint, and it must not
+    // write: getCharKey() and getStorageKey() resolve a chat-scope ID that gets
+    // stamped into chat metadata under the "Per chat" scope, and saving chat
+    // metadata rewrites the user's whole chat file. Tear down and stop here.
+    if (!settings.enabled) {
+        updateCharList();
+        injectPrompt();
+        decorateAllMessages();
+        return;
+    }
+    const currentCharKey = getCharKey();
     if (currentCharKey !== lastCharKey) {
         expandedCharacterRows.clear();
         setSwapMode(null);

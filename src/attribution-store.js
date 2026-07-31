@@ -803,7 +803,11 @@ export function createAttributionStore(value = {}, chat) {
         return Array.isArray(current) ? current : null;
     };
     const nowOptions = () => ({ now: typeof options.now === 'function' ? options.now() : options.now });
-    const getStoreState = () => {
+    // `attach` writes the normalized store back into chat metadata, which the
+    // host persists by rewriting the whole chat file. Only callers that are
+    // about to mutate may do that: reading the review list must leave a chat
+    // with no review data exactly as it found it.
+    const getStoreState = (attach = false) => {
         const metadata = getMetadata();
         if (!metadata) {
             return { metadata: null, store: createAttributionReviewStore({}, nowOptions()), attached: false };
@@ -814,6 +818,9 @@ export function createAttributionStore(value = {}, chat) {
         } catch (_) {
             return { metadata, store: createAttributionReviewStore({}, nowOptions()), attached: false };
         }
+        if (!attach) {
+            return { metadata, store: normalized, attached: false };
+        }
         try {
             metadata[metadataKey] = normalized;
         } catch (_) {
@@ -821,9 +828,9 @@ export function createAttributionStore(value = {}, chat) {
         }
         return { metadata, store: normalized, attached: metadata[metadataKey] === normalized };
     };
-    const getReadableStore = () => getStoreState().store;
+    const getReadableStore = () => getStoreState(false).store;
     const getMutableState = () => {
-        const state = getStoreState();
+        const state = getStoreState(true);
         return state.attached ? state : null;
     };
     const notify = (metadata, action, record = null) => {

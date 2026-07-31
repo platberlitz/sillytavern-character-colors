@@ -52,14 +52,18 @@ const stApi = await import(stApiUrl);
 const {
     clearSessionAttributionVerifications,
     isMessageAttributionVerified,
+    listAttributionReviews,
     markMessageAttributionVerified,
     setMessageQuoteOverride,
+    upsertAttributionReview,
 } = await import('../src/dom-engine.js');
 const { ATTRIBUTION_SOURCE, ATTRIBUTION_VERIFICATION_STATUS } = await import('../src/attribution-store.js');
 hooks.deregister();
 
 const storageSource = await readFile(new URL('../src/storage.js', import.meta.url), 'utf8');
+const mainSource = await readFile(new URL('../src/main.js', import.meta.url), 'utf8');
 const OVERRIDES_KEY = 'dialogue_colors_overrides';
+const REVIEWS_KEY = 'dialogue_colors_attribution_reviews';
 
 // Mirrors how the host reports a save: the extension calls saveMetadataDebounced
 // and the chat file is rewritten some time later.
@@ -165,6 +169,51 @@ test('re-applying an identical override does not rewrite the chat', () => {
         assert.equal(saves.count, 2);
         assert.equal(metadata[OVERRIDES_KEY]['0'].segments['1'], 'Carol');
     });
+});
+
+test('reading the review list leaves a chat with no review data untouched', () => {
+    const message = { id: 'm-1', name: 'Bob', mes: '"Hello there," she said.' };
+    withCountedChat([message], ({ metadata, saves }) => {
+        assert.deepEqual(listAttributionReviews(), []);
+        assert.equal(saves.count, 0);
+        // Normalising the store into chat metadata on a read is enough to make
+        // the host persist it on its next save, so the key must not appear.
+        assert.equal(Object.prototype.hasOwnProperty.call(metadata, REVIEWS_KEY), false);
+    });
+});
+
+test('queueing a review still attaches the store and saves', () => {
+    const message = { id: 'm-1', name: 'Bob', mes: '"Hello there," she said.' };
+    withCountedChat([message], ({ metadata, saves }) => {
+        const review = upsertAttributionReview({
+            message,
+            messageIndex: 0,
+            segment: { index: 0, text: '"Hello there,"' },
+            currentSpeaker: 'Bob',
+            proposedSpeaker: 'Alice',
+            source: ATTRIBUTION_SOURCE.LLM,
+            confidence: 0.9,
+        });
+
+        assert.ok(review);
+        assert.equal(Object.prototype.hasOwnProperty.call(metadata, REVIEWS_KEY), true);
+        assert.equal(saves.count, 1);
+        assert.equal(listAttributionReviews().length, 1);
+    });
+});
+
+test('a disabled extension tears down before it can resolve a storage key', () => {
+    // getCharKey()/getStorageKey() stamp a chat-scope ID into chat metadata under
+    // the "Per chat" scope, which rewrites the chat file even with the extension
+    // switched off. The guard has to sit ahead of both.
+    const guard = mainSource.indexOf('if (!settings.enabled) {');
+    const charKey = mainSource.indexOf('const currentCharKey = getCharKey();');
+    const storageKey = mainSource.indexOf('const scanStorageKey = getStorageKey();');
+
+    assert.ok(guard > 0, 'handleChatChanged must guard on settings.enabled');
+    assert.ok(charKey > guard, 'the guard must precede getCharKey()');
+    assert.ok(storageKey > guard, 'the guard must precede getStorageKey()');
+    assert.match(mainSource.slice(guard, charKey), /\n {8}return;\n {4}\}/);
 });
 
 test('stored colour data keeps its timestamp when the payload is identical', () => {
