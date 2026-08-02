@@ -51,19 +51,27 @@ const hooks = registerHooks({
 const {
     applyThemeReadabilityAndBrightness,
     buildCharacterEntry,
+    deriveBaseColorFromEffectiveColor,
     getEntryEffectiveColor,
     getNextColor,
     invalidateThemeCache,
     isAssignedColorConflict,
+    syncAllEffectiveColors,
 } = await import('../src/palettes.js');
 const { characterColors, settings } = await import('../src/state.js');
+const { colorDistanceOklab } = await import('../src/gradients.js');
+const { ASSIGNED_COLOR_MIN_DELTA_E, hexToHsl } = await import('../src/utils.js');
 hooks.deregister();
 
 const DEFAULT_SETTINGS = { ...settings };
 
 function withPalette({ themeMode = 'dark', brightness = 0, colorTheme = 'pastel' }, run) {
     const previousColors = { ...characterColors };
+    const previousBackground = pageBackground;
     for (const key of Object.keys(characterColors)) delete characterColors[key];
+    // The contrast repair samples the page, so a light theme has to be tested against a light
+    // page. Leaving it dark drags every color to the same end and hides real differences.
+    pageBackground = themeMode === 'light' ? 'rgb(245, 245, 245)' : 'rgb(20, 22, 26)';
     Object.assign(settings, DEFAULT_SETTINGS, { themeMode, brightness, colorTheme });
     invalidateThemeCache();
     try {
@@ -72,8 +80,19 @@ function withPalette({ themeMode = 'dark', brightness = 0, colorTheme = 'pastel'
         for (const key of Object.keys(characterColors)) delete characterColors[key];
         Object.assign(characterColors, previousColors);
         Object.assign(settings, DEFAULT_SETTINGS);
+        pageBackground = previousBackground;
         invalidateThemeCache();
     }
+}
+
+function minimumSeparation(colors) {
+    let closest = Infinity;
+    for (let i = 0; i < colors.length; i++) {
+        for (let j = i + 1; j < colors.length; j++) {
+            closest = Math.min(closest, colorDistanceOklab(colors[i], colors[j]));
+        }
+    }
+    return closest;
 }
 
 function addCharacters(count) {
@@ -174,6 +193,140 @@ test('getNextColor avoids a color that exists only as a gradient stop', () => {
             `${next} collides with the reserved gradient stop ${reservedStop}`
         );
     });
+});
+
+// The reported symptom: with the brightness slider at its maximum every color was pushed onto
+// the theme's lightness ceiling, where HSL chroma runs out, and a cast of thirteen arrived as
+// thirteen near-white swatches nobody could tell apart.
+const BRIGHTNESS_SWEEP = [-100, -75, -50, -25, 0, 25, 50, 75, 100];
+const CAST_SIZE = 13;
+
+for (const themeMode of ['dark', 'light']) {
+    for (const brightness of BRIGHTNESS_SWEEP) {
+        const label = `${themeMode} theme, brightness ${brightness}`;
+
+        test(`a full cast stays perceptually apart (${label})`, () => {
+            withPalette({ themeMode, brightness }, () => {
+                const colors = addCharacters(CAST_SIZE).map(entry => getEntryEffectiveColor(entry));
+                const closest = minimumSeparation(colors);
+                assert.ok(
+                    closest >= ASSIGNED_COLOR_MIN_DELTA_E,
+                    `two of ${CAST_SIZE} characters are only Delta E ${closest.toFixed(2)} apart: ${colors.join(', ')}`
+                );
+            });
+        });
+
+        test(`stored base colors survive the brightness pass (${label})`, () => {
+            withPalette({ themeMode, brightness }, () => {
+                for (const entry of addCharacters(CAST_SIZE)) {
+                    // Subtracting the offset straight back out used to bottom out at black,
+                    // which throws away the hue and saturation along with the lightness.
+                    assert.notEqual(entry.baseColor, '#000000', `${entry.name} lost its color to black`);
+                    assert.notEqual(entry.baseColor, '#ffffff', `${entry.name} lost its color to white`);
+                    const [, saturation] = hexToHsl(entry.baseColor);
+                    const [, effectiveSaturation] = hexToHsl(entry.color);
+                    if (effectiveSaturation > 0) {
+                        assert.ok(saturation > 0, `${entry.name} kept a grey base color for ${entry.color}`);
+                    }
+                    // Both halves of the entry have to describe the same color, or the next
+                    // synchronization silently repaints the character.
+                    const rerendered = applyThemeReadabilityAndBrightness(entry.baseColor);
+                    assert.ok(
+                        colorDistanceOklab(rerendered, entry.color) <= 1,
+                        `${entry.name} renders as ${rerendered} but stores ${entry.color}`
+                    );
+                }
+            });
+        });
+
+        test(`characters stay apart after the slider is moved back (${label})`, () => {
+            withPalette({ themeMode, brightness }, () => {
+                const entries = addCharacters(CAST_SIZE);
+                settings.brightness = 0;
+                invalidateThemeCache();
+                syncAllEffectiveColors();
+                const colors = entries.map(entry => getEntryEffectiveColor(entry));
+                assert.equal(new Set(colors).size, colors.length, `characters collapsed onto each other: ${colors.join(', ')}`);
+            });
+        });
+    }
+}
+
+test('the brightness pass leaves colors untouched at zero', () => {
+    // Everything below the slider is unchanged for the default setting, so upgrading does not
+    // repaint anyone who never moved it.
+    withPalette({ themeMode: 'dark', brightness: 0 }, () => {
+        for (const color of ['#f4bed0', '#bee2f4', '#c6ecc6', '#db3333', '#2e2eb8']) {
+            const rendered = applyThemeReadabilityAndBrightness(color);
+            assert.equal(deriveBaseColorFromEffectiveColor(rendered), rendered, `${color} did not round-trip at brightness 0`);
+        }
+    });
+});
+
+test('a base color survives a trip through the brightness pass and back', () => {
+    // The inverse has to undo the exact travel the forward pass applied. Writing the sign out
+    // in both places let them drift apart for negative brightness, which quietly moved every
+    // color the picker or an import stored while the slider was left of centre.
+    const bases = ['#f4bed0', '#bee2f4', '#c6ecc6', '#c1c1f0', '#93ecec', '#7a5fb0'];
+    for (const themeMode of ['dark', 'light']) {
+        for (const brightness of BRIGHTNESS_SWEEP) {
+            withPalette({ themeMode, brightness }, () => {
+                for (const base of bases) {
+                    const rendered = applyThemeReadabilityAndBrightness(base);
+                    const recovered = deriveBaseColorFromEffectiveColor(rendered);
+                    // The readability walk is not invertible, so compare where it lands: a base
+                    // that renders back to the same color is a base that round-tripped.
+                    const settled = applyThemeReadabilityAndBrightness(recovered);
+                    assert.ok(
+                        colorDistanceOklab(settled, rendered) <= 2,
+                        `${themeMode} brightness ${brightness}: ${base} rendered ${rendered}, came back as ${recovered} which renders ${settled}`
+                    );
+                }
+            });
+        }
+    }
+});
+
+test('deriving a base color never discards the hue', () => {
+    for (const brightness of BRIGHTNESS_SWEEP) {
+        withPalette({ themeMode: 'dark', brightness }, () => {
+            for (const effective of ['#f4bed0', '#bee2f4', '#c6ecc6', '#db3333']) {
+                const base = deriveBaseColorFromEffectiveColor(effective);
+                const [effectiveHue] = hexToHsl(effective);
+                const [baseHue] = hexToHsl(base);
+                // Eight bits per channel cannot hold every hue exactly; anything past a degree
+                // or two of drift means the transform moved the color rather than rounded it.
+                const drift = Math.min(Math.abs(baseHue - effectiveHue), 360 - Math.abs(baseHue - effectiveHue));
+                assert.ok(drift <= 2, `brightness ${brightness} moved the hue of ${effective} to ${base}`);
+            }
+        });
+    }
+});
+
+test('a greyscale palette never invents a hue', () => {
+    // Reaching for saturation when the ladder runs out hands the user brown characters out of a
+    // palette chosen for having no color in it.
+    for (const brightness of BRIGHTNESS_SWEEP) {
+        withPalette({ themeMode: 'dark', brightness, colorTheme: 'monochrome' }, () => {
+            for (const color of addCharacters(8).map(entry => getEntryEffectiveColor(entry))) {
+                const [, saturation] = hexToHsl(color);
+                assert.ok(saturation <= 5, `brightness ${brightness} colored a greyscale palette: ${color}`);
+            }
+        });
+    }
+});
+
+test('a greyscale palette still separates characters wherever there is room', () => {
+    // Lightness is the only axis a grey palette has. Full darkening on a dark theme is the one
+    // place it runs out: the travel lands every slot near lightness 50 and the contrast floor
+    // holds it there, so a handful of lightness points has to seat the whole cast. Everywhere
+    // that leaves room, all eight have to differ.
+    for (const brightness of [100, 75, 50, 25, 0, -25, -50, -75]) {
+        withPalette({ themeMode: 'dark', brightness, colorTheme: 'monochrome' }, () => {
+            const colors = addCharacters(8).map(entry => getEntryEffectiveColor(entry));
+            assert.equal(new Set(colors).size, colors.length, `brightness ${brightness} repeated a grey: ${colors.join(', ')}`);
+        });
+    }
 });
 
 test('a custom palette rotates through its slots', () => {

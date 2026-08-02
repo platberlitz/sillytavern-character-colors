@@ -131,6 +131,18 @@ export const COLOR_CONFLICT_HUE_THRESHOLD = 12;
 // Optimized color distance calculation
 export const COLOR_CONFLICT_LIGHTNESS_THRESHOLD = 8;
 
+// Two washed-out colors can sit 20 degrees apart in hue and still read as the same color, which
+// is how a pale palette handed out slots it considered distinct. Delta E catches that; the
+// hue/lightness test below stays alongside it so the check is never weaker than it was.
+//
+// Deliberately not PERCEPTUAL_CONFLICT_THRESHOLDS.conflictDeltaE (8). That value reports a
+// clash to the user; this one refuses to create it. At 8 the pastel ladder, whose own tightest
+// pair renders 4.2 apart, would reject every slot it has and exhaust the search. 3.5 clears
+// pastel, jewel and neon; the single-family palettes (jade, ocean, sunset, earth) do have
+// designed pairs below it and will hand out fewer of their eight slots before the resolver
+// takes over.
+export const ASSIGNED_COLOR_MIN_DELTA_E = 3.5;
+
 // Optimized color distance calculation
 export function colorDistance(color1, color2) {
     const [h1, , l1] = hexToHsl(color1);

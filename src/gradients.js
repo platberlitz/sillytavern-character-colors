@@ -136,8 +136,24 @@ export function oklabDistance(left, right) {
     return Math.sqrt(left.reduce((total, channel, index) => total + ((channel - right[index]) ** 2), 0)) * 100;
 }
 
+// Color assignment compares one candidate against every color already on screen, hundreds of
+// candidates deep, so the same handful of hex values gets converted over and over. Caching the
+// conversion keeps a large cast from paying for it every time.
+const OKLAB_CACHE_LIMIT = 2048;
+const oklabCache = new Map();
+
+function cachedColorToOklab(color) {
+    const key = String(color);
+    const cached = oklabCache.get(key);
+    if (cached) return cached;
+    const converted = colorToOklab(color);
+    if (oklabCache.size >= OKLAB_CACHE_LIMIT) oklabCache.clear();
+    oklabCache.set(key, converted);
+    return converted;
+}
+
 export function colorDistanceOklab(leftColor, rightColor) {
-    return oklabDistance(colorToOklab(leftColor), colorToOklab(rightColor));
+    return oklabDistance(cachedColorToOklab(leftColor), cachedColorToOklab(rightColor));
 }
 
 function hexToHsl(color) {

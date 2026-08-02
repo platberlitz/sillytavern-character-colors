@@ -554,3 +554,53 @@ test('per-chat dialogue tallies never ask for a settings write', () => {
         /setPendingColorStateSaveData\(pendingColorStateSaveData \|\| options\.data !== false\)/,
     );
 });
+
+test('brightness moves colors through the theme headroom, never onto its rail', () => {
+    const brightnessPass = functionSection(sources['palettes.js'], 'applyThemeReadabilityAndBrightness');
+
+    // Adding the slider straight to the lightness put every color on the same bound, where
+    // HSL chroma runs out and characters stop being tellable apart. The share of the
+    // remaining headroom is what keeps distinct inputs distinct.
+    assert.doesNotMatch(brightnessPass, /l \+ offset/);
+    assert.match(brightnessPass, /amount \* \(bound - l\)/);
+    assert.match(brightnessPass, /compensateSaturation\(s, l, adjustedL\)/);
+    assert.match(sources['palettes.js'], /export const BRIGHTNESS_HEADROOM_SHARE = 0\.85;/);
+
+    // Saturation is defended on the way up only; pulling it down when darkening would wash
+    // colors out from the other end.
+    const compensate = functionSection(sources['palettes.js'], 'compensateSaturation');
+    assert.match(compensate, /Math\.max\(saturation, Math\.min\(100/);
+
+    // The inverse has to stay an inverse, and can never land where hue and saturation stop
+    // existing: that is what reduced every stored base color to black. Both directions read the
+    // same travel, because writing the sign out twice is how the inverse drifted out of step
+    // with the forward pass for negative brightness.
+    const inverse = functionSection(sources['palettes.js'], 'deriveBaseColorFromEffectiveColor');
+    assert.doesNotMatch(inverse, /l - offset/);
+    assert.match(brightnessPass, /getBrightnessTravel\(\)/);
+    assert.match(inverse, /getBrightnessTravel\(\)/);
+    assert.match(inverse, /\(l - \(amount \* bound\)\) \/ \(1 - amount\)/);
+    assert.match(inverse, /Math\.max\(MIN_BASE_LIGHTNESS, Math\.min\(MAX_BASE_LIGHTNESS/);
+});
+
+test('assigned colors are kept apart perceptually, not just by hue and lightness', () => {
+    const conflict = functionSection(sources['palettes.js'], 'isAssignedColorConflict');
+
+    // Two washed-out colors can sit far apart in hue and still read as the same color, which
+    // is how a pale palette handed out slots it considered distinct.
+    assert.match(conflict, /colorDistanceOklab\(existing, normalizedCandidate\) < ASSIGNED_COLOR_MIN_DELTA_E/);
+    assert.match(conflict, /colorDistance\(existing, normalizedCandidate\)/);
+    assert.match(sources['utils.js'], /export const ASSIGNED_COLOR_MIN_DELTA_E = 3\.5;/);
+
+    // Candidates are built and stored in base space, so an entry's two halves always describe
+    // the same color and the search cannot settle somewhere no base can reproduce.
+    const resolve = functionSection(sources['palettes.js'], 'resolveUniqueAssignedColor');
+    assert.match(resolve, /const rendered = applyThemeReadabilityAndBrightness\(candidateBaseColor\)/);
+    assert.match(resolve, /isAssignedColorConflict\(candidateBaseColor, reservedBaseColors\)/);
+    assert.match(resolve, /return \{ color: rendered, baseColor: candidateBaseColor, remapped: true \}/);
+
+    // When a cast outgrows the palette every candidate collides, and the last resort has to be
+    // the widest separation found rather than an unchecked draw.
+    assert.match(resolve, /widestApart/);
+    assert.match(resolve, /separation > widestApart\.separation/);
+});

@@ -1,7 +1,7 @@
 // palettes.js - extracted from index.js (mechanical split)
 import { clearSpeakerRegexCache } from './attribution.js';
 import { simulateColorVision } from './color-vision.js';
-import { applyGradientPresetToEntry, cloneGradient, mapGradientStops, normalizeGradient, serializeGradient, synchronizeGradientEffectiveColors } from './gradients.js';
+import { applyGradientPresetToEntry, cloneGradient, colorDistanceOklab, mapGradientStops, normalizeGradient, serializeGradient, synchronizeGradientEffectiveColors } from './gradients.js';
 import { MAX_REGISTRY_IDENTITY_LENGTH, applyGroupProfile, migrateLegacyRegistryEntries, normalizeGroupName, normalizeGroupProfiles, normalizeRegistryIdentity, normalizeRegistryIdentityName, resolveGroupAutomation, resolveGroupProfile } from './group-profiles.js';
 import { createRestoreSnapshot, showUndoToast } from './history.js';
 import { applyLiveColorChangesFromSnapshot, captureEffectiveColorSnapshot, commit, repaintDomAfterCharacterDataChange } from './live-colors.js';
@@ -13,7 +13,7 @@ import { GRADIENT_GENERATOR_ALGORITHM, advanceGradientGenerator, generateSeededG
 import { escapeHtml, generateQuietPrompt, getContext, power_user } from './st-api.js';
 import { characterColors, expandedCharacterRows, groupProfiles, setCharacterColors, setExpandedCharacterRows, setGroupProfiles, setSwapMode, settings, swapMode } from './state.js';
 import { getAutoSyncRecord, isPlainObject, persistModuleStore, saveData, saveGlobalSettingsSnapshot } from './storage.js';
-import { VALID_STYLES, colorDistance, hexToHsl, hslToHex, normalizeAliases, normalizeCharacterEntry, normalizeEntryGradientGenerator, normalizeGoogleFontName, normalizeHexColor, toast } from './utils.js';
+import { ASSIGNED_COLOR_MIN_DELTA_E, VALID_STYLES, colorDistance, hexToHsl, hslToHex, normalizeAliases, normalizeCharacterEntry, normalizeEntryGradientGenerator, normalizeGoogleFontName, normalizeHexColor, toast } from './utils.js';
 
 export const COLOR_THEMES = {
     pastel: [[340, 70, 75], [200, 70, 75], [120, 50, 70], [45, 80, 70], [280, 60, 75], [170, 60, 70], [20, 80, 75], [240, 60, 75]],
@@ -1321,21 +1321,81 @@ export function getReadableSurfaceSignature() {
     return getContrastSurfaceColor();
 }
 
+// The slider walks a share of the distance to the theme lightness bound instead of adding raw
+// lightness points. A -100..100 offset against a band only ~47 wide pushed every color onto the
+// same lightness, and characters became indistinguishable. Stopping short of the bound keeps
+// distinct inputs mapping to distinct outputs even at the extremes.
+export const BRIGHTNESS_HEADROOM_SHARE = 0.85;
+
+// Base lightness never reaches 0 or 100, where hue and saturation stop existing and every
+// character would round-trip to the same black or white.
+const MIN_BASE_LIGHTNESS = 8;
+const MAX_BASE_LIGHTNESS = 92;
+
+// HSL chroma is (1 - |2L - 1|) * S, so lifting lightness drains color even when saturation
+// is untouched. This is the factor that has to be defended when brightness moves.
+function chromaFactor(lightness) {
+    return 1 - Math.abs((2 * lightness / 100) - 1);
+}
+
+// The slider always walks a share of the distance to one bound; only which bound changes with
+// its sign. Both directions read this one pair, so the inverse cannot fall out of step with the
+// pass it undoes.
+function getBrightnessTravel() {
+    const { minLightness, maxLightness } = getThemeLightnessBounds();
+    const share = (getBrightnessOffset() / 100) * BRIGHTNESS_HEADROOM_SHARE;
+    return {
+        amount: Math.abs(share),
+        bound: share >= 0 ? maxLightness : minLightness,
+        minLightness,
+        maxLightness,
+    };
+}
+
+// The lightness band colors actually land in once brightness is applied. The prompt builders
+// describe this to the model, which reads a raw slider value as an instruction to go white.
+export function getBrightnessTargetLightnessRange() {
+    const { amount, bound, minLightness, maxLightness } = getBrightnessTravel();
+    const travel = lightness => Math.round(lightness + (amount * (bound - lightness)));
+    return { minLightness: travel(minLightness), maxLightness: travel(maxLightness) };
+}
+
+// Repairing a flattened base color cannot recover the lightness that was thrown away, so it
+// re-homes the color inside this window instead. Staying clear of the theme's own bounds is
+// what stops a repaired color from coming back sitting on the rail it was flattened onto.
+export function getRepairedBaseLightnessWindow() {
+    const { minLightness, maxLightness } = getThemeLightnessBounds();
+    const margin = Math.round((maxLightness - minLightness) * 0.25);
+    return { floor: minLightness + margin, ceiling: maxLightness - margin };
+}
+
+function compensateSaturation(saturation, fromLightness, toLightness) {
+    const toFactor = chromaFactor(toLightness);
+    if (toFactor <= 0) return saturation;
+    // Only ever raise saturation: darkening already gains chroma, and pulling it down there
+    // would wash colors out from the other end.
+    return Math.max(saturation, Math.min(100, saturation * chromaFactor(fromLightness) / toFactor));
+}
+
 export function applyThemeReadabilityAndBrightness(hexColor) {
     const normalized = normalizeHexColor(hexColor);
     const [h, s, l] = hexToHsl(normalized);
-    const offset = getBrightnessOffset();
-    const { minLightness, maxLightness } = getThemeLightnessBounds();
-    const adjustedL = Math.max(minLightness, Math.min(maxLightness, l + offset));
-    return ensureReadableContrast(hslToHex(h, s, adjustedL));
+    const { amount, bound, minLightness, maxLightness } = getBrightnessTravel();
+    const adjustedL = Math.max(minLightness, Math.min(maxLightness, l + (amount * (bound - l))));
+    return ensureReadableContrast(hslToHex(h, compensateSaturation(s, l, adjustedL), adjustedL));
 }
 
 export function deriveBaseColorFromEffectiveColor(hexColor) {
     const normalized = normalizeHexColor(hexColor);
     const [h, s, l] = hexToHsl(normalized);
-    const offset = getBrightnessOffset();
-    const baseL = Math.max(0, Math.min(100, l - offset));
-    return hslToHex(h, s, baseL);
+    const { amount, bound } = getBrightnessTravel();
+    // Inverse of the travel above. The headroom cap keeps 1 - amount at or above 0.15, so the
+    // division stays well conditioned at both ends of the slider.
+    const baseL = Math.max(MIN_BASE_LIGHTNESS, Math.min(MAX_BASE_LIGHTNESS, (l - (amount * bound)) / (1 - amount)));
+    // Saturation was raised on the way out, so lower it by the same ratio. Hue is never touched
+    // in either direction.
+    const baseS = Math.max(0, Math.min(100, s * chromaFactor(l) / chromaFactor(baseL)));
+    return hslToHex(h, Math.min(s, baseS), baseL);
 }
 
 export function getBaseColor(entry, fallback = '#888888') {
@@ -1563,22 +1623,65 @@ export function collectAssignedColors(excludeKeys = []) {
     return colors;
 }
 
+// Distinctness is only guaranteed at the brightness the colors were assigned under: two bases
+// that render far apart at one slider position can render close together at another. Checking
+// the base colors as well keeps characters apart wherever the slider ends up.
+export function collectAssignedBaseColors(excludeKeys = []) {
+    const excluded = new Set((Array.isArray(excludeKeys) ? excludeKeys : [excludeKeys])
+        .map(key => String(key ?? '').trim().toLowerCase())
+        .filter(Boolean));
+    const colors = [];
+    for (const [key, entry] of Object.entries(characterColors)) {
+        if (!entry || excluded.has(key)) continue;
+        const color = normalizeHexColor(getBaseColor(entry), null);
+        if (color && !colors.includes(color)) colors.push(color);
+    }
+    return colors;
+}
+
+// How far a candidate sits from the nearest color already in use. Only meaningful for ranking
+// candidates that all collide; use isAssignedColorConflict to decide whether one is acceptable.
+export function assignedColorSeparation(candidateColor, reservedColors = []) {
+    const normalizedCandidate = normalizeHexColor(candidateColor, null);
+    if (!normalizedCandidate || !reservedColors.length) return Infinity;
+    return reservedColors.reduce(
+        (closest, existing) => Math.min(closest, colorDistanceOklab(existing, normalizedCandidate)),
+        Infinity
+    );
+}
+
 export function isAssignedColorConflict(candidateColor, reservedColors = []) {
     const normalizedCandidate = normalizeHexColor(candidateColor, null);
     if (!normalizedCandidate) return true;
-    return reservedColors.some(existing => existing === normalizedCandidate || colorDistance(existing, normalizedCandidate));
+    return reservedColors.some(existing => existing === normalizedCandidate
+        || colorDistanceOklab(existing, normalizedCandidate) < ASSIGNED_COLOR_MIN_DELTA_E
+        || colorDistance(existing, normalizedCandidate));
 }
 
-export function resolveUniqueAssignedColor(preferredColor, excludeKeys = []) {
+// Candidates carry the base color they were rendered from wherever that is known, so the caller
+// never has to run a lossy pass backwards to recover it. options.baseColor is the base the
+// preferred color came from.
+export function resolveUniqueAssignedColor(preferredColor, excludeKeys = [], options = {}) {
     const reservedColors = collectAssignedColors(excludeKeys);
+    const reservedBaseColors = collectAssignedBaseColors(excludeKeys);
     const normalizedPreferred = normalizeHexColor(preferredColor, null);
+    const preferredBaseColor = normalizeHexColor(options.baseColor, null);
+    const resolveBaseColor = (candidate, knownBaseColor) => knownBaseColor || deriveBaseColorFromEffectiveColor(candidate);
     if (normalizedPreferred && !isAssignedColorConflict(normalizedPreferred, reservedColors)) {
-        return { color: normalizedPreferred, remapped: false };
+        const baseColor = resolveBaseColor(normalizedPreferred, preferredBaseColor);
+        if (!isAssignedColorConflict(baseColor, reservedBaseColors)) {
+            return { color: normalizedPreferred, baseColor, remapped: false };
+        }
     }
 
-    const candidates = [];
-    if (normalizedPreferred) {
-        const [h, s, l] = hexToHsl(normalizedPreferred);
+    // Replacement candidates are built in base space and rendered to be tested. Building them in
+    // rendered space instead lets the search settle on a color no base can reproduce, and the
+    // entry's two halves then disagree the next time effective colors are synchronized.
+    const candidateBaseColors = [];
+    const variantBaseColor = preferredBaseColor
+        || (normalizedPreferred ? deriveBaseColorFromEffectiveColor(normalizedPreferred) : null);
+    if (variantBaseColor) {
+        const [h, s, l] = hexToHsl(variantBaseColor);
         const { minLightness, maxLightness } = getThemeLightnessBounds();
         const lightVariants = [
             l,
@@ -1593,32 +1696,64 @@ export function resolveUniqueAssignedColor(preferredColor, excludeKeys = []) {
         const hueOffsets = [30, -30, 60, -60, 90, -90, 120, -120, 150, -150, 180];
         for (const hueOffset of hueOffsets) {
             for (const lightness of lightVariants) {
-                candidates.push(hslToHex(
+                candidateBaseColors.push(hslToHex(
                     (h + hueOffset + 360) % 360,
-                    Math.max(35, Math.min(100, s)),
-                    Math.max(minLightness, Math.min(maxLightness, Math.round(lightness)))
+                    // A palette with no color in it stays that way. Flooring saturation here
+                    // turns a deliberately grey palette into brown the moment the ladder runs
+                    // out of slots.
+                    s <= 0 ? 0 : Math.max(35, Math.min(100, s)),
+                    Math.max(MIN_BASE_LIGHTNESS, Math.min(MAX_BASE_LIGHTNESS, Math.round(lightness)))
                 ));
             }
+        }
+        // Rotating the hue does nothing to a color that has none, so a greyscale palette has
+        // only lightness left to tell characters apart. Sweeping the band keeps its eighth grey
+        // from coming back as a repeat of its third.
+        for (let lightness = MIN_BASE_LIGHTNESS; lightness <= MAX_BASE_LIGHTNESS; lightness += 5) {
+            candidateBaseColors.push(hslToHex(h, s, lightness));
         }
     }
 
     for (let i = 0; i < 24; i++) {
-        const seededCandidate = applyThemeReadabilityAndBrightness(getNextColor());
-        const [seedH, seedS, seedL] = hexToHsl(seededCandidate);
-        candidates.push(seededCandidate);
-        candidates.push(hslToHex((seedH + ((i + 1) * 17)) % 360, seedS, seedL));
+        const seededBaseColor = getNextColor();
+        const [seedH, seedS, seedL] = hexToHsl(seededBaseColor);
+        candidateBaseColors.push(seededBaseColor);
+        candidateBaseColors.push(hslToHex((seedH + ((i + 1) * 17)) % 360, seedS, seedL));
     }
 
-    for (const candidate of candidates) {
-        const normalizedCandidate = ensureReadableContrast(normalizeHexColor(candidate, null));
-        if (!normalizedCandidate) continue;
-        if (!isAssignedColorConflict(normalizedCandidate, reservedColors)) {
-            return { color: normalizedCandidate, remapped: true };
+    let widestApart = null;
+    for (const candidateBaseColor of candidateBaseColors) {
+        const rendered = applyThemeReadabilityAndBrightness(candidateBaseColor);
+        if (!isAssignedColorConflict(rendered, reservedColors)
+            && !isAssignedColorConflict(candidateBaseColor, reservedBaseColors)) {
+            return { color: rendered, baseColor: candidateBaseColor, remapped: true };
+        }
+        // Once the cast outgrows the palette every candidate collides with something. Keep the
+        // one that sits furthest from what is already on screen, so the last resort is the best
+        // separation available rather than an unchecked draw. An exact repeat is never it: two
+        // characters sharing a color outright is worse than two that merely look alike.
+        if (reservedColors.includes(rendered) || reservedBaseColors.includes(candidateBaseColor)) continue;
+        const separation = Math.min(
+            assignedColorSeparation(rendered, reservedColors),
+            assignedColorSeparation(candidateBaseColor, reservedBaseColors)
+        );
+        if (!widestApart || separation > widestApart.separation) {
+            widestApart = { color: rendered, baseColor: candidateBaseColor, separation };
         }
     }
 
-    const fallback = normalizeHexColor(applyThemeReadabilityAndBrightness(getNextColor()), normalizedPreferred || '#888888');
-    return { color: fallback, remapped: fallback !== normalizedPreferred };
+    if (widestApart) {
+        return { color: widestApart.color, baseColor: widestApart.baseColor, remapped: widestApart.color !== normalizedPreferred };
+    }
+
+    const fallbackBaseColor = getNextColor();
+    const rendered = applyThemeReadabilityAndBrightness(fallbackBaseColor);
+    const fallback = normalizeHexColor(rendered, normalizedPreferred || '#888888');
+    return {
+        color: fallback,
+        baseColor: resolveBaseColor(fallback, fallback === rendered ? fallbackBaseColor : null),
+        remapped: fallback !== normalizedPreferred,
+    };
 }
 
 // Phase 2B: Prefer characterId over avatar, use ?? for 0-safety
@@ -1636,12 +1771,16 @@ export function buildCharacterEntry(name, options = {}) {
     const preferredAssignedColor = colorMode === 'effective'
         ? normalizeHexColor(normalizedSourceColor, applyThemeReadabilityAndBrightness(fallbackBaseColor))
         : applyThemeReadabilityAndBrightness(normalizedSourceColor || fallbackBaseColor);
-    const { color: assignedColor, remapped } = options.avoidConflicts === false
-        ? { color: normalizeHexColor(preferredAssignedColor, '#888888'), remapped: false }
-        : resolveUniqueAssignedColor(preferredAssignedColor, [key]);
-    const baseColor = colorMode === 'base' && normalizedSourceColor && !remapped
-        ? normalizedSourceColor
-        : deriveBaseColorFromEffectiveColor(assignedColor);
+    // The base the preferred color was rendered from, when it is known. Only an effective color
+    // handed in from outside leaves it unknown.
+    const preferredBaseColor = colorMode === 'effective'
+        ? (normalizedSourceColor ? null : fallbackBaseColor)
+        : (normalizedSourceColor || fallbackBaseColor);
+    const assignment = options.avoidConflicts === false
+        ? { color: normalizeHexColor(preferredAssignedColor, '#888888'), baseColor: preferredBaseColor, remapped: false }
+        : resolveUniqueAssignedColor(preferredAssignedColor, [key], { baseColor: preferredBaseColor });
+    const { color: assignedColor, remapped } = assignment;
+    const baseColor = normalizeHexColor(assignment.baseColor, deriveBaseColorFromEffectiveColor(assignedColor));
     const suppliedGradient = synchronizeGradientEffectiveColors(normalizeGradient(options.gradient), applyThemeReadabilityAndBrightness);
 
     const origin = String(options.origin ?? 'runtime').trim().toLowerCase();

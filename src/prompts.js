@@ -1,6 +1,6 @@
 // prompts.js - extracted from index.js (mechanical split)
 import { resolveCharacterKeyByNameOrAlias } from './color-blocks.js';
-import { applyThemeReadabilityAndBrightness, getBrightnessOffset, getCustomPaletteMeta, getCustomPalettes, getEntryEffectiveColor, getThemeLightnessBounds } from './palettes.js';
+import { applyThemeReadabilityAndBrightness, getBrightnessOffset, getBrightnessTargetLightnessRange, getCustomPaletteMeta, getCustomPalettes, getEntryEffectiveColor, getThemeLightnessBounds } from './palettes.js';
 import { getNarratorVisual } from './narrator-style.js';
 import { escapeHtml, extension_prompt_roles, extension_prompt_types, setExtensionPrompt } from './st-api.js';
 import { MODULE_NAME, characterColors, isDomEngine, settings } from './state.js';
@@ -234,7 +234,11 @@ export function buildMinimalPromptInstruction() {
             : `- Use readable colors for a light background (${minLightness}-${maxLightness}% lightness).`
     );
     if (brightnessOffset !== 0) {
-        parts.push(`- New-character color bias: ${brightnessOffset > 0 ? '+' : ''}${brightnessOffset}% lightness.`);
+        // The raw slider value used to be handed over as a lightness bias, and a large one read
+        // as "pick white". State the band the colors land in, and that hues still have to be
+        // told apart once they get there.
+        const biased = getBrightnessTargetLightnessRange();
+        parts.push(`- New-character color bias: keep lightness within ${biased.minLightness}-${biased.maxLightness}% and saturation high enough that hues stay distinct.`);
     }
 
     const customPalettePrompt = buildCustomPalettePrompt();
@@ -275,7 +279,11 @@ export function buildDomStealthColorsInstruction() {
             : `- Use light-background colors (${minLightness}-${maxLightness}% lightness) when choosing new colors.`
     );
     if (brightnessOffset !== 0) {
-        parts.push(`- New-character color bias: ${brightnessOffset > 0 ? '+' : ''}${brightnessOffset}% lightness.`);
+        // The raw slider value used to be handed over as a lightness bias, and a large one read
+        // as "pick white". State the band the colors land in, and that hues still have to be
+        // told apart once they get there.
+        const biased = getBrightnessTargetLightnessRange();
+        parts.push(`- New-character color bias: keep lightness within ${biased.minLightness}-${biased.maxLightness}% and saturation high enough that hues stay distinct.`);
     }
     const customPalettePrompt = buildCustomPalettePrompt();
     if (customPalettePrompt) {

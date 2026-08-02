@@ -84,6 +84,31 @@ test('storage normalization preserves canonical collisions and clears blank lega
     assert.match(storageSource, /mappedGroup \|\| migrateLegacyRegistryIdentityName\(entry\.group, 80, 'Legacy group'\)/);
 });
 
+// Entries written while the brightness slider was near its limit had their base color reduced to
+// pure black, taking hue and saturation with it. The rendered color beside it survived, so the
+// repair has to read that before anything re-derives or synchronizes it away.
+test('flattened base colors are repaired from the surviving rendered color', () => {
+    const repair = storageSource.match(/function repairFlattenedBaseColor\(entry\)[\s\S]*?\n}/)?.[0];
+    assert.ok(repair, 'missing repairFlattenedBaseColor');
+
+    // The guard is the gate. It can only be true for a base the old arithmetic flattened, and
+    // it is false forever afterwards, so the repair needs no schema bump to stay one-shot.
+    assert.match(repair, /if \(baseColor !== '#000000' && baseColor !== '#ffffff'\) return false/);
+    assert.match(repair, /if \(saturation < REPAIRABLE_MIN_SATURATION\) return false/);
+
+    // Inverting the brightness pass would return the same washed-out lightness, so the repair
+    // re-homes the color instead, and refreshes the rendering so the change is visible.
+    assert.doesNotMatch(repair, /deriveBaseColorFromEffectiveColor/);
+    assert.match(repair, /getRepairedBaseLightnessWindow\(\)/);
+    assert.match(repair, /entry\.color = applyThemeReadabilityAndBrightness\(entry\.baseColor\)/);
+
+    // Ordering: the repair runs before the branch that would otherwise keep the flattened base.
+    assert.match(
+        storageSource,
+        /if \(!needsBaseColorMigration && repairFlattenedBaseColor\(entry\)\) changed = true;\s*const normalizedColor = normalizeHexColor\(entry\.color, null\);/
+    );
+});
+
 test('storage identity migration is schema-versioned before strict normalization', () => {
     assert.equal(COLOR_SCHEMA_VERSION, 9);
     assert.match(storageSource, /version < COLOR_SCHEMA_VERSION\s*\? migrateLegacyAutoSyncRecord\(source\)/);

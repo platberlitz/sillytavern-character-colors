@@ -8,14 +8,14 @@ import { createHistorySnapshot, parseHistorySnapshot, saveHistory, showUndoToast
 import { analyzeJsonSource } from './import-codec.js';
 import { applyLiveColorChangesFromSnapshot, captureEffectiveColorSnapshot, commit } from './live-colors.js';
 import { normalizeNarratorStyle, setNarratorStyle } from './narrator-style.js';
-import { CUSTOM_PALETTE_KEY, CUSTOM_PALETTE_META_KEY, applyThemeReadabilityAndBrightness, buildCharacterEntry, deriveBaseColorFromEffectiveColor, getBaseColor, getPersonaName, invalidateThemeCache, normalizeCustomPalettes, syncAllEffectiveColors } from './palettes.js';
+import { CUSTOM_PALETTE_KEY, CUSTOM_PALETTE_META_KEY, applyThemeReadabilityAndBrightness, buildCharacterEntry, deriveBaseColorFromEffectiveColor, getBaseColor, getPersonaName, getRepairedBaseLightnessWindow, invalidateThemeCache, normalizeCustomPalettes, syncAllEffectiveColors } from './palettes.js';
 import { injectPrompt } from './prompts.js';
 import { extension_settings, getCharacters, getContext, getRequestHeaders, saveCharacterDebounced, saveMetadata, saveSettings, saveSettingsDebounced } from './st-api.js';
 import { ACTIVE_SETTING_KEYS, AUTO_SYNC_SAVE_TIMEOUT_MS, COLOR_SCHEMA_VERSION, COLOR_STORAGE_SCOPES, DEFAULT_COLOR_STORAGE_SCOPE, GLOBAL_SETTINGS_V2_KEY, GLOBAL_SETTINGS_V2_KEYS, GLOBAL_VISUAL_KEYS, LEGACY_AUTO_SYNC_ENABLED_KEY, LEGACY_GLOBAL_SETTINGS_KEY, LEGEND_POSITION_KEY, MODULE_NAME, PRESETS_KEY, TOGGLE_SETTING_DEFAULTS, autoSyncEnabled, autoSyncInterval, autoSyncLastTimestamp, autoSyncLastWriterId, autoSyncPendingRecord, autoSyncSaveTimeout, autoSyncSequence, autoSyncStatusError, characterColors, colorHistory, createLatestRequestGate, expandedCharacterRows, getAutoSyncRecordDisposition, groupProfiles, historyIndex, lastCharKey, lastProcessedMessageSignature, preserveLocalRemoteFontConsent, selectedCharacterKeys, setAutoSyncEnabled, setAutoSyncInterval, setAutoSyncLastTimestamp, setAutoSyncLastWriterId, setAutoSyncPendingRecord, setAutoSyncSaveTimeout, setAutoSyncSequence, setAutoSyncStatusError, setCharacterColors, setColorHistory, setExpandedCharacterRows, setGroupProfiles, setHistoryIndex, setLastCharKey, setLastProcessedMessageSignature, setSwapMode, settings, swapMode } from './state.js';
 import { AESTHETIC_APPEARANCE_KEYS, StylePackError, analyzeStylePackConflicts, buildStylePackInstallationPlan, flattenStylePackAssignmentPresets } from './style-packs.js';
 import { analyzeStylePackEnvelopeSource, digestStylePackEnvelope, normalizeStylePackEnvelope } from './style-pack-adapter.js';
 import { refreshGradientPresetControls, syncUIWithSettings, updateCharList } from './ui.js';
-import { normalizeBoolean, normalizeCharacterColors, normalizeCharacterEntry, normalizeEntryGradientGenerator, normalizeHexColor, toast } from './utils.js';
+import { hexToHsl, hslToHex, normalizeBoolean, normalizeCharacterColors, normalizeCharacterEntry, normalizeEntryGradientGenerator, normalizeHexColor, toast } from './utils.js';
 import { normalizeAttributionVerifyPasses } from './verify-consensus.js';
 
 const ORDINARY_IMPORT_LIMITS = Object.freeze({
@@ -2241,6 +2241,36 @@ export function saveData(options = {}) {
     }
 }
 
+// A large brightness offset used to be subtracted straight back out of the effective color, which
+// bottomed out at pure black or white and took the hue and saturation with it. The rendered color
+// beside it survived intact, so hue and saturation can be read back off that.
+//
+// Not gated on a schema version: the guard is its own gate. A base color is only ever exactly
+// black or white beside a colored rendering because of that arithmetic, and once repaired the
+// condition can never be true again. Bumping the schema instead would re-arm every unrelated
+// legacy migration for every existing user.
+const REPAIRABLE_MIN_SATURATION = 4;
+
+function repairFlattenedBaseColor(entry) {
+    const baseColor = normalizeHexColor(entry.baseColor, null);
+    if (baseColor !== '#000000' && baseColor !== '#ffffff') return false;
+    const effectiveColor = normalizeHexColor(entry.color, null);
+    if (!effectiveColor || effectiveColor === baseColor) return false;
+    const [hue, saturation, lightness] = hexToHsl(effectiveColor);
+    // A grey rendering has no hue left to recover; leave it for the user to recolor.
+    if (saturation < REPAIRABLE_MIN_SATURATION) return false;
+    // Inverting the brightness pass would hand back the same washed-out lightness it was
+    // flattened onto, leaving the character exactly as indistinct as it was. The lightness is
+    // genuinely gone, so re-home it somewhere the color can be seen again.
+    const { floor, ceiling } = getRepairedBaseLightnessWindow();
+    entry.baseColor = hslToHex(hue, saturation, Math.max(floor, Math.min(ceiling, lightness)));
+    if (normalizeHexColor(entry.baseColor, null) === baseColor) return false;
+    // Refresh the rendering too, or the pair stays inconsistent until some later save and the
+    // repair is invisible.
+    entry.color = applyThemeReadabilityAndBrightness(entry.baseColor);
+    return true;
+}
+
 export function migrateColorSchemaIfNeeded() {
     const currentVersion = Number(settings.colorSchemaVersion);
     const needsBaseColorMigration = !Number.isFinite(currentVersion) || currentVersion < 4;
@@ -2250,6 +2280,10 @@ export function migrateColorSchemaIfNeeded() {
     if (previousNarratorStyle !== JSON.stringify(settings.narratorStyle)) changed = true;
     for (const entry of Object.values(characterColors)) {
         if (!entry) continue;
+        // Runs before the re-derive below, which would otherwise keep the flattened base as-is,
+        // and before any effective-color synchronization, which would overwrite the only copy of
+        // the color the repair reads from.
+        if (!needsBaseColorMigration && repairFlattenedBaseColor(entry)) changed = true;
         const normalizedColor = normalizeHexColor(entry.color, null);
         if (needsBaseColorMigration) {
             if (normalizedColor) {

@@ -115,7 +115,7 @@ Adding an existing canonical name or alias reveals its current row instead of si
 ## Appearance and Automation
 
 - Select an Auto, Dark, or Light target surface and a palette for newly generated colors.
-- Adjust the current table's brightness; the value previews while dragging and applies when released.
+- Adjust the current table's brightness; the value previews while dragging and applies when released. The slider moves colors a share of the way toward the target surface's lightness limit rather than adding fixed steps, and lifts saturation as they lighten, so characters stay tellable apart at every position instead of converging on one pale tone at the top of the range.
 - Enable dialogue highlights, the floating legend, automatic recoloring after edits, or bounded remote Google Font loading. Remote font requests are off by default.
 - Bold all colored text renders every colored dialogue, narrator, and font-tag segment in bold. Per-character italic is kept, and turning it off restores each character's own text style.
 - Effective colors are adjusted against the rendered chat surface for at least 4.5:1 text contrast. Speaker metadata remains available to assistive technology without adding visible name tags to dialogue.
@@ -192,6 +192,8 @@ LLM mode supports prompt depth, system/user role, and two delivery modes:
 - **An LLM profile is unavailable**: connection profiles require a compatible SillyTavern ConnectionManagerRequestService.
 - **A selected font is not visible**: install it locally, or explicitly enable remote Google Font loading under Appearance and Automation.
 - **Gradient drift is paused**: the device's Reduce Motion preference intentionally disables it.
+- **Characters detected at a high brightness setting all look alike**: versions before 5.8.3 pushed every color onto the target surface's lightness limit and stored a black base color beside it. Loading a chat repairs those entries in place. Any character whose displayed color had already been flattened to grey has nothing left to recover from and needs recoloring by hand.
+- **A greyscale palette repeats a shade**: lightness is the only thing separating characters in a palette with no hue, and full darkening on a dark surface leaves only a few readable lightness steps for the whole cast. Ease the brightness slider back, or pick a palette with hue in it.
 - **My character card's creation date keeps resetting**: SillyTavern rewrites the card file itself every time you open or start a chat, so the file is replaced whether or not this extension is installed (`openCharacterChat` and `doNewChat` in `public/script.js` both end in `createOrEditCharacter`). This extension only writes a card when you press **Save to card**.
 - **Something is saved on every chat load**: it should not be. The extension writes settings only when a color, setting, or newly discovered character actually changes, and writes chat metadata only when a reassignment or verification verdict actually changes. Per-chat dialogue tallies are recomputed on load and are not a reason to save.
 
