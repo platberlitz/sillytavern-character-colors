@@ -1,6 +1,6 @@
 // live-colors.js - extracted from index.js (mechanical split)
 import { clearSpeakerRegexCache, colorizeMessageText, ensureCharacterEntry } from './attribution.js';
-import { collectFontColorsFromText, countFontColorStatsFromKnownColors, parseColorAssignmentsFromText, processColorBlocksInText, refreshTransientNarratorCount, resolveCharacterKeyByNameOrAlias, stripColorBlockFromElement } from './color-blocks.js';
+import { collectFontColorsFromText, countFontColorStatsFromKnownColors, parseColorAssignmentsFromText, parseNamedColorAssignmentsFromText, processColorBlocksInText, refreshTransientNarratorCount, resolveCharacterKeyByNameOrAlias, stripColorBlockFromElement } from './color-blocks.js';
 import { DOM_RETRY_REFRESH_DELAYS, decorateAllMessages, refreshMessageDom, scheduleDomRefreshSeries, scheduleDomSettleRefresh } from './dom-engine.js';
 import { scheduleCustomFontRefresh } from './fonts.js';
 import { saveHistory } from './history.js';
@@ -12,7 +12,7 @@ import { generateQuietPrompt, getContext } from './st-api.js';
 import { COLOR_STATE_SAVE_DELAY_MS, LIVE_CHAT_SAVE_DELAY_MS, attributionChatGeneration, characterColors, colorStateSaveTimer, isAutoColorizing, isColorizing, isDomEngine, isRecoloring, lastProcessedMessageSignature, liveChatSaveTimer, pendingColorStateHistory, pendingColorStateInjectPrompt, pendingColorStateSaveData, pendingColorStateUpdateList, setColorStateSaveTimer, setIsAutoColorizing, setIsColorizing, setIsRecoloring, setLastProcessedMessageSignature, setLiveChatSaveTimer, setPendingColorStateHistory, setPendingColorStateInjectPrompt, setPendingColorStateSaveData, setPendingColorStateUpdateList, setPendingLiveChatSave, settings } from './state.js';
 import { getStorageKey, saveData } from './storage.js';
 import { clearAutoColorizeIndicators, hideAutoColorizeIndicator, setColorizeButtonBusy, setRecolorButtonBusy, showAutoColorizeIndicator, updateCharList, updateLegend, updateStorageScopeStatus } from './ui.js';
-import { hashMessageText, isCompositeSpeakerLabel, normalizeHexColor, toast } from './utils.js';
+import { hashMessageText, isCompositeSpeakerLabel, isToolCallMessage, normalizeHexColor, toast } from './utils.js';
 
 let pendingAutoColorizeRetry = false;
 let chatSaveInFlight = null;
@@ -34,8 +34,12 @@ const COLORIZE_RUN_MAX_LLM_RETRIES = 1;
 // The LLM engine rewrites message text in place, so user-authored messages are normally
 // left alone. When persona coloring is switched on the user has opted into having their
 // own lines tagged, but only their own: any other user message stays untouched.
+//
+// The tool-call test has to come first: a tool-call message is not a user message, so without
+// it the !msg.is_user tier below returns true and the engine treats a JSON payload as dialogue.
 export function isColorableMessage(msg) {
     if (!msg) return false;
+    if (isToolCallMessage(msg)) return false;
     if (!msg.is_user) return true;
     if (settings.autoPersonaCharacter !== true) return false;
     const personaName = getPersonaName();
@@ -846,6 +850,102 @@ export function finalizeLLMColorizedText(rawText, responseText, narratorColor = 
         colorized: true,
         usedAssignments,
     };
+}
+
+// One-shot repair for chats damaged before isColorableMessage learned to skip tool calls.
+//
+// The LLM engine's only edits to a message are the insertion of <font color="#rrggbb"> ...
+// </font> around exact substrings and one trailing [COLORS:] line, so parseCanonicalFontMarkup
+// is that edit's exact inverse: its projection hands back every non-font byte unchanged and it
+// returns null the moment it meets a tag this extension did not write. That makes the reversal
+// provable rather than a guess, which is why nothing here uses the blunt stripFontTags and
+// stripColorBlocks helpers, and why nothing rebuilds the message from extra.tool_invocations:
+// ToolManager's formatter is a private static, it is not reachable through st-api.js, and
+// reimplementing it would rewrite bytes that were never damaged.
+export function restoreColorizedToolCallText(rawText) {
+    const parsed = parseCanonicalFontMarkup(stripLLMColorMetadata(rawText));
+    if (!parsed || !parsed.sawFont) return null;
+    return parsed.projection;
+}
+
+// A name that survives only inside a tool-call message's color block was created by the bug, not
+// by the chat. Resolved by name rather than against a hardcoded "SillyTavern System" so this
+// stays correct on hosts that label the system user differently.
+function removeUnreferencedCharacterEntries(candidateNames, chat) {
+    const referencedKeys = new Set();
+    const referencedColors = new Set();
+    for (const msg of chat) {
+        const text = msg?.mes || '';
+        if (!text) continue;
+        for (const { name } of parseNamedColorAssignmentsFromText(text)) {
+            const key = resolveCharacterKeyByNameOrAlias(name);
+            if (key) referencedKeys.add(key);
+        }
+        for (const color of collectFontColorsFromText(text)) referencedColors.add(color);
+    }
+
+    const removed = [];
+    for (const name of candidateNames) {
+        const key = resolveCharacterKeyByNameOrAlias(name);
+        const entry = key ? characterColors[key] : null;
+        // Keep is the user's explicit "protect this entry" flag. Deliberately not gated on
+        // locked: processColorPairs creates a detected entry with
+        // locked: settings.autoLockDetected !== false, which defaults to true, so a lock guard
+        // would refuse to clean up every entry the bug made.
+        if (!entry || entry.keep === true) continue;
+        if (referencedKeys.has(key)) continue;
+        if (referencedColors.has(normalizeHexColor(getEntryEffectiveColor(entry), null))) continue;
+        delete characterColors[key];
+        removed.push(key);
+    }
+    if (removed.length) clearSpeakerRegexCache();
+    return removed;
+}
+
+export function repairColorizedToolCallMessages(chat = getContext()?.chat) {
+    const report = { repairedIndices: [], removedCharacterKeys: [] };
+    if (!Array.isArray(chat) || !chat.length) return report;
+
+    const candidateNames = new Set();
+    for (let i = 0; i < chat.length; i++) {
+        const msg = chat[i];
+        if (!isToolCallMessage(msg)) continue;
+        const rawText = msg.mes || '';
+        // Cheap reject: an untouched tool-call message carries neither marker.
+        if (!/<\/font\s*>/i.test(rawText) && !/\[COLORS?:/i.test(rawText)) continue;
+        const restored = restoreColorizedToolCallText(rawText);
+        if (restored === null || restored === rawText) continue;
+
+        // Read the names off the block before it is dropped. msg.name is the host's system user,
+        // which the speaker pre-registration loops registered separately.
+        for (const { name } of parseNamedColorAssignmentsFromText(rawText)) candidateNames.add(name);
+        if (msg.name) candidateNames.add(msg.name);
+        msg.mes = restored;
+        report.repairedIndices.push(i);
+    }
+    if (!report.repairedIndices.length) return report;
+
+    report.removedCharacterKeys = removeUnreferencedCharacterEntries(candidateNames, chat);
+    return report;
+}
+
+export async function applyToolCallMessageRepair(options = {}) {
+    const chat = getContext()?.chat;
+    // Synchronous, so the registry is final before the first await and updateCharList and
+    // injectPrompt downstream of the caller both see the cleaned-up list.
+    const report = repairColorizedToolCallMessages(chat);
+    const count = report.repairedIndices.length;
+    if (!count) {
+        if (!options.silent) toast.info('No tool-call messages needed repair.');
+        return report;
+    }
+
+    commit();
+    queueChatSave();
+    console.info('[Dialogue Colors] Restored tool-call messages this extension had colorized.', report);
+    toast.info(`Restored ${count} tool-call message${count === 1 ? '' : 's'} this extension had colorized.`);
+    for (const index of report.repairedIndices) await refreshMessageDom(index, chat[index]);
+    return report;
 }
 
 export function shouldUseLocalColorizeFallback(llmResult) {

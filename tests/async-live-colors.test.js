@@ -5,6 +5,14 @@ import test from 'node:test';
 const source = await readFile(new URL('../src/live-colors.js', import.meta.url), 'utf8');
 let moduleSequence = 0;
 
+// updateVisibleMessageColors is module-internal, so it cannot be stubbed through the import
+// rewrite below. It only repaints already-rendered font tags; finding nothing is the right
+// answer here, where the assertions are about the chat array rather than the DOM.
+globalThis.document ??= {
+    querySelector: () => null,
+    querySelectorAll: () => [],
+};
+
 function delay(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -41,6 +49,9 @@ async function loadLiveColorsModule(overrides = {}) {
         },
         getEntryEffectiveColor: entry => entry?.color,
         classifyLlmRequestError: error => ({ category: 'unknown', retryable: false, status: error?.status ?? null }),
+        // Mirrors the real predicate rather than stubbing it out, so the write paths under test
+        // skip tool-call messages here exactly as they do in the host.
+        isToolCallMessage: msg => Array.isArray(msg?.extra?.tool_invocations),
         ...overrides,
     };
     const importedNames = [...names].join(', ');
@@ -223,4 +234,43 @@ test('bulk unchanged LLM output uses local fallback without a second request', a
     await live.colorizeMessages('all');
     assert.equal(requests, 1);
     assert.equal(localFallbacks, 1);
+});
+
+function toolCallMessage(mes) {
+    return { name: 'SillyTavern System', is_system: true, is_user: false, mes, extra: { tool_invocations: [{ name: 'DiceRoll' }] } };
+}
+
+test('a color remap skips tool-call messages but still rewrites ordinary ones', async () => {
+    const toolText = '<details><summary>Tool calls: DiceRoll</summary><font color="#aaaaaa">"result"</font></details>';
+    const chat = [
+        { name: 'Alice', is_user: false, extra: {}, mes: '<font color="#aaaaaa">"Hello."</font>' },
+        toolCallMessage(toolText),
+    ];
+    let saves = 0;
+    const live = await loadLiveColorsModule({
+        getContext: () => chatContext('chat-a', chat, async () => { saves++; return true; }),
+        characterColors: {},
+        updateVisibleMessageColors() {},
+    });
+
+    assert.equal(live.applyLiveColorReplacements({ '#aaaaaa': '#bbbbbb' }), 1);
+    assert.equal(chat[0].mes, '<font color="#bbbbbb">"Hello."</font>');
+    assert.equal(chat[1].mes, toolText, 'the tool-call payload must be byte-identical');
+    await waitFor(() => saves === 1);
+});
+
+test('a chat of only tool-call messages is never saved', async () => {
+    const toolText = '<details><summary>Tool calls: DiceRoll</summary><font color="#aaaaaa">"result"</font></details>';
+    const chat = [toolCallMessage(toolText)];
+    let saves = 0;
+    const live = await loadLiveColorsModule({
+        getContext: () => chatContext('chat-a', chat, async () => { saves++; return true; }),
+        characterColors: {},
+        updateVisibleMessageColors() {},
+    });
+
+    assert.equal(live.applyLiveColorReplacements({ '#aaaaaa': '#bbbbbb' }), 0);
+    assert.equal(chat[0].mes, toolText);
+    await delay(40);
+    assert.equal(saves, 0);
 });

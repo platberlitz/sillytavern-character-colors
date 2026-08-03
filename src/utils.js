@@ -198,6 +198,20 @@ export function stripColorBlocks(text) {
     return String(text ?? '').replace(/\n?\[COLORS?:[^\]]*\]/gi, '');
 }
 
+// SillyTavern's tool calling posts one synthetic message per round of invocations: a <details>
+// block wrapping a <pre><code class="language-json"> dump of the calls and their results. It is
+// not prose. Its straight quotes are JSON string delimiters, its speaker is the host's system
+// user, and the host renders it without converting quotes to <q> at all (messageFormatting in
+// public/script.js gates the quote pass on !isSystem).
+//
+// Recognised the way SillyTavern recognises it itself: the coreChat filter in public/script.js
+// reads Array.isArray(x.extra?.tool_invocations). Deliberately not recognised by is_system --
+// /hide sets that on ordinary character messages (hideChatMessageRange in public/scripts/chats.js),
+// which stay legitimately colorable and whose saved tags still have to follow a color change.
+export function isToolCallMessage(msg) {
+    return Array.isArray(msg?.extra?.tool_invocations);
+}
+
 export function getMessageElementByIndex(messageIndex) {
     const index = Number(messageIndex);
     if (!Number.isFinite(index) || index < 0) return null;

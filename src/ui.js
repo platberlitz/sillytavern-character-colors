@@ -11,7 +11,7 @@ import { getColorVisionSimulationForTarget, getGradientRenderState, getVisualRen
 import { BUILTIN_GRADIENT_PRESETS, DEFAULT_GRADIENT_ANGLE, DEFAULT_GRADIENT_DURATION, DEFAULT_GRADIENT_POSITION, GRADIENT_TYPES, MAX_GRADIENT_STOPS, cloneGradient, getBuiltInGradientPreset, getGradientSignature, normalizeGradient, normalizeGradientPresetName } from './gradients.js';
 import { GROUP_PROFILE_AUTOMATION_KEYS, deleteGroupProfile, getGroupProfile, normalizeGroupKey, normalizeGroupName, normalizeRegistryIdentity, normalizeRegistryIdentityName, renameGroupProfile, setGroupProfile } from './group-profiles.js';
 import { createRestoreSnapshot, redo, saveHistory, showUndoToast, undo } from './history.js';
-import { applyFastColorUiUpdates, applyLiveColorChangesFromSnapshot, captureEffectiveColorSnapshot, colorizeMessages, commit, flushChatSave, flushColorStateSave, queueColorStateSave, recolorAllMessages, repaintDomAfterCharacterDataChange } from './live-colors.js';
+import { applyFastColorUiUpdates, applyLiveColorChangesFromSnapshot, applyToolCallMessageRepair, captureEffectiveColorSnapshot, colorizeMessages, commit, flushChatSave, flushColorStateSave, queueColorStateSave, recolorAllMessages, repaintDomAfterCharacterDataChange } from './live-colors.js';
 import { registerKeyboardShortcuts } from './main.js';
 import { getTransientNarratorCount, getNarratorVisual, normalizeNarratorStyle, setNarratorStyle } from './narrator-style.js';
 import { applyGradientPreset, applyThemeReadabilityAndBrightness, buildCharacterEntry, collectDuplicateColorKeys, createGradientRandomMasterSeed, createRandomGradient, deleteColorPreset, deleteCustomPalette, detectTheme, flipColorsForTheme, generateCustomPaletteFromWords, getBaseColor, getCustomPaletteMeta, getCustomPalettes, getEntryEffectiveColor, getNextColor, getPerceptualConflictReport, getPersonaName, getPresets, invalidateThemeCache, loadColorPreset, refreshPaletteDropdown, refreshPresetDropdown, regenerateAllColors, regenerateAllGradients, removeCharacterKeys, repairPerceptualConflicts, resolveColorPresetName, saveColorPreset, saveCustomPalette, setEntryFromBaseColor, setEntryGradient, showHarmonyPopup, suggestColorForName, swapEntryColorData, syncAllEffectiveColors } from './palettes.js';
@@ -3961,6 +3961,7 @@ function buildSettingsPanelHtml() {
                     <div class="dc-action-block dc-dom-only" style="display:none;"><span><strong>Verify attribution</strong><small>Ask the selected LLM profile to review local assignments.</small></span><div class="dc-action-control"><select id="dc-verify-target" class="text_pole" aria-label="Verification target"><option value="latest">Latest message</option><option value="visible">Visible messages</option></select><button id="dc-verify-attr" class="menu_button dc-primary-button">Verify</button></div></div>
                     <div class="dc-action-block dc-dom-only" style="display:none;"><span><strong>Review suggestions</strong><small>Review verifier changes one dialogue segment at a time.</small></span><div class="dc-action-control"><button id="dc-review-attr" class="menu_button">Review suggestions (0)</button><span id="dc-review-attr-status" class="dc-visually-hidden" role="status" aria-live="polite">0 review suggestions.</span></div></div>
                     <div class="dc-action-block"><span><strong class="dc-llm-only">Recolor saved tags</strong><strong class="dc-dom-only" style="display:none;">Refresh local colors</strong><small class="dc-llm-only">Rewrite existing color tags across the entire chat.</small><small class="dc-dom-only" style="display:none;">Reapply current styles to rendered dialogue.</small></span><button id="dc-recolor" class="menu_button dc-primary-button">Recolor entire chat</button></div>
+                    <div class="dc-action-block"><span><strong>Repair tool calls</strong><small>Undo color tags older versions added to tool-call messages.</small></span><button id="dc-repair-tool-calls" class="menu_button dc-primary-button">Repair</button></div>
                     <div class="dc-action-block"><span><strong>List tools</strong><small>Inspect activity or clear every unpinned entry.</small></span><div class="dc-action-control"><button id="dc-stats" class="menu_button">Statistics</button><button id="dc-clear" class="menu_button dc-danger-button">Clear unpinned</button></div></div>
                 </div>
             </details>
@@ -4715,6 +4716,20 @@ function bindSettingsPanelControls($) {
         $(id).onchange = () => updateBulkToolbar();
     });
     $('dc-stats').onclick = showStatsPopup;
+    // Deliberately not dc-llm-only: a chat damaged while the LLM engine was selected stays
+    // damaged after switching to the DOM engine, so the button has to be reachable in both.
+    $('dc-repair-tool-calls').onclick = async e => {
+        const button = e.currentTarget;
+        button.disabled = true;
+        try {
+            await applyToolCallMessageRepair();
+        } catch (error) {
+            console.error('[Dialogue Colors] Tool-call repair failed:', error);
+            toast.error('Could not repair tool-call messages. See the browser console for details.');
+        } finally {
+            button.disabled = false;
+        }
+    };
     $('dc-recolor').onclick = async e => {
         if (isDomEngine()) { scheduleDomRefreshSeries(0); scheduleCustomFontRefresh(0); return; }
         const confirmed = await confirmReviewedAction({

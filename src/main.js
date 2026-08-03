@@ -5,7 +5,7 @@ import { setupContextMenu } from './context-menu.js';
 import { DOM_RETRY_REFRESH_DELAYS, POST_MUTATION_DOM_REPAIR_DELAY_MS, clearDecoratedWatchers, clearDialogueCountCache, clearSessionAttributionVerifications, decorateAllMessages, scheduleDomRefreshSeries, scheduleDomSettleRefresh, scheduleMessageDomRepair, setupChatObserver, setupChatRootObserver, startDomHealthCheck, stopDomHealthCheck } from './dom-engine.js';
 import { scheduleCustomFontRefresh } from './fonts.js';
 import { redo, undo } from './history.js';
-import { commit, onNewMessage, resumePendingChatSave } from './live-colors.js';
+import { applyToolCallMessageRepair, commit, onNewMessage, resumePendingChatSave } from './live-colors.js';
 import { consumeMainAiQuietGenerationEnd, populateProfileDropdown } from './llm.js';
 import { detectTheme, getReadableSurfaceSignature, invalidateThemeCache } from './palettes.js';
 import { buildMinimalPromptInstruction, injectPrompt } from './prompts.js';
@@ -86,6 +86,12 @@ export function handleChatChanged() {
         setLastProcessedMessageSignature('');
         syncUIWithSettings();
     }
+    // Undo the damage older versions did to tool-call messages, before stripColorBlocksFromDisplay
+    // hides the block it looks for and before the deferred scanAllMessages below re-ingests it.
+    // Not gated on a setting: the guard in isColorableMessage is its own gate, so once a chat is
+    // repaired the condition can never be true again, and this writes only when it changed something.
+    void applyToolCallMessageRepair({ silent: true })
+        .catch(error => console.error('[Dialogue Colors] Tool-call repair failed:', error));
     if (settings.autoPersonaCharacter === true) ensurePersonaCharacter({ silent: true });
     updateCharList();
     injectPrompt();

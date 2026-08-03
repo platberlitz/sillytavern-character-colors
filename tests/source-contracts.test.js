@@ -604,3 +604,53 @@ test('assigned colors are kept apart perceptually, not just by hue and lightness
     assert.match(resolve, /widestApart/);
     assert.match(resolve, /separation > widestApart\.separation/);
 });
+
+test('the LLM engine never edits or registers a tool-call message', () => {
+    const predicate = functionSection(sources['utils.js'], 'isToolCallMessage');
+    const colorable = functionSection(sources['live-colors.js'], 'isColorableMessage');
+
+    // SillyTavern's own coreChat filter reads the invocation array, not is_system.
+    assert.match(predicate, /Array\.isArray\(msg\?\.extra\?\.tool_invocations\)/);
+
+    // Ordering is the contract: the is_user tier below returns true for any host message, and a
+    // tool call is a host message. is_system must not appear here -- /hide sets it on ordinary
+    // character messages whose saved tags still have to follow a color change.
+    assert.match(
+        colorable,
+        /if \(!msg\) return false;\s*if \(isToolCallMessage\(msg\)\) return false;\s*if \(!msg\.is_user\) return true;/s,
+    );
+    assert.doesNotMatch(colorable, /is_system/);
+
+    for (const site of ['applyLiveColorReplacements', 'recolorAllMessages', 'colorizeMessages', 'onNewMessage']) {
+        assert.match(
+            functionSection(sources['live-colors.js'], site),
+            /isColorableMessage\(/,
+            `${site} must keep routing every write and registration through the one predicate`,
+        );
+    }
+});
+
+test('the tool-call repair reverses only this extension own canonical markup', () => {
+    const restore = functionSection(sources['live-colors.js'], 'restoreColorizedToolCallText');
+    const sweep = functionSection(sources['live-colors.js'], 'removeUnreferencedCharacterEntries');
+    const repair = functionSection(sources['live-colors.js'], 'repairColorizedToolCallMessages');
+    const chatChanged = functionSection(sources['main.js'], 'handleChatChanged');
+
+    // parseCanonicalFontMarkup returns null on anything this extension did not write, so the
+    // reversal declines rather than guessing. Neither blunt stripper may creep back in.
+    assert.match(restore, /parseCanonicalFontMarkup\(stripLLMColorMetadata\(/);
+    assert.match(restore, /return null/);
+    assert.doesNotMatch(restore, /stripFontTags|stripColorBlocks\(/);
+    assert.match(repair, /isToolCallMessage\(msg\)/);
+
+    // Keep is the only protection: processColorPairs creates detected entries locked by
+    // default, so a lock guard would refuse to clean up every entry the bug made.
+    assert.match(sweep, /entry\.keep === true/);
+    assert.doesNotMatch(sweep, /entry\.locked/);
+
+    // The repair must sit behind the disabled bail, and ahead of the display strip that would
+    // otherwise hide the evidence it looks for.
+    assert.ok(chatChanged.includes('applyToolCallMessageRepair('), 'handleChatChanged must run the repair');
+    assert.ok(chatChanged.indexOf('if (!settings.enabled)') < chatChanged.indexOf('applyToolCallMessageRepair('));
+    assert.ok(chatChanged.indexOf('applyToolCallMessageRepair(') < chatChanged.indexOf('stripColorBlocksFromDisplay()'));
+});
