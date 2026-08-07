@@ -1,5 +1,5 @@
 // live-colors.js - extracted from index.js (mechanical split)
-import { clearSpeakerRegexCache, colorizeMessageText, ensureCharacterEntry } from './attribution.js';
+import { attributeDialogueSegments, clearSpeakerRegexCache, colorizeMessageText, ensureCharacterEntry } from './attribution.js';
 import { collectFontColorsFromText, countFontColorStatsFromKnownColors, parseColorAssignmentsFromText, parseNamedColorAssignmentsFromText, processColorBlocksInText, refreshTransientNarratorCount, resolveCharacterKeyByNameOrAlias, stripColorBlockFromElement } from './color-blocks.js';
 import { DOM_RETRY_REFRESH_DELAYS, decorateAllMessages, refreshMessageDom, scheduleDomRefreshSeries, scheduleDomSettleRefresh } from './dom-engine.js';
 import { scheduleCustomFontRefresh } from './fonts.js';
@@ -689,6 +689,7 @@ function unwrapLLMColorizeResponse(text) {
 function parseCanonicalFontMarkup(text) {
     const source = String(text ?? '');
     const colors = [];
+    const spans = [];
     let canonicalText = '';
     let projection = '';
     let openColor = null;
@@ -729,6 +730,7 @@ function parseCanonicalFontMarkup(text) {
             } else {
                 if (!openColor || tag !== '</font>' || projection.length === openProjectionLength) return null;
                 canonicalText += '</font>';
+                spans.push({ start: openProjectionLength, end: projection.length, color: openColor });
                 openColor = null;
             }
 
@@ -744,7 +746,7 @@ function parseCanonicalFontMarkup(text) {
     }
 
     if (openColor) return null;
-    return { canonicalText, projection, colors, sawFont };
+    return { canonicalText, projection, colors, spans, sawFont };
 }
 
 function getSafeMetadataName(value) {
@@ -849,6 +851,61 @@ export function finalizeLLMColorizedText(rawText, responseText, narratorColor = 
         changed: finalText !== rawText,
         colorized: true,
         usedAssignments,
+    };
+}
+
+// Completes a message the model colored only partially: dialogue the existing font
+// spans already cover is left byte-identical, the rest is attributed and wrapped
+// locally. Declines non-canonical markup (never guess) and fully uncolored messages
+// (those belong to the autoColorize path).
+export function fillUncoloredDialogueGaps(rawText, messageSpeakerName = '', options = {}) {
+    const source = String(rawText ?? '');
+    const noChange = { updatedText: source, changed: false, createdCharacters: false, filledCount: 0 };
+    const parsed = parseCanonicalFontMarkup(stripLLMColorMetadata(source));
+    if (!parsed || !parsed.sawFont) return noChange;
+
+    // Attribution runs on the projection, not the raw text: font attribute quotes
+    // (color="#...") would otherwise match as dialogue, and alternation should read
+    // the whole clean text, covered segments included.
+    const { segments, createdCharacters } = attributeDialogueSegments(parsed.projection, messageSpeakerName, options);
+    const gaps = segments.filter(seg => seg.assignment
+        && !parsed.spans.some(span => seg.start < span.end && seg.end > span.start));
+    if (!gaps.length) return { ...noChange, createdCharacters };
+
+    // Existing spans regenerate byte-identically (the parser accepts only the
+    // canonical form), so one back-to-front insertion pass rebuilds everything.
+    const inserts = [
+        ...parsed.spans,
+        ...gaps.map(seg => ({ start: seg.start, end: seg.end, color: seg.assignment.color })),
+    ].sort((a, b) => b.start - a.start);
+    let updatedText = parsed.projection;
+    for (const { start, end, color } of inserts) {
+        updatedText = `${updatedText.slice(0, start)}<font color="${color}">${updatedText.slice(start, end)}</font>${updatedText.slice(end)}`;
+    }
+
+    const narratorColor = getNarratorVisual(settings, applyThemeReadabilityAndBrightness)?.color || null;
+    const metadata = formatValidatedColorMetadata(getValidatedAssignmentsForColors(parseCanonicalFontMarkup(updatedText)?.colors, narratorColor));
+    if (metadata && !/\[COLORS?:([^\]]*)\]/i.test(updatedText)) updatedText += `\n[COLORS:${metadata}]`;
+    return {
+        updatedText,
+        changed: updatedText !== source,
+        createdCharacters,
+        filledCount: gaps.length,
+    };
+}
+
+// Post-LLM completion: a colorized result may still have gaps the model skipped.
+function completeLLMResultGaps(result, speakerName) {
+    if (!result || result.colorized !== true) return result;
+    const completed = fillUncoloredDialogueGaps(result.updatedText, speakerName, { autoAddMessageSpeaker: true });
+    if (!completed.changed) return result;
+    return {
+        ...result,
+        updatedText: completed.updatedText,
+        changed: true,
+        createdCharacters: completed.createdCharacters || result.createdCharacters === true,
+        usedAssignments: extractUsedAssignmentsFromColorizedText(completed.updatedText,
+            getNarratorVisual(settings, applyThemeReadabilityAndBrightness)?.color || null),
     };
 }
 
@@ -1364,14 +1421,13 @@ export async function colorizeMessages(targetMode = 'all') {
         let skippedNoColor = 0;
         const updatedMessages = new Map();
         const eligibleEntries = [];
+        const partialEntries = [];
         for (let i = startIdx; i < chat.length; i++) {
             const msg = chat[i];
             if (!isColorableMessage(msg)) continue;
             const rawText = msg.mes || '';
             if (!rawText) continue;
-            const existingFontColors = collectFontColorsFromText(rawText);
-            if (existingFontColors.size > 0) continue;
-            eligibleEntries.push({
+            const entry = {
                 rawText,
                 speakerName: msg.name,
                 msgIndex: i,
@@ -1381,7 +1437,25 @@ export async function colorizeMessages(targetMode = 'all') {
                 sendDate: msg.send_date ?? null,
                 swipeId: msg.swipe_id ?? null,
                 chatGeneration: run.chatGeneration,
-            });
+            };
+            const existingFontColors = collectFontColorsFromText(rawText);
+            if (existingFontColors.size > 0) partialEntries.push(entry);
+            else eligibleEntries.push(entry);
+        }
+        // Messages the model already touched are completed locally, segment by
+        // segment — the fully-covered ones fall out as no-ops. Free, so the manual
+        // button honors its "only where dialogue is uncolored" promise regardless
+        // of the automation toggle.
+        for (const entry of partialEntries) {
+            if (!isColorizeRunCurrent(run)) return;
+            if (!isColorizeMessageCurrent(chat, entry)) continue;
+            const completion = fillUncoloredDialogueGaps(entry.rawText, entry.speakerName, { autoAddMessageSpeaker: true });
+            if (completion.createdCharacters) createdCharacters = true;
+            if (!completion.changed) continue;
+            entry.message.mes = completion.updatedText;
+            colorizedCount++;
+            updatedMessages.set(entry.msgIndex, { message: entry.message, text: completion.updatedText });
+            void queueCapturedChatSave(run.binding);
         }
         if (eligibleEntries.length > 0) {
             toast.info(`Colorizing ${eligibleEntries.length} message${eligibleEntries.length !== 1 ? 's' : ''} in batches...`, '', { timeOut: 3000 });
@@ -1452,7 +1526,7 @@ export async function colorizeMessages(targetMode = 'all') {
                 }
 
                 for (const entry of batch) {
-                    const result = resultsByIndex.get(entry.msgIndex);
+                    const result = completeLLMResultGaps(resultsByIndex.get(entry.msgIndex), entry.speakerName);
                     if (!result) {
                         fallbackEntries.push(entry);
                         if (deterministicValidationFailure || permanentRequestFailure || llmBudget.stopped) {
@@ -1468,6 +1542,7 @@ export async function colorizeMessages(targetMode = 'all') {
                         skipIndividualLlm.add(entry);
                         continue;
                     }
+                    if (result.createdCharacters) createdCharacters = true;
                     if (!result.changed) continue;
                     if (!isColorizeRunCurrent(run)) return;
                     const target = chat[entry.msgIndex];
@@ -1503,13 +1578,13 @@ export async function colorizeMessages(targetMode = 'all') {
                 }
                 if (attemptedIndividualLlm && llmResult === null) llmBudget.stopped = true;
 
-                let result = llmResult;
+                let result = completeLLMResultGaps(llmResult, entry.speakerName);
                 if (shouldUseLocalColorizeFallback(llmResult)) {
                     if (!isColorizeRunCurrent(run)
                         || !isColorizeMessageCurrent(chat, entry)) continue;
                     result = colorizeMessageText(entry.rawText, entry.speakerName, { autoAddMessageSpeaker: true });
-                    if (result.createdCharacters) createdCharacters = true;
                 }
+                if (result.createdCharacters) createdCharacters = true;
 
                 if (!result.changed) {
                     if (result.hadDialogueMatches && !result.hadResolvableSpeaker) skippedNoColor++;
@@ -1646,6 +1721,40 @@ export function onNewMessage() {
             await queueCapturedChatSave(chatBinding, { immediate: true });
         }
 
+        // The model colored some dialogue but not all of it: finish the message
+        // locally. Mutually exclusive with the auto-colorize fallback below, which
+        // only ever runs on messages carrying no font colors at all.
+        if (settings.completePartialColorize && !isAutoColorizing && isColorableMessage(lastMsg)) {
+            const completionInput = lastMsg.mes || text;
+            if (collectFontColorsFromText(completionInput).size > 0) {
+                const completionEntry = {
+                    rawText: completionInput,
+                    speakerName: lastMsg.name,
+                    message: lastMsg,
+                    msgIndex: chat.length - 1,
+                    messageHash: hashMessageText(completionInput),
+                    messageId: lastMsg.id ?? null,
+                    sendDate: lastMsg.send_date ?? null,
+                    swipeId: lastMsg.swipe_id ?? null,
+                    chatGeneration: attributionChatGeneration,
+                };
+                const completion = fillUncoloredDialogueGaps(completionInput, lastMsg.name, { autoAddMessageSpeaker: true });
+                if (completion.createdCharacters) commit();
+                if (completion.changed
+                    && isCapturedChatBindingCurrent(chatBinding)
+                    && isColorizeMessageCurrent(chat, completionEntry)) {
+                    lastMsg.mes = completion.updatedText;
+                    setLastProcessedMessageSignature(`${chat.length}|${sigId}|${lastMsg.mes}`);
+                    await queueCapturedChatSave(chatBinding, { immediate: true });
+                    if (isCapturedChatBindingCurrent(chatBinding)
+                        && isColorizeMessageCurrent(chat, completionEntry, completion.updatedText)) {
+                        await refreshMessageDom(chat.length - 1, lastMsg);
+                    }
+                    updateCharList();
+                }
+            }
+        }
+
         // Auto-colorize fallback: if model produced no color output at all
         if (!foundColorBlock && settings.autoColorize && isColorableMessage(lastMsg) && isAutoColorizing) {
             pendingAutoColorizeRetry = true;
@@ -1694,14 +1803,15 @@ export function onNewMessage() {
                     } catch (e) {
                         console.warn('[Dialogue Colors] LLM auto-colorize failed, falling back to regex:', e);
                     }
+                    if (settings.completePartialColorize) result = completeLLMResultGaps(result, lastMsg.name);
                     if (shouldUseLocalColorizeFallback(result)) {
                         const currentContext = getContext();
                         if (!isCapturedChatBindingCurrent(autoColorizeBinding, currentContext)
                             || !isColorizeMessageCurrent(capturedChat, autoColorizeEntry)) return;
                         result = colorizeMessageText(colorizeInput, lastMsg.name, { autoAddMessageSpeaker: true });
-                        if (result.createdCharacters) {
-                            commit();
-                        }
+                    }
+                    if (result.createdCharacters) {
+                        commit();
                     }
                     if (result.changed) {
                         // Revalidate: bail out rather than clobber a swiped/edited message

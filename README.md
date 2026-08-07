@@ -105,7 +105,7 @@ Adding an existing canonical name or alias reveals its current row instead of si
 ## Process Chat
 
 - **Scan entire chat**: discover speakers and update tracked dialogue activity.
-- **Colorize missing** (LLM): add missing font tags to the latest message or entire chat.
+- **Colorize missing** (LLM): add missing font tags to the latest message or entire chat. Messages the model colored only partially are completed locally, segment by segment, leaving the model's own tags untouched.
 - **Verify attribution** (Local): ask the selected profile to verify the latest or visible messages.
 - **Recolor saved tags** (LLM): rewrite existing tags across the entire chat after reviewed confirmation.
 - **Refresh local colors** (Local): reapply current render-only styles.
@@ -114,14 +114,15 @@ Adding an existing canonical name or alias reveals its current row instead of si
 
 ## Appearance and Automation
 
-- Select an Auto, Dark, or Light target surface and a palette for newly generated colors.
-- Adjust the current table's brightness; the value previews while dragging and applies when released. The slider moves colors a share of the way toward the target surface's lightness limit rather than adding fixed steps, and lifts saturation as they lighten, so characters stay tellable apart at every position instead of converging on one pale tone at the top of the range.
+- Choose the color brightness — Auto (match theme), Bright (for dark themes), or Dark (for light themes) — and a palette for newly generated colors. Auto reads the composited chat surface; forcing a mode overrides both the palette's lightness range and the readability target, so it is the escape hatch when a theme painted only by a background image is detected wrong.
+- Adjust the current table's brightness; the value previews while dragging and applies when released. The slider moves colors a share of the way toward the active mode's lightness limit rather than adding fixed steps, and lifts saturation as they lighten, so characters stay tellable apart at every position instead of converging on one pale tone at the top of the range.
 - Enable dialogue highlights, the floating legend, automatic recoloring after edits, or bounded remote Google Font loading. Remote font requests are off by default.
 - Bold all colored text renders every colored dialogue, narrator, and font-tag segment in bold. Per-character italic is kept, and turning it off restores each character's own text style.
-- Effective colors are adjusted against the rendered chat surface for at least 4.5:1 text contrast. Speaker metadata remains available to assistive technology without adding visible name tags to dialogue.
+- Effective colors are adjusted for at least 4.5:1 text contrast against the rendered chat surface in Auto, or against the forced mode's reference surface. Speaker metadata remains available to assistive technology without adding visible name tags to dialogue.
 - Scan on load only when the current character list is empty, or scan each new message.
 - Automatically lock detected speakers, assign random gradients to new NPCs or every new character, and optionally drift every gradient. Generated gradients are kept perceptually distinct from the colors other characters already use.
 - Enable manual dialogue reassignment by pointer, long press, or keyboard.
+- Complete partly colored messages (LLM engine, on by default): when the model tags only some of a message's dialogue, the uncolored lines are attributed and colored locally as the message arrives — no extra LLM request.
 - Reduce routine success notifications without suppressing required validation and safety feedback.
 
 ## Manual Dialogue Reassignment
