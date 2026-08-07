@@ -1429,10 +1429,12 @@ export function setEntryFromBaseColor(entry, baseColor) {
 export function setEntryFromEffectiveColor(entry, effectiveColor) {
     if (!entry) return '#888888';
     const normalizedEffective = ensureReadableContrast(normalizeHexColor(effectiveColor, getEntryEffectiveColor(entry)));
-    entry.baseColor = deriveBaseColorFromEffectiveColor(normalizedEffective);
-    entry.color = normalizedEffective;
-    entry.gradient = synchronizeGradientEffectiveColors(entry.gradient, applyThemeReadabilityAndBrightness);
-    return entry.color;
+    // Store the pair syncAllEffectiveColors() would settle on rather than the requested color
+    // verbatim. Every saveData() regenerates color from baseColor, and deriving a base is lossy,
+    // so keeping the raw pick made the entry drift on the very next save - away from the color
+    // already written into the chat text, which is the key that text is decorated by. The quote
+    // the user had just recolored then matched no character and lost its gradient, font and style.
+    return setEntryFromBaseColor(entry, deriveBaseColorFromEffectiveColor(normalizedEffective));
 }
 
 export function setEntryGradient(entry, gradient, options = {}) {

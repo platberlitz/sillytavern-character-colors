@@ -432,6 +432,9 @@ function showMenu(e, fontTag, qElement = null) {
                 if (!built.entry) { closeMenu(); return; }
                 key = built.key;
                 nextEntry = built.entry;
+                // Conflict avoidance and readability can move the color off the pick; the text
+                // has to carry the color the entry actually ended up with or it matches nobody.
+                finalColor = getEntryEffectiveColor(nextEntry);
             }
 
             if (isDomSegment) {
@@ -476,7 +479,9 @@ function showMenu(e, fontTag, qElement = null) {
                     // msg.mes; sync the rest of the rendered DOM to match right away.
                     updateVisibleMessageColors(mesIndex, { [originalFontColor]: finalColor });
                 }
-                assignmentSucceeded = textUpdated;
+                // A pick that settles back onto the color the tag already carries rewrites
+                // nothing, and nothing failed: the quote is already this character's color.
+                assignmentSucceeded = textUpdated || originalFontColor === finalColor;
             }
 
             if (!assignmentSucceeded) {
@@ -713,6 +718,9 @@ function showSelectionMenu(e, selection, range, selectedText, mesEl) {
             if (!built.entry) { closeMenu(); return; }
             key = built.key;
             nextEntry = built.entry;
+            // Conflict avoidance and readability can move the color off the pick; the text
+            // has to carry the color the entry actually ended up with or it matches nobody.
+            finalColor = getEntryEffectiveColor(nextEntry);
         }
 
         const textUpdated = replaceMessageSelectionWithFontTag(msg, selectedText, finalColor, {
