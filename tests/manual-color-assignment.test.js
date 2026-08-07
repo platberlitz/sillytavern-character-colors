@@ -118,3 +118,14 @@ test('manual assignment colors message text with the stored color, not the picke
         assert.equal(readBacks.length, 2, `${name} must read the final color back for both an existing and a new entry`);
     }
 });
+
+test('message re-renders chain the decoration re-apply after they settle', () => {
+    // refreshMessageDom re-renders mes_text from msg.mes, wiping the extension's gradient
+    // classes and CSS vars. It resolves only once the re-render has settled, so a
+    // fire-and-forget call loses the race against the scheduled font refresh and the
+    // clicked message renders bare until reload. Every call must chain the re-apply.
+    const chained = contextMenu.match(/void refreshMessageDom\([^;]*\)\.then\(\(\) => scheduleCustomFontRefresh\(0\)\);/g) || [];
+    assert.equal(chained.length, 2, 'both refreshMessageDom call sites must chain scheduleCustomFontRefresh(0)');
+    const bare = contextMenu.match(/^\s+refreshMessageDom\(/gm) || [];
+    assert.equal(bare.length, 0, 'no fire-and-forget refreshMessageDom call may remain');
+});

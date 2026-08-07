@@ -736,7 +736,9 @@ function showSelectionMenu(e, selection, range, selectedText, mesEl) {
             queueChatSave();
             flushChatSave();
             commit();
-            refreshMessageDom(msgIndex, msg);
+            // The host re-render wipes our DOM decorations; the gradient/color refresh
+            // scheduled above loses the race if it lands before the re-render settles.
+            void refreshMessageDom(msgIndex, msg).then(() => scheduleCustomFontRefresh(0));
             toast.success(`Assigned to ${escapeHtml(name)}`);
         } else {
             toast.error('The selection could not be mapped unambiguously to plain message source; nothing was changed.');
@@ -1552,8 +1554,10 @@ export function wrapQElementWithFontTag(qElement, color) {
     // Splice using exact source offsets — no regex, no HTML serialization.
     msg.mes = `${msg.mes.slice(0, targetSegment.start)}<font color="${newHex}">${msg.mes.slice(targetSegment.start, targetSegment.end)}</font>${msg.mes.slice(targetSegment.end)}`;
 
-    // Re-render the full message block canonically.
-    refreshMessageDom(msgIndex, msg);
+    // Re-render the full message block canonically. The re-render wipes our DOM
+    // decorations, so the re-apply has to wait for it to settle or the gradient
+    // scheduled by the caller races the wipe and disappears until reload.
+    void refreshMessageDom(msgIndex, msg).then(() => scheduleCustomFontRefresh(0));
     return true;
 }
 
