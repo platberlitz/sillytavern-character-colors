@@ -52,6 +52,9 @@ const {
     applyThemeReadabilityAndBrightness,
     buildCharacterEntry,
     deriveBaseColorFromEffectiveColor,
+    detectTheme,
+    getContrastRatio,
+    getContrastSurfaceColor,
     getEntryEffectiveColor,
     getNextColor,
     invalidateThemeCache,
@@ -345,5 +348,39 @@ test('a custom palette rotates through its slots', () => {
             const built = buildCharacterEntry(`Custom ${i}`);
             characterColors[built.key] = built.entry;
         }
+    });
+});
+
+test('a forced mode pins the readability surface no matter what the page shows', () => {
+    // The reported failure: a semi-dark theme misdetected as light let the contrast
+    // clamp drag every forced-bright color dark again. Forcing a mode must pin the
+    // readability target too, not just the lightness band.
+    withPalette({ themeMode: 'dark', brightness: 0 }, () => {
+        pageBackground = 'rgb(245, 245, 245)';
+        invalidateThemeCache();
+        assert.equal(getContrastSurfaceColor(), '#202328');
+        const color = applyThemeReadabilityAndBrightness('#8888cc');
+        assert.ok(getContrastRatio(color, '#202328') >= 4.5,
+            `forced dark produced ${color}, unreadable on the dark reference surface`);
+    });
+    withPalette({ themeMode: 'light', brightness: 0 }, () => {
+        pageBackground = 'rgb(20, 22, 26)';
+        invalidateThemeCache();
+        assert.equal(getContrastSurfaceColor(), '#f5f5f5');
+        const color = applyThemeReadabilityAndBrightness('#8888cc');
+        assert.ok(getContrastRatio(color, '#f5f5f5') >= 4.5,
+            `forced light produced ${color}, unreadable on the light reference surface`);
+    });
+});
+
+test('a transparent page background no longer reads as dark', () => {
+    // rgba(0,0,0,0) used to parse as luma 0 and lock every image/overlay theme to
+    // 'dark'. What actually shows through a transparent body is the layers above it
+    // composited over the browser's white default canvas.
+    withPalette({ themeMode: 'dark', brightness: 0 }, () => {
+        settings.themeMode = 'auto';
+        pageBackground = 'rgba(0, 0, 0, 0)';
+        invalidateThemeCache();
+        assert.equal(detectTheme(), 'light');
     });
 });

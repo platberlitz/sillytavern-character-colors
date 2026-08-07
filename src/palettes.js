@@ -39,7 +39,6 @@ export let cachedTheme = null;
 
 export let cachedThemeBackground = null;
 
-export let cachedIsDark = null;
 let cachedThemeCheckedAt = 0;
 let cachedContrastSurface = null;
 let cachedContrastSurfaceCheckedAt = 0;
@@ -192,7 +191,6 @@ export function getNextColor() {
     const theme = COLOR_THEMES[settings.colorTheme] || COLOR_THEMES.pastel;
     const mode = settings.themeMode === 'auto' ? detectTheme() : settings.themeMode;
     const isDark = mode === 'dark';
-    cachedIsDark = isDark;
     for (const [h, s, l] of theme) {
         const adjustedL = isDark ? Math.min(l + 15, 85) : Math.max(l - 15, 35);
         const color = hslToHex(h, s, adjustedL);
@@ -1206,8 +1204,14 @@ export function detectTheme() {
     const background = getComputedStyle(document.body).backgroundColor || '';
     cachedThemeCheckedAt = now;
     if (cachedTheme && background === cachedThemeBackground) return cachedTheme;
-    const m = background.match(/\d+/g);
-    cachedTheme = m && m.length >= 3 && (parseInt(m[0]) * 299 + parseInt(m[1]) * 587 + parseInt(m[2]) * 114) / 1000 < 128 ? 'dark' : 'light';
+    const bodyColor = parseCssColor(background);
+    // A transparent body means the visible backdrop is whatever layers sit above it,
+    // composited over the browser's white default canvas — judging the raw rgba(0,0,0,0)
+    // used to read every image/overlay theme as dark.
+    const surface = bodyColor && bodyColor.a > 0
+        ? bodyColor
+        : compositeSurfaceOver({ r: 255, g: 255, b: 255, a: 1 });
+    cachedTheme = (surface.r * 299 + surface.g * 587 + surface.b * 114) / 1000 < 128 ? 'dark' : 'light';
     cachedThemeBackground = background;
     return cachedTheme;
 }
@@ -1218,7 +1222,6 @@ export function invalidateThemeCache() {
     cachedThemeCheckedAt = 0;
     cachedContrastSurface = null;
     cachedContrastSurfaceCheckedAt = 0;
-    cachedIsDark = null;
 }
 
 export function getThemeLightnessBounds() {
@@ -1259,17 +1262,11 @@ function rgbToHex({ r, g, b }) {
     return `#${channel(r)}${channel(g)}${channel(b)}`;
 }
 
-export function getContrastSurfaceColor() {
-    if (typeof document === 'undefined') return settings.themeMode === 'dark' ? '#202328' : '#f5f5f5';
-    const now = Date.now();
-    if (cachedContrastSurface && now - cachedContrastSurfaceCheckedAt < 250) return cachedContrastSurface;
-    const fallback = detectTheme() === 'dark'
-        ? { r: 32, g: 35, b: 40, a: 1 }
-        : { r: 245, g: 245, b: 245, a: 1 };
+function compositeSurfaceOver(base) {
     const target = document.querySelector('#chat .mes_text, .mes_text') || document.body;
     const ancestors = [];
     for (let element = target; element; element = element.parentElement) ancestors.push(element);
-    let surface = fallback;
+    let surface = base;
     for (const element of ancestors.reverse()) {
         const layer = parseCssColor(getComputedStyle(element).backgroundColor);
         if (!layer || layer.a <= 0) continue;
@@ -1280,7 +1277,21 @@ export function getContrastSurfaceColor() {
             a: 1,
         };
     }
-    cachedContrastSurface = rgbToHex(surface);
+    return surface;
+}
+
+export function getContrastSurfaceColor() {
+    // A forced theme mode pins the readability target too; otherwise a misdetected
+    // page surface silently drags every color back toward the wrong pole.
+    if (typeof document === 'undefined' || settings.themeMode !== 'auto') {
+        return settings.themeMode === 'dark' ? '#202328' : '#f5f5f5';
+    }
+    const now = Date.now();
+    if (cachedContrastSurface && now - cachedContrastSurfaceCheckedAt < 250) return cachedContrastSurface;
+    const fallback = detectTheme() === 'dark'
+        ? { r: 32, g: 35, b: 40, a: 1 }
+        : { r: 245, g: 245, b: 245, a: 1 };
+    cachedContrastSurface = rgbToHex(compositeSurfaceOver(fallback));
     cachedContrastSurfaceCheckedAt = now;
     return cachedContrastSurface;
 }

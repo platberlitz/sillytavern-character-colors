@@ -18,8 +18,29 @@ import { cancelStreamingAttributionVerification, captureLoadedAttributionMessage
 
 let lastAppliedAutoTheme = null;
 let lastAppliedAutoSurface = null;
-let themeRefreshTimer = null;
+let themeRefreshTimers = [];
 let loudGenerationActive = false;
+
+// The host repaints its theme at an unknown time after SETTINGS_UPDATED (CSS variables,
+// transitions, background images), so a single early probe reads the old surface and
+// concludes nothing changed. A short series catches the settle whenever it lands; once a
+// probe repaints, the refreshed baselines make every later probe a no-op.
+const THEME_SETTLE_PROBE_DELAYS_MS = [100, 400, 1200, 2500];
+
+function scheduleAutoThemeProbes() {
+    for (const timer of themeRefreshTimers) clearTimeout(timer);
+    themeRefreshTimers = THEME_SETTLE_PROBE_DELAYS_MS.map(delay => setTimeout(() => {
+        if (settings.themeMode !== 'auto') return;
+        invalidateThemeCache();
+        const currentTheme = detectTheme();
+        const currentSurface = getReadableSurfaceSignature();
+        const themeChanged = lastAppliedAutoTheme
+            && (currentTheme !== lastAppliedAutoTheme || currentSurface !== lastAppliedAutoSurface);
+        lastAppliedAutoTheme = currentTheme;
+        lastAppliedAutoSurface = currentSurface;
+        if (themeChanged) applyThemeOrBrightnessChange(() => {}, { saveImmediately: true });
+    }, delay));
+}
 
 export function registerKeyboardShortcuts() {
     if (runtimeState.keyboardSetup) return;
@@ -223,18 +244,7 @@ export function registerEventHandlers() {
             if (renamePersonaCharacter(payload?.oldName, payload?.newName)) updateCharList();
         },
         settingsUpdated: () => {
-            clearTimeout(themeRefreshTimer);
-            themeRefreshTimer = setTimeout(() => {
-                invalidateThemeCache();
-                const currentTheme = settings.themeMode === 'auto' ? detectTheme() : null;
-                const currentSurface = settings.themeMode === 'auto' ? getReadableSurfaceSignature() : null;
-                const themeChanged = lastAppliedAutoTheme && currentTheme && (
-                    currentTheme !== lastAppliedAutoTheme || currentSurface !== lastAppliedAutoSurface
-                );
-                lastAppliedAutoTheme = currentTheme;
-                lastAppliedAutoSurface = currentSurface;
-                if (themeChanged) applyThemeOrBrightnessChange(() => {}, { saveImmediately: true });
-            }, 80);
+            scheduleAutoThemeProbes();
             const record = getAutoSyncRecord(false);
             if (!record) return;
             if (!autoSyncPendingRecord || doAutoSyncMarkersMatch(record, autoSyncPendingRecord)) {
