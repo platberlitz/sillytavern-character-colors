@@ -654,3 +654,13 @@ test('the tool-call repair reverses only this extension own canonical markup', (
     assert.ok(chatChanged.indexOf('if (!settings.enabled)') < chatChanged.indexOf('applyToolCallMessageRepair('));
     assert.ok(chatChanged.indexOf('applyToolCallMessageRepair(') < chatChanged.indexOf('stripColorBlocksFromDisplay()'));
 });
+
+test('the panel only uses theme variables the host actually defines', async () => {
+    // --SmartThemeTextColor does not exist in SillyTavern; every var() naming it
+    // resolved to its near-white fallback, which made section headers and menus
+    // unreadable on light themes. The host's text token is --SmartThemeBodyColor.
+    const styles = await readFile(new URL('../style.css', import.meta.url), 'utf8');
+    assert.ok(!styles.includes('--SmartThemeTextColor'), 'style.css names an undefined host variable');
+    const contextMenu = await readFile(new URL('../src/context-menu.js', import.meta.url), 'utf8');
+    assert.ok(!contextMenu.includes('--SmartThemeTextColor'), 'context-menu.js names an undefined host variable');
+});

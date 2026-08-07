@@ -567,7 +567,7 @@ body.dc-mark-uncertain [data-dc-colored][data-dc-confidence="low"] {
     border-radius: 13px 13px 0 0;
     background: color-mix(in srgb, var(--dc-surface-soft) 85%, transparent);
     border-bottom: 1px solid color-mix(in srgb, var(--dc-border) 60%, transparent);
-    color: var(--SmartThemeTextColor, #eee);
+    color: var(--SmartThemeBodyColor, #eee);
     letter-spacing: 0.01em;
     transition: background-color 0.15s ease, color 0.15s ease;
 }
@@ -620,7 +620,7 @@ body.dc-mark-uncertain [data-dc-colored][data-dc-confidence="low"] {
 
 #dc-ext .dc-section-note {
     margin: 0 0 10px;
-    color: var(--SmartThemeTextColor, #eee);
+    color: var(--SmartThemeBodyColor, #eee);
     opacity: 0.82;
     line-height: 1.45;
 }
@@ -713,7 +713,7 @@ body.dc-mark-uncertain [data-dc-colored][data-dc-confidence="low"] {
 }
 
 #dc-ext .dc-danger-zone > summary {
-    color: color-mix(in srgb, var(--SmartThemeTextColor, #eee) 80%, #ff8888);
+    color: color-mix(in srgb, var(--SmartThemeBodyColor, #eee) 80%, #ff8888);
     border-bottom-color: color-mix(in srgb, var(--dc-danger) 40%, transparent);
     background: color-mix(in srgb, var(--dc-danger-soft) 45%, var(--dc-surface-soft));
     border-left: 4px solid var(--dc-danger);
@@ -822,7 +822,7 @@ body.dc-mark-uncertain [data-dc-colored][data-dc-confidence="low"] {
 }
 
 #dc-ext .dc-action-block strong {
-    color: var(--SmartThemeTextColor, #fff);
+    color: var(--SmartThemeBodyColor, #fff);
     font-size: 0.94em;
 }
 
@@ -2080,7 +2080,7 @@ body.dc-mark-uncertain [data-dc-colored][data-dc-confidence="low"] {
     border: 1px solid var(--dc-border);
     border-radius: 12px;
     background: var(--dc-surface-strong);
-    color: var(--SmartThemeTextColor, #eef0f2);
+    color: var(--SmartThemeBodyColor, #eef0f2);
     box-shadow: 0 18px 50px rgba(0, 0, 0, 0.44);
 }
 
@@ -2198,7 +2198,7 @@ body.dc-mark-uncertain [data-dc-colored][data-dc-confidence="low"] {
     border-radius: 10px;
     background: var(--SmartThemeBlurTintColor, #202328);
     box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
-    color: var(--SmartThemeTextColor, #eef0f2);
+    color: var(--SmartThemeBodyColor, #eef0f2);
     font-size: 0.82em;
 }
 
