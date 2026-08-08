@@ -12,7 +12,9 @@ export const power_user = { quote_text_color: '#888888', encode_tags: false, per
 export const escapeHtml = value => String(value);
 export const escapeRegex = value => String(value).replace(/[/\\-\\\\^$*+?.()|[\\]{}]/g, '\\\\$&');
 export const extension_settings = {};
-export const getContext = () => ({ chat: [], chatMetadata: {} });
+let context = { chat: [], chatMetadata: {} };
+export const getContext = () => context;
+export const setTestContext = value => { context = value; };
 export const eventSource = { on() {}, emit() {} };
 export const event_types = {};
 export const setExtensionPrompt = () => {};
@@ -47,7 +49,10 @@ const hooks = registerHooks({
         return nextResolve(specifier, context);
     },
 });
+const stApi = await import(stApiUrl);
 const { getEntryEffectiveColor, setEntryFromEffectiveColor, syncAllEffectiveColors } = await import('../src/palettes.js');
+const { replaceCanonicalFontSpanColor, updateTextColorReferences } = await import('../src/live-colors.js');
+const { captureCanonicalFontAssignmentTarget, isCanonicalFontAssignmentTargetCurrent } = await import('../src/context-menu.js');
 const state = await import('../src/state.js');
 hooks.deregister();
 
@@ -119,13 +124,148 @@ test('manual assignment colors message text with the stored color, not the picke
     }
 });
 
+test('right-click replacement mutates only the clicked canonical span and rebuilds metadata', () => {
+    const destination = gradientEntry('Ivy');
+    withRegistry(destination, () => {
+        state.characterColors.old = { name: 'Old', color: '#ff4d6d', baseColor: '#ff4d6d', aliases: [] };
+        const pendingDestination = structuredClone(destination);
+        const destinationColor = setEntryFromEffectiveColor(pendingDestination, '#00a300');
+        const input = '<font color="#ff4d6d">"One"</font><font color="#ff4d6d">"Two"</font>\n[COLORS:Old=#ff4d6d]';
+
+        const result = replaceCanonicalFontSpanColor(input, 0, '#ff4d6d', '"One"', destinationColor, {
+            pendingEntries: [{ key: 'ivy', entry: pendingDestination }],
+        });
+
+        assert.ok(result?.changed);
+        assert.equal(
+            result.updatedText,
+            `<font color="${destinationColor}">"One"</font><font color="#ff4d6d">"Two"</font>\n`
+                + `[COLORS:Ivy=${destinationColor},Old=#ff4d6d]`,
+        );
+        assert.ok(pendingDestination.gradient, 'the existing gradient destination remains intact');
+    });
+});
+
+test('right-click replacement preserves untouched color metadata when an existing color moves', () => {
+    const destination = gradientEntry('Ivy');
+    withRegistry(destination, () => {
+        const oldColor = getEntryEffectiveColor(destination);
+        const pendingDestination = structuredClone(destination);
+        const destinationColor = setEntryFromEffectiveColor(pendingDestination, '#3366ff');
+        assert.notEqual(destinationColor, oldColor, 'fixture must move the existing effective color');
+        const input = `<font color="${oldColor}">"One"</font><font color="${oldColor}">"Two"</font>\n`
+            + `[COLORS:Ivy=${oldColor},<Unsafe>=${oldColor}]`;
+
+        const result = replaceCanonicalFontSpanColor(input, 0, oldColor, '"One"', destinationColor, {
+            pendingEntries: [{ key: 'ivy', entry: pendingDestination }],
+        });
+
+        assert.equal(
+            result?.updatedText,
+            `<font color="${destinationColor}">"One"</font><font color="${oldColor}">"Two"</font>\n`
+                + `[COLORS:Ivy=${destinationColor},Ivy=${oldColor}]`,
+        );
+        assert.equal(
+            updateTextColorReferences(result.updatedText, { [oldColor]: destinationColor }).updatedText,
+            `<font color="${destinationColor}">"One"</font><font color="${destinationColor}">"Two"</font>\n`
+                + `[COLORS:Ivy=${destinationColor}]`,
+            'automatic recolor collapses the temporary old/new metadata pair',
+        );
+    });
+});
+
+test('right-click replacement rejects an ambiguous destination color', () => {
+    const destination = gradientEntry('Ivy');
+    withRegistry(destination, () => {
+        const oldColor = getEntryEffectiveColor(destination);
+        const pendingDestination = structuredClone(destination);
+        const destinationColor = setEntryFromEffectiveColor(pendingDestination, '#3366ff');
+        state.characterColors.other = {
+            name: 'Other',
+            color: destinationColor,
+            baseColor: pendingDestination.baseColor,
+            aliases: [],
+        };
+        const input = `<font color="${oldColor}">"One"</font>\n[COLORS:Ivy=${oldColor}]`;
+
+        assert.equal(replaceCanonicalFontSpanColor(input, 0, oldColor, '"One"', destinationColor, {
+            pendingEntries: [{ key: 'ivy', entry: pendingDestination }],
+        }), null);
+    });
+});
+
+test('font assignment targeting fails closed when any rendered span diverges from source', () => {
+    const message = {
+        mes: '`<font color="#ff4d6d">"Code"</font>` <font color="#ff4d6d">"Live"</font>',
+    };
+    const mesRoot = { getAttribute: name => name === 'mesid' ? '0' : null };
+    let fonts = [];
+    const mesText = { querySelectorAll: selector => selector === 'font[color]' ? fonts : [] };
+    const makeFont = (text, color = '#ff4d6d') => ({
+        isConnected: true,
+        tagName: 'FONT',
+        textContent: text,
+        getAttribute: name => name === 'color' ? color : null,
+        closest: selector => selector === '.mes' ? mesRoot : selector === '.mes_text' ? mesText : null,
+    });
+    const clicked = makeFont('"Live"');
+    fonts = [clicked];
+    stApi.setTestContext({ chat: [message], chatMetadata: {} });
+    assert.equal(captureCanonicalFontAssignmentTarget(clicked), null, 'a hidden source font shifts the count');
+
+    message.mes = '<font color="#ff4d6d">"Live"</font><font color="#ff4d6d">"Peer"</font>';
+    fonts = [clicked, makeFont('"Different"')];
+    assert.equal(captureCanonicalFontAssignmentTarget(clicked), null, 'a mismatched peer invalidates the whole mapping');
+    fonts = [clicked, makeFont('"Peer"', '#4dffff')];
+    assert.equal(captureCanonicalFontAssignmentTarget(clicked), null, 'a mismatched peer color invalidates the whole mapping');
+    stApi.setTestContext({ chat: [], chatMetadata: {} });
+});
+
+test('captured font assignments reject replaced, swiped, and edited messages', () => {
+    const message = {
+        id: 'm1',
+        send_date: 'date1',
+        swipe_id: 0,
+        mes: '<font color="#ff4d6d">"One"</font>',
+    };
+    const mesRoot = { getAttribute: name => name === 'mesid' ? '0' : null };
+    let font;
+    const mesText = { querySelectorAll: selector => selector === 'font[color]' ? [font] : [] };
+    font = {
+        isConnected: true,
+        tagName: 'FONT',
+        textContent: '"One"',
+        getAttribute: name => name === 'color' ? '#ff4d6d' : null,
+        closest: selector => selector === '.mes' ? mesRoot : selector === '.mes_text' ? mesText : null,
+    };
+    stApi.setTestContext({ chat: [message], chatMetadata: {} });
+    const target = captureCanonicalFontAssignmentTarget(font);
+    assert.ok(target);
+    assert.equal(isCanonicalFontAssignmentTargetCurrent(target), true);
+
+    message.is_user = true;
+    assert.equal(captureCanonicalFontAssignmentTarget(font), null, 'user messages cannot become persistent right-click targets');
+    assert.equal(isCanonicalFontAssignmentTargetCurrent(target), false, 'a target that becomes a user message is stale');
+    message.is_user = false;
+
+    stApi.setTestContext({ chat: [{ ...message }], chatMetadata: {} });
+    assert.equal(isCanonicalFontAssignmentTargetCurrent(target), false, 'replacement object must be stale');
+    stApi.setTestContext({ chat: [message], chatMetadata: {} });
+    message.swipe_id = 1;
+    assert.equal(isCanonicalFontAssignmentTargetCurrent(target), false, 'swiped source must be stale');
+    message.swipe_id = 0;
+    message.mes += ' edited';
+    assert.equal(isCanonicalFontAssignmentTargetCurrent(target), false, 'edited source must be stale');
+    stApi.setTestContext({ chat: [], chatMetadata: {} });
+});
+
 test('message re-renders chain the decoration re-apply after they settle', () => {
     // refreshMessageDom re-renders mes_text from msg.mes, wiping the extension's gradient
     // classes and CSS vars. It resolves only once the re-render has settled, so a
     // fire-and-forget call loses the race against the scheduled font refresh and the
     // clicked message renders bare until reload. Every call must chain the re-apply.
     const chained = contextMenu.match(/void refreshMessageDom\([^;]*\)\.then\(\(\) => scheduleCustomFontRefresh\(0\)\);/g) || [];
-    assert.equal(chained.length, 2, 'both refreshMessageDom call sites must chain scheduleCustomFontRefresh(0)');
+    assert.equal(chained.length, 3, 'all three persistent text mutation paths must refresh fonts after re-render');
     const bare = contextMenu.match(/^\s+refreshMessageDom\(/gm) || [];
     assert.equal(bare.length, 0, 'no fire-and-forget refreshMessageDom call may remain');
 });
@@ -135,4 +275,14 @@ test('right-click overrides use the streaming painter for its owned message', ()
     assert.match(helper, /isStreamingOwnedMessage\(messageIndex\).*paintStreamingMessage\(\)/);
     const calls = contextMenu.match(/await repaintDomAssignment\(/g) || [];
     assert.equal(calls.length, 2, 'manual assignment and automatic restoration must share the streaming-aware repaint');
+});
+
+test('one-span assignment never calls the broad visible-color replacement helper', () => {
+    assert.doesNotMatch(contextMenu, /updateVisibleMessageColors/);
+});
+
+test('persistent assignment paths await chat save confirmation', () => {
+    assert.equal((contextMenu.match(/const chatSaveConfirmation = flushChatSave\(\)/g) || []).length, 2);
+    assert.equal((contextMenu.match(/await chatSaveConfirmation/g) || []).length, 2);
+    assert.doesNotMatch(contextMenu, /^\s+flushChatSave\(\);/m);
 });

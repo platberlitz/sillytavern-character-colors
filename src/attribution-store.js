@@ -51,6 +51,20 @@ export const ATTRIBUTION_SOURCE = Object.freeze({
 export const ATTRIBUTION_SOURCES = Object.freeze(Object.values(ATTRIBUTION_SOURCE));
 export const KNOWN_ATTRIBUTION_SOURCES = ATTRIBUTION_SOURCES;
 
+const HOST_SYSTEM_MESSAGE_TYPES = new Set([
+    'help', 'welcome', 'empty', 'generic', 'narrator', 'comment',
+    'slash_commands', 'formatting', 'hotkeys', 'macros', 'welcome_prompt',
+    'assistant_note', 'assistant_message',
+]);
+
+// /hide also sets is_system, so only host-authored system metadata and tool
+// payloads are non-dialogue messages.
+export function isHostSystemOrToolMessage(msg) {
+    const extra = msg?.extra;
+    return Array.isArray(extra?.tool_invocations)
+        || (msg?.is_system === true && HOST_SYSTEM_MESSAGE_TYPES.has(extra?.type));
+}
+
 const STATUS_SET = new Set(ATTRIBUTION_REVIEW_STATUSES);
 const SOURCE_SET = new Set(ATTRIBUTION_SOURCES);
 const VERIFICATION_STATUS_SET = new Set(ATTRIBUTION_VERIFICATION_STATUSES);
@@ -589,6 +603,31 @@ function speakerFromOverride(value) {
     return boundedString(value.speaker ?? value.name ?? value.assignment?.name ?? value.value, 80);
 }
 
+function seedFrozenAttributionSegments(entry, freezeSegments, targetSegmentKey) {
+    if (!isPlainObject(entry) || !isPlainObject(freezeSegments)) return;
+    if (!isPlainObject(entry.segments)) entry.segments = {};
+    if (!isPlainObject(entry.sources)) entry.sources = {};
+    for (const [rawKey, value] of Object.entries(freezeSegments)) {
+        const index = normalizedIndex(rawKey);
+        if (index === null) continue;
+        const key = String(index);
+        if (key === targetSegmentKey) continue;
+        const hasSegment = Object.prototype.hasOwnProperty.call(entry.segments, key);
+        const hasRecord = isPlainObject(entry.records) && Object.prototype.hasOwnProperty.call(entry.records, key);
+        const existingSource = valueFromMap(entry.sources, key) ?? valueFromMap(entry.records, key)?.source;
+        if (hasSegment || hasRecord
+            || (existingSource !== undefined
+                && normalizeAttributionSource(existingSource) !== ATTRIBUTION_SOURCE.FROZEN)) continue;
+        entry.segments[key] = speakerFromOverride(value) || null;
+        entry.sources[key] = ATTRIBUTION_SOURCE.FROZEN;
+        for (const mapName of ['confidences', 'reviewIds']) {
+            if (!isPlainObject(entry[mapName])) continue;
+            delete entry[mapName][key];
+            if (!Object.keys(entry[mapName]).length) delete entry[mapName];
+        }
+    }
+}
+
 function storedOverrideMessageFingerprint(entry) {
     let fingerprint = boundedString(entry?.messageFingerprint, 80);
     if (isPlainObject(entry?.records)) {
@@ -711,12 +750,25 @@ export function setAttributionOverrideRecord(overrideMap, review, options = {}) 
     if (!isPlainObject(entry.segments)) entry.segments = {};
     if (!isPlainObject(entry.sources)) entry.sources = {};
     const segmentKey = String(segmentIndex);
+    seedFrozenAttributionSegments(entry, options.freezeSegments, segmentKey);
     const source = normalizeAttributionSource(options.source ?? review.overrideSource ?? review.source, ATTRIBUTION_SOURCE.REVIEW);
+    if (options.clearTargetMetadata === true) {
+        for (const mapName of ['confidences', 'reviewIds', 'records']) {
+            if (!isPlainObject(entry[mapName])) continue;
+            delete entry[mapName][segmentKey];
+            if (!Object.keys(entry[mapName]).length) delete entry[mapName];
+        }
+    }
     entry.segments[segmentKey] = speaker;
     entry.sources[segmentKey] = source;
-    const confidence = normalizeAttributionConfidence(options.confidence ?? review.confidence);
-    if (!isPlainObject(entry.confidences)) entry.confidences = {};
-    entry.confidences[segmentKey] = confidence;
+    const hasConfidence = options.confidence !== undefined || review.confidence !== undefined;
+    const confidence = hasConfidence
+        ? normalizeAttributionConfidence(options.confidence ?? review.confidence)
+        : undefined;
+    if (hasConfidence) {
+        if (!isPlainObject(entry.confidences)) entry.confidences = {};
+        entry.confidences[segmentKey] = confidence;
+    }
     const reviewId = boundedString(options.reviewId ?? review.id, 96);
     if (reviewId) {
         if (!isPlainObject(entry.reviewIds)) entry.reviewIds = {};
@@ -733,9 +785,13 @@ export function setAttributionOverrideRecord(overrideMap, review, options = {}) 
         delete entry.verifiedAt;
         delete entry.verifiedVersion;
     } else if (expectedHash) {
+        const verifiedVersion = Number(options.verifiedVersion) || 1;
+        const alreadyVerified = entry.verifiedHash === expectedHash
+            && entry.verifiedVersion === verifiedVersion
+            && (!VERIFICATION_STATUS_SET.has(verificationStatus) || entry.verificationStatus === verificationStatus);
         entry.verifiedHash = expectedHash;
-        entry.verifiedAt = Date.now();
-        entry.verifiedVersion = Number(options.verifiedVersion) || 1;
+        if (!alreadyVerified) entry.verifiedAt = Date.now();
+        entry.verifiedVersion = verifiedVersion;
     }
     if (options.extended === true || isPlainObject(options.recordMap)) {
         const records = isPlainObject(options.recordMap)
@@ -748,7 +804,7 @@ export function setAttributionOverrideRecord(overrideMap, review, options = {}) 
             evidence: normalizeAttributionEvidence(options.evidence ?? review.evidence),
             messageFingerprint,
             segmentFingerprint: boundedString(review.segmentFingerprint, 80),
-            reviewId: boundedString(review.id, 96),
+            reviewId: boundedString(options.reviewId ?? review.id, 96),
         };
         const reviewedAt = normalizedTimestamp(review.decidedAt ?? options.reviewedAt, null);
         if (reviewedAt !== null) extended.reviewedAt = reviewedAt;
@@ -941,6 +997,17 @@ export function createAttributionStore(value = {}, chat) {
                 }
                 const overrideSource = operationOptions.source
                     ?? (candidate.source === ATTRIBUTION_SOURCE.MANUAL ? ATTRIBUTION_SOURCE.MANUAL : ATTRIBUTION_SOURCE.REVIEW);
+                let freezeSegments = operationOptions.freezeSegments;
+                if (typeof options.getFreezeSegments === 'function') {
+                    try {
+                        const currentSegments = options.getFreezeSegments(cloneReview(candidate), message);
+                        freezeSegments = isPlainObject(currentSegments)
+                            ? { ...currentSegments, ...(isPlainObject(freezeSegments) ? freezeSegments : {}) }
+                            : freezeSegments;
+                    } catch (_) {
+                        return null;
+                    }
+                }
                 let applied = false;
                 try {
                     applied = setAttributionOverrideRecord(overrideMap, candidate, {
@@ -951,6 +1018,7 @@ export function createAttributionStore(value = {}, chat) {
                         extended: operationOptions.extended !== false || options.extendedOverrides === true,
                         recordMap: operationOptions.recordMap,
                         reviewedAt: decisionNow,
+                        freezeSegments,
                     });
                 } catch (_) { /* handled as a failed atomic apply below */ }
                 if (!applied) {

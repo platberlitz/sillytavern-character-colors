@@ -5,6 +5,7 @@ import test from 'node:test';
 import { settings } from '../src/state.js';
 
 const sourceNames = [
+    'attribution-store.js',
     'dom-engine.js',
     'fonts.js',
     'live-colors.js',
@@ -223,9 +224,11 @@ test('the streaming painter owns its message alone', () => {
     }
 
     const paint = functionSection(sources['streaming-paint.js'], 'paintStreamingMessage');
-    // A clear pass is what makes the text visibly flash: it lands as its own
-    // mutation, and the host may paint before the re-apply half runs.
-    assert.doesNotMatch(paint, /undecorateMessageDom|clearSegmentDecoration|clearNarratorTextSpans/);
+    // Never clear the whole message before repainting. Targeted owned-state
+    // cleanup is required when a segment vanishes and runs while the observer
+    // is disconnected, so foreign styles remain intact without a bare frame.
+    assert.doesNotMatch(paint, /undecorateMessageDom|clearNarratorTextSpans/);
+    assert.match(paint, /if \(!matched\.has\(element\)\) clearSegmentDecoration\(element\)/);
     // Re-entrancy has to be blocked synchronously; our own writes re-trigger the
     // observer, and isDecoratingDom is already restored by then.
     assert.match(paint, /if \(!streamingSession\.active \|\| streamingSession\.painting\) return false/);
@@ -340,7 +343,8 @@ test('verification samples the model and applies only what the samples agree on'
     // not throw away the passes that did come back.
     assert.match(verifyOne, /for \(let pass = 0; pass < passes; pass\+\+\)/);
     assert.match(verifyOne, /ballots\.push\(validated\)/);
-    assert.match(verifyOne, /if \(!ballots\.length\)/);
+    assert.match(verifyOne, /ballots\.push\(\[\]\)/);
+    assert.match(verifyOne, /if \(!hasAttributionVerifierBallotQuorum\(validBallots, passes\)\)/);
     assert.match(verifyOne, /reduceAttributionVerifierBallots\(ballots\)/);
     // Distinct quietName per pass, or the host can collide the requests.
     assert.match(verifyOne, /quietName: `\$\{[^`]*\}_\$\{mesIndex\}_\$\{pass\}_/);
@@ -421,6 +425,22 @@ test('edited attribution review acceptance stays atomic', () => {
 
     assert.match(acceptFromUi, /acceptAttributionReview\(review\.id, \{ speaker: acceptedName \}\)/);
     assert.doesNotMatch(acceptFromUi, /setMessageQuoteOverride/);
+});
+
+test('verifier and review writes preserve untouched sibling attribution', () => {
+    const verifyOne = functionSection(sources['verify.js'], 'verifyAttributionsWithLLM');
+    const adapter = functionSection(sources['dom-engine.js'], 'getAttributionReviewAdapter');
+    const persistentWrite = functionSection(sources['attribution-store.js'], 'setAttributionOverrideRecord');
+
+    assert.match(verifyOne, /freezeSegments:\s*getMessageAttributionFreezeSegments\(mesIndex, msg, correction\.index\)/);
+    assert.match(adapter, /getFreezeSegments\(review, message\)/);
+    assert.match(persistentWrite, /seedFrozenAttributionSegments\(entry, options\.freezeSegments, segmentKey\)/);
+});
+
+test('unsafe markdown fallback never reaches innerHTML', () => {
+    const fallback = functionSection(sources['dom-engine.js'], 'renderMessageDomFallbackForTarget');
+    assert.doesNotMatch(fallback, /converter\?\.makeHtml|converter\.makeHtml/);
+    assert.match(fallback, /formatted \|\| escapeHtml\(rawText\)/);
 });
 
 test('style-pack application is bound to reviewed options and catalogs', () => {

@@ -1,10 +1,10 @@
 // context-menu.js - extracted from index.js (mechanical split)
 import { attributeDialogueSegments } from './attribution.js';
-import { ATTRIBUTION_SOURCE } from './attribution-store.js';
+import { ATTRIBUTION_SOURCE, isHostSystemOrToolMessage } from './attribution-store.js';
 import { resolveCharacterKeyByNameOrAlias } from './color-blocks.js';
 import { cancelMessageDomFollowupRepairs, clearMessageDomRepairTimer, clearStreamingAttributionOverrides, decorateMessageDomFromCurrentRender, deleteMessageQuoteOverride, getMessageIndexFromElement, getMessageQuoteOverrideEntry, getMessageQuoteOverrideOptions, isStreamingOwnedMessage, matchSegmentsToElements, refreshAndDecorateMessageDom, refreshMessageDom, resolveDomSegmentIndexForElement, restoreMessageQuoteOverrideEntry, scheduleMessageDomFollowupRepair, setMessageQuoteOverride } from './dom-engine.js';
 import { scheduleCustomFontRefresh } from './fonts.js';
-import { applyLiveColorChangesFromSnapshot, captureEffectiveColorSnapshot, commit, flushChatSave, queueChatSave, updateTextColorReferences, updateVisibleMessageColors } from './live-colors.js';
+import { applyLiveColorChangesFromSnapshot, captureEffectiveColorSnapshot, commit, flushChatSave, parseCanonicalFontMarkup, queueChatSave, replaceCanonicalFontSpanColor } from './live-colors.js';
 import { buildCharacterEntry, getEntryEffectiveColor, setEntryFromEffectiveColor } from './palettes.js';
 import { escapeHtml, eventSource, event_types, getContext, power_user } from './st-api.js';
 import { characterColors, isDomEngine, runtimeState, settings } from './state.js';
@@ -16,6 +16,10 @@ const INVALID_CHARACTER_NAME_RE = /[\r\n\t\[\]=,()]/;
 const CONTEXT_FOCUS_ATTRIBUTE = 'data-dc-context-focus';
 const CONTEXT_CHARACTER_OPTION_LIMIT = 200;
 let closeActiveAssignmentSurface = null;
+
+function isContextMenuEnabled() {
+    return settings.enabled === true && settings.enableRightClick === true;
+}
 
 function readCharacterName(nameInput) {
     const name = nameInput.value.trim();
@@ -67,7 +71,7 @@ function getCharacterSuggestionMarkup() {
 function getDomAttributionDetails(targetEl) {
     const messageIndex = getMessageIndexFromElement(targetEl);
     const message = getContext()?.chat?.[messageIndex];
-    if (!message || !Number.isInteger(messageIndex) || messageIndex < 0) return null;
+    if (!message || isHostSystemOrToolMessage(message) || !Number.isInteger(messageIndex) || messageIndex < 0) return null;
     const segmentIndex = resolveDomSegmentIndexForElement(targetEl, messageIndex, message);
     if (!Number.isFinite(segmentIndex)) return null;
     const attribution = attributeDialogueSegments(message.mes, message.name, {
@@ -167,6 +171,63 @@ function isDomAssignmentTargetCurrent(target) {
     return true;
 }
 
+function getCanonicalFontDomMapping(message, mesText) {
+    const parsed = parseCanonicalFontMarkup(message?.mes);
+    const elements = [...(mesText?.querySelectorAll?.('font[color]') || [])];
+    if (!parsed || parsed.spans.length !== elements.length) return null;
+    for (let index = 0; index < elements.length; index++) {
+        if (parsed.spans[index].color !== normalizeHexColor(elements[index].getAttribute('color'), null)
+            || normalizeSegmentText(parsed.spans[index].text) !== normalizeSegmentText(elements[index].textContent)) return null;
+    }
+    return { parsed, elements };
+}
+
+export function captureCanonicalFontAssignmentTarget(fontTag) {
+    const messageIndex = getMessageIndexFromElement(fontTag);
+    const message = getContext()?.chat?.[messageIndex];
+    const mesText = fontTag?.closest?.('.mes_text');
+    if (!message || message.is_user || isHostSystemOrToolMessage(message) || !mesText || !fontTag?.isConnected) return null;
+    const mapping = getCanonicalFontDomMapping(message, mesText);
+    const fontOrdinal = mapping?.elements.indexOf(fontTag) ?? -1;
+    const expectedColor = normalizeHexColor(fontTag.getAttribute('color'), null);
+    const span = mapping?.parsed.spans[fontOrdinal];
+    if (fontOrdinal < 0 || !expectedColor || !span || span.color !== expectedColor) return null;
+    return {
+        element: fontTag,
+        tagName: fontTag.tagName,
+        messageIndex,
+        message,
+        messageId: message.id ?? null,
+        sendDate: message.send_date ?? null,
+        swipeId: message.swipe_id ?? null,
+        messageHash: hashMessageText(message.mes),
+        fontOrdinal,
+        expectedColor,
+        expectedText: normalizeSegmentText(span.text),
+        elementText: normalizeSegmentText(fontTag.textContent),
+    };
+}
+
+export function isCanonicalFontAssignmentTargetCurrent(target) {
+    if (!target) return false;
+    const message = getContext()?.chat?.[target.messageIndex];
+    if (message !== target.message || message?.is_user || isHostSystemOrToolMessage(message)
+        || (message?.id ?? null) !== target.messageId
+        || (message?.send_date ?? null) !== target.sendDate
+        || (message?.swipe_id ?? null) !== target.swipeId
+        || hashMessageText(message?.mes) !== target.messageHash) return false;
+    if (!target.element?.isConnected || target.element.tagName !== target.tagName
+        || getMessageIndexFromElement(target.element) !== target.messageIndex
+        || normalizeHexColor(target.element.getAttribute('color'), null) !== target.expectedColor
+        || normalizeSegmentText(target.element.textContent) !== target.elementText) return false;
+    const mesText = target.element.closest?.('.mes_text');
+    const mapping = getCanonicalFontDomMapping(message, mesText);
+    const span = mapping?.parsed.spans[target.fontOrdinal];
+    return !!span && span.color === target.expectedColor
+        && normalizeSegmentText(span.text) === target.expectedText
+        && mapping.elements[target.fontOrdinal] === target.element;
+}
+
 function repaintDomAssignment(messageIndex, message, recoverDom) {
     if (isStreamingOwnedMessage(messageIndex)) return paintStreamingMessage();
     return recoverDom
@@ -228,7 +289,7 @@ function mountAssignmentSurface(menu, opener) {
         inertSiblings.forEach(element => { element.inert = false; });
         menu.remove();
         if (closeActiveAssignmentSurface === close) closeActiveAssignmentSurface = null;
-        if (restoreFocus) {
+        if (restoreFocus && isContextMenuEnabled()) {
             let focusTarget = opener?.isConnected ? opener : null;
             if (!focusTarget && openerMessageId) {
                 const message = document.querySelector(`#chat .mes[mesid="${CSS.escape(openerMessageId)}"]`);
@@ -283,10 +344,19 @@ function mountAssignmentSurface(menu, opener) {
 
 // Right-click and long-press context menu for messages
 function showMenu(e, fontTag, qElement = null) {
-    e.preventDefault?.();
+    if (!isContextMenuEnabled()) return;
     const isDomSegment = isDomEngine() && !fontTag && !!qElement;
     const isBareQuote = !isDomSegment && !fontTag && !!qElement;
     const targetEl = (isDomSegment || isBareQuote) ? qElement : fontTag;
+    const targetMessageIndex = getMessageIndexFromElement(targetEl);
+    const targetMessage = getContext()?.chat?.[targetMessageIndex];
+    if (!targetMessage || targetMessage.is_user || isHostSystemOrToolMessage(targetMessage)) return;
+    const fontAssignmentTarget = fontTag ? captureCanonicalFontAssignmentTarget(fontTag) : null;
+    if (fontTag && !fontAssignmentTarget) {
+        toast.warning('This font tag no longer maps to canonical saved message text.');
+        return;
+    }
+    e.preventDefault?.();
     const opener = e.type === 'keydown' ? targetEl : document.activeElement;
     const attributionDetails = isDomSegment ? getDomAttributionDetails(targetEl) : null;
     const domSpeakerKey = isDomSegment
@@ -338,6 +408,7 @@ function showMenu(e, fontTag, qElement = null) {
     menu.querySelector('#dc-ctx-close').onclick = () => closeMenu();
 
     menu.querySelector('#dc-ctx-use-automatic')?.addEventListener('click', async () => {
+        if (!isContextMenuEnabled()) { closeMenu({ restoreFocus: false }); return; }
         try {
             if (!isDomAssignmentSourceCurrent(domAssignmentTarget)) {
                 toast.warning('Message changed; reopen the assignment menu.');
@@ -387,20 +458,34 @@ function showMenu(e, fontTag, qElement = null) {
     });
 
     menu.querySelector('#dc-ctx-assign').onclick = async () => {
+        if (!isContextMenuEnabled()) { closeMenu({ restoreFocus: false }); return; }
         const assignButton = menu.querySelector('#dc-ctx-assign');
         // Read and validate before the try: readCharacterName marks the field and
         // focuses it for correction, and the try's finally would close the dialog
         // out from under the user along with everything they had typed.
         const name = readCharacterName(nameInput);
         if (name === null) return;
-        const targetMesIndex = isDomSegment ? domAssignmentTarget?.messageIndex : getMessageIndexFromElement(targetEl);
+        if (fontAssignmentTarget && !isCanonicalFontAssignmentTargetCurrent(fontAssignmentTarget)) {
+            toast.warning('Message changed; reopen the assignment menu.');
+            closeMenu();
+            return;
+        }
+        const targetMesIndex = isDomSegment
+            ? domAssignmentTarget?.messageIndex
+            : fontAssignmentTarget?.messageIndex ?? getMessageIndexFromElement(targetEl);
         const targetMessage = getContext()?.chat?.[targetMesIndex];
+        if (!targetMessage || targetMessage.is_user || isHostSystemOrToolMessage(targetMessage)) {
+            toast.warning('Message changed; reopen the assignment menu.');
+            closeMenu();
+            return;
+        }
         const originalMessageText = targetMessage?.mes;
         let installedKey = null;
         let previousEntry = null;
         let overrideRollback = null;
         let assignmentPersisted = false;
         let domRepaintTarget = null;
+        let chatSaveUnconfirmed = false;
         assignButton.disabled = true;
         try {
             const pickerColor = normalizeHexColor(colorInput.value, color);
@@ -416,10 +501,6 @@ function showMenu(e, fontTag, qElement = null) {
             const existingSnapshot = existingEntry
                 ? captureEffectiveColorSnapshot(Object.keys(characterColors))
                 : null;
-            const originalFontColor = fontTag
-                ? normalizeHexColor(fontTag.getAttribute('color'), null)
-                : null;
-
             let nextEntry = null;
             if (existingEntry) {
                 nextEntry = JSON.parse(JSON.stringify(existingEntry));
@@ -478,17 +559,19 @@ function showMenu(e, fontTag, qElement = null) {
                 textUpdated = wrapQElementWithFontTag(qElement, finalColor);
                 assignmentSucceeded = textUpdated;
             } else {
-                const mesIndex = getMessageIndexFromElement(fontTag);
-                textUpdated = updateMessageTextForFontTag(fontTag, originalFontColor, finalColor);
-                if (textUpdated) {
-                    fontTag.setAttribute('color', finalColor);
-                    // updateTextColorReferences rewrites every same-colored span in
-                    // msg.mes; sync the rest of the rendered DOM to match right away.
-                    updateVisibleMessageColors(mesIndex, { [originalFontColor]: finalColor });
+                const replacement = replaceCanonicalFontSpanColor(
+                    fontAssignmentTarget.message.mes,
+                    fontAssignmentTarget.fontOrdinal,
+                    fontAssignmentTarget.expectedColor,
+                    fontAssignmentTarget.expectedText,
+                    finalColor,
+                    { pendingEntries: [{ key, entry: nextEntry }] },
+                );
+                if (replacement) {
+                    fontAssignmentTarget.message.mes = replacement.updatedText;
+                    textUpdated = replacement.changed;
+                    assignmentSucceeded = true;
                 }
-                // A pick that settles back onto the color the tag already carries rewrites
-                // nothing, and nothing failed: the quote is already this character's color.
-                assignmentSucceeded = textUpdated || originalFontColor === finalColor;
             }
 
             if (!assignmentSucceeded) {
@@ -546,14 +629,20 @@ function showMenu(e, fontTag, qElement = null) {
             } else if (textUpdated) {
                 try {
                     queueChatSave();
-                    flushChatSave();
+                    const chatSaveConfirmation = flushChatSave();
+                    if (fontAssignmentTarget) {
+                        void refreshMessageDom(fontAssignmentTarget.messageIndex, fontAssignmentTarget.message).then(() => scheduleCustomFontRefresh(0));
+                    }
+                    if (!await chatSaveConfirmation) chatSaveUnconfirmed = true;
                 } catch (error) {
-                    refreshPending = true;
-                    console.warn('[Dialogue Colors] Assignment saved, but chat save scheduling failed:', error);
+                    chatSaveUnconfirmed = true;
+                    console.warn('[Dialogue Colors] Assignment installed, but chat save scheduling failed:', error);
                 }
             }
 
-            if (refreshPending) toast.warning(`Assigned to ${escapeHtml(name)}; visual refresh is pending.`);
+            if (refreshPending && chatSaveUnconfirmed) toast.warning(`Assigned to ${escapeHtml(name)}; visual refresh is pending and the chat save was not confirmed.`);
+            else if (refreshPending) toast.warning(`Assigned to ${escapeHtml(name)}; visual refresh is pending.`);
+            else if (chatSaveUnconfirmed) toast.warning(`Assigned to ${escapeHtml(name)}; the host did not confirm the chat save.`);
             else toast.success(`Assigned to ${escapeHtml(name)}`);
             }
         } catch (error) {
@@ -599,7 +688,7 @@ function showMenu(e, fontTag, qElement = null) {
 }
 
 function showSelectionMenu(e, selection, range, selectedText, mesEl) {
-    e.preventDefault?.();
+    if (!isContextMenuEnabled()) return;
     const opener = document.activeElement;
     if (closeActiveAssignmentSurface) closeActiveAssignmentSurface({ restoreFocus: false });
 
@@ -609,7 +698,8 @@ function showSelectionMenu(e, selection, range, selectedText, mesEl) {
     const ctx = getContext();
     const chat = ctx?.chat || [];
     const msg = chat[msgIndex];
-    if (!msg || msg.is_user) return;
+    if (!msg || msg.is_user || isHostSystemOrToolMessage(msg)) return;
+    e.preventDefault?.();
     const sourceMessageHash = hashMessageText(msg.mes);
     const selectedRangeText = range.toString();
     const capturedMesText = mesEl.querySelector('.mes_text');
@@ -670,7 +760,8 @@ function showSelectionMenu(e, selection, range, selectedText, mesEl) {
         }
     });
 
-    menu.querySelector('#dc-ctx-assign').onclick = () => {
+    menu.querySelector('#dc-ctx-assign').onclick = async () => {
+        if (!isContextMenuEnabled()) { closeMenu({ restoreFocus: false }); return; }
         const name = readCharacterName(nameInput);
         if (name === null) return;
         const pickerColor = normalizeHexColor(colorInput.value, '#888888');
@@ -736,12 +827,14 @@ function showSelectionMenu(e, selection, range, selectedText, mesEl) {
                 applyLiveColorChangesFromSnapshot(existingSnapshot, [key], { saveImmediately: true });
             }
             queueChatSave();
-            flushChatSave();
             commit();
+            const chatSaveConfirmation = flushChatSave();
             // The host re-render wipes our DOM decorations; the gradient/color refresh
             // scheduled above loses the race if it lands before the re-render settles.
             void refreshMessageDom(msgIndex, msg).then(() => scheduleCustomFontRefresh(0));
-            toast.success(`Assigned to ${escapeHtml(name)}`);
+            const chatSaveConfirmed = await chatSaveConfirmation;
+            if (chatSaveConfirmed) toast.success(`Assigned to ${escapeHtml(name)}`);
+            else toast.warning(`Assigned to ${escapeHtml(name)}; the host did not confirm the chat save.`);
         } else {
             toast.error('The selection could not be mapped unambiguously to plain message source; nothing was changed.');
         }
@@ -779,9 +872,9 @@ function syncManagedDialogueTabStops(messageRoots = null) {
     const managed = messageRoots
         ? roots.flatMap(root => [...root.querySelectorAll(`[${CONTEXT_FOCUS_ATTRIBUTE}]`)])
         : [...document.querySelectorAll(`[${CONTEXT_FOCUS_ATTRIBUTE}]`)];
-    if (!settings.enableRightClick) {
+    if (!isContextMenuEnabled()) {
         managed.forEach(clearManagedTabStop);
-        if (closeActiveAssignmentSurface) closeActiveAssignmentSurface();
+        if (closeActiveAssignmentSurface) closeActiveAssignmentSurface({ restoreFocus: false });
         return;
     }
 
@@ -826,7 +919,11 @@ function resolveDialogueAssignmentTarget(source) {
 }
 
 export function setupContextMenu() {
-    if (runtimeState.contextMenuSetup) return;
+    if (runtimeState.contextMenuSetup) {
+        syncManagedDialogueTabStops();
+        return;
+    }
+    if (!settings.enabled) return;
     runtimeState.contextMenuSetup = true;
     let longPressState = null;
     let consumeTouchEnd = false;
@@ -945,12 +1042,12 @@ export function setupContextMenu() {
     observeChatRoot();
 
     document.addEventListener('change', e => {
-        if (getEventElement(e.target)?.id === 'dc-right-click') syncManagedDialogueTabStops();
+        if (['dc-enabled', 'dc-right-click'].includes(getEventElement(e.target)?.id)) syncManagedDialogueTabStops();
     });
-    let previousFocusMode = `${settings.enableRightClick}:${isDomEngine()}`;
+    let previousFocusMode = `${settings.enabled}:${settings.enableRightClick}:${isDomEngine()}`;
     eventSource.on(event_types.SETTINGS_UPDATED, () => {
-        const nextFocusMode = `${settings.enableRightClick}:${isDomEngine()}`;
-        if (!settings.enableRightClick) finishTouchGesture();
+        const nextFocusMode = `${settings.enabled}:${settings.enableRightClick}:${isDomEngine()}`;
+        if (!isContextMenuEnabled()) finishTouchGesture();
         if (nextFocusMode === previousFocusMode) return;
         previousFocusMode = nextFocusMode;
         queueFocusSync();
@@ -959,7 +1056,7 @@ export function setupContextMenu() {
 
     document.addEventListener('keydown', e => {
         const focusedTarget = getEventElement(e.target);
-        if (settings.enableRightClick && focusedTarget?.getAttribute?.(CONTEXT_FOCUS_ATTRIBUTE) === 'tabindex'
+        if (isContextMenuEnabled() && focusedTarget?.getAttribute?.(CONTEXT_FOCUS_ATTRIBUTE) === 'tabindex'
             && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) {
             const targets = getMessageDialogueTargets(focusedTarget.closest('.mes_text'));
             const currentIndex = targets.indexOf(focusedTarget);
@@ -977,7 +1074,7 @@ export function setupContextMenu() {
         const opensContextMenu = e.key === 'ContextMenu'
             || e.code === 'ContextMenu'
             || (e.shiftKey && e.key === 'F10');
-        if (!opensContextMenu || e.repeat || !settings.enableRightClick) return;
+        if (!opensContextMenu || e.repeat || !isContextMenuEnabled()) return;
 
         syncManagedDialogueTabStops();
         const assignmentTarget = resolveDialogueAssignmentTarget(e.target);
@@ -986,7 +1083,7 @@ export function setupContextMenu() {
     });
 
     document.addEventListener('contextmenu', e => {
-        if (!settings.enableRightClick) return;
+        if (!isContextMenuEnabled()) return;
         const eventElement = getEventElement(e.target);
         if (suppressedContextTarget && Date.now() <= suppressContextUntil
             && (suppressedContextTarget === eventElement || suppressedContextTarget.contains(eventElement))) {
@@ -1020,7 +1117,7 @@ export function setupContextMenu() {
 
     document.addEventListener('touchstart', e => {
         finishTouchGesture();
-        if (!settings.enableRightClick) return;
+        if (!isContextMenuEnabled()) return;
         if (e.touches.length !== 1) return;
         const assignmentTarget = resolveDialogueAssignmentTarget(e.target);
         if (!assignmentTarget) return;
@@ -1036,7 +1133,7 @@ export function setupContextMenu() {
             timer: null,
         };
         press.timer = setTimeout(() => {
-            if (longPressState !== press || press.cancelled || !press.targetEl.isConnected || !settings.enableRightClick) {
+            if (longPressState !== press || press.cancelled || !press.targetEl.isConnected || !isContextMenuEnabled()) {
                 finishTouchGesture();
                 return;
             }
@@ -1488,7 +1585,7 @@ export function replaceMessageSelectionWithFontTag(msg, selectedText, hexColor, 
     const rawText = typeof msg?.mes === 'string' ? msg.mes : '';
     const sourceSelection = String(selectedText ?? '');
     const normalizedColor = normalizeHexColor(hexColor, null);
-    if (!sourceSelection || !sourceSelection.trim() || !rawText || !normalizedColor) return false;
+    if (isHostSystemOrToolMessage(msg) || !sourceSelection || !sourceSelection.trim() || !rawText || !normalizedColor) return false;
 
     const syntax = getRawSelectionSyntax(rawText);
     if (syntax.unsupportedProjection) return false;
@@ -1530,7 +1627,7 @@ export function wrapQElementWithFontTag(qElement, color) {
     const ctx = getContext();
     const chat = ctx?.chat || [];
     const msg = chat[msgIndex];
-    if (!msg || msg.is_user) return false;
+    if (!msg || msg.is_user || isHostSystemOrToolMessage(msg)) return false;
 
     const newHex = normalizeHexColor(color);
     if (!newHex) return false;
@@ -1561,26 +1658,4 @@ export function wrapQElementWithFontTag(qElement, color) {
     // scheduled by the caller races the wipe and disappears until reload.
     void refreshMessageDom(msgIndex, msg).then(() => scheduleCustomFontRefresh(0));
     return true;
-}
-
-export function updateMessageTextForFontTag(fontTag, oldColor, newColor) {
-    const msgIndex = getMessageIndexFromElement(fontTag);
-    if (msgIndex === -1) return false;
-
-    const ctx = getContext();
-    const chat = ctx?.chat || [];
-    const msg = chat[msgIndex];
-    if (!msg || msg.is_user) return false;
-
-    const oldHex = normalizeHexColor(oldColor, null);
-    const newHex = normalizeHexColor(newColor, null);
-    if (!oldHex || !newHex || oldHex === newHex) return false;
-
-    const { updatedText: updated } = updateTextColorReferences(msg.mes, { [oldHex]: newHex });
-
-    if (updated !== msg.mes) {
-        msg.mes = updated;
-        return true;
-    }
-    return false;
 }

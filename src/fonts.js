@@ -66,18 +66,30 @@ export function syncRemoteFontLoadingPolicy() {
     return enabled;
 }
 
-export function loadGoogleFont(fontName) {
+function waitForGoogleFontStylesheet(link, normalized) {
+    if (link?.dataset?.dcGoogleFontState !== 'loading' || typeof link.addEventListener !== 'function') {
+        return Promise.resolve(normalized);
+    }
+    return new Promise(resolve => {
+        const finish = () => resolve(normalized);
+        link.addEventListener('load', finish, { once: true });
+        link.addEventListener('error', finish, { once: true });
+    });
+}
+
+export function loadGoogleFont(fontName, { wait = false } = {}) {
     const normalized = normalizeGoogleFontName(fontName);
-    if (!normalized || settings.allowRemoteFonts !== true || typeof document === 'undefined' || !document.head) return normalized;
+    const result = () => wait ? Promise.resolve(normalized) : normalized;
+    if (!normalized || settings.allowRemoteFonts !== true || typeof document === 'undefined' || !document.head) return result();
     initializeRemoteFontTracking();
     const key = normalized.toLowerCase();
     const existing = [...document.querySelectorAll(REMOTE_FONT_LINK_SELECTOR)]
         .find(link => getRemoteFontLinkKey(link) === key);
     if (existing) {
         existing.disabled = existing.dataset.dcGoogleFontState === 'failed';
-        return normalized;
+        return wait ? waitForGoogleFontStylesheet(existing, normalized) : normalized;
     }
-    if (remoteFontRequests.has(key) || remoteFontRequests.size >= REMOTE_FONT_REQUEST_LIMIT) return normalized;
+    if (remoteFontRequests.has(key) || remoteFontRequests.size >= REMOTE_FONT_REQUEST_LIMIT) return result();
 
     remoteFontRequests.add(key);
     loadedGoogleFonts.add(key);
@@ -113,8 +125,9 @@ export function loadGoogleFont(fontName) {
         remoteFontRequests.delete(key);
         link.dataset.dcGoogleFontState = 'failed';
         console.warn(`[Dialogue Colors] Google Font request could not be started: ${normalized}`, error);
+        return result();
     }
-    return normalized;
+    return wait ? waitForGoogleFontStylesheet(link, normalized) : normalized;
 }
 
 export let customFontRefreshTimer = null;

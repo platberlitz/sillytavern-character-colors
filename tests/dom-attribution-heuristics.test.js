@@ -432,6 +432,15 @@ test('a possessive body part or voice puts its owner in the scene, a prop does n
     });
 });
 
+test('speaker matching supports accented and CJK names with curly possessives', () => {
+    withCharacters(['Dana', 'Élodie', '愛子'], () => {
+        assert.equal(attribute('Élodie said, "Come in."', 'Dana')[0].speaker, 'Élodie');
+        assert.equal(attribute('Élodie’s voice dropped. "Not now."', 'Dana')[0].speaker, 'Élodie');
+        assert.equal(attribute('愛子 said, "行きましょう。"', 'Dana')[0].speaker, '愛子');
+        assert.equal(attribute('愛子が振り返った。 "行きましょう。"', 'Dana')[0].speaker, '愛子');
+    });
+});
+
 test('alternation stays a two-speaker ping-pong and reports scene crowding as doubt', () => {
     withCharacters(['Alice', 'Carol'], () => {
         const twoSpeakers = attribute('Alice said, "A one"\nCarol said, "B two"\n"C three"\n"D four"', 'Alice');

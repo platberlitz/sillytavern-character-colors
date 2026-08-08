@@ -9,16 +9,16 @@ import { DOM_RETRY_REFRESH_DELAYS, acceptAttributionReview, cancelMessageDomFoll
 import { loadGoogleFont, scheduleCustomFontRefresh, syncRemoteFontLoadingPolicy } from './fonts.js';
 import { getColorVisionSimulationForTarget, getGradientRenderState, getVisualRenderState } from './gradient-rendering.js';
 import { BUILTIN_GRADIENT_PRESETS, DEFAULT_GRADIENT_ANGLE, DEFAULT_GRADIENT_DURATION, DEFAULT_GRADIENT_POSITION, GRADIENT_TYPES, MAX_GRADIENT_STOPS, cloneGradient, getBuiltInGradientPreset, getGradientSignature, normalizeGradient, normalizeGradientPresetName } from './gradients.js';
-import { GROUP_PROFILE_AUTOMATION_KEYS, deleteGroupProfile, getGroupProfile, normalizeGroupKey, normalizeGroupName, normalizeRegistryIdentity, normalizeRegistryIdentityName, renameGroupProfile, setGroupProfile } from './group-profiles.js';
+import { GROUP_PROFILE_AUTOMATION_KEYS, deleteGroupProfile, getGroupProfile, isReservedCharacterIdentity, normalizeGroupKey, normalizeGroupName, normalizeRegistryIdentity, normalizeRegistryIdentityName, renameGroupProfile, setGroupProfile } from './group-profiles.js';
 import { createRestoreSnapshot, redo, saveHistory, showUndoToast, undo } from './history.js';
-import { applyFastColorUiUpdates, applyLiveColorChangesFromSnapshot, applyToolCallMessageRepair, captureEffectiveColorSnapshot, colorizeMessages, commit, flushChatSave, flushColorStateSave, queueColorStateSave, recolorAllMessages, repaintDomAfterCharacterDataChange } from './live-colors.js';
-import { registerKeyboardShortcuts } from './main.js';
+import { applyFastColorUiUpdates, applyLiveColorChangesFromSnapshot, applyToolCallMessageRepair, areChatBindingsEqual, captureChatBinding, captureEffectiveColorSnapshot, colorizeMessages, commit, flushChatSave, flushColorStateSave, queueColorStateSave, recolorAllMessages, repaintDomAfterCharacterDataChange } from './live-colors.js';
+import { populateProfileDropdown } from './llm.js';
 import { getTransientNarratorCount, getNarratorVisual, normalizeNarratorStyle, setNarratorStyle } from './narrator-style.js';
 import { applyGradientPreset, applyThemeReadabilityAndBrightness, buildCharacterEntry, collectDuplicateColorKeys, createGradientRandomMasterSeed, createRandomGradient, deleteColorPreset, deleteCustomPalette, detectTheme, flipColorsForTheme, generateCustomPaletteFromWords, getBaseColor, getCustomPaletteMeta, getCustomPalettes, getEntryEffectiveColor, getNextColor, getPerceptualConflictReport, getPersonaName, getPresets, invalidateThemeCache, loadColorPreset, refreshPaletteDropdown, refreshPresetDropdown, regenerateAllColors, regenerateAllGradients, removeCharacterKeys, repairPerceptualConflicts, resolveColorPresetName, saveColorPreset, saveCustomPalette, setEntryFromBaseColor, setEntryGradient, showHarmonyPopup, suggestColorForName, swapEntryColorData, syncAllEffectiveColors } from './palettes.js';
 import { injectPrompt, updateSystemPromptDisplay } from './prompts.js';
-import { escapeHtml, getContext } from './st-api.js';
-import { autoRecolorHintShown, characterColors, expandedCharacterRows, groupProfiles, isDomEngine, searchTerm, selectedCharacterKeys, setAutoRecolorHintShown, setCharacterColors, setGroupProfiles, setSearchTerm, setSwapMode, settings, swapMode } from './state.js';
-import { analyzeColorImport, analyzeSettingsImport, analyzeStylePackImport, applyCardData, applyColorImport, applySettingsImport, applyStylePackImport, archiveStoredColorData, deleteCustomGradientPreset, disableAutoSync, enableAutoSync, exportColors, exportSettings, getArchivedColorData, getCurrentStorageScope, getCustomGradientPresets, getLegendPosition, getStorageKey, getStorageLabelForKey, getStorageScopeDescriptor, getStylePackRegistry, getUserColorDataStore, normalizeColorDataEntry, normalizeToggleSettings, pinCurrentPersonaColor, readCardData, renameCustomGradientPreset, renamePinnedPersonaColor, restoreAllSettingsToDefaults, restoreArchivedColorData, restorePinnedPersonaColor, saveCustomGradientPreset, saveData, saveLegendPosition, saveToCard, switchColorStorageScope, updateAutoSyncUI } from './storage.js';
+import { escapeHtml, eventSource, event_types, getContext } from './st-api.js';
+import { autoRecolorHintShown, characterColors, expandedCharacterRows, groupProfiles, isDomEngine, searchTerm, selectedCharacterKeys, setAutoRecolorHintShown, setCharacterColors, setGroupProfiles, setSearchTerm, setSwapMode, settings, swapMode, synchronizeEnabledLifecycle } from './state.js';
+import { analyzeColorImport, analyzeSettingsImport, analyzeStylePackImport, applyCardData, applyColorImport, applySettingsImport, applyStylePackImport, archiveStoredColorData, deleteCustomGradientPreset, disableAutoSync, enableAutoSync, exportColors, exportSettings, getArchivedColorData, getCurrentStorageScope, getCustomGradientPresets, getLegendPosition, getStorageKey, getStorageKeyForScope, getStorageLabelForKey, getStorageScopeDescriptor, getStylePackRegistry, getUserColorDataStore, normalizeColorDataEntry, normalizeToggleSettings, pinCurrentPersonaColor, readCardData, renameCustomGradientPreset, renamePinnedPersonaColor, restoreAllSettingsToDefaults, restoreArchivedColorData, restorePinnedPersonaColor, saveCustomGradientPreset, saveData, saveLegendPosition, saveToCard, switchColorStorageScope, updateAutoSyncUI } from './storage.js';
 import { buildStylePackEnvelope } from './style-pack-adapter.js';
 import { escapeAttr, getGoogleFontFamily, htmlToNode, normalizeEntryGradientGenerator, normalizeGoogleFontName, normalizeHexColor, normalizeManualColorInput, toast } from './utils.js';
 import { AUTO_HIGH_ATTRIBUTION_CONFIDENCE, cancelStreamingAttributionVerification, clearAutoAttributionVerificationQueue, getAttributionVerifyPasses, queueAutoAttributionVerificationForRenderedMessages, runAttributionVerification, verifyLatestAttributionsWithLLM, verifyVisibleAttributionsWithLLM } from './verify.js';
@@ -80,8 +80,60 @@ const DIALOG_LIST_RENDER_LIMIT = 500;
 const LEGEND_CANVAS_ENTRY_LIMIT = 500;
 const STYLE_PACK_OVERRIDE_DIAGNOSTIC_LIMIT = 12;
 
+function captureUiMutationContext() {
+    const scope = getCurrentStorageScope();
+    return {
+        scope,
+        storageKey: getStorageKeyForScope(scope, { persistMetadata: false }),
+        cardKey: getStorageKeyForScope('card'),
+        colors: characterColors,
+        profiles: groupProfiles,
+    };
+}
+
+function isUiMutationContextCurrent(binding) {
+    const scope = getCurrentStorageScope();
+    return !!binding
+        && binding.scope === scope
+        && binding.storageKey === getStorageKeyForScope(scope, { persistMetadata: false })
+        && binding.cardKey === getStorageKeyForScope('card')
+        && binding.colors === characterColors
+        && binding.profiles === groupProfiles;
+}
+
+function isUiChatBindingCurrent(binding) {
+    const current = captureChatBinding();
+    return areChatBindingsEqual(binding, current) && binding?.chat === current?.chat;
+}
+
+function notifyUiContextChanged(message = 'The active chat, card, or color table changed. Review the action again.') {
+    const result = { ok: false, error: 'context_changed', message };
+    toast.info(message);
+    return result;
+}
+
 function getEffectiveNarratorVisual() {
     return getNarratorVisual(settings, applyThemeReadabilityAndBrightness);
+}
+
+function getTypographyStyle(entry) {
+    const fontName = normalizeGoogleFontName(entry?.font);
+    const fontFamily = getGoogleFontFamily(fontName);
+    if (fontFamily) loadGoogleFont(fontName);
+    const textStyle = ['', 'bold', 'italic', 'bold italic'].includes(entry?.style) ? entry.style : '';
+    const bold = settings.forceBoldText === true || textStyle.includes('bold');
+    return `${fontFamily ? `font-family:${fontFamily};` : ''}${bold ? 'font-weight:bold;' : ''}${textStyle.includes('italic') ? 'font-style:italic;' : ''}`;
+}
+
+function applyPreviewTypography(element, entry) {
+    if (!element) return;
+    const fontName = normalizeGoogleFontName(entry?.font);
+    const fontFamily = getGoogleFontFamily(fontName);
+    if (fontFamily) loadGoogleFont(fontName);
+    const textStyle = ['', 'bold', 'italic', 'bold italic'].includes(entry?.style) ? entry.style : '';
+    element.style.fontFamily = fontFamily;
+    element.style.fontWeight = settings.forceBoldText === true || textStyle.includes('bold') ? 'bold' : '';
+    element.style.fontStyle = textStyle.includes('italic') ? 'italic' : '';
 }
 
 function getDialogFocusables(dialog) {
@@ -311,6 +363,10 @@ export function createCanvasGradientFill(ctx, entry, bounds, options = {}) {
             Math.hypot(originX - (x + width), originY - (y + height))
         );
         fill = ctx.createRadialGradient(originX, originY, 0, originX, originY, Math.max(1, radius));
+    } else if (data.gradient.type === 'conic' && typeof ctx.createConicGradient === 'function') {
+        const originX = x + width * data.gradient.x / 100;
+        const originY = y + height * data.gradient.y / 100;
+        fill = ctx.createConicGradient((data.gradient.angle - 90) * Math.PI / 180, originX, originY);
     } else {
         const radians = data.gradient.angle * Math.PI / 180;
         const dx = Math.sin(radians);
@@ -435,17 +491,35 @@ export async function exportLegendPng() {
         if (!decision.value || decision.value === 'cancel') return;
         if (decision.value === 'preview') colorVision = getColorVisionSimulationForTarget('ui');
     }
+    const renderedEntries = entries.map(item => {
+        const fontName = normalizeGoogleFontName(item.entry.font);
+        const fontFamily = getGoogleFontFamily(fontName);
+        const textStyle = String(item.entry.style || '');
+        return {
+            ...item,
+            fontName,
+            canvasFont: `${textStyle.includes('italic') ? 'italic ' : ''}${settings.forceBoldText || textStyle.includes('bold') ? 'bold ' : ''}14px ${fontFamily || 'sans-serif'}`,
+        };
+    });
+    await Promise.all(renderedEntries
+        .filter(item => item.fontName)
+        .map(item => loadGoogleFont(item.fontName, { wait: true })));
+    if (document.fonts?.load) {
+        await Promise.all(renderedEntries.filter(item => item.fontName).map(async item => {
+            try { await document.fonts.load(item.canvasFont); } catch { /* Canvas falls back to an available family. */ }
+        }));
+    }
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
     const lineHeight = 24, padding = 16, dotSize = 10;
     canvas.width = 300;
     const narrationGap = narrator && characterEntries.length ? 10 : 0;
-    canvas.height = entries.length * lineHeight + narrationGap + padding * 2;
+    canvas.height = renderedEntries.length * lineHeight + narrationGap + padding * 2;
     const mode = settings.themeMode === 'auto' ? detectTheme() : settings.themeMode;
     ctx.fillStyle = mode === 'dark' ? '#1a1a2e' : '#f0f0f0';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     let rowY = padding + lineHeight / 2;
-    entries.forEach(({ entry: v, label, kind }) => {
+    renderedEntries.forEach(({ entry: v, label, kind, canvasFont }) => {
         if (kind === 'narrator' && characterEntries.length) {
             ctx.strokeStyle = mode === 'dark' ? '#596070' : '#c4c7ce';
             ctx.beginPath();
@@ -460,7 +534,7 @@ export async function exportLegendPng() {
         ctx.arc(padding + dotSize / 2, y, dotSize / 2, 0, Math.PI * 2);
         ctx.fillStyle = createCanvasGradientFill(ctx, v, { x: padding, y: y - dotSize / 2, width: dotSize, height: dotSize }, { colorVision });
         ctx.fill();
-        ctx.font = '14px sans-serif';
+        ctx.font = canvasFont;
         const textX = padding + dotSize + 8;
         const count = kind === 'narrator' ? getTransientNarratorCount(getContext()?.chat) : null;
         const text = kind === 'narrator' && count !== null ? `${label} (${count})` : label;
@@ -604,6 +678,7 @@ export function updateLegend() {
     const signature = JSON.stringify({
         visible: !!settings.showLegend,
         remoteFonts: settings.allowRemoteFonts === true,
+        forceBold: settings.forceBoldText === true,
         driftAll: settings.driftAllGradientColors === true,
         omittedEntryCount,
         colorVision: getColorVisionSimulationForTarget('ui'),
@@ -613,9 +688,10 @@ export function updateLegend() {
             entry.dialogueCount || 0,
             getVisualRenderState(entry, { target: 'ui' }).fallbackColor,
             normalizeGoogleFontName(entry.font),
+            entry.style || '',
             getGradientSignature(entry),
         ]),
-        narrator: narrator ? [narratorCount, getVisualRenderState(narrator, { target: 'ui' }).fallbackColor, getGradientSignature(narrator)] : null,
+        narrator: narrator ? [narratorCount, getVisualRenderState(narrator, { target: 'ui' }).fallbackColor, getGradientSignature(narrator), narrator.font, narrator.style] : null,
     });
     if ((!allEntries.length && !narrator) || !settings.showLegend) {
         legend.style.display = 'none';
@@ -635,18 +711,15 @@ export function updateLegend() {
     legend.innerHTML = '<div class="dc-legend-handle" tabindex="0" role="toolbar" aria-label="Move character legend with arrow keys"><strong>Characters</strong><span><button type="button" class="dc-legend-reset" aria-label="Reset legend position" title="Reset position">↺</button><button type="button" class="dc-legend-hide" aria-label="Hide character legend" title="Hide legend">×</button></span></div>' +
         entries.map(([, v]) => {
              const presentation = getGradientPresentation(v, { target: 'ui' });
-            const fontFamily = getGoogleFontFamily(v.font);
-            if (fontFamily) loadGoogleFont(v.font);
-            const fontStyle = fontFamily ? `font-family:${escapeAttr(fontFamily)};` : '';
             const gradientClasses = presentation ? ` dc-gradient-legend-item ${presentation.classes}` : '';
             const gradientAttributes = presentation ? ` ${presentation.dataAttributes}` : '';
-            return `<div class="dc-legend-character${gradientClasses}"${gradientAttributes} style="display:flex;align-items:center;gap:4px;"><span class="dc-legend-swatch${presentation ? ' dc-gradient-surface' : ''}"${gradientAttributes} style="width:8px;height:8px;border-radius:50%;${escapeAttr(buildGradientSurfaceStyle(v))}"></span><span class="dc-legend-name${presentation ? ' dc-gradient-text' : ''}"${gradientAttributes} style="${escapeAttr(buildGradientSurfaceStyle(v, { text: true }))}${fontStyle}">${escapeHtml(v.name)}</span><span style="opacity:0.5;font-size:0.8em;">${v.dialogueCount || 0}</span></div>`;
+            return `<div class="dc-legend-character${gradientClasses}"${gradientAttributes} style="display:flex;align-items:center;gap:4px;"><span class="dc-legend-swatch${presentation ? ' dc-gradient-surface' : ''}"${gradientAttributes} style="width:8px;height:8px;border-radius:50%;${escapeAttr(buildGradientSurfaceStyle(v))}"></span><span class="dc-legend-name${presentation ? ' dc-gradient-text' : ''}"${gradientAttributes} style="${escapeAttr(buildGradientSurfaceStyle(v, { text: true }) + getTypographyStyle(v))}">${escapeHtml(v.name)}</span><span style="opacity:0.5;font-size:0.8em;">${v.dialogueCount || 0}</span></div>`;
         }).join('') + (narrator ? (() => {
             const presentation = getGradientPresentation(narrator, { target: 'ui' });
             const gradientClasses = presentation ? ` dc-gradient-legend-item ${presentation.classes}` : '';
             const gradientAttributes = presentation ? ` ${presentation.dataAttributes}` : '';
             const countLabel = narratorCount === null ? 'Visual only' : String(narratorCount);
-            return `<div class="dc-legend-section-label">Narration</div><div class="dc-legend-character dc-legend-narration${gradientClasses}"${gradientAttributes} style="display:flex;align-items:center;gap:4px;"><span class="dc-legend-swatch${presentation ? ' dc-gradient-surface' : ''}"${gradientAttributes} style="width:8px;height:8px;border-radius:50%;${escapeAttr(buildGradientSurfaceStyle(narrator))}"></span><span class="dc-legend-name${presentation ? ' dc-gradient-text' : ''}"${gradientAttributes} style="${escapeAttr(buildGradientSurfaceStyle(narrator, { text: true }))}">Narration</span><span style="opacity:0.5;font-size:0.8em;">${escapeHtml(countLabel)}</span></div>`;
+            return `<div class="dc-legend-section-label">Narration</div><div class="dc-legend-character dc-legend-narration${gradientClasses}"${gradientAttributes} style="display:flex;align-items:center;gap:4px;"><span class="dc-legend-swatch${presentation ? ' dc-gradient-surface' : ''}"${gradientAttributes} style="width:8px;height:8px;border-radius:50%;${escapeAttr(buildGradientSurfaceStyle(narrator))}"></span><span class="dc-legend-name${presentation ? ' dc-gradient-text' : ''}"${gradientAttributes} style="${escapeAttr(buildGradientSurfaceStyle(narrator, { text: true }) + getTypographyStyle(narrator))}">Narration</span><span style="opacity:0.5;font-size:0.8em;">${escapeHtml(countLabel)}</span></div>`;
         })() : '') + (omittedEntryCount
         ? `<p class="dc-list-limit">${omittedEntryCount} additional character${omittedEntryCount === 1 ? '' : 's'} omitted from the floating legend.</p>`
         : '');
@@ -698,7 +771,7 @@ export async function showStatsPopup() {
         const gradientClasses = presentation ? ` ${presentation.classes}` : '';
         const gradientAttributes = presentation ? ` ${presentation.dataAttributes}` : '';
         const value = narratorCount === null ? 'Visual only; no reliable count available' : `${narratorCount} tagged narration span${narratorCount === 1 ? '' : 's'}`;
-        return `<div class="dc-stats-narration${gradientClasses}"${gradientAttributes}><span class="dc-stats-name${presentation ? ' dc-gradient-text' : ''}"${gradientAttributes} style="${escapeAttr(buildGradientSurfaceStyle(narrator, { text: true }))}">Narration</span><span class="dc-stats-value">${escapeHtml(value)}</span></div>`;
+        return `<div class="dc-stats-narration${gradientClasses}"${gradientAttributes}><span class="dc-stats-name${presentation ? ' dc-gradient-text' : ''}"${gradientAttributes} style="${escapeAttr(buildGradientSurfaceStyle(narrator, { text: true }) + getTypographyStyle(narrator))}">Narration</span><span class="dc-stats-value">${escapeHtml(value)}</span></div>`;
     })() : '';
     const html = `${dialogueHtml}${narrationHtml ? `<div class="dc-stats-section-label">Narration</div>${narrationHtml}` : ''}`;
     await openDecisionDialog({
@@ -1203,7 +1276,7 @@ export function hideAutoColorizeIndicator(mesElement) {
 
 export function addCharacter(name, color, options = {}) {
     if (!name.trim()) return;
-    if (name.trim().toLowerCase() === 'narrator') {
+    if (isReservedCharacterIdentity(name)) {
         toast.info('Use the dedicated Narration editor instead of adding Narrator as a character.');
         return;
     }
@@ -1762,8 +1835,19 @@ function handleAliasClick(aliasBtn) {
     inp.focus();
     const close = () => { inputRow.remove(); focusCharacterControl(key, 'alias'); };
     const submit = () => {
-        const alias = inp.value.trim();
+        const rawAlias = inp.value.trim();
+        const alias = normalizeRegistryIdentityName(rawAlias);
+        if (rawAlias && !alias) {
+            inp.setAttribute('aria-invalid', 'true');
+            toast.warning('Use an alias without reserved words, control characters, or more than 120 characters.');
+            return;
+        }
         if (alias) {
+            if (isReservedCharacterIdentity(alias)) {
+                inp.setAttribute('aria-invalid', 'true');
+                toast.warning('Narrator identities are reserved for the Narration editor.');
+                return;
+            }
             const existingKey = resolveCharacterKeyByNameOrAlias(alias);
             if (existingKey && existingKey !== key) {
                 inp.setAttribute('aria-invalid', 'true');
@@ -1785,6 +1869,19 @@ function handleAliasClick(aliasBtn) {
     inputRow.querySelector('.dc-inline-submit').onclick = submit;
     inputRow.querySelector('.dc-inline-cancel').onclick = close;
     inp.onkeydown = ev => { if (ev.key === 'Enter') submit(); if (ev.key === 'Escape') close(); };
+}
+
+function readValidatedGroupInput(input) {
+    const rawValue = String(input?.value ?? '').trim();
+    const group = normalizeGroupName(rawValue);
+    if (rawValue && !group) {
+        input?.setAttribute('aria-invalid', 'true');
+        input?.focus({ preventScroll: true });
+        toast.warning('Group labels must be at most 80 characters and cannot be reserved words or contain control characters.');
+        return null;
+    }
+    input?.removeAttribute('aria-invalid');
+    return group;
 }
 
 function handleFontClick(fontBtn) {
@@ -1836,7 +1933,8 @@ function handleGroupClick(groupBtn) {
     inp.select();
     const close = () => { inputRow.remove(); focusCharacterControl(key, 'group'); };
     const submit = () => {
-        const nextGroup = normalizeGroupName(inp.value);
+        const nextGroup = readValidatedGroupInput(inp);
+        if (nextGroup === null) return;
         if ((characterColors[key]?.group || '') === nextGroup) { close(); return; }
         const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
         const result = setCharacterGroup([key], nextGroup);
@@ -2027,7 +2125,10 @@ function getNarratorPreviewVisual(style = normalizeNarratorStyle(settings.narrat
 
 function previewNarratorStyle(style) {
     const preview = document.getElementById('dc-narrator-preview');
-    if (preview) setGradientPresentation(preview, getNarratorPreviewVisual(style));
+    if (!preview) return;
+    const visual = getNarratorPreviewVisual(style);
+    setGradientPresentation(preview, visual);
+    applyPreviewTypography(preview, visual);
 }
 
 function commitNarratorStyle(style) {
@@ -2075,10 +2176,16 @@ function bindNarratorEditorControls(host) {
     });
     const colorInput = host.querySelector('#dc-narrator-color');
     colorInput?.addEventListener('input', event => {
-        previewNarratorStyle({ ...currentStyle(), baseColor: normalizeHexColor(event.target.value, '#888888') });
+        previewNarratorStyle({ ...currentStyle(), baseColor: normalizeHexColor(event.target.value, '#888888'), gradientGenerator: null });
     });
     colorInput?.addEventListener('change', event => {
-        commitNarratorStyle({ ...currentStyle(), baseColor: normalizeHexColor(event.target.value, '#888888') });
+        commitNarratorStyle({ ...currentStyle(), baseColor: normalizeHexColor(event.target.value, '#888888'), gradientGenerator: null });
+    });
+    host.querySelector('#dc-narrator-style')?.addEventListener('change', event => {
+        commitNarratorStyle({ ...currentStyle(), style: event.target.value });
+    });
+    host.querySelector('#dc-narrator-font')?.addEventListener('change', event => {
+        commitNarratorStyle({ ...currentStyle(), font: normalizeGoogleFontName(event.target.value) });
     });
     host.querySelector('#dc-narrator-gradient-toggle')?.addEventListener('click', () => {
         const style = currentStyle();
@@ -2190,6 +2297,7 @@ function renderNarratorEditor() {
     const disabled = style.enabled ? '' : ' disabled';
     const generator = normalizeEntryGradientGenerator(style.gradientGenerator, gradient);
     const generatorStatus = generator ? `Seeded variation ${generator.iteration}` : 'Manual gradient';
+    const fontName = normalizeGoogleFontName(style.font);
     const narratorAngle = gradient ? `<label>${gradient.type === 'conic' ? 'Start angle' : 'Angle'} <input id="dc-narrator-gradient-angle" type="number" class="text_pole" min="0" max="360" step="0.1" value="${gradient.angle}"${disabled}>°</label>` : '';
     const narratorOrigin = gradient ? `<label>Origin X <input id="dc-narrator-gradient-x" type="number" class="text_pole" min="0" max="100" step="0.1" value="${gradient.x}"${disabled}>%</label><label>Origin Y <input id="dc-narrator-gradient-y" type="number" class="text_pole" min="0" max="100" step="0.1" value="${gradient.y}"${disabled}>%</label>` : '';
     const geometry = gradient?.type === 'radial'
@@ -2202,6 +2310,8 @@ function renderNarratorEditor() {
         <label class="checkbox_label dc-narrator-enable"><input type="checkbox" id="dc-narrator-enabled"${style.enabled ? ' checked' : ''}><span>Color narration</span></label>
         <div class="dc-narrator-compact">
             <label>Primary <input type="color" id="dc-narrator-color" value="${style.baseColor}"${disabled}></label>
+            <label>Style <select id="dc-narrator-style" class="text_pole"${disabled}><option value=""${!style.style ? ' selected' : ''}>Normal</option><option value="bold"${style.style === 'bold' ? ' selected' : ''}>Bold</option><option value="italic"${style.style === 'italic' ? ' selected' : ''}>Italic</option><option value="bold italic"${style.style === 'bold italic' ? ' selected' : ''}>Bold italic</option></select></label>
+            <label>Font <input type="text" id="dc-narrator-font" class="text_pole" maxlength="80" value="${escapeAttr(fontName)}" placeholder="Font family" aria-describedby="dc-remote-fonts-note"${disabled}></label>
             <button type="button" id="dc-narrator-gradient-toggle" class="menu_button${gradient ? ' dc-danger-button' : ''}"${disabled}>${gradient ? 'Remove gradient' : 'Enable gradient'}</button>
             <button type="button" id="dc-narrator-gradient-randomize" class="menu_button"${disabled}>Randomize</button>
             <label>Preset <select id="dc-narrator-gradient-preset" class="text_pole"${disabled}>${buildGradientPresetOptionsHtml()}</select></label>
@@ -2210,6 +2320,8 @@ function renderNarratorEditor() {
         </div>
         ${gradient ? `<div class="dc-narrator-gradient-controls"><label>Type <select id="dc-narrator-gradient-type" class="text_pole"${disabled}><option value="linear"${gradient.type === 'linear' ? ' selected' : ''}>Linear</option><option value="radial"${gradient.type === 'radial' ? ' selected' : ''}>Radial</option><option value="conic"${gradient.type === 'conic' ? ' selected' : ''}>Conic</option></select></label>${geometry}<label>Primary position <input id="dc-narrator-gradient-primary-position" type="number" class="text_pole" min="0" max="100" step="0.1" value="${gradient.primaryPosition}"${disabled}>%</label><label class="checkbox_label"><input type="checkbox" id="dc-narrator-gradient-animation"${gradient.animation.enabled ? ' checked' : ''}${disabled}><span>Drift colors</span></label><span class="dc-gradient-generator-status">${escapeHtml(generatorStatus)}</span></div><div class="dc-narrator-stops">${stopRows}<button type="button" id="dc-narrator-gradient-add-stop" class="menu_button"${disabled}${gradient.stops.length + 1 >= MAX_GRADIENT_STOPS ? ' disabled' : ''}>Add stop (${gradient.stops.length + 1}/${MAX_GRADIENT_STOPS})</button></div>` : ''}`;
     setGradientPresentation(host.querySelector('#dc-narrator-preview'), visual);
+    applyPreviewTypography(host.querySelector('#dc-narrator-preview'), visual);
+    host.dataset.narratorSignature = JSON.stringify(style);
     bindNarratorEditorControls(host);
     restoreScrollPositions(scrollPositions);
     requestAnimationFrame(() => restoreScrollPositions(scrollPositions));
@@ -2322,16 +2434,22 @@ export function refreshGradientPresetControls(preferredCustomName = '') {
     renderNarratorEditor();
 }
 
+function getReadableGradientPresetPreview(preset) {
+    const preview = {};
+    if (!applyGradientPreset(preview, preset)) return preset;
+    return { baseColor: preview.baseColor, color: preview.color, gradient: preview.gradient };
+}
+
 function getGradientPresetCatalog() {
     const builtIns = Object.entries(BUILTIN_GRADIENT_PRESETS).map(([name, preset]) => ({
         id: `builtin:${name}`,
         name: formatGradientPresetName(name),
         source: 'builtin',
-        preset,
+        preset: getReadableGradientPresetPreview(preset),
     }));
     const customs = Object.entries(getCustomGradientPresets())
         .sort((left, right) => left[0].localeCompare(right[0]))
-        .map(([name, preset]) => ({ id: `custom:${name}`, name, source: 'custom', preset }));
+        .map(([name, preset]) => ({ id: `custom:${name}`, name, source: 'custom', preset: getReadableGradientPresetPreview(preset) }));
     return [...builtIns, ...customs];
 }
 
@@ -2491,6 +2609,8 @@ function renameGradientGalleryPreset() {
 async function deleteGradientGalleryPreset(event) {
     if (!selectedGradientGalleryPreset.startsWith('custom:')) return;
     const name = selectedGradientGalleryPreset.slice(7);
+    const binding = captureUiMutationContext();
+    const reviewedPreset = JSON.stringify(getCustomGradientPresets()[name] ?? null);
     if (!await confirmReviewedAction({
         title: 'Delete gradient preset?',
         description: `“${name}” will be removed. Characters already using it are not changed.`,
@@ -2498,6 +2618,11 @@ async function deleteGradientGalleryPreset(event) {
         danger: true,
         opener: event.currentTarget,
     })) return;
+    if (!isUiMutationContextCurrent(binding)
+        || selectedGradientGalleryPreset !== `custom:${name}`
+        || JSON.stringify(getCustomGradientPresets()[name] ?? null) !== reviewedPreset) {
+        return notifyUiContextChanged('The active target or gradient preset changed. Review the deletion again.');
+    }
     const catalog = getGradientPresetCatalog();
     const currentIndex = catalog.findIndex(item => item.id === selectedGradientGalleryPreset);
     if (!deleteCustomGradientPreset(name, { immediate: true })) { toast.error('Could not delete gradient preset'); return; }
@@ -2517,6 +2642,10 @@ async function handleSaveCustomGradientPreset(button) {
         return;
     }
     const overwrite = Object.prototype.hasOwnProperty.call(getCustomGradientPresets(), name);
+    const binding = captureUiMutationContext();
+    const reviewedEntry = entry;
+    const reviewedGradient = getGradientSignature(entry);
+    const reviewedPreset = JSON.stringify(getCustomGradientPresets()[name] ?? null);
     if (overwrite && !await confirmReviewedAction({
         title: 'Replace gradient preset?',
         description: `“${name}” already exists. Its saved gradient will be replaced.`,
@@ -2524,6 +2653,13 @@ async function handleSaveCustomGradientPreset(button) {
         danger: true,
         opener: button,
     })) return;
+    if (overwrite && (!isUiMutationContextCurrent(binding)
+        || getGradientEditorContext(button).entry !== reviewedEntry
+        || getGradientSignature(reviewedEntry) !== reviewedGradient
+        || normalizeGradientPresetName(nameInput?.value) !== name
+        || JSON.stringify(getCustomGradientPresets()[name] ?? null) !== reviewedPreset)) {
+        return notifyUiContextChanged('The active target or saved preset changed. Review the replacement again.');
+    }
     if (!saveCustomGradientPreset(name, entry, { immediate: true, overwrite })) {
         toast.error('Could not save gradient preset');
         return;
@@ -2560,6 +2696,8 @@ async function handleDeleteCustomGradientPreset(button) {
         toast.warning('Select a custom gradient preset first');
         return;
     }
+    const binding = captureUiMutationContext();
+    const reviewedPreset = JSON.stringify(getCustomGradientPresets()[name] ?? null);
     if (!await confirmReviewedAction({
         title: 'Delete gradient preset?',
         description: `“${name}” will be removed. Characters already using it are not changed.`,
@@ -2567,6 +2705,11 @@ async function handleDeleteCustomGradientPreset(button) {
         danger: true,
         opener: button,
     })) return;
+    if (!isUiMutationContextCurrent(binding)
+        || editor?.querySelector('.dc-gradient-custom-preset')?.value !== `custom:${name}`
+        || JSON.stringify(getCustomGradientPresets()[name] ?? null) !== reviewedPreset) {
+        return notifyUiContextChanged('The active target or gradient preset changed. Review the deletion again.');
+    }
     if (!deleteCustomGradientPreset(name, { immediate: true })) {
         toast.error('Could not delete gradient preset');
         return;
@@ -2818,7 +2961,9 @@ export function refreshGroupProfileControls() {
 }
 
 function saveGroupProfileFromEditor() {
-    const name = getGroupProfileEditorName();
+    const nameInput = document.getElementById('dc-group-profile-name');
+    const name = readValidatedGroupInput(nameInput);
+    if (name === null) return;
     if (!name) { toast.warning('Enter a group label.'); return; }
     const existing = getGroupProfile(groupProfiles, name);
     const sourceKey = document.getElementById('dc-group-profile-source')?.value || '';
@@ -2843,7 +2988,8 @@ function saveGroupProfileFromEditor() {
 
 function renameGroupProfileFromEditor() {
     const currentName = getGroupProfileEditorName();
-    const nextName = normalizeGroupName(document.getElementById('dc-group-profile-rename')?.value);
+    const nextName = readValidatedGroupInput(document.getElementById('dc-group-profile-rename'));
+    if (nextName === null) return;
     if (!currentName || !nextName) { toast.warning('Choose a profile and enter its new group label.'); return; }
     const renamed = renameGroupProfile(groupProfiles, currentName, nextName);
     if (!renamed) { toast.warning('That profile cannot be renamed. The destination may already exist.'); return; }
@@ -2859,6 +3005,8 @@ async function deleteGroupProfileFromEditor(opener) {
     const name = getGroupProfileEditorName();
     const profile = getGroupProfile(groupProfiles, name);
     if (!profile) { toast.info('Choose a saved group profile.'); return; }
+    const binding = captureUiMutationContext();
+    const reviewedProfile = JSON.stringify(profile);
     if (!await confirmReviewedAction({
         title: 'Delete group profile?',
         description: `“${profile.name}” will be removed. Existing character styles and group labels will not change.`,
@@ -2866,6 +3014,11 @@ async function deleteGroupProfileFromEditor(opener) {
         danger: true,
         opener,
     })) return;
+    if (!isUiMutationContextCurrent(binding)
+        || getGroupProfileEditorName() !== name
+        || JSON.stringify(getGroupProfile(groupProfiles, name) ?? null) !== reviewedProfile) {
+        return notifyUiContextChanged('The active target or group profile changed. Review the deletion again.');
+    }
     setGroupProfiles(deleteGroupProfile(groupProfiles, name));
     saveHistory();
     saveData();
@@ -2879,6 +3032,9 @@ async function applyGroupProfileToExisting(opener) {
     const profile = getGroupProfile(groupProfiles, name);
     const keys = getCharacterKeysForGroup(name);
     if (!profile || !keys.length) { toast.info('This saved profile has no current group members.'); return; }
+    const binding = captureUiMutationContext();
+    const reviewedProfile = JSON.stringify(profile);
+    const reviewedMembers = JSON.stringify(keys.map(key => [key, characterColors[key]?.group ?? '']));
     const confirmed = await confirmReviewedAction({
         title: `Apply profile to ${keys.length} character${keys.length === 1 ? '' : 's'}?`,
         description: `The selected fields from “${profile.name}” will be copied into every current member of that group. Later profile edits will not alter them.`,
@@ -2887,6 +3043,12 @@ async function applyGroupProfileToExisting(opener) {
         opener,
     });
     if (!confirmed) return;
+    const currentKeys = getCharacterKeysForGroup(name);
+    if (!isUiMutationContextCurrent(binding)
+        || JSON.stringify(getGroupProfile(groupProfiles, name) ?? null) !== reviewedProfile
+        || JSON.stringify(currentKeys.map(key => [key, characterColors[key]?.group ?? ''])) !== reviewedMembers) {
+        return notifyUiContextChanged('The active target, group profile, or reviewed members changed. Review the action again.');
+    }
     const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
     const result = applyGroupProfileToKeys(keys, profile);
     if (!result.changedKeys.length) { toast.info('All group members already match the saved fields.'); return; }
@@ -2950,6 +3112,9 @@ function getVisibleCharacterEntries() {
 
 export function updateCharList() {
     const list = document.getElementById('dc-char-list'); if (!list) return;
+    const narratorEditor = document.getElementById('dc-narrator-editor');
+    const narratorSignature = JSON.stringify(normalizeNarratorStyle(settings.narratorStyle, { legacy: settings }));
+    if (narratorEditor && narratorEditor.dataset.narratorSignature !== narratorSignature) renderNarratorEditor();
     const scrollPositions = captureScrollPositions(list);
     const masterSeedInput = document.getElementById('dc-gradient-master-seed');
     if (masterSeedInput) masterSeedInput.value = settings.gradientRandomMasterSeed || 'Generated on first randomization';
@@ -3109,7 +3274,7 @@ export function autoAssignFromCard() {
 export function ensurePersonaCharacter({ silent = false } = {}) {
     try {
         const name = getPersonaName();
-        if (!name || name.toLowerCase() === 'narrator') {
+        if (!name || isReservedCharacterIdentity(name)) {
             if (!silent) toast.info('No active persona to add.');
             return;
         }
@@ -3154,7 +3319,7 @@ export function renamePersonaCharacter(oldName, newName) {
     const previousKey = resolveCharacterKeyByNameOrAlias(oldName);
     const nextName = normalizeRegistryIdentityName(String(newName ?? ''));
     const nextKey = normalizeRegistryIdentity(nextName);
-    if (!previousKey || !nextName || !nextKey || previousKey === nextKey) return false;
+    if (!previousKey || !nextName || !nextKey || isReservedCharacterIdentity(nextName) || previousKey === nextKey) return false;
     if (characterColors[nextKey]) return false;
     const entry = characterColors[previousKey];
     if (!entry) return false;
@@ -3185,8 +3350,10 @@ async function handleStorageScopeChange(select) {
     const previousScope = getCurrentStorageScope();
     const nextScope = select.value;
     if (nextScope === previousScope) return;
+    const binding = captureUiMutationContext();
     const source = getStorageScopeDescriptor(previousScope);
     const target = getStorageScopeDescriptor(nextScope);
+    const targetFingerprint = JSON.stringify(target);
     const detailsHtml = `<dl class="dc-review-list"><div><dt>Current</dt><dd>${escapeHtml(formatScopeName(previousScope))}, ${source.characterCount} characters, ${source.groupProfileCount || 0} group profiles</dd></div><div><dt>Destination</dt><dd>${escapeHtml(formatScopeName(nextScope))}, ${target.characterCount} characters, ${target.groupProfileCount || 0} group profiles</dd></div><div><dt>Last saved</dt><dd>${escapeHtml(formatDate(target.updatedAt))}</dd></div></dl><p class="dc-section-note">If Auto-recolor is enabled, changing assignments can also update saved LLM font tags.</p>`;
     const targetIsEmpty = !target.exists || (target.characterCount === 0 && (target.groupProfileCount || 0) === 0);
     const decision = await openDecisionDialog({
@@ -3208,7 +3375,13 @@ async function handleStorageScopeChange(select) {
         ],
     });
     if (!decision.value || decision.value === 'cancel') {
-        select.value = previousScope;
+        select.value = getCurrentStorageScope();
+        return;
+    }
+    if (!isUiMutationContextCurrent(binding)
+        || JSON.stringify(getStorageScopeDescriptor(nextScope)) !== targetFingerprint) {
+        select.value = getCurrentStorageScope();
+        notifyUiContextChanged('The source or destination color table changed. Review the scope switch again.');
         return;
     }
     select.disabled = true;
@@ -3534,7 +3707,7 @@ function buildStylePackImportDetails(analysis) {
     return `<dl class="dc-review-list dc-style-pack-review">${rows.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join('')}</dl>${buildStylePackAssignmentOverrideDetails(analysis)}<p class="dc-style-pack-privacy">${escapeHtml(fontNote)} No URLs, CSS, profile IDs, storage scope, auto-sync, prompts, automation, attribution settings, or UI positions are accepted from a style pack.</p>`;
 }
 
-async function reviewAndApplyStylePack(analysis, opener) {
+async function reviewAndApplyStylePack(analysis, opener, binding = captureUiMutationContext()) {
     const totals = analysis?.catalog?.totals;
     const validTotals = totals && ['palettes', 'gradientPresets', 'assignmentPresets', 'appearanceSettings']
         .every(key => Number.isFinite(totals[key]) && totals[key] >= 0);
@@ -3567,6 +3740,11 @@ async function reviewAndApplyStylePack(analysis, opener) {
     }
     const hasAssignments = analysis.catalog.totals.assignmentPresets > 0;
     const hasAppearance = analysis.catalog.totals.appearanceSettings > 0;
+    const reviewedState = JSON.stringify([
+        analysis.digest,
+        analysis.catalogFingerprint,
+        analysis.conflicts.categories.assignmentPresets.presetOrder,
+    ]);
     const strategySelect = (category, label) => `<label>${escapeHtml(label)}<select class="text_pole" data-dialog-field="strategy-${category}"><option value="keep">Keep existing (default)</option><option value="rename">Rename imported</option><option value="replace">Replace existing</option></select></label>`;
     const formHtml = `
         <fieldset class="dc-style-pack-selection"><legend>Conflict handling</legend>
@@ -3593,6 +3771,15 @@ async function reviewAndApplyStylePack(analysis, opener) {
     });
     if (decision.value !== 'install') return { ok: false, cancelled: true };
     const fields = decision.formValues;
+    const needsScope = fields.applyAssignments === true || fields.applyAppearance === true;
+    if ((needsScope && !isUiMutationContextCurrent(binding))
+        || reviewedState !== JSON.stringify([
+            analysis.digest,
+            analysis.catalogFingerprint,
+            analysis.conflicts.categories.assignmentPresets.presetOrder,
+        ])) {
+        return notifyUiContextChanged('The active style-pack target or reviewed state changed. Review the pack again.');
+    }
     let result;
     try {
         result = await applyStylePackImport(analysis, {
@@ -3638,11 +3825,16 @@ export function renderStylePackRegistry() {
 }
 
 async function confirmCharacterRemoval(keys, options = {}) {
-    const candidates = [...new Set(keys)].filter(key => characterColors[key]);
+    const getCandidates = () => [...new Set(typeof options.getCandidates === 'function' ? options.getCandidates() : keys)]
+        .filter(key => characterColors[key]);
+    const candidates = getCandidates();
     const pinned = candidates.filter(key => characterColors[key]?.keep);
     const removable = candidates.filter(key => !characterColors[key]?.keep);
     if (!candidates.length) { toast.info(options.emptyMessage || 'No matching characters.'); return false; }
     if (!removable.length) { toast.info(options.blockedMessage || 'All matching characters are pinned.'); return false; }
+    const binding = captureUiMutationContext();
+    const reviewedEntries = new Map(candidates.map(key => [key, characterColors[key]]));
+    const reviewedKeep = new Map(candidates.map(key => [key, characterColors[key].keep === true]));
     const confirmed = await confirmReviewedAction({
         title: options.title || 'Delete characters?',
         description: `${removable.length} character${removable.length === 1 ? '' : 's'} will be deleted. ${pinned.length ? `${pinned.length} pinned ${pinned.length === 1 ? 'entry is' : 'entries are'} protected.` : 'No pinned entries are affected.'}`,
@@ -3652,6 +3844,15 @@ async function confirmCharacterRemoval(keys, options = {}) {
         opener: options.opener,
     });
     if (!confirmed) return false;
+    const currentCandidates = getCandidates();
+    const reviewedCandidateSet = new Set(candidates);
+    if (!isUiMutationContextCurrent(binding)
+        || currentCandidates.length !== candidates.length
+        || currentCandidates.some(key => !reviewedCandidateSet.has(key))
+        || candidates.some(key => characterColors[key] !== reviewedEntries.get(key)
+            || (characterColors[key]?.keep === true) !== reviewedKeep.get(key))) {
+        return notifyUiContextChanged('The active color table or reviewed characters changed. Review the deletion again.');
+    }
     return removeCharacterKeys(candidates, options);
 }
 
@@ -3678,6 +3879,9 @@ async function deleteSelectedCharacters(opener) {
     const removableKeys = selectedKeys.filter(key => characterColors[key] && !characterColors[key].keep);
     if (!selectedKeys.length) { toast.info('Select at least one character.'); return; }
     if (!removableKeys.length) { toast.info('All selected characters are kept. Unkeep them before deleting.'); return; }
+    const binding = captureUiMutationContext();
+    const reviewedEntries = new Map(selectedKeys.map(key => [key, characterColors[key]]));
+    const reviewedKeep = new Map(selectedKeys.map(key => [key, characterColors[key]?.keep === true]));
     const confirmed = await confirmReviewedAction({
         title: `Delete ${removableKeys.length} selected character${removableKeys.length === 1 ? '' : 's'}?`,
         description: `${removableKeys.length} selected character${removableKeys.length === 1 ? '' : 's'} will be deleted. ${keptKeys.length ? `${keptKeys.length} kept ${keptKeys.length === 1 ? 'character is' : 'characters are'} protected.` : 'No kept characters are affected.'}`,
@@ -3687,6 +3891,14 @@ async function deleteSelectedCharacters(opener) {
         opener,
     });
     if (!confirmed) return;
+    const currentSelection = getSelectedCharacterKeys();
+    if (!isUiMutationContextCurrent(binding)
+        || currentSelection.length !== selectedKeys.length
+        || currentSelection.some((key, index) => key !== selectedKeys[index])
+        || selectedKeys.some(key => characterColors[key] !== reviewedEntries.get(key)
+            || (characterColors[key]?.keep === true) !== reviewedKeep.get(key))) {
+        return notifyUiContextChanged('The active color table or selected characters changed. Review the deletion again.');
+    }
     const restore = createRestoreSnapshot();
     const result = runSelectedCharacterMutation(deleteCharacterKeys);
     if (!result.removedKeys?.length) return;
@@ -3878,6 +4090,8 @@ function buildConflictReportHtml(report) {
 }
 
 export async function showColorConflictReport(report = getPerceptualConflictReport(), options = {}) {
+    const binding = captureUiMutationContext();
+    const reviewedTable = JSON.stringify(characterColors);
     const issues = getConflictReportIssues(report);
     const partial = isConflictReportPartial(report);
     const canRepair = !partial && issues.some(conflict => {
@@ -3902,6 +4116,10 @@ export async function showColorConflictReport(report = getPerceptualConflictRepo
         ],
     });
     if (decision.value !== 'repair') return report;
+    if (!isUiMutationContextCurrent(binding) || JSON.stringify(characterColors) !== reviewedTable) {
+        notifyUiContextChanged('The active color table changed. Run the conflict report again.');
+        return report;
+    }
     const result = repairPerceptualConflicts();
     await showColorConflictReport(result.report, { afterRepair: true, changedCount: result.changedKeys.length });
     return result.report;
@@ -4402,17 +4620,17 @@ function bindSettingsPage() {
 function bindSettingsPanelControls($) {
     $('dc-enabled').onchange = e => {
         settings.enabled = e.target.checked;
-        if (!settings.enabled) {
-            stopDomHealthCheck();
-            clearAutoAttributionVerificationQueue({ clearCooldown: true });
-        }
+        synchronizeEnabledLifecycle();
         saveData();
-        injectPrompt();
-        scheduleDomRefreshSeries(0);
-        scheduleCustomFontRefresh(0);
         syncProcessControlState();
     };
-    $('dc-highlight').onchange = e => { settings.highlightMode = e.target.checked; saveData(); injectPrompt(); scheduleDomRefreshSeries(0); };
+    $('dc-highlight').onchange = e => {
+        applyThemeOrBrightnessChange(() => { settings.highlightMode = e.target.checked; }, { saveImmediately: true });
+        renderNarratorEditor();
+        updateLegend();
+        injectPrompt();
+        scheduleDomRefreshSeries(0);
+    };
     $('dc-autoscan').onchange = e => { settings.autoScanOnLoad = e.target.checked; saveData(); };
     $('dc-autoscan-new').onchange = e => { settings.autoScanNewMessages = e.target.checked; saveData(); };
     $('dc-auto-lock').onchange = e => { settings.autoLockDetected = e.target.checked; saveData(); };
@@ -4445,6 +4663,8 @@ function bindSettingsPanelControls($) {
     $('dc-force-bold').onchange = e => {
         settings.forceBoldText = e.target.checked;
         saveData();
+        updateLegend();
+        renderNarratorEditor();
         scheduleDomRefreshSeries(0);
         scheduleCustomFontRefresh(0);
     };
@@ -4574,6 +4794,12 @@ function bindSettingsPanelControls($) {
         renderNarratorEditor();
     };
     $('dc-gradient-new-seed').onclick = async e => {
+        const binding = captureUiMutationContext();
+        const reviewedState = JSON.stringify([
+            characterColors,
+            settings.gradientRandomMasterSeed,
+            settings.narratorStyle,
+        ]);
         const confirmed = await confirmReviewedAction({
             title: 'Start a new gradient sequence?',
             description: 'Existing gradients stay exactly as shown. Their generator links are cleared, and each future randomization starts at variation 0 using a new master seed.',
@@ -4581,6 +4807,15 @@ function bindSettingsPanelControls($) {
             opener: e.currentTarget,
         });
         if (!confirmed) return;
+        if (!isUiMutationContextCurrent(binding)
+            || JSON.stringify([
+                characterColors,
+                settings.gradientRandomMasterSeed,
+                settings.narratorStyle,
+            ]) !== reviewedState) {
+            notifyUiContextChanged('The active color table or gradient state changed. Review the new seed again.');
+            return;
+        }
         settings.gradientRandomMasterSeed = createGradientRandomMasterSeed();
         Object.values(characterColors).forEach(entry => { entry.gradientGenerator = null; });
         setNarratorStyle(settings, { ...normalizeNarratorStyle(settings.narratorStyle, { legacy: settings }), gradientGenerator: null }, applyThemeReadabilityAndBrightness);
@@ -4702,7 +4937,8 @@ function bindSettingsPanelControls($) {
         }
     };
     const setSelectedGroup = () => {
-        const group = $('dc-bulk-group-select')?.value?.trim();
+        const group = readValidatedGroupInput($('dc-bulk-group-select'));
+        if (group === null) return;
         if (!group) { toast.info('Choose a group label, or use Clear group.'); return; }
         runSelectedCharacterMutation(keys => setCharacterGroup(keys, group), {
             noChangeMessage: 'All selected characters already use that group.',
@@ -4734,24 +4970,36 @@ function bindSettingsPanelControls($) {
     };
     $('dc-recolor').onclick = async e => {
         if (isDomEngine()) { scheduleDomRefreshSeries(0); scheduleCustomFontRefresh(0); return; }
+        const chatBinding = captureChatBinding();
         const confirmed = await confirmReviewedAction({
             title: 'Recolor the entire chat?',
             description: 'Existing saved font-color tags will be rewritten to match current assignments. Message wording is not changed.',
             confirmLabel: 'Recolor entire chat',
             opener: e.currentTarget,
         });
-        if (confirmed) recolorAllMessages();
+        if (!confirmed) return;
+        if (!isUiChatBindingCurrent(chatBinding) || isDomEngine()) {
+            notifyUiContextChanged('The active chat or color engine changed. Review recoloring again.');
+            return;
+        }
+        recolorAllMessages();
     };
     $('dc-colorize').onclick = async e => {
         const target = $('dc-colorize-target').value === 'all' ? 'all' : 'last';
         if (target === 'last') { colorizeMessages('last'); return; }
+        const chatBinding = captureChatBinding();
         const confirmed = await confirmReviewedAction({
             title: 'Colorize missing dialogue across the chat?',
             description: 'Font-color tags will be added only to dialogue that is currently uncolored.',
             confirmLabel: 'Colorize entire chat',
             opener: e.currentTarget,
         });
-        if (confirmed) colorizeMessages('all');
+        if (!confirmed) return;
+        if (!isUiChatBindingCurrent(chatBinding) || isDomEngine()) {
+            notifyUiContextChanged('The active chat or color engine changed. Review colorization again.');
+            return;
+        }
+        colorizeMessages('all');
     };
     $('dc-verify-attr').onclick = () => {
         const target = $('dc-verify-target').value;
@@ -4763,6 +5011,8 @@ function bindSettingsPanelControls($) {
     $('dc-regen').onclick = async e => {
         const unlockedCount = Object.values(characterColors).filter(entry => !entry.locked).length;
         if (!unlockedCount) { toast.info('No unlocked colors to regenerate'); return; }
+        const binding = captureUiMutationContext();
+        const reviewedTable = JSON.stringify(characterColors);
         const confirmed = await confirmReviewedAction({
             title: 'Regenerate unlocked colors?',
             description: `${unlockedCount} character color${unlockedCount === 1 ? '' : 's'} will change. Locked colors remain unchanged.`,
@@ -4770,11 +5020,17 @@ function bindSettingsPanelControls($) {
             danger: true,
             opener: e.currentTarget,
         });
-        if (confirmed) regenerateAllColors();
+        if (!confirmed) return;
+        if (!isUiMutationContextCurrent(binding) || JSON.stringify(characterColors) !== reviewedTable) {
+            return notifyUiContextChanged('The active color table changed. Review regeneration again.');
+        }
+        regenerateAllColors();
     };
     $('dc-rerandom-gradients').onclick = async e => {
         const targetCount = Object.values(characterColors).filter(entry => entry.gradient && !entry.locked).length;
         if (!targetCount) { toast.info('No unlocked gradients to re-randomize'); return; }
+        const binding = captureUiMutationContext();
+        const reviewedTable = JSON.stringify(characterColors);
         const confirmed = await confirmReviewedAction({
             title: 'Re-randomize gradients?',
             description: `${targetCount} gradient${targetCount === 1 ? '' : 's'} will change. Locked characters and characters without a gradient are skipped.`,
@@ -4783,6 +5039,9 @@ function bindSettingsPanelControls($) {
             opener: e.currentTarget,
         });
         if (!confirmed) return;
+        if (!isUiMutationContextCurrent(binding) || JSON.stringify(characterColors) !== reviewedTable) {
+            return notifyUiContextChanged('The active color table changed. Review gradient randomization again.');
+        }
         regenerateAllGradients();
         updateCharList();
         repaintDomAfterCharacterDataChange(0);
@@ -4811,7 +5070,11 @@ function bindSettingsPanelControls($) {
         // Resolved, not raw: storage normalizes the name, so testing the raw input
         // would miss an overwrite whenever normalization changes it.
         const name = resolveColorPresetName($('dc-preset-name').value);
-        if (name && Object.prototype.hasOwnProperty.call(getPresets(), name)) {
+        const presets = getPresets();
+        if (name && Object.prototype.hasOwnProperty.call(presets, name)) {
+            const binding = captureUiMutationContext();
+            const reviewedTable = JSON.stringify([characterColors, groupProfiles]);
+            const reviewedPreset = JSON.stringify(presets[name]);
             const replace = await confirmReviewedAction({
                 title: 'Replace assignment preset?',
                 description: `“${name}” already exists. Its saved character assignments will be replaced.`,
@@ -4820,6 +5083,12 @@ function bindSettingsPanelControls($) {
                 opener: e.currentTarget,
             });
             if (!replace) return;
+            if (!isUiMutationContextCurrent(binding)
+                || resolveColorPresetName($('dc-preset-name').value) !== name
+                || JSON.stringify([characterColors, groupProfiles]) !== reviewedTable
+                || JSON.stringify(getPresets()[name] ?? null) !== reviewedPreset) {
+                return notifyUiContextChanged('The preset name, active color table, or saved preset changed. Review replacement again.');
+            }
         }
         saveColorPreset();
     };
@@ -4827,7 +5096,16 @@ function bindSettingsPanelControls($) {
     $('dc-delete-preset').onclick = async e => {
         const name = $('dc-preset-select').value;
         if (!name) { toast.warning('Select a preset first.'); return; }
-        if (await confirmReviewedAction({ title: 'Delete assignment preset?', description: `“${name}” will be removed. Character assignments are not changed.`, confirmLabel: 'Delete preset', danger: true, opener: e.currentTarget })) deleteColorPreset();
+        const binding = captureUiMutationContext();
+        const reviewedPreset = JSON.stringify(getPresets()[name] ?? null);
+        if (!await confirmReviewedAction({ title: 'Delete assignment preset?', description: `“${name}” will be removed. Character assignments are not changed.`, confirmLabel: 'Delete preset', danger: true, opener: e.currentTarget })) return;
+        if (!isUiMutationContextCurrent(binding)
+            || $('dc-preset-select').value !== name
+            || JSON.stringify(getPresets()[name] ?? null) !== reviewedPreset) {
+            notifyUiContextChanged('The active target or assignment preset changed. Review the deletion again.');
+            return;
+        }
+        deleteColorPreset(name);
     };
     $('dc-gen-palette').onclick = async () => { await generateCustomPaletteFromWords(); };
     $('dc-save-palette').onclick = saveCustomPalette;
@@ -4837,7 +5115,16 @@ function bindSettingsPanelControls($) {
         const value = $('dc-palette').value;
         if (!value?.startsWith('custom:')) { toast.warning('Select a custom palette in Appearance first.'); return; }
         const name = value.slice(7);
-        if (await confirmReviewedAction({ title: 'Delete custom palette?', description: `“${name}” will be removed. Existing character colors are not changed.`, confirmLabel: 'Delete palette', danger: true, opener: e.currentTarget })) deleteCustomPalette();
+        const binding = captureUiMutationContext();
+        const reviewedPalette = JSON.stringify(getCustomPalettes()[name] ?? null);
+        if (!await confirmReviewedAction({ title: 'Delete custom palette?', description: `“${name}” will be removed. Existing character colors are not changed.`, confirmLabel: 'Delete palette', danger: true, opener: e.currentTarget })) return;
+        if (!isUiMutationContextCurrent(binding)
+            || $('dc-palette').value !== value
+            || JSON.stringify(getCustomPalettes()[name] ?? null) !== reviewedPalette) {
+            notifyUiContextChanged('The active target or custom palette changed. Review the deletion again.');
+            return;
+        }
+        deleteCustomPalette(name);
     };
     $('dc-style-pack-export').onclick = e => { void buildStylePackExport(e.currentTarget); };
     $('dc-style-pack-import').onclick = () => $('dc-style-pack-file').click();
@@ -4855,18 +5142,32 @@ function bindSettingsPanelControls($) {
             'Style pack',
             announceStylePack,
         );
-        if (analysis) await reviewAndApplyStylePack(analysis, $('dc-style-pack-import'));
+        if (!analysis) return;
+        await reviewAndApplyStylePack(analysis, $('dc-style-pack-import'));
     };
     $('dc-card').onclick = autoAssignFromCard;
     $('dc-add-persona').onclick = () => ensurePersonaCharacter();
     $('dc-avatar-color').onclick = async () => {
         try {
+            const binding = captureUiMutationContext();
             const ctx = getContext();
             const char = ctx?.characters?.[ctx?.characterId];
             if (!char?.avatar) { toast.info('No avatar found'); return; }
+            const reviewedCharacterId = ctx.characterId;
+            const reviewedName = char.name;
+            const reviewedAvatar = char.avatar;
             const avatarUrl = `/characters/${encodeURIComponent(char.avatar)}`;
             const color = await extractAvatarColor(avatarUrl);
             if (!color) { toast.error('Could not extract color'); return; }
+            const currentContext = getContext();
+            const currentCharacter = currentContext?.characters?.[currentContext?.characterId];
+            if (!isUiMutationContextCurrent(binding)
+                || currentContext?.characterId !== reviewedCharacterId
+                || currentCharacter !== char
+                || currentCharacter?.name !== reviewedName
+                || currentCharacter?.avatar !== reviewedAvatar) {
+                return notifyUiContextChanged('The active card changed while its avatar color was extracted. Try again on the current card.');
+            }
             // Resolve through the registry rather than lowercasing the card name, so an
             // existing entry is recolored instead of shadowed by a mismatched key.
             const existingKey = resolveCharacterKeyByNameOrAlias(char.name);
@@ -4890,8 +5191,17 @@ function bindSettingsPanelControls($) {
         }
     };
     $('dc-save-card').onclick = async e => {
+        const binding = captureUiMutationContext();
         const existing = await runImportAnalysis(() => readCardData(), 'Card data');
         if (!existing) return;
+        if (!isUiMutationContextCurrent(binding)) {
+            return notifyUiContextChanged('The active card or color table changed while card data was reviewed. Review it again.');
+        }
+        const reviewedContext = getContext();
+        const reviewedCharacterId = reviewedContext?.characterId;
+        const reviewedCard = reviewedContext?.characters?.[reviewedCharacterId];
+        const reviewedCardData = JSON.stringify(reviewedCard?.data?.extensions?.dialogueColors ?? null);
+        const reviewedSource = JSON.stringify([characterColors, groupProfiles, settings]);
         if (existing.ok) {
             const analysisError = getImportAnalysisError(existing, 'card');
             if (analysisError) {
@@ -4911,7 +5221,16 @@ function bindSettingsPanelControls($) {
             toast.error(existing.message || 'The current card could not be reviewed.');
             return;
         }
-        saveToCard();
+        const currentContext = getContext();
+        const currentCard = currentContext?.characters?.[currentContext?.characterId];
+        if (!isUiMutationContextCurrent(binding)
+            || currentContext?.characterId !== reviewedCharacterId
+            || currentCard !== reviewedCard
+            || JSON.stringify(currentCard?.data?.extensions?.dialogueColors ?? null) !== reviewedCardData
+            || JSON.stringify([characterColors, groupProfiles, settings]) !== reviewedSource) {
+            return notifyUiContextChanged('The active card, color table, or reviewed card data changed. Review the save again.');
+        }
+        return saveToCard();
     };
     $('dc-load-card').onclick = async e => {
         const analysis = await runImportAnalysis(() => readCardData(), 'Card data');
@@ -4942,6 +5261,7 @@ function bindSettingsPanelControls($) {
     $('dc-disable-autosync').onclick = () => { disableAutoSync(); updateAutoSyncUI(); };
     $('dc-del-locked').onclick = e => {
         confirmCharacterRemoval(Object.keys(characterColors).filter(k => characterColors[k]?.locked), {
+            getCandidates: () => Object.keys(characterColors).filter(k => characterColors[k]?.locked),
             title: 'Delete locked characters?',
             actionLabel: 'Deleted',
             itemLabel: 'locked character',
@@ -4952,6 +5272,7 @@ function bindSettingsPanelControls($) {
     };
     $('dc-del-unlocked').onclick = e => {
         confirmCharacterRemoval(Object.keys(characterColors).filter(k => characterColors[k] && !characterColors[k].locked), {
+            getCandidates: () => Object.keys(characterColors).filter(k => characterColors[k] && !characterColors[k].locked),
             title: 'Delete unlocked characters?',
             actionLabel: 'Deleted',
             itemLabel: 'unlocked character',
@@ -4964,6 +5285,7 @@ function bindSettingsPanelControls($) {
         const min = parseInt($('dc-del-least-threshold')?.value || '3', 10);
         if (isNaN(min) || min < 0) { toast.warning('Invalid threshold'); return; }
         confirmCharacterRemoval(Object.keys(characterColors).filter(k => (characterColors[k]?.dialogueCount || 0) < min), {
+            getCandidates: () => Object.keys(characterColors).filter(k => (characterColors[k]?.dialogueCount || 0) < min),
             title: `Delete characters below ${min} lines?`,
             actionLabel: 'Deleted',
             itemLabel: 'low-dialogue character',
@@ -4974,6 +5296,7 @@ function bindSettingsPanelControls($) {
     };
     $('dc-del-dupes').onclick = e => {
         confirmCharacterRemoval(collectDuplicateColorKeys(), {
+            getCandidates: collectDuplicateColorKeys,
             title: 'Delete duplicate primary colors?',
             actionLabel: 'Deleted',
             itemLabel: 'duplicate-color character',
@@ -5010,6 +5333,8 @@ function bindSettingsPanelControls($) {
     $('dc-reset').onclick = async e => {
         const unlockedCount = Object.values(characterColors).filter(entry => !entry.locked).length;
         if (!unlockedCount) { toast.info('No unlocked colors to reset'); return; }
+        const binding = captureUiMutationContext();
+        const reviewedTable = JSON.stringify(characterColors);
         const confirmed = await confirmReviewedAction({
             title: 'Reset unlocked colors?',
             description: `${unlockedCount} character color${unlockedCount === 1 ? '' : 's'} will be regenerated. Locked colors remain unchanged.`,
@@ -5018,6 +5343,9 @@ function bindSettingsPanelControls($) {
             opener: e.currentTarget,
         });
         if (!confirmed) return;
+        if (!isUiMutationContextCurrent(binding) || JSON.stringify(characterColors) !== reviewedTable) {
+            return notifyUiContextChanged('The active color table changed. Review the reset again.');
+        }
         const restore = createRestoreSnapshot();
         let changed = 0;
         const changedKeys = [];
@@ -5045,7 +5373,9 @@ function bindSettingsPanelControls($) {
         const input = $('dc-add-name');
         const error = $('dc-add-error');
         const groupInput = $('dc-add-group');
-        const result = addCharacter(input.value, undefined, { group: normalizeGroupName(groupInput?.value), origin: 'manual' });
+        const group = readValidatedGroupInput(groupInput);
+        if (group === null) return;
+        const result = addCharacter(input.value, undefined, { group, origin: 'manual' });
         if (result?.added || result?.existing) {
             input.value = '';
             if (groupInput) groupInput.value = '';
@@ -5067,6 +5397,18 @@ function bindSettingsPanelControls($) {
 
 }
 
+function bindConnectionProfileRefresh() {
+    const refresh = () => populateProfileDropdown();
+    for (const type of new Set([
+        event_types.CONNECTION_PROFILE_LOADED,
+        event_types.CONNECTION_PROFILE_CREATED,
+        event_types.CONNECTION_PROFILE_UPDATED,
+        event_types.CONNECTION_PROFILE_DELETED,
+    ].filter(Boolean))) {
+        eventSource.on(type, refresh);
+    }
+}
+
 export function createUI() {
     if (document.getElementById('dc-ext')) return;
     document.getElementById('extensions_settings')?.insertAdjacentHTML('beforeend', buildSettingsPanelHtml());
@@ -5076,8 +5418,8 @@ export function createUI() {
     bindSettingsPage();
     syncUIWithSettings();
     bindSettingsPanelControls($);
+    bindConnectionProfileRefresh();
 
-    registerKeyboardShortcuts();
     applyControlHelpText();
     updateCharList();
     injectPrompt();

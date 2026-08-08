@@ -13,7 +13,7 @@ import {
     normalizeGradient,
     pickRandomGradientType,
 } from '../src/gradients.js';
-import { createGradientRandom } from '../src/seeded-gradient-generator.js';
+import { advanceGradientGenerator, createGradientRandom } from '../src/seeded-gradient-generator.js';
 
 const presetEntries = Object.entries(BUILTIN_GRADIENT_PRESETS);
 
@@ -184,4 +184,15 @@ test('hue spread widens the colors two characters can draw from one palette', ()
     assert.ok(plain.size <= palette.length);
     const spread = collect(true);
     assert.ok(spread.size > plain.size, `expected more variety, got ${spread.size} vs ${plain.size}`);
+});
+
+test('gradient generator iteration reseeds instead of sticking at MAX_SAFE_INTEGER', () => {
+    const current = { algorithm: 'dc-gradient-v1', seed: 'edge', iteration: Number.MAX_SAFE_INTEGER };
+    const first = advanceGradientGenerator(current);
+    const second = advanceGradientGenerator(current);
+
+    assert.equal(first.iteration, 0);
+    assert.notEqual(first.seed, current.seed);
+    assert.deepEqual(first, second);
+    assert.deepEqual(advanceGradientGenerator(first), { ...first, iteration: 1 });
 });

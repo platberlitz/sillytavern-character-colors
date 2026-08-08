@@ -17,6 +17,14 @@ function delay(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function deferred() {
+    let resolve;
+    const promise = new Promise(resolvePromise => {
+        resolve = resolvePromise;
+    });
+    return { promise, resolve };
+}
+
 async function waitFor(predicate, timeoutMs = 500) {
     const deadline = Date.now() + timeoutMs;
     while (!predicate()) {
@@ -39,7 +47,7 @@ async function loadLiveColorsModule(overrides = {}) {
         liveChatSaveTimer: null,
         colorStateSaveTimer: null,
         characterColors: {},
-        settings: {},
+        settings: { enabled: true, coloringEngine: 'llm' },
         attributionChatGeneration: 0,
         setLiveChatSaveTimer() {},
         setPendingLiveChatSave() {},
@@ -78,7 +86,7 @@ function bulkColorizeStubs(chat, callLLMWithProfile, onLocalFallback = () => {})
     const entry = { name: 'Alice', color: '#123456', aliases: [] };
     return {
         getContext: () => chatContext('chat-a', chat),
-        settings: {},
+        settings: { enabled: true, coloringEngine: 'llm' },
         characterColors: { alice: entry },
         generateQuietPrompt() {},
         callLLMWithProfile,
@@ -98,6 +106,7 @@ function bulkColorizeStubs(chat, callLLMWithProfile, onLocalFallback = () => {})
         getEntryEffectiveColor: value => value.color,
         getNarratorVisual: () => null,
         getThoughtDelimiterSymbols: () => [],
+        attributeDialogueSegments: () => ({ segments: [], createdCharacters: false }),
         buildLLMColorizeRules: () => [],
         buildColorMetadataPromptLines: () => [],
         hashMessageText: value => String(value),
@@ -170,6 +179,24 @@ test('a save waiting behind the global gate resumes only for its durable chat', 
     assert.equal(savedB, 0);
 });
 
+test('a fulfilled void host save is terminal but not reported as confirmed', async () => {
+    let saves = 0;
+    let pending = null;
+    const chat = [{ mes: 'changed' }];
+    const live = await loadLiveColorsModule({
+        getContext: () => chatContext('chat-a', chat, async () => { saves++; }),
+        setPendingLiveChatSave: value => { pending = value; },
+    });
+
+    live.queueChatSave();
+    assert.equal(await live.flushChatSave(), false);
+    assert.equal(saves, 1);
+    assert.equal(pending, false, 'an accepted unconfirmed save must not remain queued forever');
+    assert.equal(await live.flushChatSave(), false);
+    await delay(30);
+    assert.equal(saves, 1, 'void settlement must not trigger an endless confirmation retry');
+});
+
 test('unchanged no-font LLM output is valid but not completed colorization', async () => {
     const live = await loadLiveColorsModule({ getContext: () => ({ chat: [] }) });
     const dialogue = 'Alice said, "Hello."';
@@ -234,6 +261,59 @@ test('bulk unchanged LLM output uses local fallback without a second request', a
     await live.colorizeMessages('all');
     assert.equal(requests, 1);
     assert.equal(localFallbacks, 1);
+});
+
+test('bulk colorization rechecks tool eligibility after the provider await', async () => {
+    const request = deferred();
+    const chat = [{ name: 'Alice', is_user: false, extra: {}, mes: '"Hello."' }];
+    let started = false;
+    const live = await loadLiveColorsModule(bulkColorizeStubs(chat, () => {
+        started = true;
+        return request.promise;
+    }));
+
+    const run = live.colorizeMessages('all');
+    await waitFor(() => started);
+    chat[0].extra.tool_invocations = [];
+    request.resolve('[MSG:0]\n<font color="#123456">"Hello."</font>');
+    await run;
+
+    assert.equal(chat[0].mes, '"Hello."');
+});
+
+test('effective narrator changes invalidate an in-flight colorize run without registry entries', async () => {
+    const request = deferred();
+    const settings = {
+        enabled: true,
+        coloringEngine: 'llm',
+        highlightMode: false,
+        narratorStyle: { enabled: true, baseColor: '#111111', gradient: null },
+    };
+    const chat = [{ name: 'Narrator', is_user: false, extra: {}, mes: 'Narration' }];
+    let started = false;
+    const stubs = bulkColorizeStubs(chat, () => {
+        started = true;
+        return request.promise;
+    });
+    Object.assign(stubs, {
+        settings,
+        characterColors: {},
+        ensureCharacterEntry: () => ({ created: false, entry: null }),
+        getNarratorVisual: sourceSettings => ({
+            name: 'Narrator',
+            color: sourceSettings.highlightMode ? '#222222' : '#111111',
+            gradient: null,
+        }),
+    });
+    const live = await loadLiveColorsModule(stubs);
+
+    const run = live.colorizeMessages('all');
+    await waitFor(() => started);
+    settings.highlightMode = true;
+    request.resolve('[MSG:0]\n<font color="#111111">Narration</font>');
+    await run;
+
+    assert.equal(chat[0].mes, 'Narration');
 });
 
 function toolCallMessage(mes) {

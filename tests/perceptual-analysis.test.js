@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { simulateColorVision } from '../src/color-vision.js';
 import { getGradientRenderState } from '../src/gradient-rendering.js';
 import {
     PERCEPTUAL_CONFLICT_LIMITS,
@@ -35,9 +36,61 @@ test('gradient sampling is capped while retaining both endpoints', () => {
         { sampleCount: Number.MAX_SAFE_INTEGER },
     );
 
-    assert.equal(samples.length, PERCEPTUAL_CONFLICT_LIMITS.maxGradientSamples);
+    assert.equal(samples.length, PERCEPTUAL_CONFLICT_LIMITS.maxUniformGradientSamples);
+    assert.ok(samples.length <= PERCEPTUAL_CONFLICT_LIMITS.maxGradientSamples);
     assert.equal(samples[0].offset, 0);
     assert.equal(samples.at(-1).offset, 1);
+});
+
+test('gradient sampling includes explicit positions and both sides of hard cuts', () => {
+    const samples = sampleGradient({
+        color: '#000000',
+        gradient: {
+            type: 'linear',
+            primaryPosition: 0,
+            stops: [
+                { color: '#ffffff', position: 49.9 },
+                { color: '#000000', position: 49.9 },
+                { color: '#000000', position: 50.1 },
+                { color: '#ffffff', position: 50.1 },
+            ],
+        },
+    }, { sampleCount: 2 });
+
+    assert.ok(samples.length <= PERCEPTUAL_CONFLICT_LIMITS.maxGradientSamples);
+    assert.deepEqual(new Set(samples.filter(sample => sample.position === 49.9).map(sample => sample.color)), new Set(['#ffffff', '#000000']));
+    assert.deepEqual(new Set(samples.filter(sample => sample.position === 50.1).map(sample => sample.color)), new Set(['#000000', '#ffffff']));
+});
+
+test('gradient sampling includes the midpoint of every narrow stop interval', () => {
+    const entry = {
+        color: '#ff0000',
+        gradient: {
+            type: 'linear',
+            primaryPosition: 51,
+            stops: [{ color: '#00ff00', position: 52 }],
+        },
+    };
+    const simulation = { mode: 'deuteranopia', severity: 1 };
+    const samples = sampleGradient(entry, { sampleCount: 2, colorVision: simulation });
+
+    assert.ok(samples.length <= PERCEPTUAL_CONFLICT_LIMITS.maxGradientSamples);
+    assert.equal(
+        samples.find(sample => sample.position === 51.5)?.color,
+        simulateColorVision('#808000', simulation),
+    );
+});
+
+test('color-vision simulation transforms the rendered midpoint, not the endpoints', () => {
+    const entry = { color: '#ff0000', gradient: animatedGradient() };
+    entry.gradient.stops[0] = { baseColor: '#00ff00', color: '#00ff00', position: 100 };
+    const simulation = { mode: 'deuteranopia', severity: 1 };
+    const expected = simulateColorVision('#808000', simulation);
+    const samples = sampleGradient(entry, { sampleCount: 3, colorVision: simulation });
+    const visual = resolveVisual(entry, { colorVision: simulation });
+
+    assert.equal(samples.find(sample => sample.offset === 0.5)?.color, expected);
+    assert.equal(visual.canvasStops.find(stop => stop.offset === 0.5)?.color, expected);
 });
 
 test('perceptual reports cap comparison work and mark truncation as partial', () => {

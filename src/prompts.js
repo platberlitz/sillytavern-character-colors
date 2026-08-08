@@ -7,6 +7,7 @@ import { MODULE_NAME, characterColors, isDomEngine, settings } from './state.js'
 import { normalizeAliases, normalizeHexColor } from './utils.js';
 
 export let injectDebouncedTimer = null;
+let promptInjectionActive = false;
 
 export const PROMPT_THOUGHT_DELIMITER_PAIRS = Object.freeze({
     '(': ')',
@@ -311,21 +312,41 @@ export function buildColoredPromptPreview() {
     ].join(', ');
 }
 
+function updatePromptUi() {
+    const preview = document.getElementById('dc-prompt-preview');
+    if (preview) preview.innerHTML = buildColoredPromptPreview();
+    updateSystemPromptDisplay();
+}
+
+export function flushPromptInjection() {
+    if (injectDebouncedTimer) clearTimeout(injectDebouncedTimer);
+    injectDebouncedTimer = null;
+    if (!settings.enabled && !promptInjectionActive) {
+        updatePromptUi();
+        return '';
+    }
+
+    let promptText = '';
+    if (settings.enabled && !isDomEngine() && settings.promptMode !== 'macro') {
+        promptText = buildMinimalPromptInstruction();
+    } else if (settings.enabled && isDomEngine() && settings.domStealthColors) {
+        promptText = buildDomStealthColorsInstruction();
+    }
+    const role = settings.promptRole === 'user' ? extension_prompt_roles.USER : extension_prompt_roles.SYSTEM;
+    setExtensionPrompt(MODULE_NAME, promptText, extension_prompt_types.IN_CHAT, settings.promptDepth, false, role);
+    promptInjectionActive = !!promptText;
+    updatePromptUi();
+    return promptText;
+}
+
 export function injectPrompt() {
     if (injectDebouncedTimer) clearTimeout(injectDebouncedTimer);
-    injectDebouncedTimer = setTimeout(() => {
-        let promptText = '';
-        if (settings.enabled && !isDomEngine() && settings.promptMode !== 'macro') {
-            promptText = buildMinimalPromptInstruction();
-        } else if (settings.enabled && isDomEngine() && settings.domStealthColors) {
-            promptText = buildDomStealthColorsInstruction();
-        }
-        const role = settings.promptRole === 'user' ? extension_prompt_roles.USER : extension_prompt_roles.SYSTEM;
-        setExtensionPrompt(MODULE_NAME, promptText, extension_prompt_types.IN_CHAT, settings.promptDepth, false, role);
-        const p = document.getElementById('dc-prompt-preview');
-        if (p) p.innerHTML = buildColoredPromptPreview();
-        updateSystemPromptDisplay();
-    }, 50);
+    if (!settings.enabled && !promptInjectionActive) {
+        injectDebouncedTimer = null;
+        updatePromptUi();
+        return;
+    }
+    injectDebouncedTimer = setTimeout(flushPromptInjection, 50);
 }
 
 // Phase 3A: Legend with event listener cleanup

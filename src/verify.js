@@ -1,10 +1,10 @@
 // verify.js - extracted from index.js (mechanical split)
 import { attributeDialogueSegments, clearSpeakerRegexCache, ensureCharacterEntry } from './attribution.js';
-import { ATTRIBUTION_SOURCE, ATTRIBUTION_VERIFICATION_STATUS, normalizeAttributionConfidence } from './attribution-store.js';
+import { ATTRIBUTION_SOURCE, ATTRIBUTION_VERIFICATION_STATUS, isHostSystemOrToolMessage, normalizeAttributionConfidence } from './attribution-store.js';
 import { buildNameColorLookup, collectFontColorsFromText, parseNamedColorAssignmentsFromText, resolveCharacterKeyByNameOrAlias } from './color-blocks.js';
-import { cancelMessageDomFollowupRepairs, clearMessageDomRepairTimer, clearStreamingAttributionOverrides, decorateMessageDomFromCurrentRender, decorateObservedMessages, getMessageQuoteOverrideEntry, getMessageQuoteOverrideOptions, isMessageAttributionVerified, markMessageAttributionVerified, refreshAndDecorateMessageDom, scheduleMessageDomFollowupRepair, setMessageQuoteOverride, setStreamingAttributionOverride, suspendMessageDomWorkForEdit, upsertAttributionReview } from './dom-engine.js';
+import { cancelMessageDomFollowupRepairs, clearMessageDomRepairTimer, clearStreamingAttributionOverrides, decorateMessageDomFromCurrentRender, decorateObservedMessages, getMessageAttributionFreezeSegments, getMessageQuoteOverrideEntry, getMessageQuoteOverrideOptions, isMessageAttributionVerified, markMessageAttributionVerified, refreshAndDecorateMessageDom, scheduleMessageDomFollowupRepair, setMessageQuoteOverride, setStreamingAttributionOverride, suspendMessageDomWorkForEdit, upsertAttributionReview } from './dom-engine.js';
 import { callLLMWithProfile, classifyLlmRequestError } from './llm.js';
-import { isSpeakerNamePresentInText, normalizeAttributionVerifyPasses, reduceAttributionVerifierBallots } from './verify-consensus.js';
+import { hasAttributionVerifierBallotQuorum, isSpeakerNamePresentInText, normalizeAttributionVerifyPasses, reduceAttributionVerifierBallots } from './verify-consensus.js';
 import { commit, repaintDomAfterCharacterDataChange } from './live-colors.js';
 import { formatPromptLiteralSymbol, getThoughtDelimiterSymbols } from './prompts.js';
 import { getContext } from './st-api.js';
@@ -13,7 +13,7 @@ import { setVerifyAttributionButtonBusy } from './ui.js';
 import { getMessageElementByIndex, hashMessageText, isCompositeSpeakerLabel, toast } from './utils.js';
 
 export function isMessageEligibleForAttributionVerification(msg) {
-    return !!msg && !msg.is_system && !!msg.mes && !collectFontColorsFromText(msg.mes).size;
+    return !!msg && !isHostSystemOrToolMessage(msg) && !!msg.mes && !collectFontColorsFromText(msg.mes).size;
 }
 
 export const MAX_ATTRIBUTION_VERIFIER_RESPONSE_CHARS = 65536;
@@ -890,6 +890,7 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
     const request = buildAttributionVerifierRequest(msg, mesIndex, segments, lookup);
     if (!request.hasAllSegments) {
         console.warn(`[Dialogue Colors] Skipped attribution verification for message ${mesIndex}: too many dialogue segments.`);
+        if (!useTransientOverrides && isAttributionVerificationTargetCurrent(target)) clearStreamingAttributionOverrides(mesIndex);
         return unchecked;
     }
 
@@ -933,6 +934,7 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
     const passes = getAttributionVerifyPasses();
     const targetSegmentList = [...target.segments.values()];
     const ballots = [];
+    let validBallots = 0;
     for (let pass = 0; pass < passes; pass++) {
         if (!isAttributionVerificationTargetAndSegmentsCurrent(target, { allowAppendedText: useTransientOverrides })) return unchecked;
         const controller = new AbortController();
@@ -956,6 +958,7 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
                 console.warn('[Dialogue Colors] LLM attribution verification failed:', e);
                 if (trackFailure) recordAutoAttributionVerifyFailure(verifyKey, mesIndex);
                 if (!quiet) toast.warning('Color verification failed (see console).');
+                if (!useTransientOverrides && isAttributionVerificationTargetCurrent(target)) clearStreamingAttributionOverrides(mesIndex);
             }
             return cancelled
                 ? unchecked
@@ -970,17 +973,20 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
             ? validateAttributionVerifierCorrections(parsed, targetSegmentList)
             : null;
         if (!validated) {
-            // One unusable sample out of several is survivable; only a total
-            // washout counts as a failed verification.
+            // Invalid passes remain empty ballots so they cannot make a lone
+            // correction look like consensus.
             console.warn(`[Dialogue Colors] LLM attribution verification pass ${pass + 1}/${passes} returned invalid JSON.`);
+            ballots.push([]);
             continue;
         }
+        validBallots++;
         ballots.push(validated);
     }
 
-    if (!ballots.length) {
+    if (!hasAttributionVerifierBallotQuorum(validBallots, passes)) {
         if (trackFailure) recordAutoAttributionVerifyFailure(verifyKey, mesIndex);
         if (!quiet) toast.warning('Color verification failed (see console).');
+        if (!useTransientOverrides && isAttributionVerificationTargetCurrent(target)) clearStreamingAttributionOverrides(mesIndex);
         return unchecked;
     }
 
@@ -1080,6 +1086,7 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
                 source: ATTRIBUTION_SOURCE.LLM,
                 confidence: correction.confidence,
                 evidence,
+                freezeSegments: getMessageAttributionFreezeSegments(mesIndex, msg, correction.index),
             });
         if (didSetOverride) {
             appliedCorrections++;
@@ -1310,7 +1317,7 @@ export function cancelStreamingAttributionVerification(options = {}) {
     streamingProviderFailureCount = 0;
     cancelActiveStreamingAttributionVerifications();
     setLastStreamingAttributionVerifyKey('');
-    if (options.clearOverrides) clearStreamingAttributionOverrides();
+    if (options.clearOverrides !== false) clearStreamingAttributionOverrides();
 }
 
 export function scheduleStreamingAttributionVerification() {
@@ -1386,6 +1393,7 @@ export async function runStreamingAttributionVerification(mesIndex, generation) 
                 if (!result.providerFailure.retryable
                     || streamingProviderFailureCount >= MAX_STREAMING_PROVIDER_FAILURES) {
                     blockedStreamingProviderGeneration = generation;
+                    clearStreamingAttributionOverrides(mesIndex);
                 }
             } else if (result.checked && generation === streamingAttributionGeneration) {
                 streamingProviderFailureCount = 0;

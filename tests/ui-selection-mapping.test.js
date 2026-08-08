@@ -29,9 +29,9 @@ const stubSources = new Map([
         export const captureEffectiveColorSnapshot = () => null;
         export const commit = () => {};
         export const flushChatSave = () => {};
+        export const parseCanonicalFontMarkup = () => null;
         export const queueChatSave = () => {};
-        export const updateTextColorReferences = text => ({ updatedText: text });
-        export const updateVisibleMessageColors = () => {};
+        export const replaceCanonicalFontSpanColor = () => null;
     `],
     ['./palettes.js', `
         export const buildCharacterEntry = () => ({ entry: null });
@@ -64,6 +64,7 @@ const stubSources = new Map([
     ['./utils.js', `
         export const escapeAttr = value => String(value);
         export const hashMessageText = value => String(value);
+        export const isToolCallMessage = () => false;
         export const normalizeHexColor = (value, fallback = null) => /^#[0-9a-f]{6}$/i.test(String(value || "")) ? String(value).toLowerCase() : fallback;
         export const normalizeSegmentText = value => String(value || "");
         export const toast = { error() {}, info() {}, success() {}, warning() {} };

@@ -22,10 +22,12 @@ function createEventTarget() {
 
 function createClassList(initial = []) {
     const values = new Set(initial);
+    const calls = { add: new Map(), remove: new Map() };
     return {
-        add(value) { values.add(value); },
-        remove(value) { values.delete(value); },
+        add(value) { calls.add.set(value, (calls.add.get(value) || 0) + 1); values.add(value); },
+        remove(value) { calls.remove.set(value, (calls.remove.get(value) || 0) + 1); values.delete(value); },
         contains(value) { return values.has(value); },
+        callCount(action, value) { return calls[action].get(value) || 0; },
     };
 }
 
@@ -80,6 +82,36 @@ test('scroll refreshes auto-animation visibility without IntersectionObserver an
         rect = { top: 2000, bottom: 2040, left: 10, right: 50 };
         documentTarget.dispatch('scroll');
         assert.equal(animatedElement.classList.contains('dc-gradient-running'), false);
+
+        rect = { top: 10, bottom: 50, left: 10, right: 50 };
+        documentTarget.dispatch('scroll');
+        const runningAdds = animatedElement.classList.callCount('add', 'dc-gradient-running');
+        const runningRemoves = animatedElement.classList.callCount('remove', 'dc-gradient-running');
+        controller.refreshGradientAnimationState();
+        assert.equal(animatedElement.classList.callCount('add', 'dc-gradient-running'), runningAdds);
+        assert.equal(animatedElement.classList.callCount('remove', 'dc-gradient-running'), runningRemoves);
+
+        controller.unregisterGradientAnimationRoot(root);
+        assert.equal(controller.getGradientAnimationState().rootCount, 0);
+        assert.equal(controller.getGradientAnimationState().fallbackVisibilityEnabled, false);
+        assert.equal(documentTarget.listenerCount('scroll'), 0);
+        assert.equal(viewportTarget.listenerCount('resize'), 0);
+
+        const descendants = Array.from({ length: 2049 }, () => ({ matches: () => false }));
+        fakeDocument.createTreeWalker = () => {
+            let index = 0;
+            return { nextNode: () => descendants[index++] || null };
+        };
+        const oversizedEmptyRoot = {
+            classList: createClassList(['mes']),
+            isConnected: true,
+            matches: selector => selector === '.mes',
+            querySelector: () => null,
+            getBoundingClientRect: () => ({ top: 10, bottom: 50, left: 10, right: 50 }),
+        };
+        controller.registerGradientAnimationRoot(oversizedEmptyRoot);
+        assert.equal(controller.getGradientAnimationState().rootCount, 0);
+        assert.equal(controller.getGradientAnimationState().fallbackVisibilityEnabled, false);
 
         controller.destroyGradientAnimationController();
         assert.equal(documentTarget.listenerCount('scroll'), 0);

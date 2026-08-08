@@ -1,6 +1,6 @@
 // dom-engine.js - extracted from index.js (mechanical split)
 import { attributeDialogueSegments } from './attribution.js';
-import { ATTRIBUTION_REVIEW_METADATA_KEY, ATTRIBUTION_REVIEW_STATUS, ATTRIBUTION_SOURCE, ATTRIBUTION_VERIFICATION_STATUS, createAttributionStore, createMessageFingerprint, deleteAttributionOverrideRecord, getAttributionConfidenceBand, isLegacyAttributionOverrideEntry, normalizeAttributionConfidence, normalizeAttributionSource } from './attribution-store.js';
+import { ATTRIBUTION_REVIEW_METADATA_KEY, ATTRIBUTION_REVIEW_STATUS, ATTRIBUTION_SOURCE, ATTRIBUTION_VERIFICATION_STATUS, createAttributionStore, createMessageFingerprint, deleteAttributionOverrideRecord, getAttributionConfidenceBand, isHostSystemOrToolMessage, isLegacyAttributionOverrideEntry, normalizeAttributionConfidence, normalizeAttributionSource, setAttributionOverrideRecord } from './attribution-store.js';
 import { unregisterGradientAnimationRoot } from './animation-controller.js';
 import { buildUniqueKnownColorStatsLookup, collectFontColorsFromText, countFontColorOccurrencesFromText, resolveCharacterKeyByNameOrAlias } from './color-blocks.js';
 import { applyCustomFontsToFontTags, applyCustomFontsToMessageElements, clearCustomFontsFromFontTags, loadGoogleFont, scheduleCardStyle, scheduleCustomFontRefresh } from './fonts.js';
@@ -8,7 +8,7 @@ import { applyGradientText, clearGradientText, getVisualRenderState } from './gr
 import { queueColorStateSave } from './live-colors.js';
 import { getNarratorVisual } from './narrator-style.js';
 import { applyThemeReadabilityAndBrightness } from './palettes.js';
-import { converter, escapeHtml, eventSource, event_types, getContext } from './st-api.js';
+import { escapeHtml, eventSource, event_types, getContext } from './st-api.js';
 import { ATTRIBUTION_VERIFIER_VERSION, AUTO_ATTRIBUTION_VERIFY_DELAY_MS, attributionChatGeneration, characterColors, isDomEngine, runtimeState, settings, streamingAttributionOverrides, streamingSession } from './state.js';
 import { isPlainObject } from './storage.js';
 import { applyTextStyle, clearTextStyle } from './text-style-rendering.js';
@@ -120,9 +120,9 @@ function renderMessageDomFallbackForTarget(target, detailsState = null) {
         if (typeof target.context?.messageFormatting === 'function') {
             formatted = target.context.messageFormatting(rawText, target.messageSpeaker, target.isSystem, target.isUser, target.messageIndex);
         }
-        if (!formatted && typeof converter?.makeHtml === 'function') formatted = converter.makeHtml(rawText);
     } catch (e) {
         console.warn('[Dialogue Colors] Message formatting fallback failed:', e);
+        formatted = '';
     }
     if (!isMessageDomElementCurrent(target, mesEl) || mesEl.querySelector?.('.mes_text') !== mesText) return false;
     mesText.innerHTML = formatted || escapeHtml(rawText).replace(/\n/g, '<br>');
@@ -211,7 +211,7 @@ export function waitForDomFrame(maxWaitMs = 80) {
 
 export function getMessageDomReadiness(mesElement, msg, mesIndex) {
     const mesText = mesElement?.querySelector?.('.mes_text');
-    if (!mesText || !msg || msg.is_system) return { ready: false, totalSegments: 0, matchedSegments: 0, expectedDecorations: 0, coloredDecorations: 0, correctDecorations: 0 };
+    if (!mesText || !msg || isHostSystemOrToolMessage(msg)) return { ready: false, totalSegments: 0, matchedSegments: 0, expectedDecorations: 0, coloredDecorations: 0, correctDecorations: 0 };
     if (mesText.querySelector('font[color]') || collectFontColorsFromText(msg.mes).size) {
         return { ready: true, totalSegments: 0, matchedSegments: 0, expectedDecorations: 0, coloredDecorations: 0, correctDecorations: 0 };
     }
@@ -491,7 +491,7 @@ export function scheduleMessageDomRepair(mesIndex, options = {}) {
             if (!isCurrent()) return;
 
             const msg = target.message;
-            if (!msg || msg.is_system) return;
+            if (!msg || isHostSystemOrToolMessage(msg)) return;
             if (suspendMessageDomWorkForEdit(getMessageElementByIndex(index), index)) return;
 
             await decorateMessageDomFromCurrentRender(index, msg, {
@@ -617,20 +617,84 @@ export function getChatMetadataStore() {
 }
 
 let lastSavedChatMetadataScope = null;
+let lastSavedChatMetadataBinding = null;
+let dirtyChatMetadataScope = null;
+let dirtyChatMetadataBinding = null;
+let pendingChatMetadataSave = null;
+
+function captureChatMetadataBinding(metadata = getChatMetadataStore(), ctx = getContext()) {
+    return {
+        chatGeneration: attributionChatGeneration,
+        chat: ctx?.chat,
+        contextIdentity: getChatContextIdentity(ctx),
+        metadata,
+    };
+}
+
+function chatMetadataBindingsEqual(left, right) {
+    return !!left && !!right
+        && left.chatGeneration === right.chatGeneration
+        && left.chat === right.chat
+        && left.contextIdentity === right.contextIdentity
+        && left.metadata === right.metadata;
+}
+
+function isChatMetadataBindingCurrent(binding) {
+    return chatMetadataBindingsEqual(binding, captureChatMetadataBinding());
+}
 
 export function saveChatMetadata() {
     const ctx = getContext();
+    const metadata = getChatMetadataStore();
+    const scope = snapshotChatMetadataScope(metadata);
+    const binding = captureChatMetadataBinding(metadata, ctx);
+    dirtyChatMetadataScope = scope;
+    dirtyChatMetadataBinding = binding;
+    let result;
+    let debounced = false;
     try {
-        const result = typeof ctx?.saveMetadataDebounced === 'function'
-            ? ctx.saveMetadataDebounced()
-            : typeof ctx?.saveMetadata === 'function'
-                ? ctx.saveMetadata()
-                : null;
-        lastSavedChatMetadataScope = snapshotChatMetadataScope();
-        result?.catch?.(error => console.warn('[Dialogue Colors] Failed to save chat metadata:', error));
+        // The host debounce is cancellable and returns no settlement signal;
+        // bind durable attribution writes to this chat's immediate save instead.
+        if (typeof ctx?.saveMetadata === 'function') {
+            result = ctx.saveMetadata();
+        } else if (typeof ctx?.saveMetadataDebounced === 'function') {
+            debounced = true;
+            result = ctx.saveMetadataDebounced();
+        } else {
+            return null;
+        }
     } catch (error) {
         console.warn('[Dialogue Colors] Failed to save chat metadata:', error);
+        return null;
     }
+
+    const settle = () => {
+        if (!isChatMetadataBindingCurrent(binding) || snapshotChatMetadataScope(metadata) !== scope) return;
+        lastSavedChatMetadataScope = scope;
+        lastSavedChatMetadataBinding = binding;
+        if (chatMetadataBindingsEqual(dirtyChatMetadataBinding, binding) && dirtyChatMetadataScope === scope) {
+            dirtyChatMetadataScope = null;
+            dirtyChatMetadataBinding = null;
+        }
+    };
+
+    if (result && typeof result.then === 'function') {
+        const pending = { binding, scope };
+        pendingChatMetadataSave = pending;
+        Promise.resolve(result).then(value => {
+            if (value !== false && pendingChatMetadataSave === pending) settle();
+        }, error => {
+            console.warn('[Dialogue Colors] Failed to save chat metadata:', error);
+        }).finally(() => {
+            if (pendingChatMetadataSave === pending) pendingChatMetadataSave = null;
+        });
+    } else if ((!debounced && result !== false) || result === true) {
+        // A synchronous saveMetadata call has settled on return. Debounced
+        // hosts must explicitly confirm; undefined can mean the call was folded
+        // into or cancelled by another debounce.
+        settle();
+    }
+    return result;
 }
 
 // A chat metadata save is a full rewrite of the chat file - the host stores
@@ -650,15 +714,26 @@ export function snapshotChatMetadataScope(metadata = getChatMetadataStore()) {
     }
 }
 
-// Saves only when the snapshot proves something changed. Callers that could not
-// snapshot before mutating pass null and fall back to the last state we handed
-// to the host. A snapshot that could not be taken on either side is treated as
-// "unknown", which saves, so a serialisation failure can never silently drop a
-// real edit.
+// Saves only when the snapshot changed or an earlier attempt is still dirty.
+// Callers without a before-snapshot compare against the last confirmed save;
+// unknown snapshots save so serialization failures cannot drop a real edit.
 export function saveChatMetadataIfChanged(before, metadata = getChatMetadataStore()) {
     const after = snapshotChatMetadataScope(metadata);
-    const baseline = before === null || before === undefined ? lastSavedChatMetadataScope : before;
-    if (baseline !== null && baseline !== undefined && after !== null && baseline === after) return false;
+    const binding = captureChatMetadataBinding(metadata);
+    const savedScope = chatMetadataBindingsEqual(lastSavedChatMetadataBinding, binding)
+        ? lastSavedChatMetadataScope
+        : null;
+    const pendingSameScope = pendingChatMetadataSave
+        && chatMetadataBindingsEqual(pendingChatMetadataSave.binding, binding)
+        && pendingChatMetadataSave.scope === after;
+    const dirtySameScope = chatMetadataBindingsEqual(dirtyChatMetadataBinding, binding)
+        && dirtyChatMetadataScope === after;
+    const baseline = before === null || before === undefined ? savedScope : before;
+    const changed = baseline === null || baseline === undefined || after === null || baseline !== after;
+    if (!changed && !dirtySameScope) return false;
+    if (pendingSameScope) return false;
+    dirtyChatMetadataScope = after;
+    dirtyChatMetadataBinding = binding;
     saveChatMetadata();
     return true;
 }
@@ -831,6 +906,22 @@ export function getMessageQuoteOverrideEntry(mesIndex, msg, create = false) {
     return entry;
 }
 
+export function getMessageAttributionFreezeSegments(mesIndex, msg, targetSegmentIndex = -1) {
+    if (!msg) return {};
+    const target = Number(targetSegmentIndex);
+    const attribution = attributeDialogueSegments(msg.mes, msg.name, {
+        autoAddMessageSpeaker: false,
+        ...getMessageQuoteOverrideOptions(mesIndex, msg),
+        mesIndex,
+    });
+    const frozen = {};
+    for (const segment of attribution.segments) {
+        if (segment.index === target) continue;
+        frozen[String(segment.index)] = segment.assignment?.name || segment.assignment?.key || null;
+    }
+    return frozen;
+}
+
 export function setMessageQuoteOverride(mesIndex, msg, segmentIndex, speakerName, options = {}) {
     const index = Number(mesIndex);
     const normalizedSegmentIndex = Number(segmentIndex);
@@ -873,72 +964,53 @@ export function setMessageQuoteOverride(mesIndex, msg, segmentIndex, speakerName
     }
     const entryIsNew = !messageQuoteOverrideEntryMatches(existingEntry, msg);
     const baseEntry = entryIsNew ? createMessageQuoteOverrideEntry(msg) : existingEntry;
-    const entry = {
-        ...baseEntry,
-        segments: { ...(isPlainObject(baseEntry.segments) ? baseEntry.segments : {}) },
-        sources: { ...(isPlainObject(baseEntry.sources) ? baseEntry.sources : {}) },
+    const entry = { ...baseEntry };
+    for (const mapName of ['segments', 'sources', 'confidences', 'reviewIds', 'records']) {
+        if (isPlainObject(baseEntry[mapName])) entry[mapName] = { ...baseEntry[mapName] };
+    }
+    const identity = getMessageAttributionIdentity(msg);
+    const review = {
+        messageIndex: index,
+        segmentIndex: normalizedSegmentIndex,
+        proposedSpeaker: speaker,
+        source,
+        messageId: identity.messageId,
+        messageHash: identity.hash,
+        messageFingerprint: identity.messageFingerprint,
+        ...(confidence === undefined ? {} : { confidence }),
+        ...(evidence === undefined ? {} : { evidence }),
     };
-    // Snapshot the sibling segments' current auto-attribution the first time a
-    // message gets an override. Without this, the paragraph-carry and
-    // alternation tiers read the new override back and silently re-colour
-    // neighbouring quotes that the user never touched. Only seed on a fresh
-    // entry, otherwise clearing an override would immediately re-freeze it.
-    if (entryIsNew && isPlainObject(normalizedOptions.freezeSegments)) {
-        for (const [frozenKey, frozenSpeaker] of Object.entries(normalizedOptions.freezeSegments)) {
-            const frozenIndex = Number(frozenKey);
-            if (frozenKey === segmentKey || !Number.isInteger(frozenIndex) || frozenIndex < 0) continue;
-            const frozenName = String(frozenSpeaker ?? '').trim();
-            if (!frozenName) continue;
-            entry.segments[frozenKey] = frozenName;
-            entry.sources[frozenKey] = ATTRIBUTION_SOURCE.FROZEN;
-        }
-    }
-    entry.segments[segmentKey] = speaker;
-    entry.sources[segmentKey] = source;
-    if (confidence !== undefined) {
-        entry.confidences = { ...(isPlainObject(baseEntry.confidences) ? baseEntry.confidences : {}) };
-        entry.confidences[segmentKey] = confidence;
-    }
-    if (reviewId) {
-        entry.reviewIds = { ...(isPlainObject(baseEntry.reviewIds) ? baseEntry.reviewIds : {}) };
-        entry.reviewIds[segmentKey] = reviewId;
-    }
-    if (evidence !== undefined) {
-        entry.records = { ...(isPlainObject(baseEntry.records) ? baseEntry.records : {}) };
-        entry.records[segmentKey] = {
-            speaker,
-            source,
-            confidence: entry.confidences?.[segmentKey],
-            evidence,
-            ...(entry.reviewIds?.[segmentKey] ? { reviewId: entry.reviewIds[segmentKey] } : {}),
-        };
-    }
-    applyMessageAttributionIdentity(entry, msg);
-    if (Object.values(ATTRIBUTION_VERIFICATION_STATUS).includes(normalizedOptions.verificationStatus)) {
-        entry.verificationStatus = normalizedOptions.verificationStatus;
-    }
-    if (normalizedOptions.markUnverified === true) {
-        delete entry.verifiedHash;
-        delete entry.verifiedAt;
-        delete entry.verifiedVersion;
-    } else {
-        // Keep the original stamp when this entry already carries the same
-        // verdict for the same text: a fresh Date.now() on every re-apply makes
-        // an identical write look like a change and forces a chat file rewrite.
-        if (entry.verifiedHash !== entry.hash || entry.verifiedVersion !== ATTRIBUTION_VERIFIER_VERSION) {
-            entry.verifiedAt = Date.now();
-        }
-        entry.verifiedHash = entry.hash;
-        entry.verifiedVersion = ATTRIBUTION_VERIFIER_VERSION;
-        if (!Object.values(ATTRIBUTION_VERIFICATION_STATUS).includes(entry.verificationStatus)) {
-            entry.verificationStatus = source === ATTRIBUTION_SOURCE.LLM
+    const hasFreezeSegments = Object.prototype.hasOwnProperty.call(normalizedOptions, 'freezeSegments');
+    const freezeSegments = hasFreezeSegments
+        ? { ...getMessageAttributionFreezeSegments(index, msg, normalizedSegmentIndex), ...(isPlainObject(normalizedOptions.freezeSegments) ? normalizedOptions.freezeSegments : {}) }
+        : undefined;
+    const requestedStatus = Object.values(ATTRIBUTION_VERIFICATION_STATUS).includes(normalizedOptions.verificationStatus)
+        ? normalizedOptions.verificationStatus
+        : Object.values(ATTRIBUTION_VERIFICATION_STATUS).includes(entry.verificationStatus)
+            ? undefined
+            : source === ATTRIBUTION_SOURCE.LLM
                 ? ATTRIBUTION_VERIFICATION_STATUS.AUTO_APPLIED
                 : ATTRIBUTION_VERIFICATION_STATUS.CLEAN;
-        }
-    }
+    const workingMap = { [messageKey]: entry };
+    const applied = setAttributionOverrideRecord(workingMap, review, {
+        message: msg,
+        speaker,
+        source,
+        ...(confidence === undefined ? {} : { confidence }),
+        ...(evidence === undefined ? {} : { evidence }),
+        ...(reviewId ? { reviewId } : {}),
+        ...(requestedStatus ? { verificationStatus: requestedStatus } : {}),
+        freezeSegments,
+        clearTargetMetadata: source === ATTRIBUTION_SOURCE.MANUAL,
+        markUnverified: normalizedOptions.markUnverified === true,
+        verifiedVersion: ATTRIBUTION_VERIFIER_VERSION,
+        extended: evidence !== undefined,
+    });
+    if (!applied) return false;
+    const nextEntry = applyMessageAttributionIdentity(workingMap[messageKey], msg);
     try {
-        if (existingMap) existingMap[messageKey] = entry;
-        else metadata[OVERRIDES_METADATA_KEY] = { [messageKey]: entry };
+        if (existingMap) existingMap[messageKey] = nextEntry;
+        else metadata[OVERRIDES_METADATA_KEY] = { [messageKey]: nextEntry };
     } catch (_) {
         return false;
     }
@@ -980,6 +1052,54 @@ export function restoreMessageQuoteOverrideEntry(mesIndex, snapshot) {
     return true;
 }
 
+// The host renumbers mesid values after deletion while this metadata remains
+// index-keyed. Rebuild the map from the stored message identity before a later
+// main.js deletion hook starts using it.
+export function reconcileMessageQuoteOverridesAfterDeletion(chat = getContext()?.chat, options = {}) {
+    const messages = Array.isArray(chat) ? chat : null;
+    const map = getQuoteOverridesMap(false);
+    if (!messages || !map) return false;
+    const next = {};
+    const pending = [];
+    for (const [key, entry] of Object.entries(map)) {
+        if (!isPlainObject(entry)) {
+            pending.push([key, entry]);
+            continue;
+        }
+        const index = Number(key);
+        if (Number.isInteger(index) && index >= 0 && messageQuoteOverrideEntryMatches(entry, messages[index])) {
+            next[key] = entry;
+        } else {
+            pending.push([key, entry]);
+        }
+    }
+    if (options.deletion === false) return false;
+    for (const [, entry] of pending) {
+        if (!isPlainObject(entry)) continue;
+        const matches = [];
+        for (let index = 0; index < messages.length; index++) {
+            if (messageQuoteOverrideEntryMatches(entry, messages[index])) matches.push(index);
+        }
+        if (!matches.length) continue;
+        const targetKey = String(matches[0]);
+        // Ambiguous identity is safer left inert at its old key than erased or
+        // attached to an arbitrary duplicate.
+        if (matches.length !== 1 || Object.prototype.hasOwnProperty.call(next, targetKey)) return false;
+        next[targetKey] = entry;
+    }
+    const currentKeys = Object.keys(map);
+    const nextKeys = Object.keys(next);
+    const unchanged = currentKeys.length === nextKeys.length
+        && nextKeys.every(key => map[key] === next[key]);
+    if (unchanged) return false;
+    const metadataBefore = snapshotChatMetadataScope();
+    for (const key of currentKeys) delete map[key];
+    Object.assign(map, next);
+    streamingSession.assignments.clear();
+    saveChatMetadataIfChanged(metadataBefore);
+    return true;
+}
+
 // Verdicts the local pass re-derives for free are remembered here instead of in
 // chat metadata. Cleared whenever the chat changes; an edited message misses on
 // its own because the key carries the message's text hash and fingerprint.
@@ -1001,6 +1121,10 @@ export function clearSessionAttributionVerifications() {
     // The saved-scope baseline describes the chat we are leaving; keeping it
     // could let an unrelated chat's identical-looking metadata skip a real save.
     lastSavedChatMetadataScope = null;
+    lastSavedChatMetadataBinding = null;
+    dirtyChatMetadataScope = null;
+    dirtyChatMetadataBinding = null;
+    pendingChatMetadataSave = null;
 }
 
 export function markMessageAttributionVerified(mesIndex, msg, verificationStatus = ATTRIBUTION_VERIFICATION_STATUS.CLEAN, options = {}) {
@@ -1073,10 +1197,13 @@ export function getAttributionReviewAdapter() {
         getChat: () => getContext()?.chat || [],
         getOverrideMap: () => getQuoteOverridesMap(true),
         // The store notifies after mutating, so there is no "before" to pass;
-        // fall back to the last scope handed to the host so a re-upsert of an
-        // identical review does not rewrite the chat file.
+        // fall back to the last confirmed or pending scope so an identical
+        // re-upsert does not queue another chat rewrite.
         saveMetadata: metadata => saveChatMetadataIfChanged(null, metadata),
         extendedOverrides: true,
+        getFreezeSegments(review, message) {
+            return getMessageAttributionFreezeSegments(review?.messageIndex, message, review?.segmentIndex);
+        },
         validateAcceptance(review, operationOptions) {
             const requestedSpeaker = String(operationOptions?.speaker ?? review?.proposedSpeaker ?? '').trim();
             const key = resolveCharacterKeyByNameOrAlias(requestedSpeaker);
@@ -1201,7 +1328,7 @@ export function refreshDomDialogueCounts(chat = getContext()?.chat || []) {
 
     for (let i = 0; i < chat.length; i++) {
         const msg = chat[i];
-        if (!msg || msg.is_system || !msg.mes) continue;
+        if (!msg || isHostSystemOrToolMessage(msg) || !msg.mes) continue;
         // Font-tagged messages are never decorated, but their saved tags still
         // say who spoke; count them from the tags instead of dropping the whole
         // message out of the statistics. Left uncached: this branch resolves by
@@ -1312,11 +1439,6 @@ export function isApproximateSegmentTextMatch(target, rendered) {
 
 export function resolveDomSegmentIndexForElement(segmentEl, mesIndex, msg) {
     if (!segmentEl || !msg) return NaN;
-    if (segmentEl.hasAttribute?.('data-dc-seg')) {
-        const directIndex = Number(segmentEl.getAttribute('data-dc-seg'));
-        if (Number.isFinite(directIndex)) return directIndex;
-    }
-
     const mesText = segmentEl.closest?.('.mes_text');
     if (!mesText) return NaN;
 
@@ -1348,12 +1470,139 @@ export function resolveDomSegmentIndexForElement(segmentEl, mesIndex, msg) {
     return resolvedIndex;
 }
 
-function setStyleIfChanged(el, property, value) {
-    if (el.style[property] !== value) el.style[property] = value;
-}
-
 function setAttributeIfChanged(el, name, value) {
     if (el.getAttribute(name) !== value) el.setAttribute(name, value);
+}
+
+const SEGMENT_COLOR_STATE_ATTRIBUTE = 'data-dc-color-state';
+const SEGMENT_HIGHLIGHT_STATE_ATTRIBUTE = 'data-dc-highlight-state';
+const SEGMENT_FONT_STATE_ATTRIBUTE = 'data-dc-font';
+
+function readOwnedStyleState(el, attribute) {
+    try {
+        const state = JSON.parse(el.getAttribute(attribute) || '');
+        if (!state || typeof state !== 'object' || typeof state.applied !== 'string') return null;
+        return {
+            value: typeof state.value === 'string' ? state.value : '',
+            priority: typeof state.priority === 'string' ? state.priority : '',
+            applied: state.applied,
+            appliedPriority: typeof state.appliedPriority === 'string' ? state.appliedPriority : '',
+            requested: typeof state.requested === 'string' ? state.requested : null,
+        };
+    } catch (_) {
+        return null;
+    }
+}
+
+function applyOwnedStyle(el, property, value, attribute, legacyOwned = false) {
+    const currentValue = el.style.getPropertyValue(property);
+    const currentPriority = el.style.getPropertyPriority(property);
+    let state = readOwnedStyleState(el, attribute);
+    const ownsCurrent = !!state
+        && currentValue === state.applied
+        && currentPriority === state.appliedPriority;
+    if (!ownsCurrent) {
+        state = {
+            value: legacyOwned ? '' : currentValue,
+            priority: legacyOwned ? '' : currentPriority,
+            applied: '',
+            appliedPriority: '',
+            requested: null,
+        };
+    }
+    let changed = false;
+    if (!ownsCurrent || state.requested !== value) {
+        el.style.setProperty(property, value);
+        changed = currentValue !== el.style.getPropertyValue(property)
+            || currentPriority !== el.style.getPropertyPriority(property);
+    }
+    state.requested = value;
+    state.applied = el.style.getPropertyValue(property);
+    state.appliedPriority = el.style.getPropertyPriority(property);
+    const encoded = JSON.stringify(state);
+    if (el.getAttribute(attribute) !== encoded) {
+        el.setAttribute(attribute, encoded);
+        changed = true;
+    }
+    return changed;
+}
+
+function clearOwnedStyle(el, property, attribute, legacyOwned = false) {
+    if (!el.hasAttribute(attribute)) {
+        if (!legacyOwned || !el.style.getPropertyValue(property)) return false;
+        el.style.removeProperty(property);
+        return true;
+    }
+    const state = readOwnedStyleState(el, attribute);
+    if (state && el.style.getPropertyValue(property) === state.applied
+        && el.style.getPropertyPriority(property) === state.appliedPriority) {
+        if (state.value) el.style.setProperty(property, state.value, state.priority);
+        else el.style.removeProperty(property);
+    } else if (!state && legacyOwned) {
+        el.style.removeProperty(property);
+    }
+    el.removeAttribute(attribute);
+    return true;
+}
+
+function readOwnedAttributeState(el, attribute) {
+    try {
+        const state = JSON.parse(el.getAttribute(attribute) || '');
+        if (!state || typeof state !== 'object' || typeof state.applied !== 'string') return null;
+        return {
+            hadValue: state.hadValue === true,
+            value: typeof state.value === 'string' ? state.value : '',
+            applied: state.applied,
+        };
+    } catch (_) {
+        return null;
+    }
+}
+
+function applyOwnedAriaLabel(el, value) {
+    const marker = 'data-dc-aria-label';
+    const hasValue = el.hasAttribute('aria-label');
+    const currentValue = el.getAttribute('aria-label') || '';
+    let state = readOwnedAttributeState(el, marker);
+    if (!state && el.hasAttribute(marker) && currentValue) {
+        state = { hadValue: false, value: '', applied: currentValue };
+    }
+    if (!state) {
+        if (hasValue) return false;
+        state = { hadValue: false, value: '', applied: value };
+    } else if (!hasValue || currentValue !== state.applied) {
+        // Another owner changed ARIA after us; relinquish it rather than
+        // replacing accessibility text we do not own.
+        el.removeAttribute(marker);
+        return false;
+    } else {
+        state.applied = value;
+    }
+    let changed = false;
+    if (!hasValue || currentValue !== value) {
+        el.setAttribute('aria-label', value);
+        changed = true;
+    }
+    const encoded = JSON.stringify(state);
+    if (el.getAttribute(marker) !== encoded) {
+        el.setAttribute(marker, encoded);
+        changed = true;
+    }
+    return changed;
+}
+
+function clearOwnedAriaLabel(el) {
+    const marker = 'data-dc-aria-label';
+    if (!el.hasAttribute(marker)) return false;
+    const state = readOwnedAttributeState(el, marker);
+    if (state && el.hasAttribute('aria-label') && el.getAttribute('aria-label') === state.applied) {
+        if (state.hadValue) el.setAttribute('aria-label', state.value);
+        else el.removeAttribute('aria-label');
+    } else if (!state) {
+        el.removeAttribute('aria-label');
+    }
+    el.removeAttribute(marker);
+    return true;
 }
 
 // Writes only what differs. Streaming paints run without a preceding clear pass,
@@ -1361,53 +1610,53 @@ function setAttributeIfChanged(el, name, value) {
 // classes restarts the animation and re-setting attributes wakes the observers.
 export function applySegmentDecoration(seg, el) {
     setAttributeIfChanged(el, 'data-dc-seg', String(seg.index));
-    if (!seg.assignment) return false;
+    if (!seg.assignment) {
+        clearSegmentDecoration(el, { preserveSegment: true });
+        return false;
+    }
+    const legacyOwned = el.hasAttribute('data-dc-colored') && !el.hasAttribute(SEGMENT_COLOR_STATE_ATTRIBUTE);
     const entryKey = characterColors[seg.assignment.key]
         ? seg.assignment.key
         : resolveCharacterKeyByNameOrAlias(seg.assignment.name || seg.assignment.key);
     const entry = entryKey ? characterColors[entryKey] : null;
     const displayVisual = getVisualRenderState(entry || { color: seg.assignment.color, baseColor: seg.assignment.color }, { target: 'chat' });
-    setStyleIfChanged(el, 'color', displayVisual.fallbackColor);
+    applyOwnedStyle(el, 'color', displayVisual.fallbackColor, SEGMENT_COLOR_STATE_ATTRIBUTE, legacyOwned);
     applyTextStyle(el, entry?.style);
     const font = entry?.font || seg.assignment.font;
     const family = getGoogleFontFamily(font);
     if (family) {
         loadGoogleFont(font);
-        setStyleIfChanged(el, 'fontFamily', family);
-        setAttributeIfChanged(el, 'data-dc-font', '1');
-    }
+        applyOwnedStyle(el, 'font-family', family, SEGMENT_FONT_STATE_ATTRIBUTE, legacyOwned);
+    } else clearOwnedStyle(el, 'font-family', SEGMENT_FONT_STATE_ATTRIBUTE, legacyOwned);
     const highlightColor = settings.highlightMode ? `${displayVisual.fallbackColor}26` : '';
     const gradientResult = applyGradientText(el, entry, { highlightColor, target: 'chat' });
-    if (settings.highlightMode && !gradientResult.applied) setStyleIfChanged(el, 'backgroundColor', highlightColor);
+    if (settings.highlightMode && !gradientResult.applied) {
+        applyOwnedStyle(el, 'background-color', highlightColor, SEGMENT_HIGHLIGHT_STATE_ATTRIBUTE, legacyOwned);
+    } else clearOwnedStyle(el, 'background-color', SEGMENT_HIGHLIGHT_STATE_ATTRIBUTE, legacyOwned);
     setAttributeIfChanged(el, 'data-dc-colored', '1');
     setAttributeIfChanged(el, 'data-dc-confidence', getAttributionConfidenceBand(seg.confidence));
     setAttributeIfChanged(el, 'data-dc-speaker', seg.assignment.key);
     const speakerName = entry?.name || seg.assignment.name || seg.assignment.key;
     setAttributeIfChanged(el, 'data-dc-speaker-name', speakerName);
-    if (!el.hasAttribute('aria-label')) {
-        el.setAttribute('aria-label', `${speakerName}: ${el.textContent.trim()}`);
-        el.setAttribute('data-dc-aria-label', '1');
-    }
+    applyOwnedAriaLabel(el, `${speakerName}: ${el.textContent.trim()}`);
     return true;
 }
 
-export function clearSegmentDecoration(el) {
+export function clearSegmentDecoration(el, options = {}) {
+    const legacyOwned = el.hasAttribute('data-dc-colored') && !el.hasAttribute(SEGMENT_COLOR_STATE_ATTRIBUTE);
     clearGradientText(el);
     clearTextStyle(el);
-    el.style.color = '';
-    el.style.backgroundColor = '';
-    el.style.fontFamily = '';
+    clearOwnedStyle(el, 'color', SEGMENT_COLOR_STATE_ATTRIBUTE, legacyOwned);
+    clearOwnedStyle(el, 'background-color', SEGMENT_HIGHLIGHT_STATE_ATTRIBUTE, legacyOwned);
+    clearOwnedStyle(el, 'font-family', SEGMENT_FONT_STATE_ATTRIBUTE, legacyOwned);
     if (!el.getAttribute('style')) el.removeAttribute('style');
     el.removeAttribute('data-dc-colored');
     el.removeAttribute('data-dc-confidence');
     el.removeAttribute('data-dc-speaker');
     el.removeAttribute('data-dc-speaker-name');
     el.removeAttribute('data-dc-font');
-    el.removeAttribute('data-dc-seg');
-    if (el.hasAttribute('data-dc-aria-label')) {
-        el.removeAttribute('aria-label');
-        el.removeAttribute('data-dc-aria-label');
-    }
+    if (options.preserveSegment !== true) el.removeAttribute('data-dc-seg');
+    clearOwnedAriaLabel(el);
 }
 
 export function clearNarratorTextSpans(mesText) {
@@ -1504,10 +1753,10 @@ export function undecorateMessageDom(mesElement, options = {}) {
 
 export function decorateMessageDom(mesElement, msg, mesIndex) {
     const mesText = mesElement?.querySelector?.('.mes_text');
-    if (!mesText) return { decorated: false, createdCharacters: false, needsRetry: !!msg && !msg.is_system };
+    if (!mesText) return { decorated: false, createdCharacters: false, needsRetry: !!msg && !isHostSystemOrToolMessage(msg) };
     if (suspendMessageDomWorkForEdit(mesElement, mesIndex)) return { decorated: false, createdCharacters: false, needsRetry: false };
     undecorateMessageDom(mesElement, { clearWatcher: false, preserveNarrator: true });
-    if (!settings.enabled || !msg || msg.is_system) {
+    if (!settings.enabled || !msg || isHostSystemOrToolMessage(msg)) {
         clearNarratorTextSpans(mesText);
         return { decorated: false, createdCharacters: false };
     }
@@ -1619,6 +1868,17 @@ export function clearMessageObservers(mesElement) {
     }
 }
 
+function clearMessageSettleObservers() {
+    for (const { observer, fallbackTimer, retryTimers } of runtimeState.messageSettleObservers.values()) {
+        try { observer?.disconnect?.(); } catch (_) { /* ignored */ }
+        clearTimeout(fallbackTimer);
+        retryTimers?.forEach?.(clearTimeout);
+    }
+    runtimeState.messageSettleObservers.clear();
+    pendingDomSettleRefreshKey = '';
+    pendingDomSettleRefreshCount = 0;
+}
+
 // Maximum time to wait for a message's DOM to settle before giving up.
 export const MESSAGE_SETTLE_MAX_WAIT_MS = 3000;
 
@@ -1704,7 +1964,7 @@ export function watchDecoratedMessage(mesElement, mesIndex) {
         const currentMesText = mesElement.querySelector('.mes_text');
         if (!currentMesText || !currentMesText.isConnected) return;
         const msg = getContext()?.chat?.[repairIndex];
-        if (!msg || msg.is_system) return;
+        if (!msg || isHostSystemOrToolMessage(msg)) return;
         if (!getMessageDomHealthRepairType(mesElement, msg, repairIndex, { bootstrap: true })
             && !currentMesText.querySelector('font[color]')
             && !collectFontColorsFromText(msg.mes).size) return;
@@ -1788,7 +2048,7 @@ const healthRefreshAttempts = new Map();
 
 export function getMessageDomHealthRepairType(mesElement, msg, mesIndex, options = {}) {
     const mesText = mesElement?.querySelector?.('.mes_text');
-    if (!mesText || !msg || msg.is_system) return '';
+    if (!mesText || !msg || isHostSystemOrToolMessage(msg)) return '';
     if (suspendMessageDomWorkForEdit(mesElement, mesIndex)) return '';
     if (mesText.querySelector('font[color]') || collectFontColorsFromText(msg.mes).size) return '';
     const readiness = getMessageDomReadiness(mesElement, msg, mesIndex);
@@ -1903,6 +2163,16 @@ export function stopDomHealthCheck() {
         runtimeState.domHealthCheckTimer = null;
     }
     clearMessageDomRepairTimers();
+    clearMessageSettleObservers();
+    // Font repair uses this observer in both engines. DOM-health teardown may
+    // keep it while enabled, but full extension teardown and stale targets may not.
+    if (!settings.enabled || !runtimeState.chatObserverTarget) disconnectChatObserver();
+    clearTimeout(decorateAllTimer);
+    decorateAllTimer = null;
+    decorateAllFirstCallTime = 0;
+    pendingDeferredMutations = false;
+    if (runtimeState.chatRootObserverTimer) clearTimeout(runtimeState.chatRootObserverTimer);
+    runtimeState.chatRootObserverTimer = null;
 }
 
 /**
@@ -2074,7 +2344,7 @@ export function disconnectChatObserver() {
 }
 
 export function queueObservedMessageDecoration(mesElement) {
-    if (!mesElement || !settings.enabled || !isDomEngine()) return;
+    if (!mesElement?.isConnected || !settings.enabled || !isDomEngine()) return;
     const mesIndex = Number(mesElement.getAttribute('mesid'));
     if (isStreamingOwnedMessage(mesIndex)) return;
     if (suspendMessageDomWorkForEdit(mesElement, mesIndex)) return;
@@ -2090,11 +2360,12 @@ export function queueObservedMessageDecoration(mesElement) {
         runtimeState.pendingObservedMessages.clear();
         if (!settings.enabled || !isDomEngine()) return;
         for (const pendingElement of pending) {
+            if (!pendingElement?.isConnected) continue;
             const pendingIndex = Number(pendingElement?.getAttribute?.('mesid'));
             if (!Number.isFinite(pendingIndex) || pendingIndex < 0) continue;
             const msg = getContext()?.chat?.[pendingIndex];
             const mesText = pendingElement?.querySelector?.('.mes_text');
-            if (!mesText || !msg || msg.is_system) continue;
+            if (!mesText || !msg || isHostSystemOrToolMessage(msg)) continue;
             if (mesText.querySelector('font[color]') || collectFontColorsFromText(msg.mes).size) {
                 applyCustomFontsToFontTags(mesText, msg.mes);
                 continue;

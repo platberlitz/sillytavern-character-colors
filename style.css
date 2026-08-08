@@ -2070,8 +2070,8 @@ body.dc-mark-uncertain [data-dc-colored][data-dc-confidence="low"] {
 .dc-dialog {
     box-sizing: border-box;
     width: min(520px, 100%);
-    max-height: calc(100dvh - max(32px, env(safe-area-inset-top) + env(safe-area-inset-bottom)));
     max-height: calc(100vh - max(32px, env(safe-area-inset-top) + env(safe-area-inset-bottom)));
+    max-height: calc(100dvh - max(32px, env(safe-area-inset-top) + env(safe-area-inset-bottom)));
     overflow: auto;
     overscroll-behavior: contain;
     margin: auto 0;
@@ -2704,8 +2704,8 @@ body.dc-mark-uncertain [data-dc-colored][data-dc-confidence="low"] {
 
     .dc-dialog {
         width: 100%;
-        max-height: calc(100dvh - max(32px, env(safe-area-inset-top) + env(safe-area-inset-bottom)));
         max-height: calc(100vh - max(32px, env(safe-area-inset-top) + env(safe-area-inset-bottom)));
+        max-height: calc(100dvh - max(32px, env(safe-area-inset-top) + env(safe-area-inset-bottom)));
         margin: auto 0;
         margin-top: 0;
         padding: 14px;

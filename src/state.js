@@ -1,6 +1,6 @@
 // state.js - extracted from index.js (mechanical split)
 
-import { normalizeRegistryIdentity } from './group-profiles.js';
+import { GROUP_PROFILE_RENAME, normalizeGroupKey, normalizeRegistryIdentity, resolveCanonicalAliasOwners } from './group-profiles.js';
 
 export const RUNTIME_GUARD_KEY = '__dialogueColorsRuntime_v1';
 
@@ -31,13 +31,23 @@ export const runtimeState = {
     pendingObservedMessages: new Set(),
 };
 
+let enabledLifecycleSynchronizer = null;
+
+export function setEnabledLifecycleSynchronizer(value) {
+    enabledLifecycleSynchronizer = typeof value === 'function' ? value : null;
+}
+
+export function synchronizeEnabledLifecycle() {
+    return enabledLifecycleSynchronizer?.() ?? false;
+}
+
 export function isDomEngine() {
     return settings.coloringEngine === 'dom';
 }
 
 export const MODULE_NAME = 'dialogue-colors';
 
-export const COLOR_SCHEMA_VERSION = 9;
+export const COLOR_SCHEMA_VERSION = 10;
 
 export const COLOR_STORAGE_SCOPES = Object.freeze(['chat', 'card', 'global']);
 
@@ -103,9 +113,22 @@ export const GLOBAL_TOGGLE_KEYS = Object.freeze(Object.keys(TOGGLE_SETTING_DEFAU
 
 export const GLOBAL_VISUAL_KEYS = Object.freeze(['thoughtSymbols', 'themeMode', 'colorTheme', 'brightness', 'promptDepth', 'promptRole', 'promptMode', 'coloringEngine', 'gradientRandomMasterSeed', 'colorVisionPreviewMode', 'colorVisionPreviewSeverity', 'colorVisionPreviewTarget', 'gradientAnimationMode']);
 
-export const GLOBAL_SETTINGS_V2_KEYS = Object.freeze([...new Set([...GLOBAL_VISUAL_KEYS, ...GLOBAL_TOGGLE_KEYS, 'narratorStyle', 'narratorColor', 'colorStorageScope', 'attributionReviewPolicy'])]);
+export const PORTABLE_SETTING_KEYS = Object.freeze([...new Set([
+    ...GLOBAL_VISUAL_KEYS,
+    ...GLOBAL_TOGGLE_KEYS,
+    'narratorStyle',
+    'narratorColor',
+    'colorStorageScope',
+    'attributionReviewPolicy',
+    'attributionMaxTokens',
+    'attributionVerifyPasses',
+    'colorSchemaVersion',
+    'sortMode',
+])]);
 
-export const ACTIVE_SETTING_KEYS = Object.freeze([...new Set([...GLOBAL_SETTINGS_V2_KEYS, 'llmConnectionProfile', 'attributionConnectionProfile', 'attributionConservativeOnly', 'attributionReviewPolicy', 'attributionMaxTokens', 'attributionVerifyPasses', 'colorSchemaVersion', 'sortMode'])]);
+export const GLOBAL_SETTINGS_V2_KEYS = PORTABLE_SETTING_KEYS;
+
+export const ACTIVE_SETTING_KEYS = Object.freeze([...PORTABLE_SETTING_KEYS, 'llmConnectionProfile', 'attributionConnectionProfile']);
 
 export const LEGACY_AUTO_SYNC_ENABLED_KEY = 'dc_autosync_enabled';
 
@@ -278,8 +301,30 @@ export function setAutoSyncPendingRecord(value) { autoSyncPendingRecord = value;
 export function setAutoSyncSaveTimeout(value) { autoSyncSaveTimeout = value; return value; }
 export function setAutoSyncSequence(value) { autoSyncSequence = value; return value; }
 export function setAutoSyncStatusError(value) { autoSyncStatusError = value; return value; }
-export function setCharacterColors(value) { characterColors = toNullPrototypeNameMap(value, 120, true); return characterColors; }
-export function setGroupProfiles(value) { groupProfiles = toNullPrototypeNameMap(value, 80); return groupProfiles; }
+export function setCharacterColors(value) {
+    const next = toNullPrototypeNameMap(value, 120, true);
+    const keys = Object.keys(next);
+    const ownership = resolveCanonicalAliasOwners(keys.map(key => next[key]));
+    for (const conflict of ownership.conflicts) {
+        if (conflict.kind.endsWith('canonical')) delete next[keys[conflict.ownerIndex]];
+    }
+    keys.forEach((key, index) => {
+        if (next[key]) next[key].aliases = ownership.aliases[index];
+    });
+    characterColors = next;
+    return characterColors;
+}
+export function setGroupProfiles(value) {
+    const rename = value && typeof value === 'object' ? value[GROUP_PROFILE_RENAME] : null;
+    const next = toNullPrototypeNameMap(value, 80);
+    if (rename) {
+        for (const entry of Object.values(characterColors)) {
+            if (normalizeGroupKey(entry?.group) === rename.from) entry.group = rename.to;
+        }
+    }
+    groupProfiles = next;
+    return groupProfiles;
+}
 export function setColorHistory(value) { colorHistory = value; return value; }
 export function setColorStateSaveTimer(value) { colorStateSaveTimer = value; return value; }
 export function setExpandedCharacterRows(value) { expandedCharacterRows = value; return value; }

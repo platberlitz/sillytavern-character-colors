@@ -1,25 +1,27 @@
 // visual-resolver.js - shared pure output for CSS and canvas visual consumers.
-import { buildGradientCss, normalizeGradient } from './gradients.js';
+import { MAX_GRADIENT_RAMP_SAMPLES, MAX_GRADIENT_UNIFORM_SAMPLES, buildGradientCss, getGradientColorStops, normalizeGradient, sampleGradientRamp } from './gradients.js';
 import { normalizeColorVisionSimulation, simulateColorVision } from './color-vision.js';
 
-export const VISUAL_RESOLVER_VERSION = 'dc-visual-resolver-v1';
+export const VISUAL_RESOLVER_VERSION = 'dc-visual-resolver-v2';
 
 function normalizeHex(value, fallback = null) {
     const color = String(value ?? '').trim();
     return /^#[0-9a-fA-F]{6}$/.test(color) ? color.toLowerCase() : fallback;
 }
 
-function buildCanvasStops(gradient, fallbackColor) {
-    if (!gradient) {
-        return [
-            { offset: 0, color: fallbackColor },
-            { offset: 1, color: fallbackColor },
-        ];
+function formatCssNumber(value) {
+    return Number(value.toFixed(4)).toString();
+}
+
+function buildGradientCssFromStops(gradient, stops) {
+    const colorStops = stops.map(stop => `${stop.color} ${formatCssNumber(stop.offset * 100)}%`).join(', ');
+    if (gradient.type === 'radial') {
+        return `radial-gradient(circle at ${formatCssNumber(gradient.x)}% ${formatCssNumber(gradient.y)}%, ${colorStops})`;
     }
-    return [
-        { offset: gradient.primaryPosition / 100, color: fallbackColor },
-        ...gradient.stops.map(stop => ({ offset: stop.position / 100, color: stop.color })),
-    ].sort((left, right) => left.offset - right.offset);
+    if (gradient.type === 'conic') {
+        return `conic-gradient(from ${formatCssNumber(gradient.angle)}deg at ${formatCssNumber(gradient.x)}% ${formatCssNumber(gradient.y)}%, ${colorStops})`;
+    }
+    return `linear-gradient(${formatCssNumber(gradient.angle)}deg, ${colorStops})`;
 }
 
 export function resolveVisual(entry, options = {}) {
@@ -28,28 +30,28 @@ export function resolveVisual(entry, options = {}) {
     const sourceFallbackColor = normalizeHex(source.color, normalizeHex(source.baseColor, '#888888'));
     const fallbackColor = simulateColorVision(sourceFallbackColor, colorVision);
     const sourceGradient = normalizeGradient(source.gradient);
-    const displayGradient = sourceGradient
-        ? {
-            ...sourceGradient,
-            stops: sourceGradient.stops.map(stop => ({
-                ...stop,
-                color: simulateColorVision(stop.color, colorVision),
-            })),
-            animation: { ...sourceGradient.animation },
-        }
+    const simulationActive = colorVision.mode !== 'none' && colorVision.severity > 0;
+    const canvasStops = simulationActive
+        ? sampleGradientRamp({ color: sourceFallbackColor, gradient: sourceGradient }, {
+            uniformCount: MAX_GRADIENT_UNIFORM_SAMPLES,
+            maxSamples: MAX_GRADIENT_RAMP_SAMPLES,
+            transformColor: color => simulateColorVision(color, colorVision),
+        }).map(({ offset, color }) => ({ offset, color }))
+        : getGradientColorStops({ color: sourceFallbackColor, gradient: sourceGradient });
+    const hasVisibleGradient = !!sourceGradient && canvasStops.some(stop => stop.color !== fallbackColor);
+    const gradientCss = hasVisibleGradient
+        ? (simulationActive
+            ? buildGradientCssFromStops(sourceGradient, canvasStops)
+            : buildGradientCss({ color: sourceFallbackColor, baseColor: source.baseColor, gradient: sourceGradient }))
         : null;
-    const gradientCss = displayGradient
-        ? buildGradientCss({ color: fallbackColor, baseColor: source.baseColor, gradient: displayGradient })
-        : null;
-    const canvasStops = buildCanvasStops(displayGradient, fallbackColor);
-    const animationRequested = !!displayGradient
-        && (displayGradient.animation.enabled || options.animateAllGradients === true);
+    const animationRequested = hasVisibleGradient
+        && (sourceGradient.animation.enabled || options.animateAllGradients === true);
     const effectiveAnimation = {
         enabled: animationRequested && options.reducedMotion !== true,
         requested: animationRequested,
-        durationSeconds: displayGradient?.animation.duration ?? 0,
-        reverse: displayGradient?.animation.reverse ?? false,
-        direction: displayGradient?.animation.reverse ? 'alternate-reverse' : 'alternate',
+        durationSeconds: sourceGradient?.animation.duration ?? 0,
+        reverse: sourceGradient?.animation.reverse ?? false,
+        direction: sourceGradient?.animation.reverse ? 'alternate-reverse' : 'alternate',
     };
     const signature = JSON.stringify({
         version: VISUAL_RESOLVER_VERSION,

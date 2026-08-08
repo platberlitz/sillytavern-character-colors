@@ -57,6 +57,14 @@ test('remote auto-sync application yields to local queued persistence', () => {
     assert.match(storageSource, /function stopAutoSyncPolling[\s\S]*?deferredAutoSyncApplication = null/);
 });
 
+test('remote auto-sync flushes pending debounced color activity before applying', () => {
+    assert.match(storageSource, /function hasPendingColorStateActivity[\s\S]*?colorStateSaveTimer/);
+    assert.match(storageSource, /function flushPendingColorStateActivity[\s\S]*?moduleSettingsActivityEpoch\+\+[\s\S]*?flushColorStateSave\(\)/);
+    assert.match(storageSource, /function applyDeferredAutoSyncRecord\(\) \{\s*flushPendingColorStateActivity\(\)/);
+    assert.match(storageSource, /export function applyAutoSyncRecord[\s\S]*?flushPendingColorStateActivity\(\)/);
+    assert.match(storageSource, /export async function loadSettingsFromServer\(\) \{\s*flushPendingColorStateActivity\(\)/);
+});
+
 test('imports and remote records preserve local remote-font consent', () => {
     const remote = { allowRemoteFonts: true, themeMode: 'dark' };
     const denied = preserveLocalRemoteFontConsent(remote, false);

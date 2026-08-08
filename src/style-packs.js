@@ -14,7 +14,7 @@ import {
     normalizeGradientPreset,
     normalizeGradientPresetName,
 } from './gradients.js';
-import { isDangerousRegistryIdentity, normalizeGroupName, normalizeRegistryIdentity } from './group-profiles.js';
+import { isDangerousRegistryIdentity, isReservedCharacterIdentity, normalizeGroupName, normalizeRegistryIdentity, resolveCanonicalAliasOwners } from './group-profiles.js';
 
 export const STYLE_PACK_FORMAT = 'dialogue-colors-style-pack';
 export const STYLE_PACK_FORMAT_VERSION = 1;
@@ -71,7 +71,12 @@ const METADATA_URL_KEYS = Object.freeze([
     'previewUrl',
 ]);
 const VALID_STYLES = new Set(['', 'bold', 'italic', 'bold italic']);
+const BUILT_IN_COLOR_THEMES = new Set([
+    'pastel', 'neon', 'earth', 'jewel', 'muted', 'jade', 'forest', 'ocean', 'sunset',
+    'aurora', 'warm', 'cool', 'berry', 'monochrome', 'protanopia', 'deuteranopia', 'tritanopia',
+]);
 const INSTALLABLE_CATEGORIES = Object.freeze(['palettes', 'gradientPresets', 'assignmentPresets']);
+const INSTALLED_NAME_LIMITS = Object.freeze({ palettes: 120, gradientPresets: 80, assignmentPresets: 120 });
 
 export class StylePackError extends Error {
     constructor(code, message, details = undefined) {
@@ -98,8 +103,8 @@ function compareText(left, right) {
     return left < right ? -1 : left > right ? 1 : 0;
 }
 
-function normalizedLookupName(value) {
-    return normalizeRegistryIdentity(value);
+function normalizedLookupName(value, maximum = STYLE_PACK_LIMITS.maxCharacterNameLength) {
+    return normalizeRegistryIdentity(value, maximum);
 }
 
 function fail(code, message, details) {
@@ -129,8 +134,8 @@ function normalizeString(value, field, maximum, { required = false, multiline = 
     return normalized;
 }
 
-function normalizeDictionaryName(value, field) {
-    const name = normalizeString(value, field, STYLE_PACK_LIMITS.maxNameLength, { required: true });
+function normalizeDictionaryName(value, field, maximum = STYLE_PACK_LIMITS.maxNameLength) {
+    const name = normalizeString(value, field, maximum, { required: true });
     if (isDangerousRegistryIdentity(name)) fail('reserved_key', `Reserved name "${name}" is not allowed.`, { field, name });
     return name;
 }
@@ -230,7 +235,7 @@ function normalizePalettes(value) {
     const names = new Set();
     for (const [rawName, rawPalette] of entries.sort(([left], [right]) => compareText(left, right))) {
         const name = normalizeDictionaryName(rawName, 'palette name');
-        const lookup = normalizedLookupName(name);
+        const lookup = normalizedLookupName(name, STYLE_PACK_LIMITS.maxNameLength);
         if (names.has(lookup)) fail('duplicate_name', `Duplicate palette name "${name}".`);
         names.add(lookup);
         const rawColors = Array.isArray(rawPalette) ? rawPalette : rawPalette?.colors;
@@ -265,7 +270,7 @@ function normalizeGradientPresets(value) {
     const names = new Set();
     for (const [rawName, rawPreset] of entries.sort(([left], [right]) => compareText(left, right))) {
         const name = normalizeDictionaryName(normalizeGradientPresetName(rawName), 'gradient preset name');
-        const lookup = normalizedLookupName(name);
+        const lookup = normalizedLookupName(name, STYLE_PACK_LIMITS.maxNameLength);
         if (names.has(lookup)) fail('duplicate_name', `Duplicate gradient preset name "${name}".`);
         names.add(lookup);
         assertGradientStopCount(rawPreset?.gradient, `gradientPresets.${name}.gradient`);
@@ -306,7 +311,7 @@ function normalizeAliases(value, field, totals) {
             STYLE_PACK_LIMITS.maxCharacterNameLength,
             { required: true },
         );
-        if (isDangerousRegistryIdentity(normalized)) {
+        if (isDangerousRegistryIdentity(normalized) || isReservedCharacterIdentity(normalized)) {
             fail('reserved_key', `Reserved assignment identity "${normalized}" is not allowed.`, { field: aliasField, name: normalized });
         }
         const lookup = normalizedLookupName(normalized);
@@ -322,7 +327,7 @@ function normalizeAssignment(value, field, totals) {
     assertRecord(value, field);
     const assignment = dictionary();
     assignment.name = normalizeString(value.name, `${field}.name`, STYLE_PACK_LIMITS.maxCharacterNameLength, { required: true });
-    if (isDangerousRegistryIdentity(assignment.name)) {
+    if (isDangerousRegistryIdentity(assignment.name) || isReservedCharacterIdentity(assignment.name)) {
         fail('reserved_key', `Reserved assignment identity "${assignment.name}" is not allowed.`, {
             field: `${field}.name`,
             name: assignment.name,
@@ -360,7 +365,6 @@ function normalizeAssignment(value, field, totals) {
 
 export function assertStylePackAssignmentIdentities(assignments, field = 'assignments') {
     if (!Array.isArray(assignments)) fail('invalid_assignment_preset', `${field} must be an array.`);
-    const identities = new Map();
     assignments.forEach((assignment, assignmentIndex) => {
         assertRecord(assignment, `${field}[${assignmentIndex}]`);
         if (assignment.aliases !== undefined && !Array.isArray(assignment.aliases)) {
@@ -379,7 +383,7 @@ export function assertStylePackAssignmentIdentities(assignments, field = 'assign
             if (typeof identity.value !== 'string') {
                 fail('invalid_string', `${identity.field} must be a string.`, { field: identity.field });
             }
-            if (isDangerousRegistryIdentity(identity.value)) {
+            if (isDangerousRegistryIdentity(identity.value) || isReservedCharacterIdentity(identity.value)) {
                 fail('reserved_key', `Reserved assignment identity "${identity.value}" is not allowed.`, {
                     field: identity.field,
                     name: identity.value,
@@ -387,17 +391,18 @@ export function assertStylePackAssignmentIdentities(assignments, field = 'assign
             }
             const lookup = normalizedLookupName(identity.value);
             if (!lookup) fail('missing_field', `${identity.field} is required.`, { field: identity.field });
-            const existing = identities.get(lookup);
-            if (existing && existing.assignmentIndex !== assignmentIndex) {
-                fail('duplicate_assignment_identity', `Assignment identity "${identity.value}" collides with ${existing.field}.`, {
-                    field: identity.field,
-                    existingField: existing.field,
-                    identity: identity.value,
-                });
-            }
-            if (!existing) identities.set(lookup, { ...identity, assignmentIndex });
         }
     });
+    const ownership = resolveCanonicalAliasOwners(assignments);
+    const conflict = ownership.conflicts[0];
+    if (conflict) {
+        const identity = conflict.identity || assignments[conflict.ownerIndex]?.name || '';
+        fail('duplicate_assignment_identity', `Assignment identity "${identity}" is ambiguous.`, {
+            identity,
+            assignmentIndex: conflict.ownerIndex,
+            existingAssignmentIndex: conflict.otherOwnerIndex,
+        });
+    }
     return true;
 }
 
@@ -414,7 +419,8 @@ function appendAssignmentNameSuffix(name, field, occupied) {
 /**
  * Version 1 packs predate globally unique assignment identities. Keep parsing
  * them safely: primary names are retained (with a suffix when necessary),
- * primary names beat aliases, and the first remaining alias wins.
+ * primary names beat aliases. Ambiguous aliases are rejected instead of being
+ * assigned according to source order.
  */
 function resolveV1AssignmentIdentities(assignments, field) {
     const resolved = assignments.map(assignment => {
@@ -437,15 +443,16 @@ function resolveV1AssignmentIdentities(assignments, field) {
         primaryIdentities.add(normalizedLookupName(assignment.name));
     });
 
-    const claimedAliases = new Set();
-    for (const assignment of resolved) {
-        assignment.aliases = assignment.aliases.filter(alias => {
-            const lookup = normalizedLookupName(alias);
-            if (primaryIdentities.has(lookup) || claimedAliases.has(lookup)) return false;
-            claimedAliases.add(lookup);
-            return true;
+    const ownership = resolveCanonicalAliasOwners(resolved);
+    const conflict = ownership.conflicts[0];
+    if (conflict) {
+        fail('duplicate_assignment_identity', `Assignment identity "${conflict.identity}" is ambiguous.`, {
+            field,
+            assignmentIndex: conflict.ownerIndex,
+            existingAssignmentIndex: conflict.otherOwnerIndex,
         });
     }
+    resolved.forEach((assignment, index) => { assignment.aliases = ownership.aliases[index]; });
     return resolved;
 }
 
@@ -460,7 +467,7 @@ function normalizeAssignmentPresets(value) {
     const names = new Set();
     for (const [rawName, rawAssignments] of entries.sort(([left], [right]) => compareText(left, right))) {
         const name = normalizeDictionaryName(rawName, 'assignment preset name');
-        const lookup = normalizedLookupName(name);
+        const lookup = normalizedLookupName(name, STYLE_PACK_LIMITS.maxNameLength);
         if (names.has(lookup)) fail('duplicate_name', `Duplicate assignment preset name "${name}".`);
         names.add(lookup);
         if (!Array.isArray(rawAssignments)) fail('invalid_assignment_preset', `Assignment preset "${name}" must be an array.`);
@@ -514,13 +521,14 @@ function removeAssignmentAlias(item, identity, aliasOwners) {
     if (aliasOwners.get(identity) === item) aliasOwners.delete(identity);
 }
 
-/** Flatten independent presets with later selected presets taking precedence. */
+/** Flatten presets with later canonical assignments winning and ambiguous aliases dropped. */
 export function flattenStylePackAssignmentPresets(presets, selectedPresetNames = undefined) {
     assertRecord(presets, 'assignmentPresets');
     const presetNames = selectionNames(selectedPresetNames, Object.keys(presets), 'assignmentPresets');
     const active = new Map();
     const primaryOwners = new Map();
     const aliasOwners = new Map();
+    const ambiguousAliases = new Set();
     const overrides = [];
     let token = 0;
 
@@ -565,7 +573,7 @@ export function flattenStylePackAssignmentPresets(presets, selectedPresetNames =
             primaryOwners.set(current.primary, current);
             for (const alias of assignment.aliases || []) {
                 const identity = normalizedLookupName(alias);
-                if (identity === current.primary || current.aliases.has(identity)) continue;
+                if (identity === current.primary || current.aliases.has(identity) || ambiguousAliases.has(identity)) continue;
                 const primaryOwner = primaryOwners.get(identity);
                 if (primaryOwner) {
                     overrides.push(createAssignmentOverrideDiagnostic(
@@ -580,13 +588,15 @@ export function flattenStylePackAssignmentPresets(presets, selectedPresetNames =
                 const previousOwner = aliasOwners.get(identity);
                 if (previousOwner) {
                     overrides.push(createAssignmentOverrideDiagnostic(
-                        'alias-reassignment',
+                        'alias-ambiguity',
                         identity,
                         previousOwner,
                         current,
-                        'reassign-alias',
+                        'drop-ambiguous-alias',
                     ));
                     removeAssignmentAlias(previousOwner, identity, aliasOwners);
+                    ambiguousAliases.add(identity);
+                    continue;
                 }
                 current.assignment.aliases.push(alias);
                 current.aliases.add(identity);
@@ -614,7 +624,16 @@ function normalizeAppearance(value) {
         appearance.themeMode = value.themeMode;
     }
     if (value.colorTheme !== undefined) {
-        appearance.colorTheme = normalizeString(value.colorTheme, 'appearance.colorTheme', STYLE_PACK_LIMITS.maxNameLength, { required: true });
+        const theme = normalizeString(value.colorTheme, 'appearance.colorTheme', STYLE_PACK_LIMITS.maxNameLength + 7, { required: true });
+        if (theme.slice(0, 7).toLowerCase() === 'custom:') {
+            appearance.colorTheme = `custom:${normalizeDictionaryName(theme.slice(7), 'appearance.colorTheme')}`;
+        } else {
+            const builtIn = theme.toLowerCase();
+            if (!BUILT_IN_COLOR_THEMES.has(builtIn)) {
+                fail('unresolved_appearance_reference', `appearance.colorTheme references unknown palette "${theme}".`);
+            }
+            appearance.colorTheme = builtIn;
+        }
     }
     if (value.brightness !== undefined) {
         const brightness = Number(value.brightness);
@@ -676,6 +695,15 @@ export function normalizeStylePack(input, options = {}) {
         if (options.includeAssignmentPresets === true) pack.assignmentPresets = assignments;
     }
     if (hasOwn(source, 'appearance')) pack.appearance = normalizeAppearance(source.appearance);
+    if (pack.appearance?.colorTheme?.startsWith('custom:')) {
+        const requested = pack.appearance.colorTheme.slice(7);
+        const actual = Object.keys(pack.palettes || {}).find(name => normalizedLookupName(name, STYLE_PACK_LIMITS.maxNameLength)
+            === normalizedLookupName(requested, STYLE_PACK_LIMITS.maxNameLength));
+        if (!actual) {
+            fail('unresolved_appearance_reference', `appearance.colorTheme references palette "${requested}" that is not included in the pack.`);
+        }
+        pack.appearance.colorTheme = `custom:${actual}`;
+    }
     if (!STYLE_PACK_CATEGORIES.some(category => hasOwn(pack, category))) {
         fail('empty_pack', 'The style pack contains no selected style data.');
     }
@@ -690,14 +718,14 @@ function selectionNames(selection, available, field) {
     const requestedLookups = new Set();
     values.forEach((value, index) => {
         const name = normalizeDictionaryName(value, `${field}[${index}]`);
-        const lookup = normalizedLookupName(name);
+        const lookup = normalizedLookupName(name, STYLE_PACK_LIMITS.maxNameLength);
         if (requestedLookups.has(lookup)) return;
         requestedLookups.add(lookup);
         requested.push(name);
     });
-    const byLookup = new Map(available.map(name => [normalizedLookupName(name), name]));
+    const byLookup = new Map(available.map(name => [normalizedLookupName(name, STYLE_PACK_LIMITS.maxNameLength), name]));
     return requested.map(name => {
-        const actual = byLookup.get(normalizedLookupName(name));
+        const actual = byLookup.get(normalizedLookupName(name, STYLE_PACK_LIMITS.maxNameLength));
         if (!actual) fail('missing_selection', `${field} selection "${name}" does not exist.`);
         return actual;
     });
@@ -865,17 +893,19 @@ function installedNames(installed, category) {
         gradientPresets: 'customGradientPresets',
         assignmentPresets: 'presets',
     };
+    const maximum = INSTALLED_NAME_LIMITS[category] || STYLE_PACK_LIMITS.maxNameLength;
     const raw = installed?.[category] ?? installed?.[aliases[category]];
     if (raw === undefined || raw === null) return [];
     if (Array.isArray(raw)) {
         return raw.map((entry, index) => normalizeDictionaryName(
             typeof entry === 'string' ? entry : entry?.name,
             `installed.${category}[${index}]`,
+            maximum,
         ));
     }
     const hardened = hardenJsonValue(raw);
     assertRecord(hardened, `installed.${category}`);
-    return Object.keys(hardened).map(name => normalizeDictionaryName(name, `installed.${category}`));
+    return Object.keys(hardened).map(name => normalizeDictionaryName(name, `installed.${category}`, maximum));
 }
 
 function normalizeIncomingForPlanning(input, options) {
@@ -895,11 +925,11 @@ export function analyzeStylePackConflicts(input, installed = {}, options = {}) {
     for (const category of INSTALLABLE_CATEGORIES) {
         const incoming = Object.keys(pack[category] || {}).sort(compareText);
         const existing = installedNames(safeInstalled, category).sort(compareText);
-        const occupied = new Map(existing.map(name => [normalizedLookupName(name), name]));
+        const occupied = new Map(existing.map(name => [normalizedLookupName(name, STYLE_PACK_LIMITS.maxNameLength), name]));
         const conflicts = [];
         const additions = [];
         for (const name of incoming) {
-            const existingName = occupied.get(normalizedLookupName(name));
+            const existingName = occupied.get(normalizedLookupName(name, STYLE_PACK_LIMITS.maxNameLength));
             if (existingName === undefined) additions.push(name);
             else {
                 const conflict = dictionary();
@@ -948,8 +978,9 @@ function getDecision(options, category, name, conflict) {
 
 function nextAvailableName(name, occupied) {
     for (let suffix = 2; suffix <= 10000; suffix++) {
-        const candidate = `${name} (${suffix})`;
-        if (!occupied.has(normalizedLookupName(candidate))) return candidate;
+        const ending = ` (${suffix})`;
+        const candidate = `${name.slice(0, STYLE_PACK_LIMITS.maxNameLength - ending.length).trimEnd()}${ending}`;
+        if (!occupied.has(normalizedLookupName(candidate, STYLE_PACK_LIMITS.maxNameLength))) return candidate;
     }
     fail('rename_exhausted', `Could not generate an available name for "${name}".`);
 }
@@ -978,11 +1009,11 @@ export function buildStylePackInstallationPlan(input, installed = {}, options = 
         const incomingDictionary = pack[category] || dictionary();
         const incomingNames = selectionNames(selections[category], Object.keys(incomingDictionary), `selected.${category}`);
         const existing = installedNames(safeInstalled, category);
-        const occupied = new Map(existing.map(name => [normalizedLookupName(name), name]));
+        const occupied = new Map(existing.map(name => [normalizedLookupName(name, STYLE_PACK_LIMITS.maxNameLength), name]));
         plan.install[category] = dictionary();
 
         for (const name of incomingNames) {
-            const lookup = normalizedLookupName(name);
+            const lookup = normalizedLookupName(name, STYLE_PACK_LIMITS.maxNameLength);
             const existingName = occupied.get(lookup);
             const operation = dictionary();
             operation.category = category;
@@ -1012,7 +1043,7 @@ export function buildStylePackInstallationPlan(input, installed = {}, options = 
                 const requestedName = decision.targetName
                     ? normalizeDictionaryName(decision.targetName, `rename target for ${category}.${name}`)
                     : nextAvailableName(name, occupied);
-                const targetLookup = normalizedLookupName(requestedName);
+                const targetLookup = normalizedLookupName(requestedName, STYLE_PACK_LIMITS.maxNameLength);
                 if (occupied.has(targetLookup)) {
                     fail('rename_conflict', `Rename target "${requestedName}" already exists in ${category}.`);
                 }
@@ -1026,7 +1057,21 @@ export function buildStylePackInstallationPlan(input, installed = {}, options = 
     }
 
     if (options.includeAppearance !== false && Object.keys(pack.appearance || {}).length) {
-        plan.install.appearance = pack.appearance;
+        const appearance = hardenJsonValue(pack.appearance);
+        if (appearance.colorTheme?.startsWith('custom:')) {
+            const sourceName = appearance.colorTheme.slice(7);
+            const sourceIdentity = normalizedLookupName(sourceName, STYLE_PACK_LIMITS.maxNameLength);
+            const operation = plan.operations.find(item => item.category === 'palettes'
+                && normalizedLookupName(item.sourceName, STYLE_PACK_LIMITS.maxNameLength) === sourceIdentity);
+            const existing = installedNames(safeInstalled, 'palettes')
+                .find(name => normalizedLookupName(name, STYLE_PACK_LIMITS.maxNameLength) === sourceIdentity);
+            const targetName = operation?.targetName || existing;
+            if (!targetName) {
+                fail('unresolved_appearance_reference', `appearance.colorTheme palette "${sourceName}" is not selected or installed.`);
+            }
+            appearance.colorTheme = `custom:${targetName}`;
+        }
+        plan.install.appearance = appearance;
         const operation = dictionary();
         operation.category = 'appearance';
         operation.action = 'replace';

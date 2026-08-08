@@ -1,7 +1,6 @@
 // perceptual-conflicts.js - gradient sampling and generic visual conflict reports.
-import { COLOR_VISION_MODES, normalizeColorVisionSimulation } from './color-vision.js';
-import { colorToOklab, oklabDistance } from './gradients.js';
-import { resolveVisual } from './visual-resolver.js';
+import { COLOR_VISION_MODES, normalizeColorVisionSimulation, simulateColorVision } from './color-vision.js';
+import { MAX_GRADIENT_RAMP_SAMPLES, MAX_GRADIENT_UNIFORM_SAMPLES, colorToOklab, oklabDistance, sampleGradientRamp } from './gradients.js';
 
 export const PERCEPTUAL_CONFLICT_REPORT_VERSION = 'dc-perceptual-conflict-v1';
 export const PERCEPTUAL_CONFLICT_THRESHOLDS = Object.freeze({
@@ -13,60 +12,32 @@ export const PERCEPTUAL_CONFLICT_THRESHOLDS = Object.freeze({
 export const PERCEPTUAL_CONFLICT_LIMITS = Object.freeze({
     maxModes: 5,
     maxModeInputs: 12,
-    maxGradientSamples: 12,
+    maxGradientSamples: MAX_GRADIENT_RAMP_SAMPLES,
+    maxUniformGradientSamples: MAX_GRADIENT_UNIFORM_SAMPLES,
     maxItems: 512,
     maxComparisonsPerMode: 512,
     maxConflictsPerMode: 128,
 });
 
-function hexToRgb(color) {
-    const normalized = /^#[0-9a-fA-F]{6}$/.test(String(color ?? '')) ? String(color).toLowerCase() : '#888888';
-    return [
-        parseInt(normalized.slice(1, 3), 16),
-        parseInt(normalized.slice(3, 5), 16),
-        parseInt(normalized.slice(5, 7), 16),
-    ];
-}
-
-function rgbToHex(channels) {
-    return `#${channels
-        .map(channel => Math.max(0, Math.min(255, Math.round(channel))).toString(16).padStart(2, '0'))
-        .join('')}`;
-}
-
-function interpolateStops(stops, offset) {
-    if (offset <= stops[0].offset) return stops[0].color;
-    if (offset >= stops[stops.length - 1].offset) return stops[stops.length - 1].color;
-    const rightIndex = stops.findIndex(stop => stop.offset >= offset);
-    const left = stops[rightIndex - 1];
-    const right = stops[rightIndex];
-    const width = right.offset - left.offset;
-    if (width <= 0) return right.color;
-    const progress = (offset - left.offset) / width;
-    const leftRgb = hexToRgb(left.color);
-    const rightRgb = hexToRgb(right.color);
-    return rgbToHex(leftRgb.map((channel, index) => channel + ((rightRgb[index] - channel) * progress)));
-}
-
 function normalizeSampleCount(value) {
     const number = Number(value);
     const requested = Number.isFinite(number) ? Math.floor(number) : PERCEPTUAL_CONFLICT_THRESHOLDS.gradientSampleCount;
-    return Math.max(2, Math.min(PERCEPTUAL_CONFLICT_LIMITS.maxGradientSamples, requested));
+    return Math.max(2, Math.min(PERCEPTUAL_CONFLICT_LIMITS.maxUniformGradientSamples, requested));
 }
 
 export function sampleGradient(entry, options = {}) {
     const sampleCount = normalizeSampleCount(options.sampleCount);
     if (options.signal?.aborted) return [];
-    const resolved = resolveVisual(entry, { colorVision: options.colorVision });
+    const simulation = normalizeColorVisionSimulation(options.colorVision);
+    const resolved = sampleGradientRamp(entry, {
+        uniformCount: sampleCount,
+        maxSamples: PERCEPTUAL_CONFLICT_LIMITS.maxGradientSamples,
+        transformColor: color => simulateColorVision(color, simulation),
+    });
     const samples = [];
-    for (let index = 0; index < sampleCount; index++) {
+    for (const sample of resolved) {
         if (options.signal?.aborted) break;
-        const offset = index / (sampleCount - 1);
-        samples.push({
-            offset,
-            position: offset * 100,
-            color: interpolateStops(resolved.canvasStops, offset),
-        });
+        samples.push(sample);
     }
     return samples;
 }
@@ -253,7 +224,7 @@ export function createPerceptualConflictReport(value, options = {}) {
                     colorVision: simulation,
                     signal: options.signal,
                 });
-                if (samples.length !== sampleCount) {
+                if (!samples.length || options.signal?.aborted) {
                     cancelled = true;
                     break;
                 }
@@ -373,6 +344,7 @@ export function createPerceptualConflictReport(value, options = {}) {
             comparisonLimit,
             conflictLimit,
             maxGradientSamples: PERCEPTUAL_CONFLICT_LIMITS.maxGradientSamples,
+            maxUniformGradientSamples: PERCEPTUAL_CONFLICT_LIMITS.maxUniformGradientSamples,
         },
         itemCount: normalizedItems.requestedItemCount,
         analyzedItemCount: items.length,

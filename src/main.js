@@ -1,18 +1,19 @@
 // main.js - extracted from index.js (mechanical split)
 import { clearDomCache } from './attribution.js';
-import { scanAllMessages, stripColorBlocksFromDisplay } from './color-blocks.js';
+import { destroyGradientAnimationController } from './animation-controller.js';
+import { recountDialogueCountsFromChat, scanAllMessages, stripColorBlocksFromDisplay } from './color-blocks.js';
 import { setupContextMenu } from './context-menu.js';
-import { DOM_RETRY_REFRESH_DELAYS, POST_MUTATION_DOM_REPAIR_DELAY_MS, clearDecoratedWatchers, clearDialogueCountCache, clearSessionAttributionVerifications, decorateAllMessages, scheduleDomRefreshSeries, scheduleDomSettleRefresh, scheduleMessageDomRepair, setupChatObserver, setupChatRootObserver, startDomHealthCheck, stopDomHealthCheck } from './dom-engine.js';
+import { DOM_RETRY_REFRESH_DELAYS, POST_MUTATION_DOM_REPAIR_DELAY_MS, clearDecoratedWatchers, clearDialogueCountCache, clearSessionAttributionVerifications, decorateAllMessages, reconcileMessageQuoteOverridesAfterDeletion, refreshDomDialogueCounts, scheduleDomRefreshSeries, scheduleDomSettleRefresh, scheduleMessageDomRepair, setupChatObserver, setupChatRootObserver, startDomHealthCheck, stopDomHealthCheck, undecorateAllMessages } from './dom-engine.js';
 import { scheduleCustomFontRefresh } from './fonts.js';
 import { redo, undo } from './history.js';
-import { applyToolCallMessageRepair, commit, onNewMessage, resumePendingChatSave } from './live-colors.js';
+import { applyToolCallMessageRepair, onNewMessage, resumePendingChatSave } from './live-colors.js';
 import { consumeMainAiQuietGenerationEnd, populateProfileDropdown } from './llm.js';
 import { detectTheme, getReadableSurfaceSignature, invalidateThemeCache } from './palettes.js';
-import { buildMinimalPromptInstruction, injectPrompt } from './prompts.js';
+import { buildMinimalPromptInstruction, flushPromptInjection, injectPrompt } from './prompts.js';
 import { eventSource, event_types, getContext } from './st-api.js';
-import { attributionChatGeneration, autoSyncPendingRecord, characterColors, expandedCharacterRows, isDomEngine, isStreamingGenerationActive, lastCharKey, lastProcessedMessageSignature, pendingAttributionVerifications, runtimeState, selectedCharacterKeys, setAttributionChatGeneration, setIsStreamingGenerationActive, setLastCharKey, setLastProcessedMessageSignature, setPendingAttributionVerifications, setSwapMode, settings, swapMode } from './state.js';
+import { attributionChatGeneration, autoSyncPendingRecord, characterColors, expandedCharacterRows, groupProfiles, isDomEngine, isStreamingGenerationActive, lastCharKey, lastProcessedMessageSignature, pendingAttributionVerifications, runtimeState, selectedCharacterKeys, setAttributionChatGeneration, setEnabledLifecycleSynchronizer, setIsStreamingGenerationActive, setLastCharKey, setLastProcessedMessageSignature, setPendingAttributionVerifications, setSwapMode, settings, swapMode } from './state.js';
 import { beginStreamingPaint, endStreamingPaint } from './streaming-paint.js';
-import { confirmAutoSyncRecord, doAutoSyncMarkersMatch, ensureRegexScript, getAutoSyncRecord, getCharKey, getStorageKey, initAutoSync, loadData, migrateLegacyLocalStorageIfNeeded, migrateRenamedCharacterStorage, tryLoadFromCard, updateAutoSyncUI } from './storage.js';
+import { confirmAutoSyncRecord, doAutoSyncMarkersMatch, ensureRegexScript, getAutoSyncRecord, getCharKey, getStorageKey, initAutoSync, loadData, migrateLegacyLocalStorageIfNeeded, migrateRenamedCharacterStorage, stopAutoSyncPolling, syncAutoSyncPolling, tryLoadFromCard, updateAutoSyncUI } from './storage.js';
 import { applyRestoredPersonaColor, applyThemeOrBrightnessChange, clearAutoColorizeIndicators, createUI, ensurePersonaCharacter, renamePersonaCharacter, syncUIWithSettings, updateCharList } from './ui.js';
 import { cancelStreamingAttributionVerification, captureLoadedAttributionMessageBaseline, clearAutoAttributionVerificationQueue, queueAutoAttributionVerificationForRenderedMessages, scheduleStreamingAttributionVerification } from './verify.js';
 
@@ -20,6 +21,10 @@ let lastAppliedAutoTheme = null;
 let lastAppliedAutoSurface = null;
 let themeRefreshTimers = [];
 let loudGenerationActive = false;
+let automaticRuntimeActive = false;
+let enabledStorageInitialized = false;
+let regexInstallTimer = null;
+let dialogueColorsMacroRegistered = false;
 
 // The host repaints its theme at an unknown time after SETTINGS_UPDATED (CSS variables,
 // transitions, background images), so a single early probe reads the old surface and
@@ -29,8 +34,10 @@ const THEME_SETTLE_PROBE_DELAYS_MS = [100, 400, 1200, 2500];
 
 function scheduleAutoThemeProbes() {
     for (const timer of themeRefreshTimers) clearTimeout(timer);
+    themeRefreshTimers = [];
+    if (!settings.enabled) return;
     themeRefreshTimers = THEME_SETTLE_PROBE_DELAYS_MS.map(delay => setTimeout(() => {
-        if (settings.themeMode !== 'auto') return;
+        if (!settings.enabled || settings.themeMode !== 'auto') return;
         invalidateThemeCache();
         const currentTheme = detectTheme();
         const currentSurface = getReadableSurfaceSignature();
@@ -41,6 +48,92 @@ function scheduleAutoThemeProbes() {
         if (themeChanged) applyThemeOrBrightnessChange(() => {}, { saveImmediately: true });
     }, delay));
 }
+
+function scheduleRegexScriptInstall() {
+    clearTimeout(regexInstallTimer);
+    regexInstallTimer = setTimeout(() => {
+        regexInstallTimer = null;
+        if (settings.enabled) ensureRegexScript();
+    }, 1000);
+}
+
+function startAutomaticRuntime() {
+    if (!settings.enabled || automaticRuntimeActive) return false;
+    if (!enabledStorageInitialized) {
+        const requestedEnabled = settings.enabled;
+        try {
+            migrateLegacyLocalStorageIfNeeded();
+            loadData();
+            settings.enabled = requestedEnabled;
+            initAutoSync();
+        } finally {
+            // The click that starts this runtime is newer than the persisted
+            // disabled snapshot loaded above.
+            settings.enabled = requestedEnabled;
+        }
+        enabledStorageInitialized = true;
+        syncUIWithSettings();
+    } else {
+        syncAutoSyncPolling();
+    }
+    automaticRuntimeActive = true;
+    return true;
+}
+
+function stopAutomaticRuntime() {
+    automaticRuntimeActive = false;
+    for (const timer of themeRefreshTimers) clearTimeout(timer);
+    themeRefreshTimers = [];
+    clearTimeout(regexInstallTimer);
+    regexInstallTimer = null;
+    stopAutoSyncPolling();
+    loudGenerationActive = false;
+    setIsStreamingGenerationActive(false);
+    clearAutoAttributionVerificationQueue({ clearCooldown: true });
+    cancelStreamingAttributionVerification({ clearOverrides: true });
+    endStreamingPaint();
+    if (runtimeState.chatChangedRafId) cancelAnimationFrame(runtimeState.chatChangedRafId);
+    runtimeState.chatChangedRafId = null;
+    clearTimeout(runtimeState.chatChangedSettleTimer);
+    runtimeState.chatChangedSettleTimer = null;
+    stopDomHealthCheck();
+    clearDecoratedWatchers();
+    undecorateAllMessages();
+    setupContextMenu();
+    runtimeState.chatRootObserver?.disconnect();
+    runtimeState.chatRootObserver = null;
+    clearTimeout(runtimeState.chatRootObserverTimer);
+    runtimeState.chatRootObserverTimer = null;
+    destroyGradientAnimationController();
+    scheduleCustomFontRefresh(0);
+    flushPromptInjection();
+}
+
+export function syncAutomaticRuntime() {
+    if (!settings.enabled) {
+        stopAutomaticRuntime();
+        return false;
+    }
+    const activated = startAutomaticRuntime();
+    if (!activated) {
+        if (!settings.enabled) stopAutomaticRuntime();
+        return false;
+    }
+
+    // A chat/card may have changed while disabled. Load and reconcile that
+    // context before any activation repaint or observer can use the old table.
+    handleChatChanged();
+    scheduleRegexScriptInstall();
+    setupContextMenu();
+    registerDialogueColorsMacro();
+    invalidateThemeCache();
+    lastAppliedAutoTheme = settings.themeMode === 'auto' ? detectTheme() : null;
+    lastAppliedAutoSurface = settings.themeMode === 'auto' ? getReadableSurfaceSignature() : null;
+    if (lastAppliedAutoTheme) applyThemeOrBrightnessChange(() => {}, { saveImmediately: true });
+    return true;
+}
+
+setEnabledLifecycleSynchronizer(syncAutomaticRuntime);
 
 export function registerKeyboardShortcuts() {
     if (runtimeState.keyboardSetup) return;
@@ -58,6 +151,7 @@ export function registerKeyboardShortcuts() {
 }
 
 export function resetDialogueCountsForNewChat() {
+    if (!settings.enabled || !automaticRuntimeActive) return;
     setLastProcessedMessageSignature('');
 
     let changed = false;
@@ -68,10 +162,15 @@ export function resetDialogueCountsForNewChat() {
         changed = true;
     }
 
-    if (changed) commit({ history: false });
+    if (changed) updateCharList();
 }
 
 export function handleChatChanged() {
+    if (!settings.enabled) {
+        stopAutomaticRuntime();
+        return;
+    }
+    if (!automaticRuntimeActive) return;
     resumePendingChatSave();
     selectedCharacterKeys.clear();
     setAttributionChatGeneration(attributionChatGeneration + 1);
@@ -87,26 +186,21 @@ export function handleChatChanged() {
     clearSessionAttributionVerifications();
     stopDomHealthCheck();
     clearDecoratedWatchers();
-    // A disabled extension has nothing to load, scan or paint, and it must not
-    // write: getCharKey() and getStorageKey() resolve a chat-scope ID that gets
-    // stamped into chat metadata under the "Per chat" scope, and saving chat
-    // metadata rewrites the user's whole chat file. Tear down and stop here.
-    if (!settings.enabled) {
-        updateCharList();
-        injectPrompt();
-        decorateAllMessages();
-        return;
-    }
     const currentCharKey = getCharKey();
     if (currentCharKey !== lastCharKey) {
         expandedCharacterRows.clear();
         setSwapMode(null);
         loadData();
-        if (!Object.keys(characterColors).length) tryLoadFromCard();
+        if (!Object.keys(characterColors).length && !Object.keys(groupProfiles).length) {
+            tryLoadFromCard({ colorsOnly: true });
+        }
         setLastCharKey(currentCharKey);
         setLastProcessedMessageSignature('');
         syncUIWithSettings();
     }
+    // A bare reconcileMessageQuoteOverridesAfterDeletion() is reserved for an
+    // actual deletion; activation must not discard ambiguous ID-less records.
+    reconcileMessageQuoteOverridesAfterDeletion(undefined, { deletion: false });
     // Undo the damage older versions did to tool-call messages, before stripColorBlocksFromDisplay
     // hides the block it looks for and before the deferred scanAllMessages below re-ingests it.
     // Not gated on a setting: the guard in isColorableMessage is its own gate, so once a chat is
@@ -114,6 +208,7 @@ export function handleChatChanged() {
     void applyToolCallMessageRepair({ silent: true })
         .catch(error => console.error('[Dialogue Colors] Tool-call repair failed:', error));
     if (settings.autoPersonaCharacter === true) ensurePersonaCharacter({ silent: true });
+    if (!isDomEngine()) recountDialogueCountsFromChat();
     updateCharList();
     injectPrompt();
     stripColorBlocksFromDisplay();
@@ -127,6 +222,7 @@ export function handleChatChanged() {
     if (runtimeState.chatChangedRafId) cancelAnimationFrame(runtimeState.chatChangedRafId);
     runtimeState.chatChangedRafId = requestAnimationFrame(() => {
         runtimeState.chatChangedRafId = null;
+        if (!settings.enabled) return;
         setupChatObserver();
         startDomHealthCheck();
         decorateAllMessages();
@@ -136,6 +232,7 @@ export function handleChatChanged() {
     clearTimeout(runtimeState.chatChangedSettleTimer);
     runtimeState.chatChangedSettleTimer = setTimeout(() => {
         runtimeState.chatChangedSettleTimer = null;
+        if (!settings.enabled) return;
         if (scanGeneration !== attributionChatGeneration || scanStorageKey !== getStorageKey()) return;
         setupChatObserver();
         startDomHealthCheck();
@@ -160,8 +257,10 @@ export function handleChatChanged() {
 }
 
 export function handleMessageUpdated(mesIndex) {
+    if (!settings.enabled || !automaticRuntimeActive) return;
     // A swipe reuses the same mesid with an entirely different body, so the
     // frozen streaming assignments and the cached target must both be dropped.
+    cancelStreamingAttributionVerification();
     endStreamingPaint();
     const index = Number(mesIndex);
     if (Number.isFinite(index) && index >= 0) {
@@ -188,21 +287,44 @@ export function handleMessageUpdated(mesIndex) {
     }, POST_MUTATION_DOM_REPAIR_DELAY_MS);
 }
 
+export function handleMessageDeleted() {
+    if (!settings.enabled || !automaticRuntimeActive) return;
+    cancelStreamingAttributionVerification();
+    endStreamingPaint();
+    reconcileMessageQuoteOverridesAfterDeletion();
+    clearDialogueCountCache();
+    let countsChanged;
+    if (isDomEngine()) {
+        const result = refreshDomDialogueCounts();
+        countsChanged = result.changed || result.countsChanged;
+    } else {
+        countsChanged = recountDialogueCountsFromChat();
+    }
+    if (countsChanged) updateCharList();
+    scheduleDomRefreshSeries(0);
+    scheduleCustomFontRefresh(0);
+}
+
 export function registerEventHandlers() {
     if (runtimeState.eventsRegistered) return;
     runtimeState.eventHandlers = {
         generationStarted: (type, _options, dryRun) => {
+            if (!settings.enabled || !automaticRuntimeActive) return;
             if (dryRun) return;
             if (type !== 'quiet') loudGenerationActive = true;
         },
-        generationAfterCommands: () => injectPrompt(),
-        characterMessageRendered: () => { onNewMessage(); scheduleDomRefreshSeries(120); scheduleCustomFontRefresh(120); },
-        messageRendered: () => { scheduleDomRefreshSeries(120); scheduleCustomFontRefresh(120); },
+        generationAfterCommands: (_type, _options, dryRun) => {
+            if (settings.enabled && automaticRuntimeActive && !dryRun) flushPromptInjection();
+        },
+        characterMessageRendered: () => { if (settings.enabled && automaticRuntimeActive) { onNewMessage(); scheduleDomRefreshSeries(120); scheduleCustomFontRefresh(120); } },
+        messageRendered: () => { if (settings.enabled && automaticRuntimeActive) { scheduleDomRefreshSeries(120); scheduleCustomFontRefresh(120); } },
         messageUpdated: handleMessageUpdated,
+        messageDeleted: handleMessageDeleted,
         // No timers here: beginStreamingPaint installs a MutationObserver so the
         // repaint lands in the same frame as the host's .mes_text rewrite.
-        streamToken: () => { setIsStreamingGenerationActive(true); beginStreamingPaint(); scheduleStreamingAttributionVerification(); },
+        streamToken: () => { if (settings.enabled && automaticRuntimeActive) { setIsStreamingGenerationActive(true); beginStreamingPaint(); scheduleStreamingAttributionVerification(); } },
         generationEnded: () => {
+            if (!settings.enabled || !automaticRuntimeActive) return;
             // GENERATION_ENDED has no type payload. A preceding non-quiet start
             // takes priority over an overlapping extension quiet request.
             let isQuietEnd = false;
@@ -224,6 +346,7 @@ export function registerEventHandlers() {
         chatCreated: resetDialogueCountsForNewChat,
         chatChanged: handleChatChanged,
         characterRenamed: (oldValue, newValue) => {
+            if (!settings.enabled || !automaticRuntimeActive) return;
             void migrateRenamedCharacterStorage(oldValue, newValue)
                 .then(result => {
                     if (!result?.ok) console.warn('[Dialogue Colors] Character storage rename migration was not persisted.', result);
@@ -231,6 +354,7 @@ export function registerEventHandlers() {
                 .catch(error => console.warn('[Dialogue Colors] Character storage rename migration failed.', error));
         },
         personaChanged: () => {
+            if (!settings.enabled || !automaticRuntimeActive) return;
             // Each persona keeps its own pinned color, so a switch has to swap the pin in
             // before anything repaints, whether or not the persona entry is auto-created.
             // applyRestoredPersonaColor persists and repaints the swap; the settings list
@@ -241,9 +365,12 @@ export function registerEventHandlers() {
             updateCharList();
         },
         personaRenamed: payload => {
+            if (!settings.enabled || !automaticRuntimeActive) return;
             if (renamePersonaCharacter(payload?.oldName, payload?.newName)) updateCharList();
         },
         settingsUpdated: () => {
+            syncAutomaticRuntime();
+            if (!settings.enabled) return;
             scheduleAutoThemeProbes();
             const record = getAutoSyncRecord(false);
             if (!record) return;
@@ -259,8 +386,10 @@ export function registerEventHandlers() {
     if (event_types.USER_MESSAGE_RENDERED) eventSource.on(event_types.USER_MESSAGE_RENDERED, runtimeState.eventHandlers.messageRendered);
     if (event_types.MESSAGE_UPDATED) eventSource.on(event_types.MESSAGE_UPDATED, runtimeState.eventHandlers.messageUpdated);
     if (event_types.MESSAGE_SWIPED) eventSource.on(event_types.MESSAGE_SWIPED, runtimeState.eventHandlers.messageUpdated);
-    if (event_types.STREAM_TOKEN_RECEIVED) eventSource.on(event_types.STREAM_TOKEN_RECEIVED, runtimeState.eventHandlers.streamToken);
-    if (event_types.SMOOTH_STREAM_TOKEN_RECEIVED) eventSource.on(event_types.SMOOTH_STREAM_TOKEN_RECEIVED, runtimeState.eventHandlers.streamToken);
+    if (event_types.MESSAGE_DELETED) eventSource.on(event_types.MESSAGE_DELETED, runtimeState.eventHandlers.messageDeleted);
+    for (const eventName of new Set([event_types.STREAM_TOKEN_RECEIVED, event_types.SMOOTH_STREAM_TOKEN_RECEIVED].filter(Boolean))) {
+        eventSource.on(eventName, runtimeState.eventHandlers.streamToken);
+    }
     if (event_types.GENERATION_ENDED) eventSource.on(event_types.GENERATION_ENDED, runtimeState.eventHandlers.generationEnded);
     if (event_types.CHAT_CREATED) eventSource.on(event_types.CHAT_CREATED, runtimeState.eventHandlers.chatCreated);
     if (event_types.GROUP_CHAT_CREATED) eventSource.on(event_types.GROUP_CHAT_CREATED, runtimeState.eventHandlers.chatCreated);
@@ -275,6 +404,7 @@ export function registerEventHandlers() {
 }
 
 export function registerDialogueColorsMacro() {
+    if (!settings.enabled || dialogueColorsMacroRegistered) return;
     try {
         const context = getContext();
         const macroCallback = () => {
@@ -284,6 +414,7 @@ export function registerDialogueColorsMacro() {
 
         if (context && context.registerMacro) {
             context.registerMacro('dialoguecolors', macroCallback);
+            dialogueColorsMacroRegistered = true;
             console.log('[Dialogue Colors] Macro registered: {{dialoguecolors}}');
         } else {
             console.warn('[Dialogue Colors] registerMacro not available - macro mode will not work');
@@ -294,17 +425,10 @@ export function registerDialogueColorsMacro() {
 }
 
 export function init() {
-    migrateLegacyLocalStorageIfNeeded();
-    loadData();
-    captureLoadedAttributionMessageBaseline();
-    invalidateThemeCache();
-    lastAppliedAutoTheme = settings.themeMode === 'auto' ? detectTheme() : null;
-    lastAppliedAutoSurface = settings.themeMode === 'auto' ? getReadableSurfaceSignature() : null;
-    if (lastAppliedAutoTheme) applyThemeOrBrightnessChange(() => {}, { saveImmediately: true });
-    initAutoSync();
-    setTimeout(() => ensureRegexScript(), 1000);
-    setupContextMenu();
-    registerDialogueColorsMacro();
+    // Load enough state to render the settings UI, but do not migrate or persist
+    // anything until the stored enabled flag is known.
+    loadData({ persistPrevious: false, persistMigrations: false, allowMetadataPersistence: false });
+    syncAutomaticRuntime();
 
     let waitAttempts = 0;
     const waitUI = setInterval(() => {
@@ -312,15 +436,18 @@ export function init() {
         if (document.getElementById('extensions_settings')) {
             clearInterval(waitUI);
             createUI();
+            registerKeyboardShortcuts();
             updateAutoSyncUI();
-            clearDomCache();
-            injectPrompt();
             populateProfileDropdown();
-            setupChatRootObserver();
-            setupChatObserver();
-            startDomHealthCheck();
-            scheduleDomRefreshSeries(150);
-            scheduleCustomFontRefresh(150);
+            if (settings.enabled) {
+                clearDomCache();
+                injectPrompt();
+                setupChatRootObserver();
+                setupChatObserver();
+                startDomHealthCheck();
+                scheduleDomRefreshSeries(150);
+                scheduleCustomFontRefresh(150);
+            }
         } else if (waitAttempts > 60) {
             clearInterval(waitUI);
             console.warn('[Dialogue Colors] #extensions_settings never appeared after 30s; the settings panel was not created. Reload SillyTavern to retry.');
@@ -329,4 +456,4 @@ export function init() {
 }
 
 // External generation interceptor called by SillyTavern during prompt generation.
-globalThis.DialogueColorsInterceptor = async function (chat, contextSize, abort, type) { if (type !== 'quiet' && settings.enabled && !isDomEngine()) injectPrompt(); };
+globalThis.DialogueColorsInterceptor = async function (chat, contextSize, abort, type) { if (type !== 'quiet' && settings.enabled && automaticRuntimeActive && !isDomEngine()) flushPromptInjection(); };

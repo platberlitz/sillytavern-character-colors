@@ -256,6 +256,19 @@ const SENTENCE_LEADING_PATTERN = /(?:^|[.!?…])[\s"'*_~([{<>|«»\-–—]*$/;
 // Cache compiled per-speaker name-match regexes.  Invalidated when the
 // character list changes (loadData/addCharacter/deleteCharacter/renameCharacter).
 export const speakerRegexCache = new Map();
+const CJK_SPEAKER_PATTERN = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+
+function getSpeakerNameRegex(speakerKey) {
+    let regex = speakerRegexCache.get(speakerKey);
+    if (!regex) {
+        const name = `${escapeRegex(speakerKey)}(?:['’]s?)?`;
+        regex = new RegExp(CJK_SPEAKER_PATTERN.test(speakerKey)
+            ? name
+            : `(?<![\\p{L}\\p{N}])${name}(?![\\p{L}\\p{N}])`, 'giu');
+        speakerRegexCache.set(speakerKey, regex);
+    }
+    return regex;
+}
 
 export function clearSpeakerRegexCache() {
     speakerRegexCache.clear();
@@ -300,11 +313,7 @@ export function findSpeakerCandidateInContext(maskedText, windowStart, windowEnd
     for (const speakerKey of sortedLookupKeys) {
         const assignment = lookup.get(speakerKey);
         if (!assignment) continue;
-        let regex = speakerRegexCache.get(speakerKey);
-        if (!regex) {
-            regex = new RegExp(`\\b${escapeRegex(speakerKey)}(?:'s?)?\\b`, 'gi');
-            speakerRegexCache.set(speakerKey, regex);
-        }
+        const regex = getSpeakerNameRegex(speakerKey);
         regex.lastIndex = 0;
         let match;
         while ((match = regex.exec(cleanWindow)) !== null) {
@@ -418,11 +427,7 @@ export function findParagraphSubjectSpeaker(maskedText, paragraph, lookup, sorte
     for (const speakerKey of sortedLookupKeys) {
         const assignment = lookup.get(speakerKey);
         if (!assignment) continue;
-        let regex = speakerRegexCache.get(speakerKey);
-        if (!regex) {
-            regex = new RegExp(`\\b${escapeRegex(speakerKey)}(?:'s?)?\\b`, 'gi');
-            speakerRegexCache.set(speakerKey, regex);
-        }
+        const regex = getSpeakerNameRegex(speakerKey);
         regex.lastIndex = 0;
         let match;
         while ((match = regex.exec(cleanRange)) !== null) {
@@ -527,10 +532,11 @@ export function findAddressedSpeakerKeys(segmentText, lookup, sortedLookupKeys) 
         if (!assignment?.key || addressed.has(assignment.key)) continue;
         let regex = vocativeRegexCache.get(speakerKey);
         if (!regex) {
+            const trailingBoundary = CJK_SPEAKER_PATTERN.test(speakerKey) ? '' : '(?![\\p{L}\\p{N}])';
             regex = new RegExp(
                 `(?:^[\\s"'“”«»‘’(\\[]*|[,;:]\\s*|\\b(?:oh|hey|hi|hello|yo|well|please|thanks|sorry|look|listen|wait|stop|yes|no|goodbye|bye)[,!\\s]+)`
-                + `${escapeRegex(speakerKey)}\\b\\s*(?=[,!?.:…—–-]|["'“”«»‘’)\\]\\s]*$)`,
-                'i',
+                + `${escapeRegex(speakerKey)}${trailingBoundary}\\s*(?=[,!?.:…—–-]|["'“”«»‘’)\\]\\s]*$)`,
+                'iu',
             );
             vocativeRegexCache.set(speakerKey, regex);
         }
@@ -751,11 +757,7 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
             for (const key of sortedLookupKeys) {
                 const assignment = lookup.get(key);
                 if (!assignment?.key) continue;
-                let regex = speakerRegexCache.get(key);
-                if (!regex) {
-                    regex = new RegExp(`\\b${escapeRegex(key)}(?:'s?)?\\b`, 'gi');
-                    speakerRegexCache.set(key, regex);
-                }
+                const regex = getSpeakerNameRegex(key);
                 regex.lastIndex = 0;
                 if (regex.test(searchText)) competingNamedKeys.add(assignment.key);
             }
@@ -801,13 +803,14 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
         const overrideValue = getSegmentMapValue(overrides, segment.index);
         const overrideRecord = getSegmentMapValue(options.overrideRecords, segment.index);
         const overrideName = getOverrideSpeaker(overrideValue) || getOverrideSpeaker(overrideRecord);
+        const overrideSource = getSegmentMapValue(options.overrideSources, segment.index)
+            ?? overrideRecord?.source
+            ?? overrideValue?.source;
+        const frozenOverride = normalizeAttributionSource(overrideSource) === ATTRIBUTION_SOURCE.FROZEN;
         if (overrideName) {
             assignment = resolveSingleSpeakerAssignment(String(overrideName), lookup);
             if (assignment) {
-                const source = getSegmentMapValue(options.overrideSources, segment.index)
-                    ?? overrideRecord?.source
-                    ?? overrideValue?.source
-                    ?? ATTRIBUTION_SOURCE.OVERRIDE;
+                const source = overrideSource ?? ATTRIBUTION_SOURCE.OVERRIDE;
                 const confidence = getSegmentMapValue(options.overrideConfidences, segment.index)
                     ?? overrideRecord?.confidence
                     ?? overrideValue?.confidence;
@@ -824,8 +827,17 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
                 );
             }
         }
+        const frozenUnresolved = frozenOverride && !assignment;
+        if (frozenUnresolved) {
+            attributionMetadata = createSegmentProvenance(
+                ATTRIBUTION_SOURCE.FROZEN,
+                'frozen-unresolved',
+                1,
+                [{ type: 'frozen-unresolved', segmentIndex: segment.index }],
+            );
+        }
 
-        if (!assignment && isStreamingMsg && streamingSession.assignments.has(stickyKey)) {
+        if (!assignment && !frozenUnresolved && isStreamingMsg && streamingSession.assignments.has(stickyKey)) {
             assignment = streamingSession.assignments.get(stickyKey);
             if (assignment) {
                 attributionMetadata = createSegmentProvenance(
@@ -846,7 +858,7 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
         };
 
         // Tier 2: masked, paragraph-scoped proximity near the quote.
-        if (!assignment) {
+        if (!assignment && !frozenUnresolved) {
             const windowStart = Math.max(segment.paragraph.start, segment.start - 240);
             const windowEnd = Math.min(segment.paragraph.end, segment.end + 120);
             const probeOptions = { segments: collectedSegments, paragraphStart: segment.paragraph.start, segmentText: segment.text };
@@ -887,7 +899,7 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
         // Tier 2.5: a pronoun speech tag bound to the nearest preceding name.
         // Always weaker than a literal mention. The antecedent may sit in an
         // earlier narration line, which is where models usually put it.
-        if (!assignment) {
+        if (!assignment && !frozenUnresolved) {
             const antecedent = getPrecedingNarrationSubject(segment.paragraph);
             const bound = bindPronounSpeakerInParagraph(maskedText, segment.start, segment.end, segment.paragraph, lookup, sortedLookupKeys, {
                 antecedentText: narrationText,
@@ -915,7 +927,7 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
         // speech tag, but stronger than carrying or alternating, because a
         // paragraph that opens on a name is that character's turn even when
         // the quote sits far from it or ahead of it.
-        if (!assignment) {
+        if (!assignment && !frozenUnresolved) {
             const subject = getParagraphSubject(segment.paragraph);
             assignment = subject && !isAddressedInQuote(subject.assignment.key) ? subject.assignment : null;
             if (assignment) {
@@ -931,7 +943,7 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
         // Tier 3: carry only within the same paragraph/line. Doubt propagates:
         // a carried speaker can never read as more certain than the segment it
         // was carried from.
-        if (!assignment && sameParagraphAsPrevious && lastResolvedSpeakerKey) {
+        if (!assignment && !frozenUnresolved && sameParagraphAsPrevious && lastResolvedSpeakerKey) {
             const carried = lookup.get(lastResolvedSpeakerKey) || null;
             assignment = carried && !isAddressedInQuote(carried.key) ? carried : null;
             if (assignment) {
@@ -947,7 +959,7 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
         // Tier 3.5: the actor of the narration line above. This is the shape the
         // in-paragraph tiers structurally cannot see -- a beat, a newline, then
         // a bare quote -- and it is far better evidence than alternating.
-        if (!assignment) {
+        if (!assignment && !frozenUnresolved) {
             const preceding = getPrecedingNarrationSubject(segment.paragraph);
             assignment = preceding && !isAddressedInQuote(preceding.assignment.key) ? preceding.assignment : null;
             if (assignment) {
@@ -963,7 +975,7 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
         // Tier 3.75: the previous quote called somebody by name, so the reply on
         // the next line is theirs. Evidence-backed where plain alternation is a
         // coin flip, which is what a scene with three or more speakers gives.
-        if (!assignment && !sameParagraphAsPrevious && previouslyAddressedKeys.size === 1) {
+        if (!assignment && !frozenUnresolved && !sameParagraphAsPrevious && previouslyAddressedKeys.size === 1) {
             const [addressedKey] = previouslyAddressedKeys;
             const replier = addressedKey !== lastResolvedSpeakerKey && !isAddressedInQuote(addressedKey)
                 ? lookup.get(addressedKey) || null
@@ -980,7 +992,7 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
         }
 
         // Tier 4: alternate speakers across unattributed new paragraphs.
-        if (!assignment && !sameParagraphAsPrevious) {
+        if (!assignment && !frozenUnresolved && !sameParagraphAsPrevious) {
             assignment = getAlternatingAssignment(key => !isAddressedInQuote(key));
             if (assignment) {
                 const distinctRecent = new Set(recentSpeakerKeys.filter(Boolean)).size;
@@ -997,7 +1009,7 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
         // narration means this is a guess, not a default, and the quote calling
         // the default speaker by name means it is very probably wrong -- but a
         // colourless quote helps nobody, so say so in the confidence instead.
-        if (!assignment) {
+        if (!assignment && !frozenUnresolved) {
             assignment = defaultSpeaker || ensureDefaultSpeaker();
             if (assignment) {
                 const fromColorBlock = defaultSpeakerSource === ATTRIBUTION_SOURCE.COLOR_BLOCK;

@@ -56,3 +56,13 @@ test('runtime CSS trimming uses stable ownership and exact legacy migration', ()
     assert.match(storageSource, /const hasUnownedCssTargetName/);
     assert.match(storageSource, /else if \(!hasUnownedCssTargetName\)/);
 });
+
+test('all runtime regex rules use namespaced ownership and exact legacy fingerprints', () => {
+    assert.equal(config.id, 'dialogue-colors:trim-font-tags:v1');
+    assert.match(storageSource, /id: 'dialogue-colors:trim-font-tags:v1'/);
+    assert.match(storageSource, /id: 'dialogue-colors:trim-color-blocks:v1'/);
+    assert.match(storageSource, /id: 'dialogue-colors:trim-css-effects:v1'/);
+    assert.match(storageSource, /const isLegacyOwnedFontRule = rule =>[\s\S]*?rule\.findRegex/);
+    assert.match(storageSource, /const isLegacyOwnedColorBlockRule = rule =>[\s\S]*?rule\.findRegex/);
+    assert.doesNotMatch(storageSource, /uuidv4/);
+});

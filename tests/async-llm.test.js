@@ -27,12 +27,12 @@ async function waitFor(predicate, timeoutMs = 500) {
     }
 }
 
-async function loadLlmModule(generateQuietPrompt) {
+async function loadLlmModule(generateQuietPrompt, overrides = {}) {
     const key = `__dcAsyncLlmStubs_${++moduleSequence}`;
     globalThis[key] = {
         generateQuietPrompt,
-        getContext: () => ({}),
-        settings: { llmConnectionProfile: null },
+        getContext: overrides.getContext || (() => ({})),
+        settings: overrides.settings || { llmConnectionProfile: null },
     };
     const transformed = source
         .replace(
@@ -166,4 +166,65 @@ test('LLM request error classification stops permanent provider failures', async
         quotaLlm.callLLMWithProfile('quota', { timeoutMs: 100 }),
         error => error?.llmCategory === 'quota' && error?.retryable === false,
     );
+});
+
+test('LLM request error classification walks the complete cause chain', async () => {
+    const llm = await loadLlmModule(async () => 'unused');
+
+    const auth = new Error('request wrapper', {
+        cause: new Error('provider wrapper', { cause: Object.assign(new Error('denied'), { response: { status: 401 } }) }),
+    });
+    assert.deepEqual(llm.classifyLlmRequestError(auth), {
+        category: 'authentication',
+        retryable: false,
+        status: 401,
+    });
+
+    const abort = new Error('cancelled by caller');
+    abort.name = 'AbortError';
+    assert.equal(
+        llm.classifyLlmRequestError(new Error('outer', { cause: new Error('middle', { cause: abort }) })).category,
+        'cancelled',
+    );
+    assert.equal(
+        llm.classifyLlmRequestError(new Error('outer', { cause: new Error('insufficient quota') })).category,
+        'quota',
+    );
+
+    const cyclic = new Error('network failure');
+    cyclic.cause = cyclic;
+    assert.equal(llm.classifyLlmRequestError(cyclic).category, 'transient');
+});
+
+test('profile refresh keeps a missing selected profile explicit', async () => {
+    const llm = await loadLlmModule(async () => '', {
+        getContext: () => ({
+            ConnectionManagerRequestService: {
+                getSupportedProfiles: () => [{ id: 'available', name: 'Available' }],
+            },
+        }),
+    });
+    const originalDocument = globalThis.document;
+    const select = {
+        options: [],
+        disabled: true,
+        set innerHTML(value) { this.html = value; this.options = []; },
+        get innerHTML() { return this.html; },
+        appendChild(option) { this.options.push(option); },
+    };
+    globalThis.document = {
+        getElementById: id => id === 'profile' ? select : null,
+        createElement: () => ({}),
+    };
+    try {
+        llm.populateProfileSelect('profile', 'deleted-profile');
+        const missing = select.options.find(option => option.value === 'deleted-profile');
+        assert.ok(missing);
+        assert.equal(missing.selected, true);
+        assert.equal(missing.disabled, true);
+        assert.match(missing.textContent, /Missing profile/);
+        assert.equal(select.disabled, false);
+    } finally {
+        globalThis.document = originalDocument;
+    }
 });

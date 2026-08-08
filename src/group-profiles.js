@@ -1,8 +1,10 @@
 import { CHARACTER_STYLE_FIELD_MASKS, applyCharacterStyle, captureCharacterStyle, normalizeCharacterStyle } from './character-style.js';
 
 const DANGEROUS_REGISTRY_IDENTITIES = new Set(['__proto__', 'prototype', 'constructor']);
+const RESERVED_CHARACTER_IDENTITIES = new Set(['narrator', '__narrator__']);
 
 export const MAX_REGISTRY_IDENTITY_LENGTH = 120;
+export const GROUP_PROFILE_RENAME = Symbol('group-profile-rename');
 
 function dictionary() {
     return Object.create(null);
@@ -87,14 +89,71 @@ export function normalizeRegistryIdentity(value, maximum = MAX_REGISTRY_IDENTITY
     return normalizeRegistryIdentityName(value, maximum).toLowerCase();
 }
 
+export function isReservedCharacterIdentity(value) {
+    return RESERVED_CHARACTER_IDENTITIES.has(normalizeRegistryIdentity(value));
+}
+
+// Canonical names claim identities before aliases. Alias identities claimed by
+// more than one owner are omitted, so lookups cannot depend on insertion order.
+export function resolveCanonicalAliasOwners(entries, maximum = MAX_REGISTRY_IDENTITY_LENGTH) {
+    const source = Array.isArray(entries) ? entries : [];
+    const aliases = source.map(() => []);
+    const conflicts = [];
+    const canonicalOwners = new Map();
+
+    source.forEach((entry, ownerIndex) => {
+        const identity = normalizeRegistryIdentity(entry?.name, maximum);
+        if (!identity) {
+            conflicts.push({ kind: 'invalid-canonical', ownerIndex, identity: '' });
+        } else if (RESERVED_CHARACTER_IDENTITIES.has(identity)) {
+            conflicts.push({ kind: 'reserved-canonical', ownerIndex, identity });
+        } else if (canonicalOwners.has(identity)) {
+            conflicts.push({ kind: 'canonical-ambiguity', ownerIndex, otherOwnerIndex: canonicalOwners.get(identity), identity });
+        } else {
+            canonicalOwners.set(identity, ownerIndex);
+        }
+    });
+
+    const aliasOwners = new Map();
+    source.forEach((entry, ownerIndex) => {
+        for (const [aliasIndex, alias] of (Array.isArray(entry?.aliases) ? entry.aliases : []).entries()) {
+            const identity = normalizeRegistryIdentity(alias, maximum);
+            if (!identity) {
+                conflicts.push({ kind: 'invalid-alias', ownerIndex, aliasIndex, identity: '' });
+                continue;
+            }
+            if (RESERVED_CHARACTER_IDENTITIES.has(identity)) {
+                conflicts.push({ kind: 'reserved-alias', ownerIndex, aliasIndex, identity });
+                continue;
+            }
+            if (canonicalOwners.has(identity)) continue;
+            const previous = aliasOwners.get(identity);
+            if (!previous) {
+                aliasOwners.set(identity, { ownerIndex, aliasIndex, alias, ambiguous: false });
+            } else if (previous.ownerIndex !== ownerIndex && !previous.ambiguous) {
+                previous.ambiguous = true;
+                conflicts.push({ kind: 'alias-ambiguity', ownerIndex, otherOwnerIndex: previous.ownerIndex, aliasIndex, identity });
+            }
+        }
+    });
+    for (const claim of aliasOwners.values()) {
+        if (!claim.ambiguous) aliases[claim.ownerIndex].push(claim.alias);
+    }
+    return { aliases, conflicts };
+}
+
 /** Convert an already-persisted legacy identity into the current bounded schema. */
-export function migrateLegacyRegistryIdentityName(value, maximum = MAX_REGISTRY_IDENTITY_LENGTH, fallback = 'Legacy item') {
+export function migrateLegacyRegistryIdentityName(value, maximum = MAX_REGISTRY_IDENTITY_LENGTH, fallback = 'Legacy item', options = {}) {
     const limit = Number.isInteger(maximum) && maximum > 0
         ? Math.min(maximum, MAX_REGISTRY_IDENTITY_LENGTH)
         : MAX_REGISTRY_IDENTITY_LENGTH;
     const original = normalizeLegacyRegistryIdentityText(value);
     let normalized = original || normalizeLegacyRegistryIdentityText(fallback) || 'Legacy item';
-    if (DANGEROUS_REGISTRY_IDENTITIES.has(normalized.toLowerCase())) normalized = `${normalized} (legacy)`;
+    const identity = normalized.toLowerCase();
+    if (DANGEROUS_REGISTRY_IDENTITIES.has(identity)
+        || (options.reserveCharacterIdentities === true && RESERVED_CHARACTER_IDENTITIES.has(identity))) {
+        normalized = `${normalized} (legacy)`;
+    }
     normalized = fitLegacyRegistryIdentity(normalized, limit);
     if (normalizeRegistryIdentityName(normalized, limit)) return normalized;
     return fitLegacyRegistryIdentity(`Legacy item ${hashLegacyRegistryIdentity(original || String(value))}`, limit);
@@ -129,7 +188,7 @@ export function migrateLegacyRegistryEntries(source, options = {}) {
             : undefined;
         const rawName = normalizeLegacyRegistryIdentityText(explicitName) ? explicitName : rawKey;
         const sourceName = legacyRegistrySourceName(rawName, rawKey);
-        const baseName = migrateLegacyRegistryIdentityName(rawName, maximum, `${fallback} ${entryIndex}`);
+        const baseName = migrateLegacyRegistryIdentityName(rawName, maximum, `${fallback} ${entryIndex}`, options);
         let name = baseName;
         let identity = normalizeRegistryIdentity(name, maximum);
         const baseIdentity = identity;
@@ -177,7 +236,7 @@ export function migrateLegacyRegistryIdentities(values, options = {}) {
         const sourceIdentity = originalName.toLowerCase();
         if (sourceIdentity && sourceIdentities.has(sourceIdentity)) return;
         if (sourceIdentity) sourceIdentities.add(sourceIdentity);
-        const baseName = migrateLegacyRegistryIdentityName(value, maximum, `${fallback} ${index + 1}`);
+        const baseName = migrateLegacyRegistryIdentityName(value, maximum, `${fallback} ${index + 1}`, options);
         let name = baseName;
         let identity = normalizeRegistryIdentity(name, maximum);
         const baseIdentity = identity;
@@ -265,6 +324,9 @@ export function renameGroupProfile(profiles, currentName, nextName) {
     const profile = { ...next[currentKey], name: normalizedName };
     delete next[currentKey];
     next[nextKey] = profile;
+    Object.defineProperty(next, GROUP_PROFILE_RENAME, {
+        value: { from: currentKey, to: normalizedName },
+    });
     return next;
 }
 

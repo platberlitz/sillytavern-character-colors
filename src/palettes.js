@@ -1,8 +1,8 @@
 // palettes.js - extracted from index.js (mechanical split)
 import { clearSpeakerRegexCache } from './attribution.js';
 import { simulateColorVision } from './color-vision.js';
-import { applyGradientPresetToEntry, cloneGradient, colorDistanceOklab, mapGradientStops, normalizeGradient, serializeGradient, synchronizeGradientEffectiveColors } from './gradients.js';
-import { MAX_REGISTRY_IDENTITY_LENGTH, applyGroupProfile, migrateLegacyRegistryEntries, normalizeGroupName, normalizeGroupProfiles, normalizeRegistryIdentity, normalizeRegistryIdentityName, resolveGroupAutomation, resolveGroupProfile } from './group-profiles.js';
+import { applyGradientPresetToEntry, cloneGradient, colorDistanceOklab, getGradientColorStops, interpolateGradientColor, mapGradientStops, normalizeGradient, serializeGradient } from './gradients.js';
+import { MAX_REGISTRY_IDENTITY_LENGTH, applyGroupProfile, isReservedCharacterIdentity, migrateLegacyRegistryEntries, normalizeGroupName, normalizeGroupProfiles, normalizeRegistryIdentity, normalizeRegistryIdentityName, resolveGroupAutomation, resolveGroupProfile } from './group-profiles.js';
 import { createRestoreSnapshot, showUndoToast } from './history.js';
 import { applyLiveColorChangesFromSnapshot, captureEffectiveColorSnapshot, commit, repaintDomAfterCharacterDataChange } from './live-colors.js';
 import { callLLMWithProfile } from './llm.js';
@@ -43,6 +43,12 @@ let cachedThemeCheckedAt = 0;
 let cachedContrastSurface = null;
 let cachedContrastSurfaceCheckedAt = 0;
 let closeActiveHarmonyPopup = null;
+
+function compareCodePoints(left, right) {
+    const first = String(left ?? '');
+    const second = String(right ?? '');
+    return first < second ? -1 : first > second ? 1 : 0;
+}
 
 export function getPresets() {
     const presets = getAutoSyncRecord(true).presets;
@@ -228,7 +234,7 @@ function getConflictSurfaceColor() {
 export function getPerceptualConflictReport(options = {}) {
     const narrator = getNarratorVisual(settings, applyThemeReadabilityAndBrightness);
     const conflictVisuals = narrator ? [narrator] : [];
-    const characterKeys = Object.keys(characterColors).sort((left, right) => left.localeCompare(right));
+    const characterKeys = Object.keys(characterColors).sort(compareCodePoints);
     for (const key of characterKeys) {
         const entry = characterColors[key] && typeof characterColors[key] === 'object' ? characterColors[key] : {};
         conflictVisuals.push({ ...entry, id: key, label: entry.name || key, kind: 'character' });
@@ -244,13 +250,18 @@ export function getPerceptualConflictReport(options = {}) {
         signal: options.signal,
     });
     const surface = getConflictSurfaceColor();
+    const visualsById = new Map(conflictVisuals.map(visual => [visual.id, visual]));
     report.modes.forEach(mode => {
         const modeSurface = simulateColorVision(surface, mode);
         mode.readability = mode.items.map(item => {
+            const visual = visualsById.get(item.id);
+            const itemSurface = settings.highlightMode
+                ? simulateColorVision(getTextContrastSurfaceColor(visual?.color, surface), mode)
+                : modeSurface;
             let minimumRatio = Number.POSITIVE_INFINITY;
             let minimumSample = item.samples[0] || { color: '#888888', position: 0, offset: 0 };
             for (const sample of item.samples) {
-                const ratio = getContrastRatio(sample.color, modeSurface);
+                const ratio = getContrastRatio(sample.color, itemSurface);
                 if (ratio < minimumRatio) {
                     minimumRatio = ratio;
                     minimumSample = sample;
@@ -263,6 +274,7 @@ export function getPerceptualConflictReport(options = {}) {
                 minimumRatio: Number(minimumRatio.toFixed(2)),
                 level: minimumRatio >= 4.5 ? 'pass' : minimumRatio >= 3 ? 'large-text-only' : 'low',
                 sample: { ...minimumSample },
+                surface: itemSurface,
             };
         });
         const readabilityById = new Map(mode.readability.map(item => [item.id, item]));
@@ -295,7 +307,7 @@ export function getPerceptualConflictReport(options = {}) {
                 deltaE: null,
                 samples: {
                     left: { ...readability.sample },
-                    right: { offset: 0, position: 0, color: modeSurface },
+                    right: { offset: 0, position: 0, color: readability.surface },
                 },
                 narration: `${readability.label} does not meet normal-text contrast under ${mode.mode === 'none' ? 'normal color vision' : `${mode.mode} simulation`} (${readability.minimumRatio}:1).`,
                 readability: { left: readability, right: null },
@@ -478,7 +490,7 @@ export function repairPerceptualConflicts(options = {}) {
         const candidates = identities.map(identity => identity.id)
             .filter(canRepairConflictEntry)
             .sort((left, right) => (characterColors[left].dialogueCount || 0) - (characterColors[right].dialogueCount || 0)
-                || characterColors[left].name.localeCompare(characterColors[right].name));
+                || compareCodePoints(characterColors[left].name, characterColors[right].name));
         const key = candidates[0];
         if (!key) {
             blockedPairs.add(pairKey);
@@ -554,7 +566,7 @@ export function flipColorsForTheme() {
             return { ...stop, baseColor: deriveBaseColorFromEffectiveColor(color), color };
         });
         setEntryFromEffectiveColor(char, flipEffectiveColor(getEntryEffectiveColor(char)));
-        char.gradient = flippedGradient;
+        setEntryGradient(char, flippedGradient);
     }
     applyLiveColorChangesFromSnapshot(snapshot, entries.map(([key]) => key));
     commit();
@@ -640,9 +652,9 @@ export function loadColorPreset() {
     toast.success(`Preset "${escapeHtml(name)}" loaded`);
 }
 
-export function deleteColorPreset() {
+export function deleteColorPreset(reviewedName = '') {
     const select = document.getElementById('dc-preset-select');
-    const name = select?.value;
+    const name = reviewedName || select?.value;
     if (!name) { toast.warning('Select a preset first'); return; }
     const presets = getPresets();
     if (!Object.prototype.hasOwnProperty.call(presets, name)) {
@@ -1036,15 +1048,16 @@ export function saveCustomPalette() {
     toast.success(`Custom palette "${escapeHtml(name)}" saved`);
 }
 
-export function deleteCustomPalette() {
+export function deleteCustomPalette(reviewedName = '') {
     const select = document.getElementById('dc-palette');
-    if (!select?.value?.startsWith('custom:')) { toast.warning('Select a custom palette first'); return; }
-    const paletteName = select.value.slice(7);
+    const paletteName = reviewedName || (select?.value?.startsWith('custom:') ? select.value.slice(7) : '');
+    if (!paletteName) { toast.warning('Select a custom palette first'); return; }
     const customs = getCustomPalettes();
+    if (!Object.prototype.hasOwnProperty.call(customs, paletteName)) { toast.error('Custom palette not found'); return; }
     delete customs[paletteName];
     saveCustomPalettes(customs);
     deleteCustomPaletteMetaEntry(paletteName);
-    settings.colorTheme = 'pastel';
+    if (settings.colorTheme === `custom:${paletteName}`) settings.colorTheme = 'pastel';
     saveData();
     invalidateThemeCache();
     refreshPaletteDropdown();
@@ -1313,19 +1326,37 @@ export function getContrastRatio(foreground, background) {
     return (lighter + 0.05) / (darker + 0.05);
 }
 
-export function ensureReadableContrast(hexColor, surfaceColor = null, minimumRatio = 4.5) {
-    const normalized = normalizeHexColor(hexColor);
+export function getTextContrastSurfaceColor(foreground, surfaceColor = null) {
     const surface = normalizeHexColor(surfaceColor, null) || getContrastSurfaceColor();
-    if (getContrastRatio(normalized, surface) >= minimumRatio) return normalized;
+    if (settings.highlightMode !== true) return surface;
+    const text = parseCssColor(normalizeHexColor(foreground)) || { r: 136, g: 136, b: 136 };
+    const background = parseCssColor(surface) || { r: 0, g: 0, b: 0 };
+    const alpha = 0x26 / 255;
+    return rgbToHex({
+        r: text.r * alpha + background.r * (1 - alpha),
+        g: text.g * alpha + background.g * (1 - alpha),
+        b: text.b * alpha + background.b * (1 - alpha),
+    });
+}
+
+function ensureContrastAgainst(hexColor, getSurface, minimumRatio) {
+    const normalized = normalizeHexColor(hexColor);
+    if (getContrastRatio(normalized, getSurface(normalized)) >= minimumRatio) return normalized;
     const [hue, saturation, lightness] = hexToHsl(normalized);
-    const towardLight = getContrastRatio('#ffffff', surface) >= getContrastRatio('#000000', surface);
+    const referenceSurface = getSurface(normalized);
+    const towardLight = getContrastRatio('#ffffff', referenceSurface) >= getContrastRatio('#000000', referenceSurface);
     const end = towardLight ? 100 : 0;
     const direction = towardLight ? 1 : -1;
     for (let nextLightness = lightness + direction; towardLight ? nextLightness <= end : nextLightness >= end; nextLightness += direction) {
         const candidate = hslToHex(hue, saturation, nextLightness);
-        if (getContrastRatio(candidate, surface) >= minimumRatio) return candidate;
+        if (getContrastRatio(candidate, getSurface(candidate)) >= minimumRatio) return candidate;
     }
     return towardLight ? '#ffffff' : '#000000';
+}
+
+export function ensureReadableContrast(hexColor, surfaceColor = null, minimumRatio = 4.5) {
+    const surface = normalizeHexColor(surfaceColor, null) || getContrastSurfaceColor();
+    return ensureContrastAgainst(hexColor, () => surface, minimumRatio);
 }
 
 export function getReadableSurfaceSignature() {
@@ -1393,8 +1424,59 @@ export function applyThemeReadabilityAndBrightness(hexColor) {
     const [h, s, l] = hexToHsl(normalized);
     const { amount, bound, minLightness, maxLightness } = getBrightnessTravel();
     const adjustedL = Math.max(minLightness, Math.min(maxLightness, l + (amount * (bound - l))));
-    return ensureReadableContrast(hslToHex(h, compensateSaturation(s, l, adjustedL), adjustedL));
+    const adjusted = hslToHex(h, compensateSaturation(s, l, adjustedL), adjustedL);
+    return ensureContrastAgainst(adjusted, color => getTextContrastSurfaceColor(color), 4.5);
 }
+
+export function resolveReadableGradient(value, primaryColor) {
+    const primary = normalizeHexColor(primaryColor);
+    const surface = getTextContrastSurfaceColor(primary);
+    const gradient = mapGradientStops(value, stop => ({
+        ...stop,
+        color: ensureReadableContrast(applyThemeReadabilityAndBrightness(stop.baseColor), surface),
+    }));
+    if (!gradient) return null;
+    const stops = getGradientColorStops({ color: primary, gradient });
+    let readable = stops.every(stop => getContrastRatio(stop.color, surface) >= 4.5);
+    for (let index = 1; readable && index < stops.length; index++) {
+        const left = stops[index - 1];
+        const right = stops[index];
+        if (right.offset <= left.offset) continue;
+        const leftRgb = parseCssColor(left.color);
+        const rightRgb = parseCssColor(right.color);
+        const channels = ['r', 'g', 'b'];
+        const deltas = channels.map(channel => rightRgb[channel] - leftRgb[channel]);
+
+        // Every rendered 8-bit color changes at one of these boundaries. With at
+        // most five stops this is exhaustive and bounded to 6,129 checks.
+        const boundaries = new Set([0, 1]);
+        for (let channel = 0; channel < deltas.length; channel++) {
+            const start = leftRgb[channels[channel]];
+            const end = rightRgb[channels[channel]];
+            for (let boundary = Math.min(start, end) + 0.5; boundary < Math.max(start, end); boundary++) {
+                boundaries.add((boundary - start) / deltas[channel]);
+            }
+        }
+        const points = [...boundaries].sort((leftPoint, rightPoint) => leftPoint - rightPoint);
+        for (let point = 1; readable && point < points.length; point++) {
+            const progressValues = [(points[point - 1] + points[point]) / 2];
+            if (point < points.length - 1) progressValues.push(points[point]);
+            for (const progress of progressValues) {
+                const offset = left.offset + ((right.offset - left.offset) * progress);
+                if (getContrastRatio(interpolateGradientColor(stops, offset), surface) < 4.5) {
+                    readable = false;
+                    break;
+                }
+            }
+        }
+    }
+    if (readable) return gradient;
+    return mapGradientStops(gradient, stop => ({ ...stop, color: primary }));
+}
+
+// Narrator/storage already receive this color resolver; the attached ramp resolver
+// keeps their gradients on the same path without introducing a palettes import cycle.
+applyThemeReadabilityAndBrightness.resolveGradient = resolveReadableGradient;
 
 export function deriveBaseColorFromEffectiveColor(hexColor) {
     const normalized = normalizeHexColor(hexColor);
@@ -1418,11 +1500,13 @@ export function getEntryEffectiveColor(entry) {
     return normalizeHexColor(entry?.color, applyThemeReadabilityAndBrightness(getBaseColor(entry)));
 }
 
-export function setEntryFromBaseColor(entry, baseColor) {
+export function setEntryFromBaseColor(entry, baseColor, options = {}) {
     if (!entry) return '#888888';
-    entry.baseColor = normalizeHexColor(baseColor, getBaseColor(entry));
+    const previousBaseColor = getBaseColor(entry);
+    entry.baseColor = normalizeHexColor(baseColor, previousBaseColor);
     entry.color = applyThemeReadabilityAndBrightness(getBaseColor(entry));
-    entry.gradient = synchronizeGradientEffectiveColors(entry.gradient, applyThemeReadabilityAndBrightness);
+    entry.gradient = resolveReadableGradient(entry.gradient, entry.color);
+    if (entry.baseColor !== previousBaseColor && options.preserveGenerator !== true) entry.gradientGenerator = null;
     return entry.color;
 }
 
@@ -1439,7 +1523,7 @@ export function setEntryFromEffectiveColor(entry, effectiveColor) {
 
 export function setEntryGradient(entry, gradient, options = {}) {
     if (!entry) return null;
-    entry.gradient = synchronizeGradientEffectiveColors(normalizeGradient(gradient), applyThemeReadabilityAndBrightness);
+    entry.gradient = resolveReadableGradient(normalizeGradient(gradient), getEntryEffectiveColor(entry));
     if (options.preserveGenerator !== true) entry.gradientGenerator = null;
     return entry.gradient;
 }
@@ -1480,8 +1564,8 @@ export function ensureGradientRandomMasterSeed() {
 
 // Every color other characters already display, so a new gradient can be pushed away
 // from them. Rendered colors are used because that is what a reader actually compares.
-export function collectReservedGradientColors(excludeName = '') {
-    const excluded = canonicalizeGradientCharacterName(excludeName);
+export function collectReservedGradientColors(excludeIdentity = '') {
+    const excluded = canonicalizeGradientCharacterName(excludeIdentity);
     const colors = new Set();
     for (const entry of Object.values(characterColors)) {
         if (!entry || canonicalizeGradientCharacterName(entry.name) === excluded) continue;
@@ -1492,6 +1576,17 @@ export function collectReservedGradientColors(excludeName = '') {
             if (stopColor) colors.add(stopColor);
         }
     }
+    const narrator = getNarratorVisual(settings, applyThemeReadabilityAndBrightness);
+    if (narrator && canonicalizeGradientCharacterName(narrator.id) !== excluded) {
+        const primary = normalizeHexColor(narrator.color, null);
+        if (primary) colors.add(primary);
+        for (const stop of narrator.gradient?.stops || []) {
+            const rendered = normalizeHexColor(stop.color, null);
+            const authored = normalizeHexColor(applyThemeReadabilityAndBrightness(stop.baseColor), null);
+            if (rendered) colors.add(rendered);
+            if (authored) colors.add(authored);
+        }
+    }
     return [...colors];
 }
 
@@ -1499,12 +1594,13 @@ export function createRandomGradient(entry, options = {}) {
     if (!entry) return null;
     const animation = options.preserveAnimation === false ? null : normalizeGradient(entry.gradient)?.animation;
     const masterSeed = ensureGradientRandomMasterSeed();
-    const seed = `${masterSeed}\u001f${canonicalizeGradientCharacterName(entry.name)}`;
+    const identity = entry.id || entry.name;
+    const seed = `${masterSeed}\u001f${canonicalizeGradientCharacterName(identity)}`;
     const existing = normalizeEntryGradientGenerator(entry.gradientGenerator, entry.gradient);
     let generator = normalizeGradientGenerator({ algorithm: GRADIENT_GENERATOR_ALGORITHM, seed, iteration: 0 });
     if (Number.isFinite(Number(options.iteration))) {
         generator.iteration = Math.max(0, Math.floor(Number(options.iteration)));
-    } else if (options.initial !== true && existing?.seed === seed) {
+    } else if (options.initial !== true && (existing?.seed === seed || existing?.seed.startsWith(`${seed}\u001e`))) {
         generator = advanceGradientGenerator(existing);
     }
     const generated = generateSeededGradient(getBaseColor(entry), generator, {
@@ -1513,10 +1609,10 @@ export function createRandomGradient(entry, options = {}) {
         totalStops: options.totalStops,
         transformColor: applyThemeReadabilityAndBrightness,
         hueSpread: true,
-        reservedColors: collectReservedGradientColors(entry.name),
+        reservedColors: collectReservedGradientColors(identity),
     });
     entry.gradientGenerator = generated.generator;
-    return synchronizeGradientEffectiveColors(generated.gradient, applyThemeReadabilityAndBrightness);
+    return resolveReadableGradient(generated.gradient, getEntryEffectiveColor(entry));
 }
 
 function getCurrentGroupCharacterNames(context) {
@@ -1617,7 +1713,7 @@ export function syncAllEffectiveColors() {
         if (!entry) continue;
         const baseColor = getBaseColor(entry);
         if (baseColor) {
-            setEntryFromBaseColor(entry, baseColor);
+            setEntryFromBaseColor(entry, baseColor, { preserveGenerator: true });
         }
     }
     setNarratorStyle(settings, settings.narratorStyle, applyThemeReadabilityAndBrightness);
@@ -1632,6 +1728,17 @@ export function collectAssignedColors(excludeKeys = []) {
         if (!entry || excluded.has(key)) continue;
         const color = normalizeHexColor(getEntryEffectiveColor(entry), null);
         if (color && !colors.includes(color)) colors.push(color);
+    }
+    if (!excluded.has(NARRATOR_VISUAL_ID)) {
+        const narrator = getNarratorVisual(settings, applyThemeReadabilityAndBrightness);
+        const color = normalizeHexColor(narrator?.color, null);
+        if (color && !colors.includes(color)) colors.push(color);
+        for (const stop of narrator?.gradient?.stops || []) {
+            for (const candidate of [stop.color, applyThemeReadabilityAndBrightness(stop.baseColor)]) {
+                const stopColor = normalizeHexColor(candidate, null);
+                if (stopColor && !colors.includes(stopColor)) colors.push(stopColor);
+            }
+        }
     }
     return colors;
 }
@@ -1648,6 +1755,15 @@ export function collectAssignedBaseColors(excludeKeys = []) {
         if (!entry || excluded.has(key)) continue;
         const color = normalizeHexColor(getBaseColor(entry), null);
         if (color && !colors.includes(color)) colors.push(color);
+    }
+    if (!excluded.has(NARRATOR_VISUAL_ID)) {
+        const narrator = getNarratorVisual(settings, applyThemeReadabilityAndBrightness);
+        const color = normalizeHexColor(narrator?.baseColor, null);
+        if (color && !colors.includes(color)) colors.push(color);
+        for (const stop of narrator?.gradient?.stops || []) {
+            const stopColor = normalizeHexColor(stop.baseColor, null);
+            if (stopColor && !colors.includes(stopColor)) colors.push(stopColor);
+        }
     }
     return colors;
 }
@@ -1775,7 +1891,7 @@ export function buildCharacterEntry(name, options = {}) {
     // Key on the same normalized identity the registry uses, otherwise the entry is
     // re-keyed or dropped by normalizeCharacterColors and recreated on the next pass.
     const trimmedName = normalizeRegistryIdentityName(String(name ?? ''));
-    if (!trimmedName || trimmedName.toLowerCase() === 'narrator') return { key: '', entry: null, remapped: false };
+    if (!trimmedName || isReservedCharacterIdentity(trimmedName)) return { key: '', entry: null, remapped: false };
 
     const key = normalizeRegistryIdentity(trimmedName);
     const colorMode = options.colorMode === 'effective' ? 'effective' : 'base';
@@ -1794,7 +1910,7 @@ export function buildCharacterEntry(name, options = {}) {
         : resolveUniqueAssignedColor(preferredAssignedColor, [key], { baseColor: preferredBaseColor });
     const { color: assignedColor, remapped } = assignment;
     const baseColor = normalizeHexColor(assignment.baseColor, deriveBaseColorFromEffectiveColor(assignedColor));
-    const suppliedGradient = synchronizeGradientEffectiveColors(normalizeGradient(options.gradient), applyThemeReadabilityAndBrightness);
+    const suppliedGradient = resolveReadableGradient(normalizeGradient(options.gradient), assignedColor);
 
     const origin = String(options.origin ?? 'runtime').trim().toLowerCase();
     const bypassAutomation = ['import', 'preset', 'undo'].includes(origin);

@@ -17,25 +17,40 @@ function validatedPositiveInteger(value, fallback, maximum) {
         : fallback;
 }
 
-function getLlmErrorStatus(value) {
-    for (const candidate of [value?.status, value?.statusCode, value?.response?.status, value?.cause?.status]) {
-        const status = Number(candidate);
-        if (Number.isInteger(status) && status >= 100 && status <= 599) return status;
+function getLlmErrorChain(value) {
+    const chain = [];
+    const seen = new Set();
+    for (let current = value; current != null && !seen.has(current); current = current?.cause) {
+        chain.push(current);
+        seen.add(current);
     }
-    const text = String(value?.message ?? value ?? '');
+    return chain;
+}
+
+function getLlmErrorStatus(value) {
+    const chain = getLlmErrorChain(value);
+    for (const error of chain) {
+        for (const candidate of [error?.status, error?.statusCode, error?.response?.status]) {
+            const status = Number(candidate);
+            if (Number.isInteger(status) && status >= 100 && status <= 599) return status;
+        }
+    }
+    const text = chain.map(error => String(error?.message ?? error ?? '')).join(' ');
     const match = text.match(/(?:\bHTTP\s*|\bstatus\s*[:=]?\s*|^)([1-5]\d{2})\b/i);
     return match ? Number(match[1]) : null;
 }
 
 export function classifyLlmRequestError(error) {
+    const chain = getLlmErrorChain(error);
     const status = getLlmErrorStatus(error);
-    const text = String(error?.message ?? error ?? '').toLowerCase();
-    const name = String(error?.name ?? '');
-    if (typeof error?.retryable === 'boolean' && error?.llmCategory) {
-        return { category: error.llmCategory, retryable: error.retryable, status };
+    const text = chain.map(value => String(value?.message ?? value ?? '')).join(' ').toLowerCase();
+    const names = new Set(chain.map(value => String(value?.name ?? '')).filter(Boolean));
+    const classified = chain.find(value => typeof value?.retryable === 'boolean' && value?.llmCategory);
+    if (classified) {
+        return { category: classified.llmCategory, retryable: classified.retryable, status };
     }
-    if (name === 'AbortError') return { category: 'cancelled', retryable: false, status };
-    if (name === 'TimeoutError' || /\b(?:timed? out|timeout)\b/.test(text)) {
+    if (names.has('AbortError')) return { category: 'cancelled', retryable: false, status };
+    if (names.has('TimeoutError') || /\b(?:timed? out|timeout)\b/.test(text)) {
         return { category: 'timeout', retryable: true, status };
     }
     if (status === 402 || /\b(?:quota|billing|payment required|insufficient (?:funds|credits?)|credit balance|resource exhausted)\b/.test(text)) {
@@ -348,7 +363,7 @@ export async function callLLMWithProfile(instruction, options = {}) {
         return resultText;
     } catch (e) {
         const error = annotateLlmRequestError(e);
-        if (profileId && error?.name !== 'AbortError') {
+        if (profileId && error?.llmCategory !== 'cancelled') {
             console.warn(`[DC] Connection Manager profile ${profileId} request failed:`, error);
         }
         throw error;
@@ -369,11 +384,23 @@ export function populateProfileSelect(elementId, selectedProfileId) {
             return;
         }
         const profiles = CMRS.getSupportedProfiles();
+        let selectedProfileFound = false;
         for (const p of profiles) {
             const opt = document.createElement('option');
             opt.value = p.id;
             opt.textContent = p.name || p.id;
-            if (p.id === selectedProfileId) opt.selected = true;
+            if (p.id === selectedProfileId) {
+                opt.selected = true;
+                selectedProfileFound = true;
+            }
+            select.appendChild(opt);
+        }
+        if (selectedProfileId && !selectedProfileFound) {
+            const opt = document.createElement('option');
+            opt.value = selectedProfileId;
+            opt.textContent = `Missing profile: ${selectedProfileId}`;
+            opt.disabled = true;
+            opt.selected = true;
             select.appendChild(opt);
         }
         select.disabled = false;

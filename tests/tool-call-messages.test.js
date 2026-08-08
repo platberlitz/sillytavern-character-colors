@@ -85,10 +85,12 @@ const hooks = registerHooks({
 });
 
 const { isToolCallMessage } = await import('../src/utils.js');
+const { isHostSystemOrToolMessage } = await import('../src/attribution-store.js');
 const { isColorableMessage, repairColorizedToolCallMessages, restoreColorizedToolCallText } = await import('../src/live-colors.js');
 const { colorizeMessageText, ensureCharacterEntry } = await import('../src/attribution.js');
-const { processColorBlocksInText } = await import('../src/color-blocks.js');
+const { processColorBlocksInText, recountDialogueCountsFromChat } = await import('../src/color-blocks.js');
 const state = await import('../src/state.js');
+const { isMessageEligibleForAttributionVerification } = await import('../src/verify.js');
 hooks.deregister();
 
 const settings = state.settings;
@@ -147,6 +149,34 @@ test('an ordinary system-flagged message stays colorable', () => {
     // follow a color change, so the gate must not widen to is_system.
     const hidden = { name: 'Alice', is_system: true, is_user: false, mes: '"Hi."', extra: {} };
     assert.equal(isColorableMessage(hidden), true);
+    assert.equal(isHostSystemOrToolMessage(hidden), false);
+    assert.equal(isMessageEligibleForAttributionVerification(hidden), true);
+});
+
+test('hiding compact ordinary dialogue does not turn it into a host system message', () => {
+    const hidden = {
+        name: 'Alice',
+        is_system: true,
+        is_user: false,
+        mes: '"Hi."',
+        extra: { isSmallSys: true, api: 'manual', model: 'slash command' },
+    };
+    assert.equal(isHostSystemOrToolMessage(hidden), false);
+    assert.equal(isMessageEligibleForAttributionVerification(hidden), true);
+});
+
+test('actual host system and tool messages share the non-dialogue gate', () => {
+    const system = {
+        name: 'SillyTavern System',
+        is_system: true,
+        is_user: false,
+        mes: 'Internal status',
+        extra: { type: 'generic' },
+    };
+    assert.equal(isHostSystemOrToolMessage(system), true);
+    assert.equal(isMessageEligibleForAttributionVerification(system), false);
+    assert.equal(isHostSystemOrToolMessage(toolMessage()), true);
+    assert.equal(isMessageEligibleForAttributionVerification(toolMessage()), false);
 });
 
 test('colorizing a tool-call payload is reversed byte for byte', () => {
@@ -269,5 +299,43 @@ test('a candidate whose color is still used elsewhere is kept', () => {
 
         assert.deepEqual(report.repairedIndices, [1]);
         assert.ok(registry()['sillytavern system'], 'a color still in use must not be orphaned');
+    });
+});
+
+test('a candidate who authors an ordinary message survives tool repair', () => {
+    withCleanRegistry(() => {
+        const { entry } = ensureCharacterEntry('Alice');
+        const damaged = `<font color="${entry.color}">payload</font>\n[COLORS:Alice=${entry.color}]`;
+        const chat = [
+            { name: 'Alice', is_user: false, extra: {}, mes: 'An ordinary uncolored message.' },
+            toolMessage(damaged),
+        ];
+
+        const report = repairColorizedToolCallMessages(chat);
+
+        assert.deepEqual(report.repairedIndices, [1]);
+        assert.ok(registry().alice, 'ordinary message authors are real references');
+        assert.ok(!report.removedCharacterKeys.includes('alice'));
+    });
+});
+
+test('LLM dialogue counts are rebuilt after a message deletion', () => {
+    withCleanRegistry(() => {
+        registry().alice = { name: 'Alice', color: '#112233', aliases: [], dialogueCount: 99 };
+        registry().bob = { name: 'Bob', color: '#445566', aliases: [], dialogueCount: 99 };
+        const chat = [
+            { name: 'Alice', is_user: false, extra: {}, mes: '<font color="#112233">"A"</font>\n[COLORS:Alice=#112233]' },
+            { name: 'Bob', is_user: false, extra: {}, mes: '<font color="#445566">"B"</font>' },
+            toolMessage('<font color="#112233">internal</font>'),
+        ];
+
+        assert.equal(recountDialogueCountsFromChat(chat), true);
+        assert.equal(registry().alice.dialogueCount, 1);
+        assert.equal(registry().bob.dialogueCount, 1);
+
+        chat.shift();
+        assert.equal(recountDialogueCountsFromChat(chat), true);
+        assert.equal(registry().alice.dialogueCount, 0);
+        assert.equal(registry().bob.dialogueCount, 1);
     });
 });

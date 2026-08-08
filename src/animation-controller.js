@@ -80,7 +80,10 @@ function removeRoot(root) {
     observer?.unobserve(root);
     roots.delete(root);
     visibleRoots.delete(root);
-    if (!roots.size) fallbackVisibilityIterator = null;
+    if (!roots.size) {
+        fallbackVisibilityIterator = null;
+        removeFallbackVisibilityListeners();
+    }
     for (const element of runningElements) {
         if (element === root || root.contains?.(element)) {
             element.classList?.remove('dc-gradient-running');
@@ -134,7 +137,7 @@ function maintainRegisteredRoots() {
             continue;
         }
         const requested = collectRequestedElements(root, { limit: 1, scanLimit: AUTO_ELEMENT_SCAN_LIMIT });
-        if (!requested.elements.length && requested.complete) removeRoot(root);
+        if (!requested.elements.length && (requested.complete || !root.querySelector?.(REQUESTED_SELECTOR))) removeRoot(root);
     }
 }
 
@@ -183,38 +186,45 @@ function getAutoRoots() {
 
 function applyRunningState() {
     refreshFrame = 0;
-    clearRunningElements();
     maintainRegisteredRoots();
-
+    const desiredElements = new Set();
     const mode = normalizeMode(settings.gradientAnimationMode);
     const reduced = reducedMotionQuery?.matches === true;
-    if (document.hidden || reduced || mode === 'static') return;
-    if (mode === 'auto' && !observer) refreshFallbackRootVisibility();
-
-    const activeRoots = mode === 'full' ? roots : getAutoRoots();
-    let remaining = mode === 'auto' ? AUTO_ANIMATED_ELEMENT_LIMIT : Number.POSITIVE_INFINITY;
-    for (const root of activeRoots) {
-        if (remaining <= 0) break;
-        if (!root.isConnected) {
-            removeRoot(root);
-            continue;
-        }
-        const result = collectRequestedElements(root, {
-            limit: remaining,
-            scanLimit: mode === 'auto' ? AUTO_ELEMENT_SCAN_LIMIT : Number.POSITIVE_INFINITY,
-        });
-        if (!result.elements.length && result.complete) {
-            removeRoot(root);
-            continue;
-        }
-        for (const element of result.elements) {
+    if (!document.hidden && !reduced && mode !== 'static') {
+        if (mode === 'auto' && !observer) refreshFallbackRootVisibility();
+        const activeRoots = mode === 'full' ? roots : getAutoRoots();
+        let remaining = mode === 'auto' ? AUTO_ANIMATED_ELEMENT_LIMIT : Number.POSITIVE_INFINITY;
+        for (const root of activeRoots) {
             if (remaining <= 0) break;
-            element.classList.add('dc-gradient-running');
-            if (!runningElements.has(element)) {
-                runningElements.add(element);
+            if (!root.isConnected) {
+                removeRoot(root);
+                continue;
+            }
+            const result = collectRequestedElements(root, {
+                limit: remaining,
+                scanLimit: mode === 'auto' ? AUTO_ELEMENT_SCAN_LIMIT : Number.POSITIVE_INFINITY,
+            });
+            if (!result.elements.length && result.complete) {
+                removeRoot(root);
+                continue;
+            }
+            for (const element of result.elements) {
+                if (remaining <= 0) break;
+                if (desiredElements.has(element)) continue;
+                desiredElements.add(element);
                 remaining--;
             }
         }
+    }
+    for (const element of runningElements) {
+        if (element.isConnected && desiredElements.has(element)) continue;
+        element.classList?.remove('dc-gradient-running');
+        runningElements.delete(element);
+    }
+    for (const element of desiredElements) {
+        if (runningElements.has(element)) continue;
+        element.classList?.add('dc-gradient-running');
+        runningElements.add(element);
     }
 }
 
@@ -292,8 +302,8 @@ export function registerGradientAnimationRoot(root) {
         roots.add(root);
         if (isNearViewport(root)) visibleRoots.add(root);
         observer?.observe(root);
+        refreshGradientAnimationState();
     }
-    refreshGradientAnimationState();
     return root;
 }
 

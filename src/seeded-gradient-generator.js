@@ -66,10 +66,20 @@ export function createGradientRandom(value) {
 export function advanceGradientGenerator(value, amount = 1) {
     const generator = normalizeGradientGenerator(value);
     const rawAmount = Number(amount);
-    const increment = Number.isFinite(rawAmount) ? Math.max(0, Math.floor(rawAmount)) : 1;
+    const increment = Number.isFinite(rawAmount)
+        ? Math.max(0, Math.min(Number.MAX_SAFE_INTEGER, Math.floor(rawAmount)))
+        : 1;
+    if (increment <= Number.MAX_SAFE_INTEGER - generator.iteration) {
+        return { ...generator, iteration: generator.iteration + increment };
+    }
+    const seedHash = createXmur3(JSON.stringify([generator.algorithm, generator.seed, 'reseed']));
+    const rootSeed = generator.seed.split('\u001e', 1)[0];
     return {
         ...generator,
-        iteration: Math.min(Number.MAX_SAFE_INTEGER, generator.iteration + increment),
+        seed: `${rootSeed}\u001ereseed-${[seedHash(), seedHash(), seedHash(), seedHash()]
+            .map(part => part.toString(16).padStart(8, '0'))
+            .join('')}`,
+        iteration: increment - (Number.MAX_SAFE_INTEGER - generator.iteration) - 1,
     };
 }
 

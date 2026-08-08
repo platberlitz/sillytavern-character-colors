@@ -17,6 +17,8 @@ export const DEFAULT_GRADIENT_DURATION = 8;
 export const GRADIENT_CROSS_CHARACTER_DELTA_E = 8;
 export const GRADIENT_PALETTE_HUE_SPREAD = 30;
 export const MAX_RESERVED_GRADIENT_COLORS = 64;
+export const MAX_GRADIENT_UNIFORM_SAMPLES = 17;
+export const MAX_GRADIENT_RAMP_SAMPLES = 24;
 
 function normalizeHex(value, fallback = null) {
     const color = String(value ?? '').trim();
@@ -89,6 +91,107 @@ export function normalizeGradient(value) {
             reverse: normalizeBoolean(animation.reverse, false),
         },
     };
+}
+
+export function getGradientColorStops(entry) {
+    const source = entry && typeof entry === 'object' && !Array.isArray(entry) ? entry : {};
+    const fallbackColor = normalizeHex(source.color, normalizeHex(source.baseColor, '#888888'));
+    const gradient = normalizeGradient(source.gradient);
+    if (!gradient) {
+        return [
+            { offset: 0, color: fallbackColor },
+            { offset: 1, color: fallbackColor },
+        ];
+    }
+    return [
+        { offset: Number(gradient.primaryPosition.toFixed(4)) / 100, color: fallbackColor },
+        ...gradient.stops.map(stop => ({ offset: Number(stop.position.toFixed(4)) / 100, color: stop.color })),
+    ].sort((left, right) => left.offset - right.offset);
+}
+
+function rgbChannelsToHex(channels) {
+    return `#${channels
+        .map(channel => Math.max(0, Math.min(255, Math.round(channel))).toString(16).padStart(2, '0'))
+        .join('')}`;
+}
+
+export function interpolateGradientColor(stops, offset, side = 'before') {
+    const source = Array.isArray(stops) && stops.length ? stops : getGradientColorStops({});
+    const position = Math.max(0, Math.min(1, Number(offset) || 0));
+    let exactStart = -1;
+    let exactEnd = -1;
+    for (let index = 0; index < source.length; index++) {
+        if (source[index].offset !== position) continue;
+        if (exactStart < 0) exactStart = index;
+        exactEnd = index;
+    }
+    if (exactStart >= 0) return source[side === 'after' ? exactEnd : exactStart].color;
+    if (position < source[0].offset) return source[0].color;
+    if (position > source[source.length - 1].offset) return source[source.length - 1].color;
+    const rightIndex = source.findIndex(stop => stop.offset > position);
+    if (rightIndex <= 0) return source[0].color;
+    const left = source[rightIndex - 1];
+    const right = source[rightIndex];
+    const width = right.offset - left.offset;
+    if (width <= 0) return right.color;
+    const progress = (position - left.offset) / width;
+    const leftRgb = parseHexRgb(left.color);
+    const rightRgb = parseHexRgb(right.color);
+    return rgbChannelsToHex(leftRgb.map((channel, index) => channel + ((rightRgb[index] - channel) * progress)));
+}
+
+export function getGradientSamplePoints(entry, options = {}) {
+    const stops = getGradientColorStops(entry);
+    const rawUniformCount = Number(options.uniformCount);
+    const uniformCount = Math.max(2, Math.min(
+        MAX_GRADIENT_UNIFORM_SAMPLES,
+        Number.isFinite(rawUniformCount) ? Math.floor(rawUniformCount) : 9,
+    ));
+    const rawMaximum = Number(options.maxSamples);
+    const maximum = Math.max(2, Math.min(
+        MAX_GRADIENT_RAMP_SAMPLES,
+        Number.isFinite(rawMaximum) ? Math.floor(rawMaximum) : MAX_GRADIENT_RAMP_SAMPLES,
+    ));
+    const points = new Map();
+    const add = (offset, side = 'before') => {
+        const normalized = Math.max(0, Math.min(1, offset));
+        points.set(`${normalized}:${side}`, { offset: normalized, side });
+    };
+
+    add(0);
+    add(1);
+    for (let start = 0; start < stops.length;) {
+        let end = start + 1;
+        while (end < stops.length && stops[end].offset === stops[start].offset) end++;
+        add(stops[start].offset);
+        if (new Set(stops.slice(start, end).map(stop => stop.color)).size > 1) add(stops[start].offset, 'after');
+        start = end;
+    }
+    // Global uniform samples can jump over a narrow authored blend. Every real
+    // stop interval gets its own midpoint before the remaining sample budget is
+    // filled uniformly.
+    for (let index = 1; index < stops.length; index++) {
+        const left = stops[index - 1].offset;
+        const right = stops[index].offset;
+        if (right > left) add((left + right) / 2);
+    }
+    const requiredCount = points.size;
+    const boundedMaximum = Math.max(requiredCount, maximum);
+    for (let index = 0; index < uniformCount && points.size < boundedMaximum; index++) {
+        add(index / (uniformCount - 1));
+    }
+    return [...points.values()].sort((left, right) => left.offset - right.offset
+        || (left.side === right.side ? 0 : left.side === 'before' ? -1 : 1));
+}
+
+export function sampleGradientRamp(entry, options = {}) {
+    const stops = getGradientColorStops(entry);
+    const transformColor = typeof options.transformColor === 'function' ? options.transformColor : color => color;
+    return getGradientSamplePoints(entry, options).map(point => ({
+        ...point,
+        position: point.offset * 100,
+        color: normalizeHex(transformColor(interpolateGradientColor(stops, point.offset, point.side)), '#888888'),
+    }));
 }
 
 function randomSample(random) {
@@ -383,11 +486,14 @@ export function applyGradientPresetToEntry(entry, preset, resolveEffectiveColor 
     const normalizedPreset = normalizeGradientPreset(preset);
     if (!entry || typeof entry !== 'object' || !normalizedPreset) return null;
     const color = normalizeHex(resolveEffectiveColor(normalizedPreset.baseColor), normalizedPreset.baseColor);
+    const gradient = typeof resolveEffectiveColor.resolveGradient === 'function'
+        ? resolveEffectiveColor.resolveGradient(normalizedPreset.gradient, color)
+        : synchronizeGradientEffectiveColors(normalizedPreset.gradient, resolveEffectiveColor);
     return {
         ...entry,
         baseColor: normalizedPreset.baseColor,
         color,
-        gradient: synchronizeGradientEffectiveColors(normalizedPreset.gradient, resolveEffectiveColor),
+        gradient,
         gradientGenerator: null,
     };
 }

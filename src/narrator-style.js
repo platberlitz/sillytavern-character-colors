@@ -6,9 +6,13 @@ export const NARRATOR_VISUAL_ID = '__narrator__';
 export const DEFAULT_NARRATOR_STYLE = Object.freeze({
     enabled: false,
     baseColor: '#888888',
+    font: '',
+    style: '',
     gradient: null,
     gradientGenerator: null,
 });
+
+const NARRATOR_TEXT_STYLES = new Set(['', 'bold', 'italic', 'bold italic']);
 
 let transientNarratorCount = null;
 let transientNarratorCountSource = null;
@@ -33,6 +37,20 @@ function normalizeHex(value, fallback = '#888888') {
     return /^#[0-9a-fA-F]{6}$/.test(color) ? color.toLowerCase() : fallback;
 }
 
+function normalizeFont(value) {
+    return String(value ?? '')
+        .replace(/[^A-Za-z0-9 .,'&+-]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 80);
+}
+
+function resolveGradientColors(gradient, primaryColor, resolver) {
+    return typeof resolver.resolveGradient === 'function'
+        ? resolver.resolveGradient(gradient, primaryColor)
+        : synchronizeGradientEffectiveColors(gradient, resolver);
+}
+
 function normalizeGenerator(value, gradient) {
     if (!gradient || !value || typeof value !== 'object' || Array.isArray(value)) return null;
     if (value.algorithm !== undefined && value.algorithm !== GRADIENT_GENERATOR_ALGORITHM) return null;
@@ -54,6 +72,8 @@ export function normalizeNarratorStyle(value, options = {}) {
     return {
         enabled,
         baseColor,
+        font: normalizeFont(source.font),
+        style: NARRATOR_TEXT_STYLES.has(source.style) ? source.style : '',
         gradient,
         gradientGenerator: normalizeGenerator(source.gradientGenerator, gradient),
     };
@@ -63,7 +83,8 @@ export function setNarratorStyle(target, value = target?.narratorStyle, resolveE
     if (!target || typeof target !== 'object') return normalizeNarratorStyle(value);
     const normalized = normalizeNarratorStyle(value, { legacy: target });
     const resolver = typeof resolveEffectiveColor === 'function' ? resolveEffectiveColor : color => color;
-    normalized.gradient = synchronizeGradientEffectiveColors(normalized.gradient, resolver);
+    const effectivePrimary = normalizeHex(resolver(normalized.baseColor), normalized.baseColor);
+    normalized.gradient = resolveGradientColors(normalized.gradient, effectivePrimary, resolver);
     normalized.gradientGenerator = normalizeGenerator(normalized.gradientGenerator, normalized.gradient);
     target.narratorStyle = normalized;
     // Keep the release-one mirrors current for old consumers and old exports.
@@ -77,18 +98,19 @@ export function getNarratorVisual(source, resolveEffectiveColor = color => color
     const style = normalizeNarratorStyle(settingsSource.narratorStyle, { legacy: settingsSource });
     if (!style.enabled) return null;
     const resolver = typeof resolveEffectiveColor === 'function' ? resolveEffectiveColor : color => color;
+    const color = normalizeHex(resolver(style.baseColor), style.baseColor);
     return {
         id: NARRATOR_VISUAL_ID,
         key: NARRATOR_VISUAL_ID,
         kind: 'narrator',
         name: 'Narration',
         baseColor: style.baseColor,
-        color: normalizeHex(resolver(style.baseColor), style.baseColor),
-        gradient: synchronizeGradientEffectiveColors(style.gradient, resolver),
+        color,
+        gradient: resolveGradientColors(style.gradient, color, resolver),
         gradientGenerator: normalizeGenerator(style.gradientGenerator, style.gradient),
         aliases: [],
-        font: '',
-        style: '',
+        font: style.font,
+        style: style.style,
     };
 }
 

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+    hasAttributionVerifierBallotQuorum,
     isSpeakerNamePresentInText,
     normalizeAttributionVerifyPasses,
     reduceAttributionVerifierBallots,
@@ -45,6 +46,21 @@ test('a one-off guess is dropped', () => {
         [],
     ]);
     assert.deepEqual(agreed, []);
+});
+
+test('invalid verifier passes represented as empty ballots stay in the denominator', () => {
+    assert.deepEqual(reduceAttributionVerifierBallots([
+        [correction(0, 'Alice')],
+        [],
+        [],
+    ]), []);
+});
+
+test('verification requires a majority of configured passes to parse', () => {
+    assert.equal(hasAttributionVerifierBallotQuorum(1, 3), false);
+    assert.equal(hasAttributionVerifierBallotQuorum(2, 3), true);
+    assert.equal(hasAttributionVerifierBallotQuorum(2, 5), false);
+    assert.equal(hasAttributionVerifierBallotQuorum(3, 5), true);
 });
 
 test('passes that disagree on the speaker cancel out', () => {
@@ -142,6 +158,12 @@ test('grounding does not match a name inside another word', () => {
 test('grounding matches names with spaces and punctuation', () => {
     const message = { name: 'Narrator', mes: '"Enough," said Mary-Anne O\'Connor.' };
     assert.equal(groundedIn("Mary-Anne O'Connor", [message], 0), true);
+});
+
+test('grounding matches accented and CJK names before curly possessives', () => {
+    const message = { name: 'Narrator', mes: 'Élodie’s voice softened as 愛子が前に出た。' };
+    assert.equal(groundedIn('Élodie', [message], 0), true);
+    assert.equal(groundedIn('愛子', [message], 0), true);
 });
 
 test('grounding ignores case', () => {

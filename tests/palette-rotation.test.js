@@ -50,19 +50,27 @@ const hooks = registerHooks({
 
 const {
     applyThemeReadabilityAndBrightness,
+    applyGradientPreset,
     buildCharacterEntry,
+    collectReservedGradientColors,
+    createRandomGradient,
     deriveBaseColorFromEffectiveColor,
     detectTheme,
     getContrastRatio,
     getContrastSurfaceColor,
+    getTextContrastSurfaceColor,
     getEntryEffectiveColor,
     getNextColor,
+    flipColorsForTheme,
     invalidateThemeCache,
     isAssignedColorConflict,
     syncAllEffectiveColors,
 } = await import('../src/palettes.js');
 const { characterColors, settings } = await import('../src/state.js');
-const { colorDistanceOklab } = await import('../src/gradients.js');
+const { BUILTIN_GRADIENT_PRESETS, colorDistanceOklab, getGradientColorStops, interpolateGradientColor } = await import('../src/gradients.js');
+const { NARRATOR_VISUAL_ID, getNarratorVisual } = await import('../src/narrator-style.js');
+const { sampleGradient } = await import('../src/perceptual-conflicts.js');
+const { resolveVisual } = await import('../src/visual-resolver.js');
 const { ASSIGNED_COLOR_MIN_DELTA_E, hexToHsl } = await import('../src/utils.js');
 hooks.deregister();
 
@@ -382,5 +390,165 @@ test('a transparent page background no longer reads as dark', () => {
         pageBackground = 'rgba(0, 0, 0, 0)';
         invalidateThemeCache();
         assert.equal(detectTheme(), 'light');
+    });
+});
+
+test('an unsafe midpoint inside a narrow stop interval falls back to a solid readable visual', () => {
+    withPalette({ themeMode: 'dark', brightness: 0 }, () => {
+        const entry = {};
+        applyGradientPreset(entry, {
+            baseColor: '#ff00ff',
+            color: '#ff00ff',
+            gradient: {
+                type: 'linear',
+                primaryPosition: 51,
+                stops: [{ baseColor: '#00ff00', color: '#00ff00', position: 52 }],
+            },
+        });
+
+        assert.equal(new Set([entry.color, ...entry.gradient.stops.map(stop => stop.color)]).size, 1);
+        assert.equal(resolveVisual(entry).gradientCss, null);
+        assert.ok(sampleGradient(entry, { sampleCount: 17 })
+            .every(sample => getContrastRatio(sample.color, getTextContrastSurfaceColor(entry.color)) >= 4.5));
+    });
+});
+
+test('an unsafe interpolation color between finite samples falls back to a solid visual', () => {
+    withPalette({ themeMode: 'dark', brightness: 0 }, () => {
+        const candidate = {
+            color: '#f86f54',
+            gradient: {
+                type: 'linear',
+                primaryPosition: 0,
+                stops: [{ baseColor: '#309bc5', color: '#309bc5', position: 100 }],
+            },
+        };
+        const surface = '#202328';
+        assert.ok(sampleGradient(candidate, { sampleCount: 17 })
+            .every(sample => getContrastRatio(sample.color, surface) >= 4.5));
+        const missedColor = interpolateGradientColor(getGradientColorStops(candidate), 0.578);
+        assert.equal(missedColor, '#848895');
+        assert.ok(getContrastRatio(missedColor, surface) < 4.5);
+
+        const entry = {};
+        applyGradientPreset(entry, { baseColor: candidate.color, color: candidate.color, gradient: candidate.gradient });
+        assert.equal(entry.gradient.stops[0].color, entry.color);
+        assert.equal(resolveVisual(entry).gradientCss, null);
+    });
+});
+
+test('every built-in gradient remains readable after ramp and highlight transformation', () => {
+    for (const themeMode of ['dark', 'light']) {
+        for (const highlightMode of [false, true]) {
+            withPalette({ themeMode, brightness: 0 }, () => {
+                settings.highlightMode = highlightMode;
+                for (const [name, preset] of Object.entries(BUILTIN_GRADIENT_PRESETS)) {
+                    const entry = {};
+                    applyGradientPreset(entry, preset);
+                    const surface = getTextContrastSurfaceColor(entry.color);
+                    const minimum = Math.min(...sampleGradient(entry, { sampleCount: 17 })
+                        .map(sample => getContrastRatio(sample.color, surface)));
+                    assert.ok(minimum >= 4.5, `${themeMode}/${highlightMode ? 'highlight' : 'plain'} ${name}: ${minimum}`);
+                }
+            });
+        }
+    }
+});
+
+test('narrator primary and stop colors are reserved from palette assignment', () => {
+    withPalette({ themeMode: 'dark', brightness: 0 }, () => {
+        settings.narratorStyle = {
+            enabled: true,
+            baseColor: '#ff00ff',
+            gradient: {
+                type: 'linear',
+                primaryPosition: 0,
+                stops: [{ baseColor: '#00ff00', color: '#00ff00', position: 100 }],
+            },
+        };
+        const reserved = collectReservedGradientColors();
+        assert.ok(reserved.includes(applyThemeReadabilityAndBrightness('#ff00ff')));
+        assert.ok(reserved.includes(applyThemeReadabilityAndBrightness('#00ff00')));
+    });
+});
+
+test('narrator gradient generation uses its visual identity instead of its display name', () => {
+    withPalette({ themeMode: 'dark', brightness: 0 }, () => {
+        settings.gradientRandomMasterSeed = 'identity-test';
+        settings.narratorStyle = {
+            enabled: true,
+            baseColor: '#f86f54',
+            gradient: {
+                type: 'linear',
+                primaryPosition: 0,
+                stops: [{ baseColor: '#ffffff', color: '#ffffff', position: 100 }],
+            },
+        };
+        characterColors.narration = {
+            name: 'Narration',
+            baseColor: '#f86f54',
+            color: '#f86f54',
+            gradient: {
+                type: 'linear',
+                primaryPosition: 0,
+                stops: [{ baseColor: '#ff80ff', color: '#ff80ff', position: 100 }],
+            },
+        };
+
+        const narratorReserved = collectReservedGradientColors(NARRATOR_VISUAL_ID);
+        const characterReserved = collectReservedGradientColors('Narration');
+        const narratorStop = applyThemeReadabilityAndBrightness('#ffffff');
+        assert.ok(narratorReserved.includes('#ff80ff'));
+        assert.ok(!narratorReserved.includes(narratorStop));
+        assert.ok(characterReserved.includes(narratorStop));
+        assert.ok(!characterReserved.includes('#ff80ff'));
+
+        const narrator = getNarratorVisual(settings, applyThemeReadabilityAndBrightness);
+        const first = createRandomGradient(narrator, { initial: true, totalStops: 3 });
+        const repeatNarrator = getNarratorVisual(settings, applyThemeReadabilityAndBrightness);
+        const repeat = createRandomGradient(repeatNarrator, { initial: true, totalStops: 3 });
+        const characterGradient = createRandomGradient(characterColors.narration, { initial: true, totalStops: 3 });
+
+        assert.equal(narrator.gradientGenerator.seed, `identity-test\u001f${NARRATOR_VISUAL_ID}`);
+        assert.equal(characterColors.narration.gradientGenerator.seed, 'identity-test\u001fnarration');
+        assert.deepEqual(first, repeat);
+        assert.notDeepEqual(first, characterGradient);
+    });
+});
+
+test('character creation rejects both reserved narrator identities', () => {
+    withPalette({ themeMode: 'dark', brightness: 0 }, () => {
+        assert.ok(buildCharacterEntry('Narration').entry);
+        for (const name of ['Narrator', '__narrator__']) {
+            assert.deepEqual(buildCharacterEntry(name), { key: '', entry: null, remapped: false });
+        }
+    });
+});
+
+test('flipping a generated gradient clears stale generator provenance', () => {
+    withPalette({ themeMode: 'dark', brightness: 0 }, () => {
+        const originalGetElementById = document.getElementById;
+        const originalToastr = globalThis.toastr;
+        document.getElementById = id => id === 'dc-legend-float' ? { style: { display: 'none' } } : null;
+        globalThis.toastr = { success() {} };
+        characterColors.alice = {
+            name: 'Alice',
+            baseColor: '#ff00ff',
+            color: applyThemeReadabilityAndBrightness('#ff00ff'),
+            gradient: {
+                type: 'linear',
+                primaryPosition: 0,
+                stops: [{ baseColor: '#00ff00', color: applyThemeReadabilityAndBrightness('#00ff00'), position: 100 }],
+            },
+            gradientGenerator: { algorithm: 'dc-gradient-v1', seed: 'stale', iteration: 3 },
+        };
+        try {
+            flipColorsForTheme();
+            assert.equal(characterColors.alice.gradientGenerator, null);
+        } finally {
+            document.getElementById = originalGetElementById;
+            if (originalToastr === undefined) delete globalThis.toastr;
+            else globalThis.toastr = originalToastr;
+        }
     });
 });

@@ -3,15 +3,15 @@ import { clearSpeakerRegexCache } from './attribution.js';
 import { GRADIENT_ANIMATION_MODES } from './animation-controller.js';
 import { COLOR_VISION_MODES } from './color-vision.js';
 import { createGradientPresetFromEntry, normalizeGradient, normalizeGradientPreset, normalizeGradientPresets, serializeGradient } from './gradients.js';
-import { isDangerousRegistryIdentity, migrateLegacyRegistryEntries, migrateLegacyRegistryIdentities, migrateLegacyRegistryIdentityName, normalizeGroupProfile, normalizeGroupProfiles, normalizeRegistryIdentity, normalizeRegistryIdentityName } from './group-profiles.js';
+import { isDangerousRegistryIdentity, isReservedCharacterIdentity, migrateLegacyRegistryEntries, migrateLegacyRegistryIdentities, migrateLegacyRegistryIdentityName, normalizeGroupProfile, normalizeGroupProfiles, normalizeRegistryIdentity, normalizeRegistryIdentityName, resolveCanonicalAliasOwners } from './group-profiles.js';
 import { createHistorySnapshot, parseHistorySnapshot, saveHistory, showUndoToast } from './history.js';
 import { analyzeJsonSource } from './import-codec.js';
-import { applyLiveColorChangesFromSnapshot, captureEffectiveColorSnapshot, commit } from './live-colors.js';
+import { applyLiveColorChangesFromSnapshot, captureEffectiveColorSnapshot, commit, flushColorStateSave } from './live-colors.js';
 import { normalizeNarratorStyle, setNarratorStyle } from './narrator-style.js';
-import { CUSTOM_PALETTE_KEY, CUSTOM_PALETTE_META_KEY, applyThemeReadabilityAndBrightness, buildCharacterEntry, deriveBaseColorFromEffectiveColor, getBaseColor, getPersonaName, getRepairedBaseLightnessWindow, invalidateThemeCache, normalizeCustomPalettes, syncAllEffectiveColors } from './palettes.js';
+import { COLOR_THEMES, CUSTOM_PALETTE_KEY, CUSTOM_PALETTE_META_KEY, applyThemeReadabilityAndBrightness, buildCharacterEntry, deriveBaseColorFromEffectiveColor, getBaseColor, getPersonaName, getRepairedBaseLightnessWindow, invalidateThemeCache, normalizeCustomPalettes, syncAllEffectiveColors } from './palettes.js';
 import { injectPrompt } from './prompts.js';
 import { extension_settings, getCharacters, getContext, getRequestHeaders, saveCharacterDebounced, saveMetadata, saveSettings, saveSettingsDebounced } from './st-api.js';
-import { ACTIVE_SETTING_KEYS, AUTO_SYNC_SAVE_TIMEOUT_MS, COLOR_SCHEMA_VERSION, COLOR_STORAGE_SCOPES, DEFAULT_COLOR_STORAGE_SCOPE, GLOBAL_SETTINGS_V2_KEY, GLOBAL_SETTINGS_V2_KEYS, GLOBAL_VISUAL_KEYS, LEGACY_AUTO_SYNC_ENABLED_KEY, LEGACY_GLOBAL_SETTINGS_KEY, LEGEND_POSITION_KEY, MODULE_NAME, PRESETS_KEY, TOGGLE_SETTING_DEFAULTS, autoSyncEnabled, autoSyncInterval, autoSyncLastTimestamp, autoSyncLastWriterId, autoSyncPendingRecord, autoSyncSaveTimeout, autoSyncSequence, autoSyncStatusError, characterColors, colorHistory, createLatestRequestGate, expandedCharacterRows, getAutoSyncRecordDisposition, groupProfiles, historyIndex, lastCharKey, lastProcessedMessageSignature, preserveLocalRemoteFontConsent, selectedCharacterKeys, setAutoSyncEnabled, setAutoSyncInterval, setAutoSyncLastTimestamp, setAutoSyncLastWriterId, setAutoSyncPendingRecord, setAutoSyncSaveTimeout, setAutoSyncSequence, setAutoSyncStatusError, setCharacterColors, setColorHistory, setExpandedCharacterRows, setGroupProfiles, setHistoryIndex, setLastCharKey, setLastProcessedMessageSignature, setSwapMode, settings, swapMode } from './state.js';
+import { ACTIVE_SETTING_KEYS, AUTO_SYNC_SAVE_TIMEOUT_MS, COLOR_SCHEMA_VERSION, COLOR_STORAGE_SCOPES, DEFAULT_COLOR_STORAGE_SCOPE, GLOBAL_SETTINGS_V2_KEY, GLOBAL_VISUAL_KEYS, LEGACY_AUTO_SYNC_ENABLED_KEY, LEGACY_GLOBAL_SETTINGS_KEY, LEGEND_POSITION_KEY, MODULE_NAME, PORTABLE_SETTING_KEYS, PRESETS_KEY, TOGGLE_SETTING_DEFAULTS, autoSyncEnabled, autoSyncInterval, autoSyncLastTimestamp, autoSyncLastWriterId, autoSyncPendingRecord, autoSyncSaveTimeout, autoSyncSequence, autoSyncStatusError, characterColors, colorHistory, colorStateSaveTimer, createLatestRequestGate, expandedCharacterRows, getAutoSyncRecordDisposition, groupProfiles, historyIndex, lastCharKey, lastProcessedMessageSignature, pendingColorStateHistory, pendingColorStateInjectPrompt, pendingColorStateSaveData, pendingColorStateUpdateList, preserveLocalRemoteFontConsent, selectedCharacterKeys, setAutoSyncEnabled, setAutoSyncInterval, setAutoSyncLastTimestamp, setAutoSyncLastWriterId, setAutoSyncPendingRecord, setAutoSyncSaveTimeout, setAutoSyncSequence, setAutoSyncStatusError, setCharacterColors, setColorHistory, setExpandedCharacterRows, setGroupProfiles, setHistoryIndex, setLastCharKey, setLastProcessedMessageSignature, setSwapMode, settings, swapMode, synchronizeEnabledLifecycle } from './state.js';
 import { AESTHETIC_APPEARANCE_KEYS, StylePackError, analyzeStylePackConflicts, buildStylePackInstallationPlan, flattenStylePackAssignmentPresets } from './style-packs.js';
 import { analyzeStylePackEnvelopeSource, digestStylePackEnvelope, normalizeStylePackEnvelope } from './style-pack-adapter.js';
 import { refreshGradientPresetControls, syncUIWithSettings, updateCharList } from './ui.js';
@@ -35,7 +35,10 @@ const ORDINARY_IMPORT_OUTPUT_LIMITS = Object.freeze({
 const AUTO_SYNC_TIMESTAMP_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?(?:Z|[+-](\d{2}):(\d{2}))$/;
 const AUTO_SYNC_WRITER_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 const LOCAL_REMOTE_FONT_CONSENT_KEY = 'dc_allow_remote_fonts_local_consent_v1';
+const LOCAL_CONNECTION_PROFILES_KEY = 'dc_connection_profiles_local_v1';
+const CONNECTION_PROFILE_SETTING_KEYS = Object.freeze(['llmConnectionProfile', 'attributionConnectionProfile']);
 let localRemoteFontConsent = null;
+let volatileLocalConnectionProfiles = null;
 
 function getLocalRemoteFontConsent() {
     if (typeof localRemoteFontConsent === 'boolean') return localRemoteFontConsent;
@@ -56,6 +59,50 @@ function persistLocalRemoteFontConsent(value) {
     }
 }
 
+function normalizeConnectionProfileId(value) {
+    return value === null ? null : normalizeSettingString(value, 256) || null;
+}
+
+function normalizeLocalConnectionProfiles(source) {
+    return Object.fromEntries(CONNECTION_PROFILE_SETTING_KEYS.map(key => [
+        key,
+        normalizeConnectionProfileId(source?.[key]),
+    ]));
+}
+
+function getLocalConnectionProfiles() {
+    try {
+        const raw = localStorage.getItem(LOCAL_CONNECTION_PROFILES_KEY);
+        if (raw === null) return volatileLocalConnectionProfiles;
+        const parsed = JSON.parse(raw);
+        return isPlainObject(parsed) ? normalizeLocalConnectionProfiles(parsed) : volatileLocalConnectionProfiles;
+    } catch {
+        return volatileLocalConnectionProfiles;
+    }
+}
+
+function persistLocalConnectionProfiles(source) {
+    const normalized = normalizeLocalConnectionProfiles(source);
+    try {
+        localStorage.setItem(LOCAL_CONNECTION_PROFILES_KEY, JSON.stringify(normalized));
+        volatileLocalConnectionProfiles = null;
+    } catch {
+        volatileLocalConnectionProfiles = normalized;
+    }
+}
+
+function migrateLegacyLocalConnectionProfiles(source) {
+    if (getLocalConnectionProfiles() || !isPlainObject(source)
+        || !CONNECTION_PROFILE_SETTING_KEYS.some(key => hasOwn(source, key))) return;
+    persistLocalConnectionProfiles(source);
+}
+
+function applyLocalConnectionProfiles() {
+    const local = getLocalConnectionProfiles();
+    if (!local) return;
+    Object.assign(settings, local);
+}
+
 function createAutoSyncWriterId() {
     if (typeof globalThis.crypto?.randomUUID === 'function') return `dc:${globalThis.crypto.randomUUID()}`;
     return `dc:${Date.now().toString(36)}:${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`;
@@ -64,7 +111,7 @@ function createAutoSyncWriterId() {
 export const AUTO_SYNC_WRITER_ID = createAutoSyncWriterId();
 
 const FONT_TRIM_RULE = Object.freeze({
-    id: 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d',
+    id: 'dialogue-colors:trim-font-tags:v1',
     scriptName: '[Dialogue Colors] Trim Exact Font Tags',
     findRegex: '/<font(?:\\s+[^<>]*?)?\\s*\\/?>|<\\/font\\s*>/gi',
     replaceString: '',
@@ -72,6 +119,24 @@ const FONT_TRIM_RULE = Object.freeze({
     placement: Object.freeze([2]),
     disabled: false,
     markdownOnly: false,
+    promptOnly: true,
+    runOnEdit: true,
+    substituteRegex: 0,
+    minDepth: null,
+    maxDepth: null,
+});
+
+const LEGACY_FONT_TRIM_RULE_ID = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
+
+const COLOR_BLOCK_TRIM_RULE = Object.freeze({
+    id: 'dialogue-colors:trim-color-blocks:v1',
+    scriptName: '[Dialogue Colors] Trim Color Blocks',
+    findRegex: '/\\[COLORS?:[^\\]]*\\]/gi',
+    replaceString: '',
+    trimStrings: Object.freeze([]),
+    placement: Object.freeze([2]),
+    disabled: false,
+    markdownOnly: true,
     promptOnly: true,
     runOnEdit: true,
     substituteRegex: 0,
@@ -98,6 +163,7 @@ const CSS_EFFECTS_TRIM_RULE = Object.freeze({
 export function normalizeToggleSettings() {
     normalizeCurrentColorStorageScope();
     pruneInactiveSettings();
+    Object.assign(settings, normalizeStoredSettings(settings));
     for (const [key, fallback] of Object.entries(TOGGLE_SETTING_DEFAULTS)) {
         settings[key] = normalizeBoolean(settings[key], fallback);
     }
@@ -252,6 +318,7 @@ function migrateLegacyCharacterRegistry(source, groupNames, migration, path) {
         maximum: 120,
         fallback: 'Legacy character',
         nameFromValue: true,
+        reserveCharacterIdentities: true,
     });
     recordStorageIdentityMigration(migration, path, migrated.renames);
     const registry = Object.create(null);
@@ -265,6 +332,7 @@ function migrateLegacyCharacterRegistry(source, groupNames, migration, path) {
             const aliases = migrateLegacyRegistryIdentities(entry.aliases, {
                 maximum: 120,
                 fallback: `${name} alias`,
+                reserveCharacterIdentities: true,
             });
             entry.aliases = aliases.values;
             recordStorageIdentityMigration(migration, `${path}.${name}.aliases`, aliases.renames);
@@ -509,15 +577,9 @@ export function getLegacyLocalStorageValue(key) {
 
 export function applySettingsSubset(source, keys) {
     if (!source || typeof source !== 'object') return;
+    const normalized = normalizeStoredSettings(source);
     for (const key of keys) {
-        if (source[key] !== undefined) settings[key] = source[key];
-    }
-    if (keys.includes('colorStorageScope') && source.colorStorageScope === undefined && source.shareColorsGlobally !== undefined) {
-        settings.colorStorageScope = normalizeColorStorageScope(undefined, source.shareColorsGlobally);
-    }
-    if (keys.includes('narratorStyle') && (source.narratorStyle !== undefined || source.disableNarration !== undefined || source.narratorColor !== undefined)) {
-        const narratorStyle = normalizeNarratorStyle(source.narratorStyle, { legacy: source });
-        setNarratorStyle(settings, narratorStyle, applyThemeReadabilityAndBrightness);
+        if (normalized[key] !== undefined) settings[key] = normalized[key];
     }
     delete settings.shareColorsGlobally;
 }
@@ -525,8 +587,9 @@ export function applySettingsSubset(source, keys) {
 export function buildSettingsSubset(keys) {
     normalizeCurrentColorStorageScope();
     setNarratorStyle(settings, settings.narratorStyle, applyThemeReadabilityAndBrightness);
+    const normalized = normalizeStoredSettings(settings);
     const subset = {};
-    for (const key of keys) subset[key] = cloneJsonValue(settings[key]);
+    for (const key of keys) subset[key] = cloneJsonValue(normalized[key]);
     return subset;
 }
 
@@ -540,35 +603,118 @@ export function pruneInactiveSettings() {
 export function buildFullSettingsSnapshot() {
     normalizeCurrentColorStorageScope();
     setNarratorStyle(settings, settings.narratorStyle, applyThemeReadabilityAndBrightness);
+    const normalized = normalizeStoredSettings(settings);
     const snapshot = {};
     for (const key of ACTIVE_SETTING_KEYS) {
-        if (settings[key] !== undefined) snapshot[key] = cloneJsonValue(settings[key]);
+        if (normalized[key] !== undefined) snapshot[key] = cloneJsonValue(normalized[key]);
     }
     snapshot.colorSchemaVersion = COLOR_SCHEMA_VERSION;
     return snapshot;
 }
 
+export function buildPortableSettingsSnapshot() {
+    const snapshot = buildSettingsSubset(PORTABLE_SETTING_KEYS);
+    snapshot.colorSchemaVersion = COLOR_SCHEMA_VERSION;
+    return snapshot;
+}
+
+function normalizeSettingString(value, maximum, fallback = '') {
+    if (typeof value !== 'string') return fallback;
+    return value
+        .normalize('NFKC')
+        .replace(/[\u0000-\u001F\u007F]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, maximum);
+}
+
+function parseSettingNumber(value) {
+    if (typeof value === 'number') return value;
+    return typeof value === 'string' && value.trim() ? Number(value) : NaN;
+}
+
 export function normalizeStoredSettings(source) {
     if (!isPlainObject(source)) return {};
     const normalized = {};
-    for (const key of ACTIVE_SETTING_KEYS) {
-        if (source[key] !== undefined) normalized[key] = source[key];
+    for (const [key, fallback] of Object.entries(TOGGLE_SETTING_DEFAULTS)) {
+        if (hasOwn(source, key)) normalized[key] = normalizeBoolean(source[key], fallback);
     }
-    if (hasOwn(normalized, 'attributionReviewPolicy')) {
-        const policy = typeof normalized.attributionReviewPolicy === 'string'
-            ? normalized.attributionReviewPolicy.trim().toLowerCase()
+
+    if (hasOwn(source, 'themeMode')) normalized.themeMode = ['auto', 'dark', 'light'].includes(source.themeMode) ? source.themeMode : 'auto';
+    if (hasOwn(source, 'colorTheme')) {
+        const theme = normalizeSettingString(source.colorTheme, 127, 'pastel');
+        const customName = theme.slice(0, 7).toLowerCase() === 'custom:'
+            ? normalizeRegistryIdentityName(theme.slice(7))
+            : '';
+        normalized.colorTheme = hasOwn(COLOR_THEMES, theme)
+            ? theme
+            : customName ? `custom:${customName}` : 'pastel';
+    }
+    if (hasOwn(source, 'brightness')) {
+        const value = parseSettingNumber(source.brightness);
+        normalized.brightness = Number.isFinite(value) ? Math.max(-100, Math.min(100, Math.round(value))) : 0;
+    }
+    if (hasOwn(source, 'thoughtSymbols')) {
+        normalized.thoughtSymbols = typeof source.thoughtSymbols === 'string'
+            ? source.thoughtSymbols.replace(/[\u0000-\u001F\u007F]/g, '').slice(0, 64)
+            : '*';
+    }
+    if (hasOwn(source, 'promptDepth')) {
+        const value = parseSettingNumber(source.promptDepth);
+        normalized.promptDepth = Number.isFinite(value) ? Math.max(0, Math.min(99, Math.round(value))) : 1;
+    }
+    if (hasOwn(source, 'promptRole')) normalized.promptRole = ['system', 'user'].includes(source.promptRole) ? source.promptRole : 'system';
+    if (hasOwn(source, 'promptMode')) normalized.promptMode = ['inject', 'macro'].includes(source.promptMode) ? source.promptMode : 'inject';
+    if (hasOwn(source, 'coloringEngine')) normalized.coloringEngine = source.coloringEngine === 'dom' ? 'dom' : 'llm';
+    if (hasOwn(source, 'gradientRandomMasterSeed')) {
+        normalized.gradientRandomMasterSeed = typeof source.gradientRandomMasterSeed === 'string'
+            ? source.gradientRandomMasterSeed.replace(/[\u0000-\u001F\u007F]/g, '').slice(0, 128)
+            : '';
+    }
+    if (hasOwn(source, 'colorVisionPreviewMode')) normalized.colorVisionPreviewMode = COLOR_VISION_MODES.includes(source.colorVisionPreviewMode) ? source.colorVisionPreviewMode : 'none';
+    if (hasOwn(source, 'colorVisionPreviewSeverity')) {
+        const value = parseSettingNumber(source.colorVisionPreviewSeverity);
+        normalized.colorVisionPreviewSeverity = Number.isFinite(value) ? Math.max(0, Math.min(100, Math.round(value))) : 100;
+    }
+    if (hasOwn(source, 'colorVisionPreviewTarget')) normalized.colorVisionPreviewTarget = ['ui', 'chat', 'all'].includes(source.colorVisionPreviewTarget) ? source.colorVisionPreviewTarget : 'all';
+    if (hasOwn(source, 'gradientAnimationMode')) normalized.gradientAnimationMode = GRADIENT_ANIMATION_MODES.includes(source.gradientAnimationMode) ? source.gradientAnimationMode : 'auto';
+    if (hasOwn(source, 'sortMode')) normalized.sortMode = ['name', 'count', 'group'].includes(source.sortMode) ? source.sortMode : 'name';
+    if (hasOwn(source, 'attributionReviewPolicy')) {
+        const policy = typeof source.attributionReviewPolicy === 'string'
+            ? source.attributionReviewPolicy.trim().toLowerCase()
             : '';
         normalized.attributionReviewPolicy = ['review', 'auto-high', 'legacy-auto'].includes(policy)
             ? policy
             : 'review';
     }
-    if (hasOwn(normalized, 'attributionVerifyPasses')) {
-        normalized.attributionVerifyPasses = normalizeAttributionVerifyPasses(normalized.attributionVerifyPasses);
+    if (hasOwn(source, 'attributionMaxTokens')) {
+        const value = parseSettingNumber(source.attributionMaxTokens);
+        normalized.attributionMaxTokens = Number.isFinite(value)
+            ? Math.max(256, Math.min(32768, Math.round(value)))
+            : 4096;
     }
-    if (source.colorSchemaVersion !== undefined) normalized.colorSchemaVersion = source.colorSchemaVersion;
+    if (hasOwn(source, 'attributionVerifyPasses')) normalized.attributionVerifyPasses = normalizeAttributionVerifyPasses(parseSettingNumber(source.attributionVerifyPasses));
+    if (hasOwn(source, 'colorSchemaVersion')) {
+        const value = parseSettingNumber(source.colorSchemaVersion);
+        normalized.colorSchemaVersion = Number.isFinite(value)
+            ? Math.max(0, Math.min(COLOR_SCHEMA_VERSION, Math.trunc(value)))
+            : 0;
+    }
+    for (const key of CONNECTION_PROFILE_SETTING_KEYS) {
+        if (!hasOwn(source, key)) continue;
+        normalized[key] = normalizeConnectionProfileId(source[key]);
+    }
     normalized.colorStorageScope = normalizeColorStorageScope(source.colorStorageScope, source.shareColorsGlobally);
     if (source.narratorStyle !== undefined || source.disableNarration !== undefined || source.narratorColor !== undefined) {
         normalized.narratorStyle = normalizeNarratorStyle(source.narratorStyle, { legacy: source });
+        if (normalized.narratorStyle.gradientGenerator) {
+            const seed = typeof source.narratorStyle?.gradientGenerator?.seed === 'string'
+                ? source.narratorStyle.gradientGenerator.seed.replace(/[\u0000-\u001F\u007F]/g, '').slice(0, 128)
+                : '';
+            normalized.narratorStyle.gradientGenerator = seed
+                ? { ...normalized.narratorStyle.gradientGenerator, seed }
+                : null;
+        }
         normalized.disableNarration = !normalized.narratorStyle.enabled;
         normalized.narratorColor = normalized.narratorStyle.baseColor;
     }
@@ -591,7 +737,7 @@ export function applyStoredSettingsSnapshot(source, { includeColorSchemaVersion 
 export function buildSettingsSubsetFromSource(source, keys) {
     const subset = {};
     if (!isPlainObject(source)) return subset;
-    const normalizedSource = keys.includes('colorStorageScope') ? normalizeStoredSettings(source) : source;
+    const normalizedSource = normalizeStoredSettings(source);
     for (const key of keys) {
         if (normalizedSource[key] !== undefined) subset[key] = normalizedSource[key];
     }
@@ -612,7 +758,7 @@ export function normalizeStoredColorPresets(source) {
     const normalizeEntries = entries => entries.map(entry => isPlainObject(entry)
         ? { ...entry, gradient: serializeGradient(entry.gradient) }
         : entry);
-    for (const [rawName, value] of Object.entries(source)) {
+    for (const [rawName, value] of Object.entries(normalizeNameDictionary(source))) {
         const name = normalizeRegistryIdentityName(rawName);
         if (!name) continue;
         if (Array.isArray(value)) {
@@ -703,7 +849,7 @@ export function buildAutoSyncRecord(source = {}) {
     source = prepareAutoSyncRecordSource(source);
     const settingsSource = isPlainObject(source?.settings) ? source.settings : null;
     const normalizedSettings = settingsSource && Object.keys(settingsSource).length
-        ? buildSettingsSubsetFromSource(settingsSource, GLOBAL_SETTINGS_V2_KEYS)
+        ? buildSettingsSubsetFromSource(settingsSource, PORTABLE_SETTING_KEYS)
         : {};
     const globalSettingsSource = isPlainObject(source?.globalSettings) ? source.globalSettings : null;
     const parsedVersion = Number(source?.version);
@@ -715,7 +861,7 @@ export function buildAutoSyncRecord(source = {}) {
         autoSyncEnabled: typeof source?.autoSyncEnabled === 'boolean' ? source.autoSyncEnabled : getLegacyAutoSyncEnabledPreference(),
         settings: normalizedSettings,
         globalSettings: globalSettingsSource && Object.keys(globalSettingsSource).length
-            ? normalizeStoredSettings(globalSettingsSource)
+            ? buildSettingsSubsetFromSource(globalSettingsSource, PORTABLE_SETTING_KEYS)
             : {},
         colorData: normalizeStoredColorData(source?.colorData),
         presets: normalizeStoredColorPresets(source?.presets),
@@ -773,6 +919,18 @@ let autoSyncPendingExpectedRecord = null;
 const autoSyncRequestGate = createLatestRequestGate();
 let autoSyncPollPromise = null;
 
+function hasPendingColorStateActivity() {
+    return !!(colorStateSaveTimer || pendingColorStateSaveData || pendingColorStateHistory
+        || pendingColorStateUpdateList || pendingColorStateInjectPrompt);
+}
+
+function flushPendingColorStateActivity() {
+    if (!hasPendingColorStateActivity()) return false;
+    moduleSettingsActivityEpoch++;
+    flushColorStateSave();
+    return true;
+}
+
 function enqueueModuleSettingsPersistence(task) {
     moduleSettingsPersistenceQueued++;
     const result = moduleSettingsPersistenceBarrier
@@ -793,8 +951,9 @@ function enqueueModuleSettingsPersistence(task) {
 }
 
 function applyDeferredAutoSyncRecord() {
+    flushPendingColorStateActivity();
     if (storageOperationActive || moduleSettingsPersistenceActive || moduleSettingsPersistenceQueued > 0
-        || moduleSettingsDebounceTimer || !deferredAutoSyncApplication) return;
+        || moduleSettingsDebounceTimer || hasPendingColorStateActivity() || !deferredAutoSyncApplication) return;
     const deferred = deferredAutoSyncApplication;
     deferredAutoSyncApplication = null;
     if ((deferred.options.request !== undefined && !autoSyncRequestGate.isCurrent(deferred.options.request))
@@ -941,6 +1100,7 @@ export function persistModuleStore(record, { debounce = true, immediate = false 
 export function getAutoSyncRecord(create = false) {
     const existing = extension_settings[MODULE_NAME];
     if (existing && typeof existing === 'object' && !Array.isArray(existing)) {
+        migrateLegacyLocalConnectionProfiles(existing.globalSettings);
         const normalized = buildAutoSyncRecord(existing);
         extension_settings[MODULE_NAME] = normalized;
         return normalized;
@@ -1011,7 +1171,7 @@ export function hasAutoSyncSettingsPayload(record) {
 }
 
 export function areSettingsSubsetsEqual(left, right) {
-    for (const key of GLOBAL_SETTINGS_V2_KEYS) {
+    for (const key of PORTABLE_SETTING_KEYS) {
         if (!jsonValuesEqual(left?.[key], right?.[key])) return false;
     }
     return true;
@@ -1136,9 +1296,18 @@ export function applyAutoSyncRecord(record, {
     request = undefined,
     activityEpoch = undefined,
 } = {}) {
+    flushPendingColorStateActivity();
     if ((request !== undefined && !autoSyncRequestGate.isCurrent(request))
         || (activityEpoch !== undefined && activityEpoch !== moduleSettingsActivityEpoch)) {
         return 'superseded';
+    }
+    if (storageOperationActive || moduleSettingsPersistenceActive || moduleSettingsPersistenceQueued > 0
+        || moduleSettingsDebounceTimer || ordinaryModuleSaveQueued || hasPendingColorStateActivity()) {
+        const options = { force, serverVerified, request, activityEpoch };
+        if (shouldReplaceDeferredAutoSync(record, options)) {
+            deferredAutoSyncApplication = { record: cloneJsonValue(record), options };
+        }
+        return 'deferred';
     }
     if (serverVerified && autoSyncPendingRecord) {
         const serverRecord = buildAutoSyncRecord(cloneJsonValue(record));
@@ -1147,14 +1316,6 @@ export function applyAutoSyncRecord(record, {
             cleanupLegacyAutoSyncPreference();
             return 'conflict';
         }
-    }
-    if (storageOperationActive || moduleSettingsPersistenceActive || moduleSettingsPersistenceQueued > 0
-        || moduleSettingsDebounceTimer || ordinaryModuleSaveQueued) {
-        const options = { force, serverVerified, request, activityEpoch };
-        if (shouldReplaceDeferredAutoSync(record, options)) {
-            deferredAutoSyncApplication = { record: cloneJsonValue(record), options };
-        }
-        return 'deferred';
     }
     const hasIncomingColorData = hasOwn(record, 'colorData');
     const incoming = buildAutoSyncRecord(cloneJsonValue(record));
@@ -1183,6 +1344,7 @@ export function applyAutoSyncRecord(record, {
         return disposition;
     }
     const previousAutoSyncEnabled = autoSyncEnabled;
+    const previousEnabled = settings.enabled;
     const previousScope = activeStorageScope || getCurrentStorageScope();
 
     if (disposition !== 'apply') {
@@ -1201,17 +1363,19 @@ export function applyAutoSyncRecord(record, {
         if (force) applyStoredSettingsSnapshot(normalized.globalSettings);
 
         const hasSettingsPayload = hasAutoSyncSettingsPayload(normalized);
-        let changed = false;
-        if (hasSettingsPayload) {
-            for (const key of GLOBAL_SETTINGS_V2_KEYS) {
+        const applyIncomingSettings = () => {
+            let settingsChanged = false;
+            for (const key of PORTABLE_SETTING_KEYS) {
                 if (key === 'allowRemoteFonts') continue;
                 if (normalized.settings[key] !== undefined && !jsonValuesEqual(settings[key], normalized.settings[key])) {
                     settings[key] = cloneJsonValue(normalized.settings[key]);
-                    changed = true;
+                    settingsChanged = true;
                 }
             }
-        }
-        normalizeToggleSettings();
+            normalizeToggleSettings();
+            return settingsChanged;
+        };
+        let changed = hasSettingsPayload ? applyIncomingSettings() : false;
         const scopeChanged = getCurrentStorageScope() !== previousScope;
         const tableReloaded = scopeChanged || hasIncomingColorData;
         if (tableReloaded) {
@@ -1222,6 +1386,7 @@ export function applyAutoSyncRecord(record, {
                 allowMetadataPersistence: false,
             });
             changed = true;
+            if (hasSettingsPayload) applyIncomingSettings();
         }
         if (hasSettingsPayload || tableReloaded) {
             if (changed) {
@@ -1247,6 +1412,7 @@ export function applyAutoSyncRecord(record, {
     } finally {
         metadataPersistenceSuppression--;
     }
+    if (serverVerified && settings.enabled !== previousEnabled) synchronizeEnabledLifecycle();
     return disposition;
 }
 
@@ -1289,8 +1455,8 @@ export async function fetchAutoSyncRecordFromServer() {
 export function saveGlobalSettingsSnapshot(options = {}) {
     const record = getAutoSyncRecord(true);
     record.version = COLOR_SCHEMA_VERSION;
-    record.globalSettings = buildFullSettingsSnapshot();
-    record.settings = buildSettingsSubset(GLOBAL_SETTINGS_V2_KEYS);
+    record.globalSettings = buildPortableSettingsSnapshot();
+    record.settings = buildSettingsSubset(PORTABLE_SETTING_KEYS);
     persistModuleStore(record, options);
 }
 
@@ -1587,7 +1753,7 @@ export function getStorageLabelForKey(key) {
 export function normalizeColorDataEntry(source) {
     if (!isPlainObject(source)) return null;
     const colors = normalizeCharacterColors(source.colors || {});
-    const storedSettings = normalizeStoredSettings(source.settings);
+    const storedSettings = buildSettingsSubsetFromSource(source.settings, PORTABLE_SETTING_KEYS);
     return {
         colors,
         groupProfiles: normalizeGroupProfiles(source.groupProfiles),
@@ -1641,7 +1807,7 @@ function findColorDataForScope(scope, primaryKey = getStorageKeyForScope(scope),
 
 export function getStorageScopeDescriptor(scope = getCurrentStorageScope()) {
     const normalizedScope = normalizeColorStorageScope(scope);
-    const key = getStorageKeyForScope(normalizedScope);
+    const key = getStorageKeyForScope(normalizedScope, { persistMetadata: false });
     const located = findColorDataForScope(normalizedScope, key);
     const colors = located.entry?.colors || {};
     return {
@@ -1749,7 +1915,7 @@ export function setStoredColorData(key, colors, storedSettings = settings, optio
     const entry = {
         colors: normalizeCharacterColors(colors || {}),
         groupProfiles: normalizeGroupProfiles(options.groupProfiles === undefined ? groupProfiles : options.groupProfiles),
-        settings: normalizeStoredSettings(storedSettings),
+        settings: buildSettingsSubsetFromSource(storedSettings, PORTABLE_SETTING_KEYS),
     };
     // A fresh timestamp on every write made an unchanged table look changed, so
     // nothing downstream could recognise a no-op save - and it left the dates in
@@ -2036,6 +2202,31 @@ export function getPinnedPersonaColors() {
     return record.ui.personaColors;
 }
 
+function getPersonaPinKeys(personaName = getPersonaName()) {
+    const legacyKey = normalizeRegistryIdentity(personaName);
+    const context = getContext();
+    const personaId = getStringOrNumberId(context?.personaId) ?? getStringOrNumberId(context?.persona_id);
+    const avatar = getStringOrNumberId(context?.userAvatar) ?? getStringOrNumberId(context?.user_avatar);
+    const personaKey = personaId === null ? '' : `persona:${sanitizeStorageKeyComponent(personaId, 'persona')}`;
+    const avatarKey = avatar === null ? '' : `avatar:${sanitizeStorageKeyComponent(avatar, 'persona')}`;
+    const key = personaKey || avatarKey || legacyKey;
+    return { key, fallbackKeys: [...new Set([avatarKey, legacyKey].filter(candidate => candidate && candidate !== key))] };
+}
+
+function resolvePinnedPersonaColor(store, personaName = getPersonaName()) {
+    const { key, fallbackKeys } = getPersonaPinKeys(personaName);
+    let migrated = false;
+    if (key && !hasOwn(store, key)) {
+        const fallbackKey = fallbackKeys.find(candidate => hasOwn(store, candidate));
+        if (fallbackKey) {
+            store[key] = store[fallbackKey];
+            delete store[fallbackKey];
+            migrated = true;
+        }
+    }
+    return { key, pinned: key ? store[key] : null, migrated };
+}
+
 function findPersonaRegistryKey(personaIdentity) {
     if (!personaIdentity) return '';
     for (const [key, entry] of Object.entries(characterColors)) {
@@ -2070,19 +2261,20 @@ export function pinCurrentPersonaColor() {
     const pinned = buildPinnedPersonaColor(entry);
     if (!pinned) return false;
     const store = getPinnedPersonaColors();
-    if (jsonValuesEqual(store[personaIdentity], pinned)) return false;
-    store[personaIdentity] = pinned;
+    const resolved = resolvePinnedPersonaColor(store);
+    if (!resolved.key || jsonValuesEqual(resolved.pinned, pinned)) return resolved.migrated;
+    store[resolved.key] = pinned;
     return true;
 }
 
 export function renamePinnedPersonaColor(oldName, newName) {
-    const previousIdentity = normalizeRegistryIdentity(oldName);
-    const nextIdentity = normalizeRegistryIdentity(newName);
     const store = getPinnedPersonaColors();
-    const pinned = previousIdentity ? store[previousIdentity] : null;
-    if (!pinned || !nextIdentity || previousIdentity === nextIdentity) return false;
-    store[nextIdentity] = { ...pinned, name: normalizeRegistryIdentityName(String(newName ?? '')) };
-    delete store[previousIdentity];
+    const previous = resolvePinnedPersonaColor(store, oldName);
+    const next = getPersonaPinKeys(newName);
+    const nextName = normalizeRegistryIdentityName(String(newName ?? ''));
+    if (!previous.pinned || !next.key || !nextName) return false;
+    store[next.key] = { ...previous.pinned, name: nextName };
+    if (previous.key !== next.key) delete store[previous.key];
     persistModuleStore(getAutoSyncRecord(true));
     return true;
 }
@@ -2094,12 +2286,13 @@ export function restorePinnedPersonaColor() {
     if (settings.persistPersonaColor !== true) return false;
     const personaName = getPersonaName();
     const personaIdentity = normalizeRegistryIdentity(personaName);
-    const pinned = buildPinnedPersonaColor(personaIdentity ? getPinnedPersonaColors()[personaIdentity] : null);
-    if (!pinned) return false;
+    const resolved = resolvePinnedPersonaColor(getPinnedPersonaColors(), personaName);
+    const pinned = buildPinnedPersonaColor(personaIdentity ? resolved.pinned : null);
+    if (!pinned) return resolved.migrated;
     const existingKey = findPersonaRegistryKey(personaIdentity);
     if (existingKey) {
         const entry = characterColors[existingKey];
-        if (jsonValuesEqual(buildPinnedPersonaColor(entry), pinned)) return false;
+        if (jsonValuesEqual(buildPinnedPersonaColor(entry), pinned)) return resolved.migrated;
         entry.baseColor = pinned.baseColor;
         entry.color = pinned.color;
         entry.style = pinned.style;
@@ -2147,10 +2340,10 @@ export function migrateLegacyLocalStorageIfNeeded() {
     if (!isPlainObject(record.globalSettings) || !Object.keys(record.globalSettings).length) {
         const legacyGlobal = parseStorageObject(LEGACY_GLOBAL_SETTINGS_KEY);
         const globalV2 = parseStorageObject(GLOBAL_SETTINGS_V2_KEY);
-        if (hasAutoSyncSettingsPayload(record)) applySettingsSubset(record.settings, GLOBAL_SETTINGS_V2_KEYS);
+        if (hasAutoSyncSettingsPayload(record)) applySettingsSubset(record.settings, PORTABLE_SETTING_KEYS);
         applySettingsSubset(legacyGlobal, GLOBAL_VISUAL_KEYS);
-        if (globalV2) applySettingsSubset(globalV2, GLOBAL_SETTINGS_V2_KEYS);
-        record.globalSettings = buildFullSettingsSnapshot();
+        if (globalV2) applySettingsSubset(globalV2, PORTABLE_SETTING_KEYS);
+        record.globalSettings = buildPortableSettingsSnapshot();
     }
 
     applyStoredSettingsSnapshot(record.globalSettings, { includeColorSchemaVersion: false });
@@ -2214,6 +2407,7 @@ function persistActiveStorageData(options = {}) {
 export function saveData(options = {}) {
     persistLocalRemoteFontConsent(settings.allowRemoteFonts === true);
     normalizeToggleSettings();
+    persistLocalConnectionProfiles(settings);
     setCharacterColors(normalizeCharacterColors(characterColors));
     setGroupProfiles(normalizeGroupProfiles(groupProfiles));
     settings.colorSchemaVersion = COLOR_SCHEMA_VERSION;
@@ -2331,8 +2525,8 @@ export function applyStoredColorData(data) {
     setGroupProfiles(normalizeGroupProfiles(data.groupProfiles));
     if (data.settings) {
         applyStoredSettingsSnapshot(data.settings);
-        if (data.settings.colorSchemaVersion === undefined && settings.colorSchemaVersion === undefined) settings.colorSchemaVersion = 0;
-    } else if (data.colors && settings.colorSchemaVersion === undefined) {
+        if (data.settings.colorSchemaVersion === undefined) settings.colorSchemaVersion = 0;
+    } else if (data.colors) {
         settings.colorSchemaVersion = 0;
     }
     return !!data.colors;
@@ -2362,6 +2556,7 @@ export function loadData(options = {}) {
         setStoredColorData(primaryKey, characterColors, { ...settings, colorStorageScope: scope });
     }
     applyStoredSettingsSnapshot(record.globalSettings, { includeColorSchemaVersion: false });
+    applyLocalConnectionProfiles();
     settings.colorStorageScope = scope;
     normalizeToggleSettings();
     activeStorageKey = primaryKey;
@@ -2861,7 +3056,7 @@ function applyStylePackAssignments(assignments, mode) {
         incoming[index] = entry;
     });
     const incomingColors = normalizeImportedColorsForApply(incoming, COLOR_SCHEMA_VERSION);
-    if (!Object.keys(incomingColors).length) return false;
+    if (!Object.keys(incomingColors).length && mode !== 'replace') return false;
     setCharacterColors(mode === 'replace'
         ? incomingColors
         : mergeCharacterRegistriesKeepingCurrent(incomingColors, characterColors));
@@ -2912,8 +3107,8 @@ function getStylePackPlanOptions(pack, options, includeAssignmentPresets) {
             gradientPresets: selected.gradientPresets,
             assignmentPresets: includeAssignmentPresets ? selected.assignmentPresets : [],
         },
-        includeAssignmentPresets,
-        includeAppearance: false,
+        includeAssignmentPresets: includeAssignmentPresets || options?.applyAssignments === true,
+        includeAppearance: options?.applyAppearance === true,
         conflictStrategy: options?.conflictStrategy || 'keep',
         decisions,
         resolutions: options?.resolutions,
@@ -3088,8 +3283,8 @@ async function applyStylePackImportInternal(normalized, digest, options, mode) {
                 return { ...contextChangedError(), rollbackPersisted };
             }
             const colorSnapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
-            if (applyAppearance && normalized.pack.appearance) {
-                applyStylePackAppearance(normalized.pack.appearance);
+            if (applyAppearance && plan.install.appearance) {
+                applyStylePackAppearance(plan.install.appearance);
                 changedRuntime = true;
             }
             if (applyAssignments) {
@@ -3141,7 +3336,10 @@ async function applyStylePackImportInternal(normalized, digest, options, mode) {
             };
         }
 
-        if (changedRuntime) saveHistory();
+        if (changedRuntime) {
+            setColorHistory([createHistorySnapshot()]);
+            setHistoryIndex(0);
+        }
         return {
             ok: true,
             digest,
@@ -3349,7 +3547,7 @@ function validateImportedIdentities(colors, profiles) {
     for (const [rawKey, entry] of colorEntries) {
         if (!isPlainObject(entry)) return importError('invalid_character', `Character entry "${rawKey}" is not a JSON object.`);
         const name = hasOwn(entry, 'name') ? entry.name : rawKey;
-        if (isDangerousRegistryIdentity(name)) {
+        if (isDangerousRegistryIdentity(name) || isReservedCharacterIdentity(name)) {
             return importError('reserved_identity', `Reserved registry identity "${name}" is not allowed.`);
         }
         const identity = normalizeRegistryIdentity(name);
@@ -3373,7 +3571,7 @@ function validateImportedIdentities(colors, profiles) {
             return importError('too_many_aliases', `The import exceeds ${ORDINARY_IMPORT_OUTPUT_LIMITS.maxAliasesTotal} aliases.`);
         }
         for (const alias of aliases) {
-            if (isDangerousRegistryIdentity(alias)) {
+            if (isDangerousRegistryIdentity(alias) || isReservedCharacterIdentity(alias)) {
                 return importError('reserved_identity', `Reserved registry identity "${alias}" is not allowed.`);
             }
             if (!normalizeRegistryIdentity(alias)) {
@@ -3381,6 +3579,16 @@ function validateImportedIdentities(colors, profiles) {
             }
         }
     }
+
+    const ownership = resolveCanonicalAliasOwners(colorEntries.map(([rawKey, entry]) => ({
+        name: hasOwn(entry, 'name') ? entry.name : rawKey,
+        aliases: entry.aliases || [],
+    })));
+    const ambiguity = ownership.conflicts.find(conflict => conflict.kind === 'alias-ambiguity');
+    if (ambiguity) {
+        return importError('identity_collision', `Alias identity "${ambiguity.identity}" belongs to more than one character.`);
+    }
+    colorEntries.forEach(([, entry], index) => { entry.aliases = ownership.aliases[index]; });
 
     const profileEntries = Object.entries(profiles || {});
     if (profileEntries.length > ORDINARY_IMPORT_OUTPUT_LIMITS.maxGroupProfiles) {
@@ -3428,7 +3636,7 @@ function analyzeColorPayload(source, kind = 'colors') {
 
     const settingsPresent = hasOwn(source, 'settings');
     const remoteFontConsent = getRemoteFontImportDisclosure(source.settings, source.remoteFontConsent);
-    const importedSettings = settingsPresent ? normalizeImportSettings(source.settings, ACTIVE_SETTING_KEYS) : null;
+    const importedSettings = settingsPresent ? normalizeImportSettings(source.settings, PORTABLE_SETTING_KEYS) : null;
     const scopeResult = getExplicitImportScope(source.settings);
     if (!scopeResult.ok) return scopeResult;
     const presetsPresent = hasOwn(source, 'customGradientPresets');
@@ -3477,7 +3685,7 @@ function analyzeSettingsPayload(source) {
     source = legacyPayload.source;
 
     const remoteFontConsent = getRemoteFontImportDisclosure(source.settings, source.remoteFontConsent);
-    const importedSettings = normalizeImportSettings(source.settings, GLOBAL_SETTINGS_V2_KEYS);
+    const importedSettings = normalizeImportSettings(source.settings, PORTABLE_SETTING_KEYS);
     const scopeResult = getExplicitImportScope(source.settings);
     if (!scopeResult.ok) return scopeResult;
     const presetsPresent = hasOwn(source, 'customGradientPresets');
@@ -3610,7 +3818,11 @@ function normalizeImportedColorsForApply(colors, colorSchemaVersion) {
 function applyImportedGradientPresets(payload) {
     if (!hasOwn(payload, 'customGradientPresets')) return false;
     const incoming = normalizeGradientPresetRegistry(payload.customGradientPresets);
-    const nextPresets = { ...incoming, ...getCustomGradientPresets() };
+    const current = getCustomGradientPresets();
+    const currentIdentities = new Set(Object.keys(current).map(name => normalizeRegistryIdentity(name, 80)));
+    const nextPresets = Object.fromEntries(Object.entries(incoming)
+        .filter(([name]) => !currentIdentities.has(normalizeRegistryIdentity(name, 80))));
+    Object.assign(nextPresets, current);
     const record = getAutoSyncRecord(true);
     record.version = COLOR_SCHEMA_VERSION;
     record.customGradientPresets = nextPresets;
@@ -3668,6 +3880,7 @@ async function applyReviewedImportInternal(
     let mutationStarted = false;
     let appliedRecord = null;
     let appliedRuntime = null;
+    const previousEnabled = settings.enabled;
 
     try {
         if (!isActiveStorageBindingCurrent(operationBinding) || !importReviewContextMatches(reviewedContext)) {
@@ -3790,7 +4003,9 @@ async function applyReviewedImportInternal(
             };
         }
 
-        saveHistory();
+        setColorHistory([createHistorySnapshot()]);
+        setHistoryIndex(0);
+        if (settings.enabled !== previousEnabled) synchronizeEnabledLifecycle();
         return {
             ok: true,
             kind,
@@ -3845,7 +4060,7 @@ export function exportColors() {
     const colors = normalizeCharacterColors(characterColors);
     const profiles = normalizeGroupProfiles(groupProfiles);
     const customGradientPresets = getCustomGradientPresets();
-    const blob = new Blob([JSON.stringify({ version: COLOR_SCHEMA_VERSION, colors, groupProfiles: profiles, settings: buildFullSettingsSnapshot(), customGradientPresets }, null, 2)], { type: 'application/json' });
+    const blob = new Blob([JSON.stringify({ version: COLOR_SCHEMA_VERSION, colors, groupProfiles: profiles, settings: buildPortableSettingsSnapshot(), customGradientPresets }, null, 2)], { type: 'application/json' });
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `dialogue-colors-${Date.now()}.json`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
@@ -3862,15 +4077,10 @@ export async function importColors(file) {
 }
 
 export function exportSettings() {
-    normalizeCurrentColorStorageScope();
-    const settingsData = {};
-    GLOBAL_SETTINGS_V2_KEYS.forEach(key => {
-        if (settings[key] !== undefined) settingsData[key] = settings[key];
-    });
     const exportObj = {
         version: COLOR_SCHEMA_VERSION,
         timestamp: new Date().toISOString(),
-        settings: settingsData,
+        settings: buildPortableSettingsSnapshot(),
         customGradientPresets: getCustomGradientPresets(),
     };
     const blob = new Blob([JSON.stringify(exportObj, null, 2)], { type: 'application/json' });
@@ -3944,14 +4154,20 @@ export function restoreAllSettingsToDefaults() {
     settings.colorSchemaVersion = COLOR_SCHEMA_VERSION;
 
     applySettingsSnapshotWithRefresh(settings);
+    const defaultSettings = buildFullSettingsSnapshot();
     showUndoToast('All settings restored to defaults.', () => {
-        applySettingsSnapshotWithRefresh(previousSettings);
+        applySettingsSnapshotWithRefresh(restoreAppliedObjectChanges(
+            previousSettings,
+            defaultSettings,
+            buildFullSettingsSnapshot(),
+        ));
         toast.success('Previous settings restored.');
     });
 }
 
 // Auto-sync functions
 export async function loadSettingsFromServer() {
+    flushPendingColorStateActivity();
     const request = autoSyncRequestGate.begin();
     const activityEpoch = moduleSettingsActivityEpoch;
     try {
@@ -3984,7 +4200,7 @@ function pollAutoSyncServer() {
 export function saveSettingsToStore(options = {}) {
     const { force = false, schedule = true } = options;
     const currentRecord = getAutoSyncRecord(true);
-    const settingsData = buildSettingsSubset(GLOBAL_SETTINGS_V2_KEYS);
+    const settingsData = buildSettingsSubset(PORTABLE_SETTING_KEYS);
     const settingsChanged = !areSettingsSubsetsEqual(currentRecord.settings, settingsData);
     const enabledChanged = currentRecord.autoSyncEnabled !== autoSyncEnabled;
 
@@ -4104,13 +4320,10 @@ export function ensureRegexScript() {
         if (!extension_settings || typeof extension_settings !== 'object') return;
         if (!Array.isArray(extension_settings.regex)) extension_settings.regex = [];
 
-        const uuidv4 = () => 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
-            const r = Math.random() * 16 | 0;
-            return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
-        });
-
-        const isLegacyOwnedFontRule = rule => rule?.scriptName === 'Trim Font Colors'
-            && rule.findRegex === '/<\\/?font[^>]*>/gi'
+        const isLegacyOwnedFontRule = rule => ((rule?.id === LEGACY_FONT_TRIM_RULE_ID
+            && rule.scriptName === FONT_TRIM_RULE.scriptName
+            && rule.findRegex === FONT_TRIM_RULE.findRegex)
+            || (rule?.scriptName === 'Trim Font Colors' && rule.findRegex === '/<\\/?font[^>]*>/gi'))
             && rule.replaceString === ''
             && Array.isArray(rule.trimStrings) && rule.trimStrings.length === 0
             && Array.isArray(rule.placement) && rule.placement.length === 1 && rule.placement[0] === 2
@@ -4122,10 +4335,11 @@ export function ensureRegexScript() {
             && rule.minDepth === null
             && rule.maxDepth === null;
         const stableOwnedFontRule = extension_settings.regex.find(rule => rule?.id === FONT_TRIM_RULE.id);
+        const legacyOwnedFontRule = extension_settings.regex.find(isLegacyOwnedFontRule);
         const hasUnownedTargetName = extension_settings.regex.some(rule => rule !== stableOwnedFontRule
+            && rule !== legacyOwnedFontRule
             && rule?.scriptName === FONT_TRIM_RULE.scriptName);
-        const ownedFontRule = stableOwnedFontRule
-            || (!hasUnownedTargetName ? extension_settings.regex.find(isLegacyOwnedFontRule) : null);
+        const ownedFontRule = stableOwnedFontRule || (!hasUnownedTargetName ? legacyOwnedFontRule : null);
         if (ownedFontRule) {
             for (const [key, value] of Object.entries(FONT_TRIM_RULE)) {
                 const nextValue = Array.isArray(value) ? [...value] : value;
@@ -4142,21 +4356,37 @@ export function ensureRegexScript() {
             changed = true;
         }
 
-        if (!extension_settings.regex.some(r => r?.scriptName === 'Trim Color Blocks')) {
+        const isLegacyOwnedColorBlockRule = rule => rule?.scriptName === 'Trim Color Blocks'
+            && rule.findRegex === COLOR_BLOCK_TRIM_RULE.findRegex
+            && rule.replaceString === ''
+            && Array.isArray(rule.trimStrings) && rule.trimStrings.length === 0
+            && Array.isArray(rule.placement) && rule.placement.length === 1 && rule.placement[0] === 2
+            && rule.disabled === false
+            && rule.markdownOnly === true
+            && rule.promptOnly === true
+            && rule.runOnEdit === true
+            && rule.substituteRegex === 0
+            && rule.minDepth === null
+            && rule.maxDepth === null;
+        const stableOwnedColorBlockRule = extension_settings.regex.find(rule => rule?.id === COLOR_BLOCK_TRIM_RULE.id);
+        const legacyOwnedColorBlockRule = extension_settings.regex.find(isLegacyOwnedColorBlockRule);
+        const hasUnownedColorBlockTargetName = extension_settings.regex.some(rule => rule !== stableOwnedColorBlockRule
+            && rule !== legacyOwnedColorBlockRule
+            && rule?.scriptName === COLOR_BLOCK_TRIM_RULE.scriptName);
+        const ownedColorBlockRule = stableOwnedColorBlockRule
+            || (!hasUnownedColorBlockTargetName ? legacyOwnedColorBlockRule : null);
+        if (ownedColorBlockRule) {
+            for (const [key, value] of Object.entries(COLOR_BLOCK_TRIM_RULE)) {
+                const nextValue = Array.isArray(value) ? [...value] : value;
+                if (JSON.stringify(ownedColorBlockRule[key]) === JSON.stringify(nextValue)) continue;
+                ownedColorBlockRule[key] = nextValue;
+                changed = true;
+            }
+        } else if (!hasUnownedColorBlockTargetName) {
             extension_settings.regex.push({
-                id: uuidv4(),
-                scriptName: 'Trim Color Blocks',
-                findRegex: '/\\[COLORS?:[^\\]]*\\]/gi',
-                replaceString: '',
+                ...COLOR_BLOCK_TRIM_RULE,
                 trimStrings: [],
                 placement: [2],
-                disabled: false,
-                markdownOnly: true,
-                promptOnly: true,
-                runOnEdit: true,
-                substituteRegex: 0,
-                minDepth: null,
-                maxDepth: null
             });
             changed = true;
         }
@@ -4174,10 +4404,11 @@ export function ensureRegexScript() {
             && rule.minDepth === null
             && rule.maxDepth === null;
         const stableOwnedCssRule = extension_settings.regex.find(rule => rule?.id === CSS_EFFECTS_TRIM_RULE.id);
+        const legacyOwnedCssRule = extension_settings.regex.find(isLegacyOwnedCssRule);
         const hasUnownedCssTargetName = extension_settings.regex.some(rule => rule !== stableOwnedCssRule
+            && rule !== legacyOwnedCssRule
             && rule?.scriptName === CSS_EFFECTS_TRIM_RULE.scriptName);
-        const ownedCssRule = stableOwnedCssRule
-            || (!hasUnownedCssTargetName ? extension_settings.regex.find(isLegacyOwnedCssRule) : null);
+        const ownedCssRule = stableOwnedCssRule || (!hasUnownedCssTargetName ? legacyOwnedCssRule : null);
         if (ownedCssRule) {
             for (const [key, value] of Object.entries(CSS_EFFECTS_TRIM_RULE)) {
                 const nextValue = Array.isArray(value) ? [...value] : value;
@@ -4209,7 +4440,7 @@ export function saveToCard() {
         char.data.extensions.dialogueColors = {
             colors: normalizeCharacterColors(characterColors),
             groupProfiles: normalizeGroupProfiles(groupProfiles),
-            settings: buildFullSettingsSnapshot(),
+            settings: buildPortableSettingsSnapshot(),
         };
         saveData();
         saveCharacterDebounced?.();
@@ -4233,7 +4464,6 @@ export async function loadFromCard() {
 export function tryLoadFromCard() {
     let currentScope;
     let colors;
-    let profiles;
     // Everything that can throw runs before any state is touched, so a malformed
     // card cannot leave the registry half-applied.
     try {
@@ -4244,7 +4474,6 @@ export function tryLoadFromCard() {
         if (!data?.colors) return;
         const migrated = migrateLegacyColorPayload(data, { allowUnversioned: true }).source;
         colors = normalizeImportedColorsForApply(migrated.colors, migrated.settings?.colorSchemaVersion);
-        profiles = normalizeGroupProfiles(migrated.groupProfiles);
     } catch (error) {
         console.warn('[Dialogue Colors] Card colors could not be read; keeping the current registry.', error);
         toast.error('Saved colors on this character card could not be read.');
@@ -4252,7 +4481,6 @@ export function tryLoadFromCard() {
     }
 
     setCharacterColors(colors);
-    setGroupProfiles(profiles);
     selectedCharacterKeys.clear();
     setExpandedCharacterRows(new Set());
     setSwapMode(null);

@@ -51,14 +51,22 @@ const stApi = await import(stApiUrl);
 const { buildDialogueRegex, DIALOGUE_SKIP_GROUP } = await import('../src/color-blocks.js');
 const { attributeDialogueSegments } = await import('../src/attribution.js');
 const {
+    acceptAttributionReview,
     deleteMessageQuoteOverride,
     getMessageQuoteOverrideOptions,
+    markMessageAttributionVerified,
     matchSegmentsToElements,
+    queueObservedMessageDecoration,
+    reconcileMessageQuoteOverridesAfterDeletion,
+    renderMessageDomFallback,
     resolveDomSegmentIndexForElement,
     setMessageQuoteOverride,
+    setStreamingAttributionOverride,
+    stopDomHealthCheck,
+    upsertAttributionReview,
 } = await import('../src/dom-engine.js');
-const { ATTRIBUTION_SOURCE } = await import('../src/attribution-store.js');
-const { characterColors, settings } = await import('../src/state.js');
+const { ATTRIBUTION_SOURCE, ATTRIBUTION_VERIFICATION_STATUS } = await import('../src/attribution-store.js');
+const { characterColors, runtimeState, settings } = await import('../src/state.js');
 const { normalizeSegmentText } = await import('../src/utils.js');
 hooks.deregister();
 
@@ -174,6 +182,7 @@ test('segmentation matches SillyTavern rendered quotes', () => {
         '"This this\nstill talking"\n\n"Reply reply"',
         '"" and "B"',
         '<style>q{color:"red"}</style>\n"B"',
+        '<STYLE>q{color:"red"}</STYLE>\n"B"',
     ];
     withCharacters(['Bob'], () => {
         for (const text of cases) {
@@ -220,6 +229,7 @@ test('an unmappable quote refuses to resolve instead of guessing an index', () =
         const message = { id: 'm-1', name: 'Bob', mes: '"This this"\n"Reply reply"' };
         withChat([message], () => {
             const mesText = createFakeMesText(['"Something else entirely"']);
+            mesText.elements[0].setAttribute('data-dc-seg', '0');
             assert.equal(Number.isNaN(resolveDomSegmentIndexForElement(mesText.elements[0], 0, message)), true);
         });
     });
@@ -292,6 +302,229 @@ test('clearing one of two manual overrides keeps the frozen snapshot', () => {
             assert.equal(entry.sources['3'], ATTRIBUTION_SOURCE.FROZEN);
         });
     });
+});
+
+test('an existing verification-only entry still gets frozen siblings', () => {
+    withCharacters(['Bob', 'Alice'], () => {
+        const message = { id: 'm-1', name: 'Bob', mes: '"A"\n"B"\n"C"' };
+        withChat([message], metadata => {
+            assert.equal(markMessageAttributionVerified(0, message, ATTRIBUTION_VERIFICATION_STATUS.CLEAN), true);
+            assert.deepEqual(metadata.dialogue_colors_overrides['0'].segments, {});
+            assert.equal(setMessageQuoteOverride(0, message, 0, 'Alice', {
+                source: ATTRIBUTION_SOURCE.MANUAL,
+                freezeSegments: {},
+            }), true);
+            assert.equal(metadata.dialogue_colors_overrides['0'].sources['1'], ATTRIBUTION_SOURCE.FROZEN);
+            assert.equal(metadata.dialogue_colors_overrides['0'].sources['2'], ATTRIBUTION_SOURCE.FROZEN);
+        });
+    });
+});
+
+test('reassigning after deleting the last override rebuilds the frozen snapshot', () => {
+    withCharacters(['Bob', 'Alice'], () => {
+        const message = { id: 'm-1', name: 'Bob', mes: '"A"\n"B"\n"C"' };
+        withChat([message], metadata => {
+            assert.equal(setMessageQuoteOverride(0, message, 0, 'Alice', { freezeSegments: {} }), true);
+            assert.equal(deleteMessageQuoteOverride(0, message, 0), true);
+            assert.deepEqual(metadata.dialogue_colors_overrides['0'].segments, {});
+            assert.equal(setMessageQuoteOverride(0, message, 2, 'Alice', { freezeSegments: {} }), true);
+            assert.equal(metadata.dialogue_colors_overrides['0'].sources['0'], ATTRIBUTION_SOURCE.FROZEN);
+            assert.equal(metadata.dialogue_colors_overrides['0'].sources['1'], ATTRIBUTION_SOURCE.FROZEN);
+        });
+    });
+});
+
+test('an unresolved frozen sibling remains explicitly unassigned', () => {
+    withCharacters(['Alice'], () => {
+        const message = { id: 'm-1', name: '', mes: '"A" "B"' };
+        withChat([message], metadata => {
+            assert.deepEqual(speakersFor(0, message), [null, null]);
+            assert.equal(setMessageQuoteOverride(0, message, 0, 'Alice', { freezeSegments: {} }), true);
+            const entry = metadata.dialogue_colors_overrides['0'];
+            assert.equal(Object.prototype.hasOwnProperty.call(entry.segments, '1'), true);
+            assert.equal(entry.segments['1'], null);
+            assert.equal(entry.sources['1'], ATTRIBUTION_SOURCE.FROZEN);
+            assert.deepEqual(speakersFor(0, message), ['Alice', null]);
+        });
+    });
+});
+
+test('a frozen speaker removed from the registry stays unresolved', () => {
+    withCharacters(['Alice', 'Bob'], () => {
+        const message = { id: 'm-1', name: 'Alice', mes: '"A"\n"B"' };
+        withChat([message], () => {
+            assert.equal(setMessageQuoteOverride(0, message, 0, 'Bob', { source: ATTRIBUTION_SOURCE.FROZEN }), true);
+            delete characterColors.bob;
+            assert.deepEqual(speakersFor(0, message), [null, 'Alice']);
+        });
+    });
+});
+
+test('the frozen snapshot includes a streaming-visible sibling', () => {
+    withCharacters(['Alice', 'Bob', 'Carol'], () => {
+        const message = { id: 'm-1', name: 'Alice', mes: '"A"\n"B"' };
+        withChat([message], metadata => {
+            assert.equal(setStreamingAttributionOverride(0, message, 1, 'Bob'), true);
+            assert.equal(setMessageQuoteOverride(0, message, 0, 'Carol', { freezeSegments: {} }), true);
+            const entry = metadata.dialogue_colors_overrides['0'];
+            assert.equal(entry.segments['1'], 'Bob');
+            assert.equal(entry.sources['1'], ATTRIBUTION_SOURCE.FROZEN);
+        });
+    });
+});
+
+test('freezing never overwrites a real sibling and manual writes drop stale review evidence', () => {
+    withCharacters(['Alice', 'Bob', 'Carol'], () => {
+        const message = { id: 'm-1', name: 'Bob', mes: '"A"\n"B"' };
+        withChat([message], metadata => {
+            assert.equal(setMessageQuoteOverride(0, message, 1, 'Carol', {
+                source: ATTRIBUTION_SOURCE.REVIEW,
+                confidence: 0.9,
+                reviewId: 'review-1',
+                evidence: [{ type: 'review' }],
+            }), true);
+            assert.equal(setMessageQuoteOverride(0, message, 0, 'Alice', {
+                source: ATTRIBUTION_SOURCE.MANUAL,
+                freezeSegments: { 1: 'Bob' },
+            }), true);
+            let entry = metadata.dialogue_colors_overrides['0'];
+            assert.equal(entry.segments['1'], 'Carol');
+            assert.equal(entry.sources['1'], ATTRIBUTION_SOURCE.REVIEW);
+
+            assert.equal(setMessageQuoteOverride(0, message, 1, 'Bob', { source: ATTRIBUTION_SOURCE.MANUAL }), true);
+            entry = metadata.dialogue_colors_overrides['0'];
+            assert.equal(entry.confidences?.['1'], undefined);
+            assert.equal(entry.reviewIds?.['1'], undefined);
+            assert.equal(entry.records?.['1'], undefined);
+        });
+    });
+});
+
+test('review acceptance uses the freeze-preserving persistent write', () => {
+    withCharacters(['Alice', 'Bob'], () => {
+        const message = { id: 'm-1', name: 'Bob', mes: '"A"\n"B"' };
+        withChat([message], metadata => {
+            const [segment] = attributeDialogueSegments(message.mes, message.name, { autoAddMessageSpeaker: false }).segments;
+            const review = upsertAttributionReview({
+                message,
+                messageIndex: 0,
+                segment,
+                currentSpeaker: 'Bob',
+                proposedSpeaker: 'Alice',
+                source: ATTRIBUTION_SOURCE.LLM,
+                confidence: 0.9,
+            });
+            assert.ok(review);
+            assert.equal(acceptAttributionReview(review.id)?.status, 'accepted');
+            const entry = metadata.dialogue_colors_overrides['0'];
+            assert.equal(entry.segments['0'], 'Alice');
+            assert.equal(entry.sources['0'], ATTRIBUTION_SOURCE.REVIEW);
+            assert.equal(entry.segments['1'], 'Bob');
+            assert.equal(entry.sources['1'], ATTRIBUTION_SOURCE.FROZEN);
+        });
+    });
+});
+
+test('message deletion reconciliation follows stable message identity', () => {
+    withCharacters(['Alice', 'Bob'], () => {
+        const messages = [
+            { id: 'a', name: 'Bob', mes: '"A"' },
+            { id: 'b', name: 'Bob', mes: '"B"' },
+            { id: 'c', name: 'Bob', mes: '"C"' },
+        ];
+        withChat(messages, metadata => {
+            messages.forEach((message, index) => setMessageQuoteOverride(index, message, 0, 'Alice'));
+            stApi.setTestContext({ chat: [messages[0], messages[2]], chatMetadata: metadata });
+            assert.equal(reconcileMessageQuoteOverridesAfterDeletion(), true);
+            assert.deepEqual(Object.keys(metadata.dialogue_colors_overrides), ['0', '1']);
+            assert.equal(metadata.dialogue_colors_overrides['0'].messageId, 'a');
+            assert.equal(metadata.dialogue_colors_overrides['1'].messageId, 'c');
+        });
+    });
+});
+
+test('message deletion uniquely reconciles a legacy hash-only override', () => {
+    withCharacters(['Alice', 'Bob'], () => {
+        const messages = [
+            { id: 'a', name: 'Bob', mes: '"A"' },
+            { id: 'b', name: 'Bob', mes: '"B"' },
+        ];
+        withChat(messages, metadata => {
+            assert.equal(setMessageQuoteOverride(1, messages[1], 0, 'Alice'), true);
+            const legacy = metadata.dialogue_colors_overrides['1'];
+            delete legacy.messageId;
+            delete legacy.messageFingerprint;
+            delete legacy.textLength;
+
+            stApi.setTestContext({ chat: [messages[1]], chatMetadata: metadata });
+            assert.equal(reconcileMessageQuoteOverridesAfterDeletion(), true);
+            assert.equal(metadata.dialogue_colors_overrides['0'], legacy);
+            assert.equal(metadata.dialogue_colors_overrides['0'].segments['0'], 'Alice');
+        });
+    });
+});
+
+test('fallback rendering escapes markup when host formatting is unavailable or fails', () => {
+    const originalDocument = globalThis.document;
+    const payload = '<img src=x onerror="globalThis.pwned=true">';
+    const message = { id: 'm-1', name: 'Bob', mes: payload };
+    const mesText = {
+        innerHTML: '',
+        querySelectorAll: () => [],
+    };
+    const mesElement = {
+        isConnected: true,
+        getAttribute: name => name === 'mesid' ? '0' : null,
+        querySelector: selector => selector === '.mes_text' ? mesText : null,
+    };
+    const chatRoot = {};
+    globalThis.document = {
+        body: {},
+        getElementById: id => id === 'chat' ? chatRoot : null,
+        querySelector: selector => selector.includes('.mes[mesid="0"]') ? mesElement : null,
+        querySelectorAll: () => [],
+    };
+    const originalWarn = console.warn;
+    console.warn = () => {};
+    try {
+        for (const messageFormatting of [undefined, () => '', () => { throw new Error('formatter failed'); }]) {
+            mesText.innerHTML = '';
+            stApi.setTestContext({ chat: [message], chatMetadata: {}, messageFormatting });
+            assert.equal(renderMessageDomFallback(0, message), true);
+            assert.doesNotMatch(mesText.innerHTML, /<img\b/i);
+            assert.match(mesText.innerHTML, /&lt;img/);
+        }
+    } finally {
+        console.warn = originalWarn;
+        globalThis.document = originalDocument;
+        stApi.setTestContext({ chat: [], chatMetadata: {} });
+    }
+});
+
+test('observer work rejects detached elements and teardown clears settle work', () => {
+    const detached = { isConnected: false };
+    const pendingBefore = runtimeState.pendingObservedMessages.size;
+    queueObservedMessageDecoration(detached);
+    assert.equal(runtimeState.pendingObservedMessages.size, pendingBefore);
+
+    let settleDisconnected = false;
+    let chatDisconnected = false;
+    const settleTimer = setTimeout(() => {}, 60000);
+    const retryTimer = setTimeout(() => {}, 60000);
+    runtimeState.messageSettleObservers.set({}, {
+        observer: { disconnect() { settleDisconnected = true; } },
+        fallbackTimer: settleTimer,
+        retryTimers: [retryTimer],
+    });
+    runtimeState.pendingObservedMessages.add({ isConnected: false });
+    runtimeState.chatObserver = { disconnect() { chatDisconnected = true; } };
+    runtimeState.chatObserverTimer = setTimeout(() => {}, 60000);
+    stopDomHealthCheck();
+    assert.equal(settleDisconnected, true);
+    assert.equal(chatDisconnected, true);
+    assert.equal(runtimeState.messageSettleObservers.size, 0);
+    assert.equal(runtimeState.pendingObservedMessages.size, 0);
+    assert.equal(runtimeState.chatObserverTimer, null);
 });
 
 test('matchSegmentsToElements never hands two elements the same segment', () => {

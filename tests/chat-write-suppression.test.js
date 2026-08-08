@@ -55,6 +55,7 @@ const {
     isMessageAttributionVerified,
     listAttributionReviews,
     markMessageAttributionVerified,
+    saveChatMetadataIfChanged,
     setMessageQuoteOverride,
     upsertAttributionReview,
 } = await import('../src/dom-engine.js');
@@ -74,15 +75,26 @@ const verifySource = await readFile(new URL('../src/verify.js', import.meta.url)
 const OVERRIDES_KEY = 'dialogue_colors_overrides';
 const REVIEWS_KEY = 'dialogue_colors_attribution_reviews';
 
-// Mirrors how the host reports a save: the extension calls saveMetadataDebounced
-// and the chat file is rewritten some time later.
+function deferred() {
+    let resolve;
+    let reject;
+    const promise = new Promise((resolvePromise, rejectPromise) => {
+        resolve = resolvePromise;
+        reject = rejectPromise;
+    });
+    return { promise, resolve, reject };
+}
+
+// The host exposes both methods; attribution writes must use the chat-bound
+// promise rather than the cancellable, void-returning debounce.
 function withCountedChat(messages, run) {
     const metadata = {};
-    const saves = { count: 0 };
+    const saves = { count: 0, debounced: 0 };
     stApi.setTestContext({
         chat: messages,
         chatMetadata: metadata,
-        saveMetadataDebounced: () => { saves.count++; },
+        saveMetadata: () => { saves.count++; return Promise.resolve(); },
+        saveMetadataDebounced: () => { saves.debounced++; },
     });
     clearSessionAttributionVerifications();
     try {
@@ -295,8 +307,87 @@ test('queueing a review still attaches the store and saves', () => {
         assert.ok(review);
         assert.equal(Object.prototype.hasOwnProperty.call(metadata, REVIEWS_KEY), true);
         assert.equal(saves.count, 1);
+        assert.equal(saves.debounced, 0);
         assert.equal(listAttributionReviews().length, 1);
     });
+});
+
+test('a rejected metadata save leaves the scope dirty and retryable', async () => {
+    const metadata = { [OVERRIDES_KEY]: { marker: 1 } };
+    const attempts = [];
+    let debounced = 0;
+    stApi.setTestContext({
+        chat: [],
+        chatMetadata: metadata,
+        saveMetadata: () => {
+            const attempt = deferred();
+            attempts.push(attempt);
+            return attempt.promise;
+        },
+        saveMetadataDebounced: () => { debounced++; },
+    });
+    clearSessionAttributionVerifications();
+    const originalWarn = console.warn;
+    console.warn = () => {};
+    try {
+        assert.equal(saveChatMetadataIfChanged(null, metadata), true);
+        assert.equal(saveChatMetadataIfChanged(null, metadata), false, 'one in-flight save is enough');
+        assert.equal(debounced, 0);
+        attempts[0].reject(new Error('save failed'));
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(saveChatMetadataIfChanged(null, metadata), true);
+        assert.equal(attempts.length, 2);
+        attempts[1].resolve();
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(saveChatMetadataIfChanged(null, metadata), false);
+    } finally {
+        console.warn = originalWarn;
+        clearSessionAttributionVerifications();
+        stApi.setTestContext({ chat: [], chatMetadata: {} });
+    }
+});
+
+test('a canceled debounce cannot advance the last-saved scope', () => {
+    const metadata = { [OVERRIDES_KEY]: { marker: 1 } };
+    let attempts = 0;
+    stApi.setTestContext({
+        chat: [],
+        chatMetadata: metadata,
+        saveMetadataDebounced: () => { attempts++; return false; },
+    });
+    clearSessionAttributionVerifications();
+    try {
+        assert.equal(saveChatMetadataIfChanged(null, metadata), true);
+        assert.equal(saveChatMetadataIfChanged(null, metadata), true);
+        assert.equal(attempts, 2);
+    } finally {
+        clearSessionAttributionVerifications();
+        stApi.setTestContext({ chat: [], chatMetadata: {} });
+    }
+});
+
+test('an old chat save settlement cannot mark a new chat saved', async () => {
+    const firstMetadata = { [OVERRIDES_KEY]: { marker: 1 } };
+    const secondMetadata = { [OVERRIDES_KEY]: { marker: 1 } };
+    const firstSave = deferred();
+    let secondSaves = 0;
+    stApi.setTestContext({ chat: [{ id: 'first' }], chatMetadata: firstMetadata, saveMetadataDebounced: () => firstSave.promise });
+    clearSessionAttributionVerifications();
+    try {
+        assert.equal(saveChatMetadataIfChanged(null, firstMetadata), true);
+        stApi.setTestContext({
+            chat: [{ id: 'second' }],
+            chatMetadata: secondMetadata,
+            saveMetadataDebounced: () => { secondSaves++; return Promise.resolve(); },
+        });
+        firstSave.resolve();
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(saveChatMetadataIfChanged(null, secondMetadata), true);
+        assert.equal(secondSaves, 1);
+    } finally {
+        clearSessionAttributionVerifications();
+        stApi.setTestContext({ chat: [], chatMetadata: {} });
+    }
 });
 
 test('a disabled extension tears down before it can resolve a storage key', () => {
@@ -318,13 +409,14 @@ test('chat lifecycle captures loaded messages before scheduling decoration', () 
     const handleCapture = mainSource.indexOf('captureLoadedAttributionMessageBaseline();', handleChatChanged);
     const handleSchedule = mainSource.indexOf('scheduleDomRefreshSeries(150);', handleChatChanged);
     const init = mainSource.indexOf('export function init()');
-    const initCapture = mainSource.indexOf('captureLoadedAttributionMessageBaseline();', init);
-    const initSchedule = mainSource.indexOf('scheduleDomRefreshSeries(150);', init);
+    const initSync = mainSource.indexOf('syncAutomaticRuntime();', init);
+    const sync = mainSource.indexOf('export function syncAutomaticRuntime()');
+    const syncHandle = mainSource.indexOf('handleChatChanged();', sync);
 
     assert.ok(handleChatChanged >= 0 && handleCapture > handleChatChanged);
     assert.ok(handleCapture < handleSchedule);
-    assert.ok(init >= 0 && initCapture > init);
-    assert.ok(initCapture < initSchedule);
+    assert.ok(init >= 0 && initSync > init);
+    assert.ok(sync >= 0 && syncHandle > sync);
 });
 
 test('loaded-message suppression also guards streaming and in-flight verification', () => {

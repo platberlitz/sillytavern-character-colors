@@ -42,9 +42,10 @@ const hooks = registerHooks({
 });
 
 const { attributeDialogueSegments, balanceStreamingText } = await import('../src/attribution.js');
-const { applySegmentDecoration, matchSegmentsToElements, setMessageQuoteOverride } = await import('../src/dom-engine.js');
+const { applySegmentDecoration, getStreamingAttributionOverrides, matchSegmentsToElements, setMessageQuoteOverride, setStreamingAttributionOverride } = await import('../src/dom-engine.js');
 const { characterColors, resetStreamingSession, settings, streamingSession } = await import('../src/state.js');
 const { paintStreamingMessage } = await import('../src/streaming-paint.js');
+const { cancelStreamingAttributionVerification } = await import('../src/verify.js');
 const { normalizeSegmentText } = await import('../src/utils.js');
 const { setTestContext } = await import(stApiUrl);
 hooks.deregister();
@@ -54,6 +55,7 @@ function withCharacters(names, run) {
     const previousEnabled = settings.enabled;
     const previousEngine = settings.coloringEngine;
     const previousSymbols = settings.thoughtSymbols;
+    const previousHighlightMode = settings.highlightMode;
     for (const key of Object.keys(characterColors)) delete characterColors[key];
     names.forEach((name, index) => {
         characterColors[name.toLowerCase()] = { name, color: index === 0 ? '#112233' : '#445566', aliases: [], dialogueCount: 0 };
@@ -70,6 +72,7 @@ function withCharacters(names, run) {
         settings.enabled = previousEnabled;
         settings.coloringEngine = previousEngine;
         settings.thoughtSymbols = previousSymbols;
+        settings.highlightMode = previousHighlightMode;
     }
 }
 
@@ -159,9 +162,10 @@ test('a half-typed quote is segmented the same way the host renders it', () => {
     });
 });
 
-function fakeElement(text) {
+function fakeElement(text, serializeStyle = (_name, value) => value) {
     const attributes = new Map();
     const style = {};
+    const priorities = {};
     const el = {
         isConnected: true,
         textContent: text,
@@ -174,8 +178,18 @@ function fakeElement(text) {
             },
             get(target, property) {
                 if (property === 'getPropertyValue') return name => target[name] ?? '';
-                if (property === 'removeProperty') return name => { if (name in target) { el.writes++; delete target[name]; } };
-                if (property === 'setProperty') return (name, value) => { if (target[name] !== value) el.writes++; target[name] = value; };
+                if (property === 'getPropertyPriority') return name => priorities[name] ?? '';
+                if (property === 'removeProperty') return name => {
+                    if (name in target) el.writes++;
+                    delete target[name];
+                    delete priorities[name];
+                };
+                if (property === 'setProperty') return (name, value, priority = '') => {
+                    const serialized = serializeStyle(name, value);
+                    if (target[name] !== serialized || priorities[name] !== priority) el.writes++;
+                    target[name] = serialized;
+                    priorities[name] = priority;
+                };
                 return target[property] ?? '';
             },
         }),
@@ -246,6 +260,104 @@ test('repainting an already-correct element writes nothing to the DOM', () => {
         applySegmentDecoration(segments[0], el);
         assert.equal(el.writes, 0, 'a no-op repaint must not restart gradients or wake observers');
     });
+});
+
+test('no-clear decoration removes stale owned state and updates owned ARIA', () => {
+    withCharacters(['Alice', 'Bob'], () => {
+        Object.assign(characterColors.alice, {
+            baseColor: characterColors.alice.color,
+            font: 'Roboto',
+            style: 'bold italic',
+            gradient: {
+                type: 'linear',
+                stops: [{ color: '#112233', position: 0 }, { color: '#778899', position: 100 }],
+                animation: { enabled: false, duration: 8, reverse: false },
+            },
+        });
+        const element = fakeElement('Hello.');
+        applySegmentDecoration({ index: 0, confidence: 0.9, assignment: { key: 'alice', name: 'Alice', color: '#112233' } }, element);
+        assert.equal(element.classList.contains('dc-gradient-text'), true);
+        assert.match(element.getAttribute('aria-label'), /^Alice:/);
+
+        settings.highlightMode = false;
+        applySegmentDecoration({ index: 0, confidence: 0.9, assignment: { key: 'bob', name: 'Bob', color: '#445566' } }, element);
+        assert.equal(element.classList.contains('dc-gradient-text'), false);
+        assert.equal(element.style.getPropertyValue('font-family'), '');
+        assert.equal(element.style.getPropertyValue('font-weight'), '');
+        assert.equal(element.style.getPropertyValue('font-style'), '');
+        assert.equal(element.getAttribute('data-dc-speaker'), 'bob');
+        assert.match(element.getAttribute('aria-label'), /^Bob:/);
+
+        applySegmentDecoration({ index: 0, confidence: 0, assignment: null }, element);
+        assert.equal(element.style.getPropertyValue('color'), '');
+        assert.equal(element.getAttribute('data-dc-speaker'), null);
+        assert.equal(element.getAttribute('aria-label'), null);
+    });
+});
+
+test('owned decoration restores foreign inline styles and leaves foreign ARIA alone', () => {
+    withCharacters(['Alice'], () => {
+        Object.assign(characterColors.alice, { font: 'Roboto', style: 'bold' });
+        settings.highlightMode = true;
+        const element = fakeElement('Hello.');
+        element.style.setProperty('color', 'purple');
+        element.style.setProperty('background-color', 'yellow');
+        element.style.setProperty('font-family', 'serif');
+        element.style.setProperty('font-weight', '600');
+        element.setAttribute('aria-label', 'Foreign description');
+
+        applySegmentDecoration({ index: 0, confidence: 0.9, assignment: { key: 'alice', name: 'Alice', color: '#112233' } }, element);
+        assert.equal(element.getAttribute('aria-label'), 'Foreign description');
+        applySegmentDecoration({ index: 0, confidence: 0, assignment: null }, element);
+
+        assert.equal(element.style.getPropertyValue('color'), 'purple');
+        assert.equal(element.style.getPropertyValue('background-color'), 'yellow');
+        assert.equal(element.style.getPropertyValue('font-family'), 'serif');
+        assert.equal(element.style.getPropertyValue('font-weight'), '600');
+        assert.equal(element.getAttribute('aria-label'), 'Foreign description');
+    });
+});
+
+test('owned decoration restores styles after browser serialization', () => {
+    withCharacters(['Alice'], () => {
+        const element = fakeElement('Hello.', (name, value) => (
+            name === 'color' && value === '#112233' ? 'rgb(17, 34, 51)' : value
+        ));
+        element.style.setProperty('color', 'purple', 'important');
+
+        applySegmentDecoration({ index: 0, confidence: 0.9, assignment: { key: 'alice', name: 'Alice', color: '#112233' } }, element);
+        assert.equal(element.style.getPropertyValue('color'), 'rgb(17, 34, 51)');
+        element.writes = 0;
+        applySegmentDecoration({ index: 0, confidence: 0.9, assignment: { key: 'alice', name: 'Alice', color: '#112233' } }, element);
+        assert.equal(element.writes, 0);
+        applySegmentDecoration({ index: 0, confidence: 0, assignment: null }, element);
+        assert.equal(element.style.getPropertyValue('color'), 'purple');
+        assert.equal(element.style.getPropertyPriority('color'), 'important');
+    });
+});
+
+test('streaming clears decoration from a rendered segment that disappears', () => {
+    const message = { mes: 'Alice said "Hello."', name: 'Alice' };
+    setTestContext({ chat: [message], chatMetadata: {} });
+    try {
+        withCharacters(['Alice'], () => {
+            const quote = fakeElement('"Hello."');
+            const mesText = fakeElement('Hello.');
+            mesText.querySelectorAll = selector => selector === 'q' ? [quote] : [];
+            armSession();
+            streamingSession.mesElement = { isConnected: true };
+            streamingSession.mesText = mesText;
+            assert.equal(paintStreamingMessage(), true);
+            assert.equal(quote.getAttribute('data-dc-colored'), '1');
+
+            message.mes = 'Narration only.';
+            assert.equal(paintStreamingMessage(), true);
+            assert.equal(quote.getAttribute('data-dc-colored'), null);
+            assert.equal(quote.style.getPropertyValue('color'), '');
+        });
+    } finally {
+        setTestContext({ chat: [], chatMetadata: {} });
+    }
 });
 
 test('a wiped tick repaints to the same colour without a clear pass', () => {
@@ -319,4 +431,17 @@ test('ending the session drops the frozen assignments and the observer', () => {
         assert.equal(streamingSession.assignments.size, 0);
         assert.equal(streamingSession.observer, null);
     });
+});
+
+test('generation-end cancellation drops provisional streaming overrides', () => {
+    const message = { id: 'm-1', name: 'Alice', mes: '"Hello."' };
+    setTestContext({ chat: [message], chatMetadata: {} });
+    try {
+        assert.equal(setStreamingAttributionOverride(0, message, 0, 'Alice'), true);
+        assert.equal(getStreamingAttributionOverrides(0, message)?.['0'], 'Alice');
+        cancelStreamingAttributionVerification();
+        assert.equal(getStreamingAttributionOverrides(0, message), null);
+    } finally {
+        setTestContext({ chat: [], chatMetadata: {} });
+    }
 });

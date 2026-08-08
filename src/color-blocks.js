@@ -1,4 +1,5 @@
 // color-blocks.js - extracted from index.js (mechanical split)
+import { isHostSystemOrToolMessage } from './attribution-store.js';
 import { DOM_RETRY_REFRESH_DELAYS, decorateAllMessages, scheduleDomSettleRefresh } from './dom-engine.js';
 import { normalizeRegistryIdentity, normalizeRegistryIdentityName } from './group-profiles.js';
 import { commit, repaintDomAfterCharacterDataChange } from './live-colors.js';
@@ -300,6 +301,41 @@ export function stripColorBlocksFromDisplay() {
     return removed;
 }
 
+export function recountDialogueCountsFromChat(chat = getContext()?.chat || []) {
+    const messages = Array.isArray(chat) ? chat : [];
+    const counts = new Map(Object.keys(characterColors).map(key => [key, 0]));
+    const colorLookup = buildUniqueKnownColorStatsLookup();
+
+    for (const msg of messages) {
+        if (isHostSystemOrToolMessage(msg)) continue;
+        const text = msg?.mes || '';
+        const countedKeys = new Set();
+        for (const assignment of parseNamedColorAssignmentsFromText(text)) {
+            if (normalizeRegistryIdentity(assignment.name) === 'narrator') continue;
+            const key = resolveCharacterKeyByNameOrAlias(assignment.name);
+            if (!key || !characterColors[key]) continue;
+            counts.set(key, (counts.get(key) || 0) + 1);
+            countedKeys.add(key);
+        }
+        for (const color of collectFontColorsFromText(text)) {
+            const key = colorLookup.get(color)?.key;
+            if (!key || countedKeys.has(key) || !characterColors[key]) continue;
+            counts.set(key, (counts.get(key) || 0) + 1);
+            countedKeys.add(key);
+        }
+    }
+
+    let changed = false;
+    for (const [key, entry] of Object.entries(characterColors)) {
+        const count = counts.get(key) || 0;
+        if ((entry.dialogueCount || 0) === count) continue;
+        entry.dialogueCount = count;
+        changed = true;
+    }
+    refreshTransientNarratorCount(messages);
+    return changed;
+}
+
 export function scanAllMessages() {
     Object.values(characterColors).forEach(c => c.dialogueCount = 0);
     const ctx = getContext();
@@ -307,6 +343,7 @@ export function scanAllMessages() {
     const processedMessages = [];
 
     for (const msg of chat) {
+        if (isHostSystemOrToolMessage(msg)) continue;
         const text = msg?.mes || '';
         const result = processColorBlocksInText(text);
         processedMessages.push({ text, countedKeys: result.countedKeys });
@@ -410,6 +447,7 @@ export function refreshTransientNarratorCount(chat = getContext()?.chat || []) {
     let total = 0;
     let present = false;
     for (const msg of chat) {
+        if (isHostSystemOrToolMessage(msg)) continue;
         const result = countNarratorFontTagsFromText(msg?.mes || '');
         if (!result.present) continue;
         present = true;
@@ -435,7 +473,7 @@ const RENDERED_QUOTE_PAIRS = Object.freeze([
 // The leading alternatives of SillyTavern's quote regex, which swallow code and
 // style spans before any quote inside them can match. Copied verbatim so both
 // sides skip the same regions.
-const RENDERED_QUOTE_SKIP_PATTERN = '<style>[\\s\\S]*?<\\/style>|```[\\s\\S]*?```|~~~[\\s\\S]*?~~~|``[\\s\\S]*?``|`[\\s\\S]*?`';
+const RENDERED_QUOTE_SKIP_PATTERN = '<[sS][tT][yY][lL][eE]>[\\s\\S]*?<\\/[sS][tT][yY][lL][eE]>|```[\\s\\S]*?```|~~~[\\s\\S]*?~~~|``[\\s\\S]*?``|`[\\s\\S]*?`';
 
 // Alternation named group marking a skipped region rather than a dialogue
 // segment. Consumers must discard these matches.
@@ -515,6 +553,8 @@ export function buildDialogueRegex() {
     // The skip alternative is first so a quote inside a code or style span is
     // consumed as a skipped region, exactly as SillyTavern consumes it before
     // it can become a <q>.
+    // Do not use new RegExp(source, 'gi') here: STYLE is case-insensitive, but
+    // user-selected alphabetic thought delimiters are not.
     return new RegExp(`(?<${DIALOGUE_SKIP_GROUP}>${RENDERED_QUOTE_SKIP_PATTERN})|(${patterns.join('|')})`, 'g');
 }
 

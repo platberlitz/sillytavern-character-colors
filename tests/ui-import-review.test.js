@@ -88,3 +88,105 @@ test('import disclosure denies permission changes and row signatures include rem
     const signatureSource = source.slice(signatureStart, signatureEnd);
     assert.match(signatureSource, /settings\.allowRemoteFonts\s*===\s*true/);
 });
+
+test('async UI mutations revalidate reviewed bindings before touching live targets', () => {
+    const capture = functionSource('captureUiMutationContext', 'isUiMutationContextCurrent');
+    const stylePack = functionSource('reviewAndApplyStylePack', 'renderStylePackRegistry');
+    const removals = functionSource('confirmCharacterRemoval', 'runSelectedCharacterMutation');
+    const avatarStart = source.indexOf("$('dc-avatar-color').onclick = async");
+    const avatarEnd = source.indexOf("$('dc-save-card').onclick = async", avatarStart);
+    const saveCardEnd = source.indexOf("$('dc-load-card').onclick = async", avatarEnd);
+    const avatar = source.slice(avatarStart, avatarEnd);
+    const saveCard = source.slice(avatarEnd, saveCardEnd);
+
+    assert.match(capture, /persistMetadata:\s*false/);
+    assert.doesNotMatch(capture, /\bgetStorageKey\(\)/);
+    assert.ok(stylePack.indexOf('captureUiMutationContext()') < stylePack.indexOf('await openDecisionDialog'));
+    assert.ok(stylePack.indexOf('isUiMutationContextCurrent(binding)') < stylePack.indexOf('await applyStylePackImport'));
+    assert.ok(removals.indexOf('captureUiMutationContext()') < removals.indexOf('await confirmReviewedAction'));
+    assert.ok(removals.indexOf('isUiMutationContextCurrent(binding)') < removals.indexOf('removeCharacterKeys'));
+    assert.ok(removals.indexOf('currentCandidates = getCandidates()') < removals.indexOf('removeCharacterKeys'));
+    assert.ok(avatar.indexOf('captureUiMutationContext()') < avatar.indexOf('await extractAvatarColor'));
+    assert.ok(avatar.indexOf('isUiMutationContextCurrent(binding)') < avatar.indexOf('setEntryFromBaseColor'));
+    assert.ok(saveCard.indexOf('captureUiMutationContext()') < saveCard.indexOf('await runImportAnalysis'));
+    assert.ok(saveCard.indexOf('isUiMutationContextCurrent(binding)') < saveCard.indexOf('saveToCard()'));
+    assert.match(source, /error:\s*'context_changed'/);
+});
+
+test('destructive confirmations bind reviewed tables, members, and preset input', () => {
+    const controls = functionSource('bindSettingsPanelControls', 'bindConnectionProfileRefresh');
+    const regen = controls.slice(controls.indexOf("$('dc-regen').onclick"), controls.indexOf("$('dc-rerandom-gradients').onclick"));
+    const gradients = controls.slice(controls.indexOf("$('dc-rerandom-gradients').onclick"), controls.indexOf("$('dc-flip-theme').onclick"));
+    const preset = controls.slice(controls.indexOf("$('dc-save-preset').onclick"), controls.indexOf("$('dc-load-preset').onclick"));
+    const reset = controls.slice(controls.indexOf("$('dc-reset').onclick"), controls.indexOf('let searchFrame'));
+    const group = functionSource('applyGroupProfileToExisting', 'getBulkStyleFieldMask');
+
+    for (const [label, section, mutation] of [
+        ['color regeneration', regen, 'regenerateAllColors()'],
+        ['gradient regeneration', gradients, 'regenerateAllGradients()'],
+        ['color reset', reset, 'createRestoreSnapshot()'],
+    ]) {
+        assert.ok(section.indexOf('captureUiMutationContext()') < section.indexOf('await confirmReviewedAction'), `${label} must capture before review`);
+        assert.ok(section.indexOf('JSON.stringify(characterColors) !== reviewedTable') < section.indexOf(mutation), `${label} must revalidate before mutation`);
+    }
+    assert.ok(preset.indexOf('reviewedTable') < preset.indexOf('await confirmReviewedAction'));
+    assert.ok(preset.indexOf("resolveColorPresetName($('dc-preset-name').value) !== name") < preset.indexOf('saveColorPreset()'));
+    assert.ok(preset.indexOf('JSON.stringify([characterColors, groupProfiles]) !== reviewedTable') < preset.indexOf('saveColorPreset()'));
+    assert.match(group, /const currentKeys = getCharacterKeysForGroup\(name\)/);
+    assert.match(group, /currentKeys\.map\(key => \[key, characterColors\[key\]\?\.group/);
+    assert.doesNotMatch(group, /characterColors\[key\] !== reviewedEntries/);
+});
+
+test('remaining reviewed chat and table actions reject context drift', () => {
+    const scope = functionSource('handleStorageScopeChange', 'buildImportReviewDetails');
+    const conflicts = functionSource('showColorConflictReport', 'buildSettingsPageNavHtml');
+    const controls = functionSource('bindSettingsPanelControls', 'bindConnectionProfileRefresh');
+    const seed = controls.slice(controls.indexOf("$('dc-gradient-new-seed').onclick"), controls.indexOf("$('dc-thought-symbols').oninput"));
+    const recolor = controls.slice(controls.indexOf("$('dc-recolor').onclick"), controls.indexOf("$('dc-colorize').onclick"));
+    const colorize = controls.slice(controls.indexOf("$('dc-colorize').onclick"), controls.indexOf("$('dc-verify-attr').onclick"));
+
+    assert.ok(scope.indexOf('captureUiMutationContext()') < scope.indexOf('await openDecisionDialog'));
+    assert.ok(scope.indexOf('isUiMutationContextCurrent(binding)') < scope.indexOf('await switchColorStorageScope'));
+    assert.ok(scope.indexOf('targetFingerprint') < scope.indexOf('await switchColorStorageScope'));
+    assert.ok(conflicts.indexOf('captureUiMutationContext()') < conflicts.indexOf('await openDecisionDialog'));
+    assert.ok(conflicts.indexOf('isUiMutationContextCurrent(binding)') < conflicts.indexOf('repairPerceptualConflicts()'));
+    assert.ok(seed.indexOf('captureUiMutationContext()') < seed.indexOf('await confirmReviewedAction'));
+    assert.ok(seed.indexOf('isUiMutationContextCurrent(binding)') < seed.indexOf('createGradientRandomMasterSeed()'));
+    assert.ok(recolor.indexOf('captureChatBinding()') < recolor.indexOf('await confirmReviewedAction'));
+    assert.ok(recolor.indexOf('isUiChatBindingCurrent(chatBinding)') < recolor.indexOf('recolorAllMessages()'));
+    assert.ok(colorize.indexOf('captureChatBinding()') < colorize.indexOf('await confirmReviewedAction'));
+    assert.ok(colorize.indexOf('isUiChatBindingCurrent(chatBinding)') < colorize.indexOf("colorizeMessages('all')"));
+});
+
+test('style-library installs and force-bold refresh only the state they depend on', () => {
+    const stylePack = functionSource('reviewAndApplyStylePack', 'renderStylePackRegistry');
+    const controls = functionSource('bindSettingsPanelControls', 'bindConnectionProfileRefresh');
+    const forceBold = controls.slice(controls.indexOf("$('dc-force-bold').onchange"), controls.indexOf("$('dc-allow-remote-fonts').onchange"));
+
+    assert.match(stylePack, /const needsScope = fields\.applyAssignments === true \|\| fields\.applyAppearance === true/);
+    assert.match(stylePack, /needsScope && !isUiMutationContextCurrent\(binding\)/);
+    assert.match(forceBold, /updateLegend\(\)/);
+    assert.match(forceBold, /renderNarratorEditor\(\)/);
+});
+
+test('UI validation and host refresh hooks use canonical existing APIs', () => {
+    const alias = functionSource('handleAliasClick', 'handleFontClick');
+    const group = functionSource('readValidatedGroupInput', 'handleGroupClick');
+    const galleryPreview = functionSource('getReadableGradientPresetPreview', 'getGradientPresetCatalog');
+    const galleryCatalog = functionSource('getGradientPresetCatalog', 'describeGradientGeometry');
+    const profileRefresh = functionSource('bindConnectionProfileRefresh', 'createUI');
+    const updateList = functionSource('updateCharList', 'setControlHelp');
+
+    assert.ok(alias.indexOf('normalizeRegistryIdentityName(rawAlias)') < alias.indexOf('aliases.push(alias)'));
+    assert.ok(alias.indexOf('isReservedCharacterIdentity(alias)') < alias.indexOf('aliases.push(alias)'));
+    assert.match(group, /rawValue\s*&&\s*!group/);
+    assert.match(galleryPreview, /applyGradientPreset\(preview, preset\)/);
+    assert.match(galleryCatalog, /getReadableGradientPresetPreview\(preset\)/);
+    assert.match(profileRefresh, /CONNECTION_PROFILE_LOADED/);
+    assert.match(profileRefresh, /CONNECTION_PROFILE_CREATED/);
+    assert.match(profileRefresh, /CONNECTION_PROFILE_UPDATED/);
+    assert.match(profileRefresh, /CONNECTION_PROFILE_DELETED/);
+    assert.doesNotMatch(profileRefresh, /setInterval|setTimeout/);
+    assert.match(updateList, /narratorEditor\.dataset\.narratorSignature[^\n]*renderNarratorEditor\(\)/);
+    assert.match(source, /getCandidates:\s*\(\) => Object\.keys\(characterColors\)\.filter\(k => \(characterColors\[k\]\?\.dialogueCount \|\| 0\) < min\)/);
+});

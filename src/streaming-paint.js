@@ -11,9 +11,10 @@
 // later, which is the flicker. While a paint session owns a message index they
 // all stand down (see isStreamingOwnedMessage in dom-engine.js).
 import { attributeDialogueSegments } from './attribution.js';
+import { isHostSystemOrToolMessage } from './attribution-store.js';
 import { applyCustomFontsToFontTags } from './fonts.js';
 import { collectFontColorsFromText } from './color-blocks.js';
-import { applySegmentDecoration, decorateNarratorTextNodes, getMessageQuoteOverrideOptions, matchSegmentsToElements } from './dom-engine.js';
+import { applySegmentDecoration, clearSegmentDecoration, decorateNarratorTextNodes, getMessageQuoteOverrideOptions, matchSegmentsToElements } from './dom-engine.js';
 import { getNarratorVisual } from './narrator-style.js';
 import { applyThemeReadabilityAndBrightness } from './palettes.js';
 import { getContext } from './st-api.js';
@@ -32,7 +33,8 @@ function resolveStreamingTarget() {
 }
 
 function observeStreamingTarget() {
-    if (!streamingSession.active || !streamingSession.observer || !streamingSession.mesText) return;
+    if (!streamingSession.active || !streamingSession.observer) return;
+    if (!streamingSession.mesText?.isConnected && !resolveStreamingTarget()) return;
     streamingSession.observer.observe(streamingSession.mesText, { childList: true, subtree: true, characterData: true });
 }
 
@@ -42,7 +44,7 @@ export function paintStreamingMessage() {
     if (!resolveStreamingTarget()) return false;
 
     const msg = getContext()?.chat?.[streamingSession.mesIndex];
-    if (!msg || msg.is_system) return false;
+    if (!msg || isHostSystemOrToolMessage(msg)) return false;
 
     const mesText = streamingSession.mesText;
     streamingSession.painting = true;
@@ -53,6 +55,7 @@ export function paintStreamingMessage() {
     streamingSession.observer?.disconnect();
     try {
         if (mesText.querySelector('font[color]') || collectFontColorsFromText(msg.mes).size) {
+            mesText.querySelectorAll('[data-dc-colored], [data-dc-seg]').forEach(clearSegmentDecoration);
             applyCustomFontsToFontTags(mesText, msg.mes);
             return true;
         }
@@ -66,8 +69,18 @@ export function paintStreamingMessage() {
 
         const quoteSegments = attribution.segments.filter(seg => seg.delimiter !== '*' && seg.delimiter !== '_');
         const emphasisSegments = attribution.segments.filter(seg => seg.delimiter === '*' || seg.delimiter === '_');
-        matchSegmentsToElements(quoteSegments, Array.from(mesText.querySelectorAll('q')), seg => normalizeSegmentText(seg.text), applySegmentDecoration, { allowAnchoredFallback: true });
-        matchSegmentsToElements(emphasisSegments, Array.from(mesText.querySelectorAll('em')), seg => normalizeSegmentText(seg.text.slice(1, -1)), applySegmentDecoration, { allowAnchoredFallback: true });
+        const quoteElements = Array.from(mesText.querySelectorAll('q'));
+        const emphasisElements = Array.from(mesText.querySelectorAll('em'));
+        const matched = new Set();
+        const decorate = (segment, element) => {
+            matched.add(element);
+            applySegmentDecoration(segment, element);
+        };
+        matchSegmentsToElements(quoteSegments, quoteElements, seg => normalizeSegmentText(seg.text), decorate, { allowAnchoredFallback: true });
+        matchSegmentsToElements(emphasisSegments, emphasisElements, seg => normalizeSegmentText(seg.text.slice(1, -1)), decorate, { allowAnchoredFallback: true });
+        for (const element of quoteElements.concat(emphasisElements)) {
+            if (!matched.has(element)) clearSegmentDecoration(element);
+        }
 
         // Narrator spans only ever get added here. Unwrapping them mid-stream is
         // a childList mutation that would re-enter this observer and make the
@@ -88,6 +101,7 @@ export function beginStreamingPaint() {
     const chat = getContext()?.chat;
     const mesIndex = Array.isArray(chat) ? chat.length - 1 : -1;
     if (mesIndex < 0) return false;
+    if (isHostSystemOrToolMessage(chat[mesIndex])) return false;
 
     // Both STREAM_TOKEN_RECEIVED and SMOOTH_STREAM_TOKEN_RECEIVED fire per
     // token, so this runs constantly and must stay a cheap no-op once armed.

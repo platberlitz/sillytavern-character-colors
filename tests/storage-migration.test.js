@@ -110,7 +110,7 @@ test('flattened base colors are repaired from the surviving rendered color', () 
 });
 
 test('storage identity migration is schema-versioned before strict normalization', () => {
-    assert.equal(COLOR_SCHEMA_VERSION, 9);
+    assert.equal(COLOR_SCHEMA_VERSION, 10);
     assert.match(storageSource, /version < COLOR_SCHEMA_VERSION\s*\? migrateLegacyAutoSyncRecord\(source\)/);
     assert.match(storageSource, /colorData: migrateLegacyStoredColorData/);
     assert.match(storageSource, /presets: migrateLegacyStoredColorPresets/);

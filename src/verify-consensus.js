@@ -13,6 +13,11 @@ export function normalizeAttributionVerifyPasses(value, fallback = 1) {
     return Math.min(MAX_ATTRIBUTION_VERIFY_PASSES, Math.max(1, Math.trunc(passes)));
 }
 
+export function hasAttributionVerifierBallotQuorum(validBallots, passes) {
+    const total = normalizeAttributionVerifyPasses(passes);
+    return Number(validBallots) >= Math.floor(total / 2) + 1;
+}
+
 /**
  * Collapse several independent verifier samples into the corrections they
  * agree on.
@@ -87,6 +92,9 @@ function escapeRegexLiteral(value) {
 export function isSpeakerNamePresentInText(name, texts) {
     const needle = String(name ?? '').trim();
     if (!needle) return false;
-    const pattern = new RegExp(`(^|[^\\p{L}\\p{N}])${escapeRegexLiteral(needle)}([^\\p{L}\\p{N}]|$)`, 'iu');
+    const cjk = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(needle);
+    const pattern = new RegExp(cjk
+        ? escapeRegexLiteral(needle)
+        : `(^|[^\\p{L}\\p{N}])${escapeRegexLiteral(needle)}([^\\p{L}\\p{N}]|$)`, 'iu');
     return (Array.isArray(texts) ? texts : []).some(text => typeof text === 'string' && pattern.test(text));
 }
