@@ -42,19 +42,23 @@ const hooks = registerHooks({
 });
 
 const { attributeDialogueSegments, balanceStreamingText } = await import('../src/attribution.js');
-const { applySegmentDecoration, matchSegmentsToElements } = await import('../src/dom-engine.js');
+const { applySegmentDecoration, matchSegmentsToElements, setMessageQuoteOverride } = await import('../src/dom-engine.js');
 const { characterColors, resetStreamingSession, settings, streamingSession } = await import('../src/state.js');
+const { paintStreamingMessage } = await import('../src/streaming-paint.js');
 const { normalizeSegmentText } = await import('../src/utils.js');
+const { setTestContext } = await import(stApiUrl);
 hooks.deregister();
 
 function withCharacters(names, run) {
     const previousColors = { ...characterColors };
+    const previousEnabled = settings.enabled;
     const previousEngine = settings.coloringEngine;
     const previousSymbols = settings.thoughtSymbols;
     for (const key of Object.keys(characterColors)) delete characterColors[key];
     names.forEach((name, index) => {
         characterColors[name.toLowerCase()] = { name, color: index === 0 ? '#112233' : '#445566', aliases: [], dialogueCount: 0 };
     });
+    settings.enabled = true;
     settings.coloringEngine = 'dom';
     settings.thoughtSymbols = '*';
     try {
@@ -63,6 +67,7 @@ function withCharacters(names, run) {
         resetStreamingSession();
         for (const key of Object.keys(characterColors)) delete characterColors[key];
         Object.assign(characterColors, previousColors);
+        settings.enabled = previousEnabled;
         settings.coloringEngine = previousEngine;
         settings.thoughtSymbols = previousSymbols;
     }
@@ -158,6 +163,7 @@ function fakeElement(text) {
     const attributes = new Map();
     const style = {};
     const el = {
+        isConnected: true,
         textContent: text,
         writes: 0,
         style: new Proxy(style, {
@@ -186,11 +192,46 @@ function fakeElement(text) {
         setAttribute(name, value) { el.writes++; attributes.set(name, String(value)); },
         removeAttribute(name) { attributes.delete(name); },
         hasAttribute: name => attributes.has(name),
+        querySelector: () => null,
         querySelectorAll: () => [],
         closest: () => null,
     };
     return el;
 }
+
+test('a saved correction repaints the streaming-owned gradient immediately', () => {
+    const message = { mes: 'Alice said "Hello."', name: 'Alice' };
+    setTestContext({ chat: [message], chatMetadata: {} });
+    try {
+        withCharacters(['Alice', 'Bob'], () => {
+            characterColors.bob.baseColor = characterColors.bob.color;
+            characterColors.bob.gradient = {
+                type: 'linear',
+                angle: 90,
+                x: 50,
+                y: 50,
+                primaryPosition: 0,
+                stops: [{ baseColor: '#778899', color: '#778899', position: 100 }],
+                animation: { enabled: false, duration: 8, reverse: false },
+            };
+
+            const quote = fakeElement('Hello.');
+            const mesText = fakeElement('Hello.');
+            mesText.querySelectorAll = selector => selector === 'q' ? [quote] : [];
+            armSession();
+            streamingSession.mesElement = { isConnected: true };
+            streamingSession.mesText = mesText;
+
+            assert.equal(setMessageQuoteOverride(0, message, 0, 'Bob'), true);
+            assert.equal(paintStreamingMessage(), true);
+            assert.equal(quote.getAttribute('data-dc-speaker'), 'bob');
+            assert.equal(quote.classList.contains('dc-gradient-text'), true);
+            assert.match(quote.style.getPropertyValue('--dc-gradient'), /#445566.*#778899/);
+        });
+    } finally {
+        setTestContext({ chat: [], chatMetadata: {} });
+    }
+});
 
 test('repainting an already-correct element writes nothing to the DOM', () => {
     withCharacters(['Alice'], () => {

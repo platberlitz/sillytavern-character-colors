@@ -14,6 +14,7 @@ const stubSources = new Map([
         export const getMessageIndexFromElement = () => -1;
         export const getMessageQuoteOverrideEntry = () => null;
         export const getMessageQuoteOverrideOptions = () => ({});
+        export const isStreamingOwnedMessage = () => false;
         export const matchSegmentsToElements = () => {};
         export const refreshAndDecorateMessageDom = async () => false;
         export const refreshMessageDom = () => {};
@@ -55,6 +56,7 @@ const stubSources = new Map([
         export const runtimeState = {};
         export const settings = {};
     `],
+    ['./streaming-paint.js', 'export const paintStreamingMessage = () => false;'],
     ['./ui.js', `
         export const getSortedEntries = () => [];
         export const updateLegend = () => {};

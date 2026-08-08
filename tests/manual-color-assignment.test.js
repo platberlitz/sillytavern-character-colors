@@ -129,3 +129,10 @@ test('message re-renders chain the decoration re-apply after they settle', () =>
     const bare = contextMenu.match(/^\s+refreshMessageDom\(/gm) || [];
     assert.equal(bare.length, 0, 'no fire-and-forget refreshMessageDom call may remain');
 });
+
+test('right-click overrides use the streaming painter for its owned message', () => {
+    const helper = contextMenu.match(/function repaintDomAssignment[\s\S]*?\n}/)?.[0] || '';
+    assert.match(helper, /isStreamingOwnedMessage\(messageIndex\).*paintStreamingMessage\(\)/);
+    const calls = contextMenu.match(/await repaintDomAssignment\(/g) || [];
+    assert.equal(calls.length, 2, 'manual assignment and automatic restoration must share the streaming-aware repaint');
+});

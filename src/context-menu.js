@@ -2,12 +2,13 @@
 import { attributeDialogueSegments } from './attribution.js';
 import { ATTRIBUTION_SOURCE } from './attribution-store.js';
 import { resolveCharacterKeyByNameOrAlias } from './color-blocks.js';
-import { cancelMessageDomFollowupRepairs, clearMessageDomRepairTimer, clearStreamingAttributionOverrides, decorateMessageDomFromCurrentRender, deleteMessageQuoteOverride, getMessageIndexFromElement, getMessageQuoteOverrideEntry, getMessageQuoteOverrideOptions, matchSegmentsToElements, refreshAndDecorateMessageDom, refreshMessageDom, resolveDomSegmentIndexForElement, restoreMessageQuoteOverrideEntry, scheduleMessageDomFollowupRepair, setMessageQuoteOverride } from './dom-engine.js';
+import { cancelMessageDomFollowupRepairs, clearMessageDomRepairTimer, clearStreamingAttributionOverrides, decorateMessageDomFromCurrentRender, deleteMessageQuoteOverride, getMessageIndexFromElement, getMessageQuoteOverrideEntry, getMessageQuoteOverrideOptions, isStreamingOwnedMessage, matchSegmentsToElements, refreshAndDecorateMessageDom, refreshMessageDom, resolveDomSegmentIndexForElement, restoreMessageQuoteOverrideEntry, scheduleMessageDomFollowupRepair, setMessageQuoteOverride } from './dom-engine.js';
 import { scheduleCustomFontRefresh } from './fonts.js';
 import { applyLiveColorChangesFromSnapshot, captureEffectiveColorSnapshot, commit, flushChatSave, queueChatSave, updateTextColorReferences, updateVisibleMessageColors } from './live-colors.js';
 import { buildCharacterEntry, getEntryEffectiveColor, setEntryFromEffectiveColor } from './palettes.js';
 import { escapeHtml, eventSource, event_types, getContext, power_user } from './st-api.js';
 import { characterColors, isDomEngine, runtimeState, settings } from './state.js';
+import { paintStreamingMessage } from './streaming-paint.js';
 import { getSortedEntries, updateLegend } from './ui.js';
 import { escapeAttr, hashMessageText, normalizeHexColor, normalizeSegmentText, toast } from './utils.js';
 
@@ -164,6 +165,16 @@ function isDomAssignmentTargetCurrent(target) {
     if (target.element.getAttribute('data-dc-seg') !== String(target.segmentIndex)) return false;
     if (target.speakerKey && target.element.getAttribute('data-dc-speaker') !== target.speakerKey) return false;
     return true;
+}
+
+function repaintDomAssignment(messageIndex, message, recoverDom) {
+    if (isStreamingOwnedMessage(messageIndex)) return paintStreamingMessage();
+    return recoverDom
+        ? refreshAndDecorateMessageDom(messageIndex, message, { queueVerification: false })
+        : decorateMessageDomFromCurrentRender(messageIndex, message, {
+            queueVerification: false,
+            renderFallback: false,
+        });
 }
 
 function getMenuPosition(e, targetEl) {
@@ -347,15 +358,11 @@ function showMenu(e, fontTag, qElement = null) {
             clearMessageDomRepairTimer(messageIndex);
             cancelMessageDomFollowupRepairs(messageIndex);
             clearStreamingAttributionOverrides(messageIndex);
-            const repainted = recoverDom
-                ? await refreshAndDecorateMessageDom(messageIndex, message, { queueVerification: false })
-                : await decorateMessageDomFromCurrentRender(messageIndex, message, {
-                    queueVerification: false,
-                    renderFallback: false,
-                });
+            const repainted = await repaintDomAssignment(messageIndex, message, recoverDom);
             scheduleMessageDomFollowupRepair(messageIndex, repainted);
             updateLegend();
-            toast.success('Automatic attribution restored.');
+            if (repainted) toast.success('Automatic attribution restored.');
+            else toast.warning('Automatic attribution restored; visual refresh is pending.');
         } catch (error) {
             toast.error('Could not restore automatic attribution.');
             console.error('[Dialogue Colors] Failed to clear dialogue override:', error);
@@ -523,12 +530,7 @@ function showMenu(e, fontTag, qElement = null) {
             if (domRepaintTarget) {
                 let repainted = false;
                 try {
-                    repainted = domRepaintTarget.recoverDom
-                        ? await refreshAndDecorateMessageDom(domRepaintTarget.mesIndex, domRepaintTarget.msg, { queueVerification: false })
-                        : await decorateMessageDomFromCurrentRender(domRepaintTarget.mesIndex, domRepaintTarget.msg, {
-                            queueVerification: false,
-                            renderFallback: false,
-                        });
+                    repainted = await repaintDomAssignment(domRepaintTarget.mesIndex, domRepaintTarget.msg, domRepaintTarget.recoverDom);
                 } catch (error) {
                     refreshPending = true;
                     console.warn('[Dialogue Colors] Assignment saved, but immediate DOM repaint failed:', error);
