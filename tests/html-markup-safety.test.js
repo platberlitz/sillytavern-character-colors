@@ -193,6 +193,44 @@ test('a message an older version broke is repaired without disturbing its real c
     });
 });
 
+// A styled card of the kind a card author or a model emits, reduced from a chat this bug was
+// reported against. The small fixtures above cannot show what actually broke: several elements,
+// each with a long style attribute full of colons, commas, hashes and parentheses.
+const STYLED_CARD = [
+    '<div style="width:320px;margin:20px auto;background:#1a1a1c;border-radius:24px;padding:16px 14px;'
+        + 'font-size:14px;color:#e8e8ea;box-shadow:0 8px 30px rgba(0,0,0,0.6);border:1px solid #2a2a2e">',
+    '<div style="text-align:center;color:#6a6a72;font-size:12px;letter-spacing:0.5px">Today</div>',
+    '<div style="display:flex;flex-direction:column;gap:10px">',
+    '<div style="background:#2c2c30;border-radius:18px;padding:9px 13px">Bob said, "Hello."</div>',
+    '</div></div>',
+].join('\n');
+
+test('a styled card keeps every attribute and gets only its dialogue colored', () => {
+    withCleanRegistry(() => {
+        const color = bobColor();
+        const result = colorizeMessageText(STYLED_CARD, 'Bob', { autoAddMessageSpeaker: true });
+
+        for (const attribute of STYLED_CARD.match(/style="[^"]*"/g)) {
+            assert.ok(result.updatedText.includes(attribute), `mangled ${attribute.slice(0, 40)}...`);
+        }
+        assert.equal(result.updatedText.match(/<font /g).length, 1);
+        assert.ok(result.updatedText.includes(`<font color="${color}">"Hello."</font>`));
+    });
+});
+
+test('a styled card damaged by an older version is repaired attribute by attribute', () => {
+    withCleanRegistry(() => {
+        const color = bobColor();
+        const colorized = STYLED_CARD.replace('"Hello."', `<font color="${color}">"Hello."</font>`);
+        // What the pre-5.9.4 colorizer produced: every attribute value wrapped as if it were speech.
+        const damaged = colorized.replace(/style="([^"]*)"/g, `style=<font color="${color}">"$1"</font>`);
+        const chat = [{ name: 'Bob', mes: damaged }];
+
+        assert.deepEqual(repairHtmlBreakingColorSpans(chat).repairedIndices, [0]);
+        assert.equal(chat[0].mes, colorized, 'the dialogue keeps its color; the attributes lose theirs');
+    });
+});
+
 test('the repair declines markup this extension did not write', () => {
     const foreign = '<div class=<font size="3">"row"</font>>"Hi."</div>';
     const chat = [{ name: 'Bob', mes: foreign }, { name: 'Bob', mes: '<b>"Hi."</b>' }];
