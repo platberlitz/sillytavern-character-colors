@@ -60,6 +60,20 @@ async function loadLiveColorsModule(overrides = {}) {
         // Mirrors the real predicate rather than stubbing it out, so the write paths under test
         // skip tool-call messages here exactly as they do in the host.
         isToolCallMessage: msg => Array.isArray(msg?.extra?.tool_invocations),
+        // Mirrored from utils.js for the same reason: these two decide whether a color span
+        // would be spliced into an element's markup, and a stub that always says "safe" would
+        // hide exactly the breakage the LLM finalizer is supposed to drop.
+        findHtmlTagRanges(text) {
+            const ranges = [];
+            const tagRegex = /<[^>]+>/g;
+            let match;
+            while ((match = tagRegex.exec(String(text ?? ''))) !== null) {
+                ranges.push({ start: match.index, end: match.index + match[0].length });
+            }
+            return ranges;
+        },
+        splitsHtmlTag: (start, end, ranges) => (ranges || []).some(range => (start > range.start && start < range.end)
+            || (end > range.start && end < range.end)),
         ...overrides,
     };
     const importedNames = [...names].join(', ');

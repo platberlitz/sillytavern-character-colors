@@ -6,7 +6,7 @@ import { normalizeRegistryIdentity, normalizeRegistryIdentityName } from './grou
 import { formatColorBlockPair } from './prompts.js';
 import { escapeRegex } from './st-api.js';
 import { characterColors, streamingSession } from './state.js';
-import { buildMaskedDialogueText, getDialogueParagraphRange, getPrecedingParagraphRange, isCompositeSpeakerLabel, isSameDialogueParagraph, makeLengthPreservingSearchText, normalizeSegmentText } from './utils.js';
+import { buildMaskedDialogueText, findHtmlTagRanges, getDialogueParagraphRange, getPrecedingParagraphRange, isCompositeSpeakerLabel, isSameDialogueParagraph, makeLengthPreservingSearchText, maskHtmlTagQuotes, normalizeSegmentText, splitsHtmlTag } from './utils.js';
 
 // Invalidates derived caches (speaker mention regexes). Called on chat change and UI init.
 export function clearDomCache() { clearSpeakerRegexCache(); }
@@ -595,9 +595,13 @@ function createSegmentProvenance(source, method, confidence, evidence) {
 export function balanceStreamingText(text) {
     let balanced = String(text ?? '');
     for (const char of ['*', '"']) {
+        // An attribute's quotes are not dialogue delimiters, so they must not tip the parity
+        // count: <img src="x.png"> alone would otherwise read as balanced speech, and a half
+        // written tag would have a closing quote appended into the middle of it.
+        const counted = char === '"' ? maskHtmlTagQuotes(balanced) : balanced;
         let count = 0;
-        for (let i = 0; i < balanced.length; i++) {
-            if (balanced[i] === char) count++;
+        for (let i = 0; i < counted.length; i++) {
+            if (counted[i] === char) count++;
         }
         if (count % 2 === 1) balanced = balanced.trimEnd() + char;
     }
@@ -612,6 +616,10 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
     const raw = options.streaming === true
         ? balanceStreamingText(rawText)
         : String(rawText ?? '');
+    // Scanned masked, sliced unmasked: maskHtmlTagQuotes is length preserving, so an offset
+    // found in scanned addresses the same byte of raw. The host hides an attribute's quotes
+    // from its own <q> pass the same way, so this keeps segment indices in step with it.
+    const scanned = maskHtmlTagQuotes(raw);
     const localAssignments = parseNamedColorAssignmentsFromText(raw);
     const lookup = buildNameColorLookup(localAssignments);
     const sortedLookupKeys = Array.from(lookup.keys())
@@ -650,7 +658,7 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
     const collectedSegments = [];
     dialogueRegex.lastIndex = 0;
 
-    while ((match = dialogueRegex.exec(raw)) !== null) {
+    while ((match = dialogueRegex.exec(scanned)) !== null) {
         // Code spans, fences and style blocks are matched only so that quotes
         // inside them are consumed instead of segmented, mirroring how
         // SillyTavern skips them when it renders <q> elements.
@@ -658,7 +666,7 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
         result.hadDialogueMatches = true;
         segmentIndex++;
         const offset = match.index;
-        const matchText = match[0];
+        const matchText = raw.slice(offset, offset + match[0].length);
         collectedSegments.push({
             index: segmentIndex,
             start: offset,
@@ -1065,10 +1073,17 @@ export function attributeDialogueSegments(rawText, messageSpeakerName = '', opti
 export function colorizeMessageText(rawText, messageSpeakerName = '', options = {}) {
     const { segments, hadDialogueMatches, hadResolvableSpeaker, createdCharacters, usedAssignments } = attributeDialogueSegments(rawText, messageSpeakerName, options);
 
+    // Quotes inside a tag are masked out of segmentation, but a delimiter pair can still close
+    // inside one (an asterisk in an attribute, a curly quote the host does not mask). Writing a
+    // font tag at such a boundary would splice it into the element and destroy it, so the span
+    // is left uncolored rather than guessed at.
+    const tagRanges = findHtmlTagRanges(rawText);
+
     let updatedText = rawText;
     for (let i = segments.length - 1; i >= 0; i--) {
         const seg = segments[i];
         if (!seg.assignment) continue;
+        if (splitsHtmlTag(seg.start, seg.end, tagRanges)) continue;
         updatedText = `${updatedText.slice(0, seg.start)}<font color="${seg.assignment.color}">${seg.text}</font>${updatedText.slice(seg.end)}`;
     }
 

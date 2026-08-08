@@ -13,7 +13,7 @@ import { generateQuietPrompt, getContext } from './st-api.js';
 import { COLOR_STATE_SAVE_DELAY_MS, LIVE_CHAT_SAVE_DELAY_MS, attributionChatGeneration, characterColors, colorStateSaveTimer, isAutoColorizing, isColorizing, isDomEngine, isRecoloring, lastProcessedMessageSignature, liveChatSaveTimer, pendingColorStateHistory, pendingColorStateInjectPrompt, pendingColorStateSaveData, pendingColorStateUpdateList, setColorStateSaveTimer, setIsAutoColorizing, setIsColorizing, setIsRecoloring, setLastProcessedMessageSignature, setLiveChatSaveTimer, setPendingColorStateHistory, setPendingColorStateInjectPrompt, setPendingColorStateSaveData, setPendingColorStateUpdateList, setPendingLiveChatSave, settings } from './state.js';
 import { getStorageKey, saveData } from './storage.js';
 import { clearAutoColorizeIndicators, hideAutoColorizeIndicator, setColorizeButtonBusy, setRecolorButtonBusy, showAutoColorizeIndicator, updateCharList, updateLegend, updateStorageScopeStatus } from './ui.js';
-import { hashMessageText, isCompositeSpeakerLabel, isToolCallMessage, normalizeHexColor, normalizeSegmentText, toast } from './utils.js';
+import { findHtmlTagRanges, hashMessageText, isCompositeSpeakerLabel, isToolCallMessage, normalizeHexColor, normalizeSegmentText, splitsHtmlTag, toast } from './utils.js';
 
 let pendingAutoColorizeRetry = false;
 let chatSaveInFlight = null;
@@ -897,6 +897,35 @@ export function detectLLMQuoteArtifacts(originalText, candidateText) {
     return issues;
 }
 
+// A model asked to color quoted text sometimes colors an attribute value too, emitting
+// <img src=<font color="#aabbcc">"portrait.png"</font>>. The projection still matches the
+// original byte for byte -- the tags are the only thing added -- so the drift check cannot see
+// it, yet the element is destroyed. Those spans are dropped and the rest of the message kept:
+// re-inserting the surviving spans into the projection is the same provable rebuild
+// fillUncoloredDialogueGaps does, not a repair guess.
+function withoutHtmlBreakingSpans(parsed, options = {}) {
+    const tagRanges = findHtmlTagRanges(parsed.projection);
+    if (!tagRanges.length) return parsed;
+    const safeSpans = parsed.spans.filter(span => !splitsHtmlTag(span.start, span.end, tagRanges));
+    if (safeSpans.length === parsed.spans.length) return parsed;
+    if (!options.silent) {
+        console.warn(`[Dialogue Colors] Dropped ${parsed.spans.length - safeSpans.length} LLM color span(s) that would have been spliced into an HTML tag.`);
+    }
+
+    let canonicalText = parsed.projection;
+    for (let i = safeSpans.length - 1; i >= 0; i--) {
+        const { start, end, color } = safeSpans[i];
+        canonicalText = `${canonicalText.slice(0, start)}<font color="${color}">${canonicalText.slice(start, end)}</font>${canonicalText.slice(end)}`;
+    }
+    return {
+        ...parsed,
+        canonicalText,
+        spans: safeSpans,
+        colors: safeSpans.map(span => span.color),
+        sawFont: safeSpans.length > 0,
+    };
+}
+
 export function extractUsedAssignmentsFromColorizedText(text, narratorColor = null) {
     const parsed = parseCanonicalFontMarkup(stripLLMColorMetadata(text));
     return parsed ? getValidatedAssignmentsForColors(parsed.colors, narratorColor) : [];
@@ -933,14 +962,17 @@ export function finalizeLLMColorizedText(rawText, responseText, narratorColor = 
         return { updatedText: rawText, changed: false, colorized: false, usedAssignments: [] };
     }
 
+    const candidate = withoutHtmlBreakingSpans(parsedCandidate, options);
+    if (!candidate.sawFont) return { updatedText: rawText, changed: false, colorized: false, usedAssignments: [] };
+
     const usedAssignments = getValidatedAssignmentsForColors(
-        parsedCandidate.colors,
+        candidate.colors,
         narratorColor,
         options.pendingEntries,
         options.preservedAssignments,
     );
     const metadata = formatValidatedColorMetadata(usedAssignments);
-    const finalText = `${parsedCandidate.canonicalText}${metadata ? `\n[COLORS:${metadata}]` : ''}`;
+    const finalText = `${candidate.canonicalText}${metadata ? `\n[COLORS:${metadata}]` : ''}`;
 
     return {
         updatedText: finalText,
@@ -1008,7 +1040,9 @@ export function fillUncoloredDialogueGaps(rawText, messageSpeakerName = '', opti
     // (color="#...") would otherwise match as dialogue, and alternation should read
     // the whole clean text, covered segments included.
     const { segments, createdCharacters } = attributeDialogueSegments(parsed.projection, messageSpeakerName, options);
+    const tagRanges = findHtmlTagRanges(parsed.projection);
     const gaps = segments.filter(seg => seg.assignment
+        && !splitsHtmlTag(seg.start, seg.end, tagRanges)
         && !parsed.spans.some(span => seg.start < span.end && seg.end > span.start));
     if (!gaps.length) return { ...noChange, createdCharacters };
 
@@ -1144,6 +1178,56 @@ export async function applyToolCallMessageRepair(options = {}) {
     queueChatSave();
     console.info('[Dialogue Colors] Restored tool-call messages this extension had colorized.', report);
     toast.info(`Restored ${count} tool-call message${count === 1 ? '' : 's'} this extension had colorized.`);
+    for (const index of report.repairedIndices) await refreshMessageDom(index, chat[index]);
+    return report;
+}
+
+// One-shot repair for chats damaged before the colorizer learned that an attribute value is
+// markup rather than dialogue. Those messages carry a font tag spliced into an element --
+// <div class=<font color="#aabbcc">"stat-block"</font>> -- which no longer renders as a div.
+//
+// Provable rather than guessed at for the same reason restoreColorizedToolCallText is:
+// parseCanonicalFontMarkup accepts only the markup this extension writes, so re-emitting the
+// surviving spans into its projection rewrites nothing the extension did not put there, and a
+// message it refuses to parse is left exactly as it is.
+export function repairHtmlBreakingColorSpans(chat = getContext()?.chat) {
+    const report = { repairedIndices: [] };
+    if (!Array.isArray(chat) || !chat.length) return report;
+
+    for (let i = 0; i < chat.length; i++) {
+        const msg = chat[i];
+        if (isHostSystemOrToolMessage(msg)) continue;
+        const rawText = msg?.mes || '';
+        // Cheap reject: an undamaged message has no closing font tag to have been misplaced.
+        if (!/<\/font\s*>/i.test(rawText)) continue;
+        const withoutMetadata = stripLLMColorMetadata(rawText);
+        const parsed = parseCanonicalFontMarkup(withoutMetadata);
+        if (!parsed || !parsed.sawFont) continue;
+        const repaired = withoutHtmlBreakingSpans(parsed, { silent: true });
+        if (repaired === parsed) continue;
+        // The trailing color block is carried over untouched: it names characters, and dropping
+        // a span is not evidence that the chat has stopped using the color it carried.
+        msg.mes = `${repaired.canonicalText}${rawText.slice(withoutMetadata.length)}`;
+        report.repairedIndices.push(i);
+    }
+    return report;
+}
+
+export async function applyHtmlBreakingSpanRepair(options = {}) {
+    const chat = getContext()?.chat;
+    const report = repairHtmlBreakingColorSpans(chat);
+    const count = report.repairedIndices.length;
+    if (!count) {
+        if (!options.silent) toast.info('No messages needed HTML repair.');
+        return report;
+    }
+
+    commit();
+    queueChatSave();
+    console.info('[Dialogue Colors] Removed color tags this extension had spliced into HTML elements.', report);
+    if (!options.silent) {
+        toast.info(`Repaired ${count} message${count === 1 ? '' : 's'} whose HTML this extension had broken.`);
+    }
     for (const index of report.repairedIndices) await refreshMessageDom(index, chat[index]);
     return report;
 }

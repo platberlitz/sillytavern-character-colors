@@ -77,9 +77,13 @@ const SILLYTAVERN_QUOTE_RE = /<style>[\s\S]*?<\/style>|```[\s\S]*?```|~~~[\s\S]*
 
 function renderSillyTavernQuotes(text) {
     const quotes = [];
-    String(text).replace(SILLYTAVERN_QUOTE_RE, (match, ...groups) => {
+    // Copied from the same place: with encode_tags off (the default) the host hides the double
+    // quotes inside every HTML tag behind U+FFFE before the quote pass, then restores them, so
+    // an attribute value never becomes a <q>.
+    const masked = String(text).replace(/<([^>]+)>/g, (_, contents) => `<${contents.replaceAll('"', '\ufffe')}>`);
+    masked.replace(SILLYTAVERN_QUOTE_RE, (match, ...groups) => {
         const captured = groups.slice(0, 6).find(value => value !== undefined);
-        if (captured !== undefined) quotes.push(captured);
+        if (captured !== undefined) quotes.push(captured.replaceAll('\ufffe', '"'));
         return match;
     });
     return quotes;
@@ -183,6 +187,12 @@ test('segmentation matches SillyTavern rendered quotes', () => {
         '"" and "B"',
         '<style>q{color:"red"}</style>\n"B"',
         '<STYLE>q{color:"red"}</STYLE>\n"B"',
+        '<div class="stat-block">"A"</div>\n"B"',
+        '<img src="portrait.png" alt="Bob">\n"B"',
+        '<font color="#aabbcc">"A"</font>\n"B"',
+        '"A <span class="tag"> B"\n"C"',
+        '<div\n  class="wrapped">"A"</div>',
+        '"6" and <div class="x">"B"</div>',
     ];
     withCharacters(['Bob'], () => {
         for (const text of cases) {

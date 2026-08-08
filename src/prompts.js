@@ -161,6 +161,7 @@ export function buildLLMColorizeRules(extraRule = '') {
         '- For delimiter spans, the opening and closing delimiters must be inside the same <font> tag.',
         '- Do not change, add, or remove any text; only insert color tags.',
         '- Do not escape or alter quotes or delimiters.',
+        '- Never place a color tag inside an HTML tag: attribute values such as class="row" are markup, not dialogue.',
         '- Do not output markdown code fences, commentary, or explanations.',
     ];
     if (extraRule) rules.push(extraRule);
@@ -229,6 +230,7 @@ export function buildMinimalPromptInstruction() {
     }
     parts.push(
         '- Preserve exact text; do not add, remove, escape, or move quotes/delimiters.',
+        '- Never place a color tag inside an HTML tag: attribute values such as class="row" are markup, not dialogue.',
         '- No code fences, commentary, or explanations.',
         mode === 'dark'
             ? `- Use readable colors for a dark background (${minLightness}-${maxLightness}% lightness).`

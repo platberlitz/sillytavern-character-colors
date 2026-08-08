@@ -255,6 +255,43 @@ export function isCompositeSpeakerLabel(rawName) {
     return splitCompositeSpeakerName(rawName).length >= 2;
 }
 
+// SillyTavern blanks the double quotes inside an HTML tag before it turns quote pairs into <q>
+// elements (the encode_tags branch of messageFormatting in public/script.js), so an attribute
+// value is never dialogue there. Mirroring that mask keeps this extension's segment indices
+// lined up with the rendered <q> elements, and in LLM mode it stops the colorizer from treating
+// class="stat-block" as speech -- splicing a <font> tag into the middle of an element produces
+// <div class=<font color="#aabbcc">"stat-block"</font>>, which is not recoverable markup.
+//
+// One character is replaced by one character, so every offset taken from the masked text still
+// points at the same byte of the original; callers slice their segment text out of the original.
+export const HTML_TAG_QUOTE_MASK = '\ufffe';
+
+export function maskHtmlTagQuotes(text) {
+    return String(text ?? '').replace(/<([^>]+)>/g, (match, contents) => (contents.includes('"')
+        ? `<${contents.replaceAll('"', HTML_TAG_QUOTE_MASK)}>`
+        : match));
+}
+
+// The spans of every HTML tag in the text, as [start, end) offsets. Used to prove that a pair of
+// insertion points sits outside element markup before anything is written between them.
+export function findHtmlTagRanges(text) {
+    const ranges = [];
+    const tagRegex = /<[^>]+>/g;
+    let match;
+    while ((match = tagRegex.exec(String(text ?? ''))) !== null) {
+        ranges.push({ start: match.index, end: match.index + match[0].length });
+    }
+    return ranges;
+}
+
+// True when wrapping [start, end) would put an opening or closing tag inside an element's own
+// markup. A boundary that lands exactly on a tag edge is fine -- that wraps the tag whole, which
+// renders; a boundary strictly inside one destroys the element.
+export function splitsHtmlTag(start, end, ranges) {
+    return (ranges || []).some(range => (start > range.start && start < range.end)
+        || (end > range.start && end < range.end));
+}
+
 export function makeLengthPreservingSearchText(text) {
     return String(text ?? '')
         .replace(/<[^>]+>/g, match => ' '.repeat(match.length))
