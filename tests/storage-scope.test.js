@@ -43,7 +43,8 @@ const hooks = registerHooks({
 });
 const stApi = await import(stApiUrl);
 const storage = await import('../src/storage.js');
-const { settings, MODULE_NAME } = await import('../src/state.js');
+const state = await import('../src/state.js');
+const { settings, MODULE_NAME } = state;
 hooks.deregister();
 
 // The host round-trips extension_settings through its own server, and the immediate-persist
@@ -120,6 +121,55 @@ test('loading a partial record keeps the scope the user is on', () => {
                 `a record with globalSettings ${JSON.stringify(globalSettings)} reset the scope`);
         });
     }
+});
+
+test('the auto-sync writer keeps both halves of the record in step', () => {
+    withFreshStore('c1', () => {
+        storage.loadData();
+        settings.colorStorageScope = 'chat';
+        state.setAutoSyncEnabled(true);
+        try {
+            storage.saveSettingsToStore({ force: true, schedule: false });
+            const record = stApi.extension_settings[MODULE_NAME];
+            // globalSettings is the half a reload restores from. Publishing only the transport
+            // payload left it empty, and the scope came back as Per card on the next load.
+            assert.equal(record.settings.colorStorageScope, 'chat');
+            assert.equal(record.globalSettings.colorStorageScope, 'chat',
+                'the auto-sync write must not leave globalSettings behind');
+        } finally {
+            state.setAutoSyncEnabled(false);
+        }
+    });
+});
+
+test('a record whose globalSettings is missing falls back to the auto-sync payload', () => {
+    withFreshStore('c1', () => {
+        stApi.extension_settings[MODULE_NAME] = {
+            version: 8,
+            settings: { themeMode: 'dark', colorStorageScope: 'chat' },
+            colorData: {},
+            legacyLocalStorageMigrated: true,
+        };
+        settings.colorStorageScope = 'card';
+        storage.loadData();
+        assert.equal(settings.colorStorageScope, 'chat',
+            'a lopsided record still holds the choice in its payload');
+    });
+});
+
+test('a value globalSettings did record still wins over the payload', () => {
+    withFreshStore('c1', () => {
+        stApi.extension_settings[MODULE_NAME] = {
+            version: 8,
+            globalSettings: { colorStorageScope: 'global' },
+            settings: { colorStorageScope: 'chat' },
+            colorData: {},
+            legacyLocalStorageMigrated: true,
+        };
+        settings.colorStorageScope = 'card';
+        storage.loadData();
+        assert.equal(settings.colorStorageScope, 'global', 'the fallback fills gaps, it does not override');
+    });
 });
 
 test('a chosen scope survives a reload, a new chat and a new card', async () => {

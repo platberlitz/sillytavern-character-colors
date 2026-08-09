@@ -1367,7 +1367,7 @@ export function applyAutoSyncRecord(record, {
         setAutoSyncEnabled(normalized.autoSyncEnabled);
         refreshGradientPresetControls();
 
-        if (force) applyStoredSettingsSnapshot(normalized.globalSettings);
+        if (force) applyStoredSettingsSnapshot(readStoredGlobalSettings(normalized));
 
         const hasSettingsPayload = hasAutoSyncSettingsPayload(normalized);
         const applyIncomingSettings = () => {
@@ -1457,6 +1457,22 @@ async function fetchModuleRecordFromServer() {
 
 export async function fetchAutoSyncRecordFromServer() {
     return fetchModuleRecordFromServer();
+}
+
+// globalSettings is what a reload restores settings from; settings is the auto-sync transport
+// payload. Both are PORTABLE_SETTING_KEYS subsets of the same live settings and are meant to
+// agree, but saveSettingsToStore writes only the payload, so a record whose last write came
+// from auto-sync carries an empty or stale globalSettings. Reading just globalSettings then
+// dropped values the payload was holding correctly -- the storage scope most visibly, because
+// it silently fell back to Per card on the next load.
+//
+// Gap filling only: a value globalSettings actually recorded still wins, so this recovers a
+// lopsided record without letting the payload override a deliberate snapshot.
+function readStoredGlobalSettings(record) {
+    const globalSettings = isPlainObject(record?.globalSettings) ? record.globalSettings : {};
+    const payload = isPlainObject(record?.settings) ? record.settings : {};
+    if (!Object.keys(payload).length) return globalSettings;
+    return { ...payload, ...globalSettings };
 }
 
 export function saveGlobalSettingsSnapshot(options = {}) {
@@ -2353,7 +2369,7 @@ export function migrateLegacyLocalStorageIfNeeded() {
         record.globalSettings = buildPortableSettingsSnapshot();
     }
 
-    applyStoredSettingsSnapshot(record.globalSettings, { includeColorSchemaVersion: false });
+    applyStoredSettingsSnapshot(readStoredGlobalSettings(record), { includeColorSchemaVersion: false });
 
     for (const key of [PRESETS_KEY, CUSTOM_PALETTE_KEY, CUSTOM_PALETTE_META_KEY, LEGEND_POSITION_KEY]) {
         const value = parseStorageObject(key);
@@ -2542,7 +2558,7 @@ export function applyStoredColorData(data) {
 // Legacy localStorage fallback is intentionally read-only and only seeds user settings.
 export function loadData(options = {}) {
     const record = getAutoSyncRecord(true);
-    applyStoredSettingsSnapshot(record.globalSettings, { includeColorSchemaVersion: false });
+    applyStoredSettingsSnapshot(readStoredGlobalSettings(record), { includeColorSchemaVersion: false });
     const scope = getCurrentStorageScope();
     const primaryKey = getStorageKeyForScope(scope, { persistMetadata: options.allowMetadataPersistence !== false });
     if (options.persistPrevious !== false && activeStorageKey && activeStorageKey !== primaryKey) {
@@ -2562,7 +2578,7 @@ export function loadData(options = {}) {
         }
         setStoredColorData(primaryKey, characterColors, { ...settings, colorStorageScope: scope });
     }
-    applyStoredSettingsSnapshot(record.globalSettings, { includeColorSchemaVersion: false });
+    applyStoredSettingsSnapshot(readStoredGlobalSettings(record), { includeColorSchemaVersion: false });
     applyLocalConnectionProfiles();
     settings.colorStorageScope = scope;
     normalizeToggleSettings();
@@ -4221,6 +4237,11 @@ export function saveSettingsToStore(options = {}) {
         sequence: getNextLocalAutoSyncSequence(currentRecord),
         autoSyncEnabled,
         settings: settingsData,
+        // Both halves come from the same live settings, so writing them together keeps the
+        // record self-consistent. Publishing only the payload left globalSettings -- the half a
+        // reload restores from -- empty or stale, which is how a chosen storage scope came back
+        // as Per card on the next load.
+        globalSettings: buildPortableSettingsSnapshot(),
     });
 
     persistModuleStore(nextRecord, { debounce: false });
@@ -4306,7 +4327,7 @@ export function updateAutoSyncUI() {
 export function initAutoSync() {
     const hadLegacyPreference = getLegacyLocalStorageValue(LEGACY_AUTO_SYNC_ENABLED_KEY) !== null;
     const record = getAutoSyncRecord(true);
-    applyStoredSettingsSnapshot(record.globalSettings, { includeColorSchemaVersion: false });
+    applyStoredSettingsSnapshot(readStoredGlobalSettings(record), { includeColorSchemaVersion: false });
     applyAutoSyncRecord(record, { force: true });
     cleanupLegacyAutoSyncPreference();
 
