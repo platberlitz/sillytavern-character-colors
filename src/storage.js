@@ -704,7 +704,14 @@ export function normalizeStoredSettings(source) {
         if (!hasOwn(source, key)) continue;
         normalized[key] = normalizeConnectionProfileId(source[key]);
     }
-    normalized.colorStorageScope = normalizeColorStorageScope(source.colorStorageScope, source.shareColorsGlobally);
+    // Guarded like every other key in this function. Unguarded, a snapshot that never mentions
+    // the scope still came back carrying the default, so applyStoredSettingsSnapshot reset the
+    // user's Per chat / Per card / Global choice to Per card, and buildSettingsSubsetFromSource
+    // stamped that default permanently onto any stored record that predated the setting.
+    // shareColorsGlobally is the pre-scope spelling of the same choice and still migrates.
+    if (hasOwn(source, 'colorStorageScope') || hasOwn(source, 'shareColorsGlobally')) {
+        normalized.colorStorageScope = normalizeColorStorageScope(source.colorStorageScope, source.shareColorsGlobally);
+    }
     if (source.narratorStyle !== undefined || source.disableNarration !== undefined || source.narratorColor !== undefined) {
         normalized.narratorStyle = normalizeNarratorStyle(source.narratorStyle, { legacy: source });
         if (normalized.narratorStyle.gradientGenerator) {

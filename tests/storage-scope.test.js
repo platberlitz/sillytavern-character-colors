@@ -1,0 +1,150 @@
+import assert from 'node:assert/strict';
+import { registerHooks } from 'node:module';
+import test from 'node:test';
+
+// Every src module reaches SillyTavern through st-api.js, which imports paths that only resolve
+// inside a SillyTavern install. Stubbing that one module lets the real save/load cycle run under
+// node --test, against a live extension_settings record rather than a source-text assertion.
+const stApiStub = `
+export const converter = { makeHtml: value => String(value) };
+export const power_user = { quote_text_color: '#888888', encode_tags: false, personas: {} };
+export const escapeHtml = value => String(value);
+export const escapeRegex = value => String(value).replace(/[/\\-\\\\^$*+?.()|[\\]{}]/g, '\\\\$&');
+export const extension_settings = {};
+let context = {};
+export const getContext = () => context;
+export const setTestContext = value => { context = value; };
+export const eventSource = { on() {}, emit() {} };
+export const event_types = {};
+export const setExtensionPrompt = () => {};
+export const saveSettings = async () => {};
+export const saveSettingsDebounced = () => {};
+export const saveCharacterDebounced = () => {};
+export const getCharacters = () => [];
+export const extension_prompt_types = {};
+export const extension_prompt_roles = {};
+export const generateQuietPrompt = async () => '';
+export const registerMacro = () => {};
+export const getRequestHeaders = () => ({});
+export const saveMetadata = async () => {};
+export const saveMetadataDebounced = () => {};
+`;
+
+globalThis.document ??= { body: {}, querySelector: () => null, querySelectorAll: () => [], getElementById: () => null };
+globalThis.getComputedStyle ??= () => ({ backgroundColor: 'rgb(0, 0, 0)' });
+globalThis.localStorage ??= { getItem: () => null, setItem: () => {}, removeItem: () => {} };
+
+const stApiUrl = `data:text/javascript;charset=utf-8,${encodeURIComponent(stApiStub)}`;
+const hooks = registerHooks({
+    resolve(specifier, context, nextResolve) {
+        if (specifier === './st-api.js') return { url: stApiUrl, shortCircuit: true };
+        return nextResolve(specifier, context);
+    },
+});
+const stApi = await import(stApiUrl);
+const storage = await import('../src/storage.js');
+const { settings, MODULE_NAME } = await import('../src/state.js');
+hooks.deregister();
+
+// The host round-trips extension_settings through its own server, and the immediate-persist
+// path verifies what it wrote by reading it back. Mirror that so a scope switch can confirm.
+globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ settings: JSON.stringify({ extension_settings: stApi.extension_settings }) }),
+});
+
+function hostContext(chatId, avatar = 'bob.png') {
+    return {
+        chat: [],
+        chatMetadata: {},
+        chatId,
+        characterId: 0,
+        characters: [{ avatar, name: 'Bob' }],
+        groupId: null,
+        saveMetadata: async () => {},
+    };
+}
+
+function withFreshStore(chatId, run) {
+    delete stApi.extension_settings[MODULE_NAME];
+    stApi.setTestContext(hostContext(chatId));
+    settings.colorStorageScope = 'card';
+    try {
+        return run();
+    } finally {
+        delete stApi.extension_settings[MODULE_NAME];
+        stApi.setTestContext({});
+        settings.colorStorageScope = 'card';
+    }
+}
+
+test('a snapshot that does not mention the scope leaves the active one alone', () => {
+    withFreshStore('c1', () => {
+        settings.colorStorageScope = 'chat';
+        storage.applyStoredSettingsSnapshot({ themeMode: 'dark', colorTheme: 'neon' });
+        assert.equal(settings.colorStorageScope, 'chat', 'an unrelated snapshot must not reset the scope');
+        storage.applyStoredSettingsSnapshot({});
+        assert.equal(settings.colorStorageScope, 'chat', 'an empty snapshot must not reset the scope');
+        storage.applyStoredSettingsSnapshot({ colorStorageScope: 'global' });
+        assert.equal(settings.colorStorageScope, 'global', 'a snapshot that does carry it still applies');
+    });
+});
+
+test('a stored record that predates the setting is not stamped with a default', () => {
+    withFreshStore('c1', () => {
+        stApi.extension_settings[MODULE_NAME] = {
+            version: 8,
+            globalSettings: { themeMode: 'dark', colorTheme: 'neon' },
+            legacyLocalStorageMigrated: true,
+        };
+        const record = storage.getAutoSyncRecord(true);
+        assert.equal(record.globalSettings.colorStorageScope, undefined,
+            'reading a record must not write a scope choice the user never made');
+        assert.equal(record.globalSettings.themeMode, 'dark', 'the rest of the snapshot still normalizes');
+    });
+});
+
+test('loading a partial record keeps the scope the user is on', () => {
+    for (const globalSettings of [undefined, {}, { themeMode: 'dark' }]) {
+        withFreshStore('c1', () => {
+            stApi.extension_settings[MODULE_NAME] = {
+                version: 8,
+                globalSettings,
+                colorData: {},
+                legacyLocalStorageMigrated: true,
+            };
+            settings.colorStorageScope = 'chat';
+            storage.loadData();
+            assert.equal(settings.colorStorageScope, 'chat',
+                `a record with globalSettings ${JSON.stringify(globalSettings)} reset the scope`);
+        });
+    }
+});
+
+test('a chosen scope survives a reload, a new chat and a new card', async () => {
+    delete stApi.extension_settings[MODULE_NAME];
+    stApi.setTestContext(hostContext('c1'));
+    settings.colorStorageScope = 'card';
+    storage.loadData();
+
+    const result = await storage.switchColorStorageScope('chat', 'copy');
+    assert.equal(result.ok, true, result.message);
+    assert.equal(stApi.extension_settings[MODULE_NAME].globalSettings.colorStorageScope, 'chat');
+
+    // A reload starts from the module default and has only the stored record to go on.
+    settings.colorStorageScope = 'card';
+    storage.loadData();
+    assert.equal(settings.colorStorageScope, 'chat', 'the scope did not survive a reload');
+
+    for (const [label, context] of [['new chat', hostContext('c2')], ['new card', hostContext('c2', 'alice.png')]]) {
+        stApi.setTestContext(context);
+        storage.saveData();
+        storage.loadData();
+        assert.equal(settings.colorStorageScope, 'chat', `the scope did not survive a ${label}`);
+    }
+
+    delete stApi.extension_settings[MODULE_NAME];
+    stApi.setTestContext({});
+    settings.colorStorageScope = 'card';
+});

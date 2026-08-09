@@ -585,6 +585,8 @@ test('stored settings normalize every active value and portable snapshots omit p
     assert.equal(normalized.narratorStyle.gradientGenerator.seed.length, 128);
     assert.equal(normalized.llmConnectionProfile, null);
     assert.equal(normalized.attributionConnectionProfile.length, 256);
+    // A key the source never mentions must not come back. colorStorageScope used to be emitted
+    // unconditionally, which made every partial snapshot reset the storage scope to the default.
     assert.deepEqual(normalizeStoredSettings({
         promptDepth: null,
         colorVisionPreviewSeverity: null,
@@ -593,8 +595,11 @@ test('stored settings normalize every active value and portable snapshots omit p
         promptDepth: 1,
         colorVisionPreviewSeverity: 100,
         attributionMaxTokens: 4096,
-        colorStorageScope: 'card',
     });
+    assert.equal(normalizeStoredSettings({ colorStorageScope: 'chat' }).colorStorageScope, 'chat');
+    assert.equal(normalizeStoredSettings({ colorStorageScope: 'nonsense' }).colorStorageScope, 'card');
+    // shareColorsGlobally is the pre-scope spelling and still has to migrate.
+    assert.equal(normalizeStoredSettings({ shareColorsGlobally: true }).colorStorageScope, 'global');
 
     const previousProfiles = [settings.llmConnectionProfile, settings.attributionConnectionProfile];
     settings.llmConnectionProfile = 'local-main';
