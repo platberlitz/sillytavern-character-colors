@@ -1558,6 +1558,18 @@ body.dc-mark-uncertain [data-dc-colored][data-dc-confidence="low"] {
     -webkit-box-decoration-break: clone;
 }
 
+/* A <font> tag the model left open across a blank line is split by the HTML
+   parser into <p>..</p><font><p>..</p><p>..</p></font><p>..</p>: the middle
+   font element holds block children instead of text. background-clip: text
+   then paints nothing while the transparent text fill still inherits down, so
+   those paragraphs render invisible. Making that element a block container
+   gives the gradient a box that covers its paragraphs.
+   ponytail: needs :has(). Older engines fall back to the invisible-text bug;
+   move the check into applyGradientText if that ever matters. */
+.dc-gradient-text:has(address, article, aside, blockquote, details, div, dl, fieldset, figure, form, h1, h2, h3, h4, h5, h6, hr, ol, p, pre, section, table, ul) {
+    display: block;
+}
+
 .dc-gradient-surface {
     background-color: var(--dc-gradient-fallback, currentColor);
     background-image: var(--dc-gradient, var(--dc-text-gradient));

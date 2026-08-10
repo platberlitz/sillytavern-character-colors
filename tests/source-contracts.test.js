@@ -684,3 +684,18 @@ test('the panel only uses theme variables the host actually defines', async () =
     const contextMenu = await readFile(new URL('../src/context-menu.js', import.meta.url), 'utf8');
     assert.ok(!contextMenu.includes('--SmartThemeTextColor'), 'context-menu.js names an undefined host variable');
 });
+
+test('gradient text stays visible when the parser puts blocks inside the font tag', async () => {
+    // An unclosed <font> spanning a blank line parses as
+    // <p>..</p><font><p>..</p><p>..</p></font><p>..</p>. background-clip: text
+    // paints nothing on that middle element while -webkit-text-fill-color:
+    // transparent still inherits into its paragraphs, so they went invisible.
+    const styles = await readFile(new URL('../style.css', import.meta.url), 'utf8');
+    const rule = /\.dc-gradient-text:has\(([^)]*)\)\s*\{([^}]*)\}/.exec(styles);
+    assert.ok(rule, 'missing the block-container guard for .dc-gradient-text');
+    const selectors = rule[1].split(',').map(value => value.trim());
+    for (const blockTag of ['p', 'div', 'blockquote', 'pre', 'ul', 'ol', 'table', 'hr']) {
+        assert.ok(selectors.includes(blockTag), `the guard must cover <${blockTag}>`);
+    }
+    assert.match(rule[2], /display:\s*block/);
+});
