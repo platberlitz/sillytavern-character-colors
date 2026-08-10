@@ -32,9 +32,10 @@ const COLORIZE_MAX_INDIVIDUAL_LLM_FALLBACKS = 2;
 const COLORIZE_RUN_MAX_LLM_REQUESTS = 4;
 const COLORIZE_RUN_MAX_LLM_RETRIES = 1;
 
-// The LLM engine rewrites message text in place, so user-authored messages are normally
-// left alone. When persona coloring is switched on the user has opted into having their
-// own lines tagged, but only their own: any other user message stays untouched.
+// The LLM engine rewrites message text in place, so user-authored messages are only tagged
+// once the persona is in the color list: having picked a color for yourself is the opt-in,
+// and it holds however the entry got there. Only your own lines qualify - any other user
+// message, in a group or from a second persona, stays untouched.
 //
 // The tool-call test has to come first: a tool-call message is not a user message, so without
 // it the !msg.is_user tier below returns true and the engine treats a JSON payload as dialogue.
@@ -43,7 +44,6 @@ export function isColorableMessage(msg) {
     if (!msg) return false;
     if (isToolCallMessage(msg)) return false;
     if (!msg.is_user) return true;
-    if (settings.autoPersonaCharacter !== true) return false;
     const personaName = getPersonaName();
     if (!personaName) return false;
     const personaKey = resolveCharacterKeyByNameOrAlias(personaName);

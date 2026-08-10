@@ -1904,7 +1904,23 @@ export function migrateRenamedCharacterStorage(oldValue, newValue) {
                 }
             }
         }
-        if (!migrated && !fallbackChanged) {
+        // Pin buckets are keyed by the same card component the chat keys are built from, so a
+        // rename orphans them exactly the way it orphans the tables above.
+        const pins = record.ui?.pinnedCharacters;
+        let pinsChanged = false;
+        if (isPlainObject(pins)) {
+            const newOwner = `card_${sanitizeStorageKeyComponent(newIds[0])}`;
+            const oldOwner = oldIds
+                .map(id => `card_${sanitizeStorageKeyComponent(id)}`)
+                .find(owner => owner !== newOwner && isPlainObject(pins[owner]));
+            if (oldOwner && !isPlainObject(pins[newOwner])) {
+                pins[newOwner] = pins[oldOwner];
+                delete pins[oldOwner];
+                pinsChanged = true;
+            }
+        }
+
+        if (!migrated && !fallbackChanged && !pinsChanged) {
             if (activeWasOld) {
                 activeStorageKey = null;
                 activeStorageScope = null;
@@ -2340,6 +2356,127 @@ export function restorePinnedPersonaColor() {
     return true;
 }
 
+// Pinned characters live outside colorData for the same reason persona pins do: that table
+// is keyed per chat, and the whole point of a pin is to survive the key changing. Bucketed
+// by card or group so one card's cast never turns up in another card's chats.
+export function getPinnedCharacters(owner = getChatOwnerStorageComponent()) {
+    const record = getAutoSyncRecord(true);
+    if (!isPlainObject(record.ui)) record.ui = {};
+    if (!isPlainObject(record.ui.pinnedCharacters)) record.ui.pinnedCharacters = {};
+    if (!isPlainObject(record.ui.pinnedCharacters[owner])) record.ui.pinnedCharacters[owner] = {};
+    return record.ui.pinnedCharacters[owner];
+}
+
+// The reading half, which must not create the bucket: every card a user visits would
+// otherwise leave an empty one behind in a record that gets synced.
+function readPinnedCharacters(owner = getChatOwnerStorageComponent()) {
+    const pins = getAutoSyncRecord(true).ui?.pinnedCharacters;
+    return isPlainObject(pins?.[owner]) ? pins[owner] : null;
+}
+
+// Aliases and the lock come along because they describe the character. Dialogue counts and
+// group membership stay per-scope for the same reason they do on a persona pin: they
+// describe the chat, not who is in it.
+function buildPinnedCharacter(entry) {
+    const normalized = normalizeCharacterEntry(entry);
+    if (!normalized) return null;
+    return {
+        name: normalized.name,
+        baseColor: normalized.baseColor,
+        color: normalized.color,
+        style: normalized.style,
+        font: normalized.font,
+        gradient: normalized.gradient,
+        gradientGenerator: normalized.gradientGenerator,
+        aliases: normalized.aliases,
+        locked: normalized.locked,
+    };
+}
+
+// The live table is the only source of truth: Keep on writes the pin, Keep off removes it,
+// so unpinning in any one chat stops the carry everywhere. Deliberately not gated on the
+// scope - recording a pin costs nothing on card or global, and it means a later switch to
+// per-chat already knows who the user wanted to keep.
+function syncPinnedCharacters() {
+    const existing = readPinnedCharacters();
+    if (!existing && !Object.values(characterColors).some(entry => entry?.keep === true)) return false;
+    const store = existing || getPinnedCharacters();
+    let changed = false;
+    for (const [key, entry] of Object.entries(characterColors)) {
+        if (entry?.keep === true) {
+            const pinned = buildPinnedCharacter(entry);
+            if (!pinned || jsonValuesEqual(store[key], pinned)) continue;
+            store[key] = pinned;
+            changed = true;
+        } else if (hasOwn(store, key)) {
+            delete store[key];
+            changed = true;
+        }
+    }
+    return changed;
+}
+
+// A rekeyed entry leaves its old pin behind, and the next chat would seed the stale name
+// back in as a second character. Only the rename paths know the old key.
+export function removePinnedCharacterKey(key) {
+    const store = readPinnedCharacters();
+    if (!key || !store || !hasOwn(store, key)) return false;
+    delete store[key];
+    return true;
+}
+
+// Seeds the pinned cast into whatever chat just loaded, so a new chat opens with the
+// characters the user pinned rather than an empty list. Chat scope only: a card or global
+// table already outlives a chat change, so there is nothing there to put back.
+export function restorePinnedCharacters() {
+    if (getCurrentStorageScope() !== 'chat') return false;
+    const store = readPinnedCharacters();
+    if (!store) return false;
+    let changed = false;
+    for (const [key, stored] of Object.entries(store)) {
+        const pinned = buildPinnedCharacter(stored);
+        if (!pinned) continue;
+        const entry = characterColors[key];
+        if (entry) {
+            if (entry.keep === true && jsonValuesEqual(buildPinnedCharacter(entry), pinned)) continue;
+            entry.baseColor = pinned.baseColor;
+            entry.color = pinned.color;
+            entry.style = pinned.style;
+            entry.font = pinned.font;
+            entry.gradient = cloneJsonValue(pinned.gradient);
+            entry.gradientGenerator = cloneJsonValue(pinned.gradientGenerator);
+            entry.aliases = [...pinned.aliases];
+            entry.locked = pinned.locked;
+            entry.keep = true;
+            changed = true;
+            continue;
+        }
+        // avoidConflicts off for the same reason the persona restore leaves it off: the pin
+        // is a color the user chose, so it is reproduced exactly rather than nudged aside by
+        // whoever else is in this chat. randomGradient is pinned off too, or a pinned
+        // character with no gradient would grow one on the way into every new chat.
+        const built = buildCharacterEntry(pinned.name, {
+            color: pinned.baseColor,
+            colorMode: 'base',
+            origin: 'pin',
+            avoidConflicts: false,
+            randomGradient: false,
+            style: pinned.style,
+            font: pinned.font,
+            gradient: pinned.gradient,
+            gradientGenerator: pinned.gradientGenerator,
+            aliases: pinned.aliases,
+            locked: pinned.locked,
+            keep: true,
+        });
+        if (!built.entry) continue;
+        characterColors[built.key] = built.entry;
+        changed = true;
+    }
+    if (changed) clearSpeakerRegexCache();
+    return changed;
+}
+
 export function saveLegendPosition(position) {
     const record = getAutoSyncRecord(true);
     const nextPosition = isPlainObject(position) ? position : {};
@@ -2436,6 +2573,7 @@ export function saveData(options = {}) {
     settings.colorSchemaVersion = COLOR_SCHEMA_VERSION;
     if (!options.preserveEffectiveColors) syncAllEffectiveColors();
     pinCurrentPersonaColor();
+    syncPinnedCharacters();
     try {
         let storageKey = getStorageKey();
         if (activeStorageKey && storageKey !== activeStorageKey) {
@@ -2585,8 +2723,11 @@ export function loadData(options = {}) {
     activeStorageKey = primaryKey;
     activeStorageScope = scope;
     setLastCharKey(scope === 'chat' ? primaryKey : getCardIdentity());
+    // Pins first, persona last: a persona that is also pinned should still show the color
+    // the persona option holds, not the one the pin captured in some other chat.
+    const pinsRestored = restorePinnedCharacters();
     const personaRestored = restorePinnedPersonaColor();
-    if ((migrateColorSchemaIfNeeded() || personaRestored) && options.persistMigrations !== false) {
+    if ((migrateColorSchemaIfNeeded() || personaRestored || pinsRestored) && options.persistMigrations !== false) {
         saveData({ preserveEffectiveColors: true });
     }
     setColorHistory([createHistorySnapshot()]); setHistoryIndex(0);

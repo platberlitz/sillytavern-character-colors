@@ -8,7 +8,7 @@ A SillyTavern extension that gives each character's dialogue a consistent visual
 2. On **Current setup**, enable the extension and choose where colors are saved: **Per chat**, **Per card**, or **Global**.
 3. Choose the **LLM** or **Local (DOM-only)** engine.
 4. Use **Scan entire chat** to discover existing speakers, or start chatting so new speakers are detected automatically.
-5. Open **Characters** to edit a speaker. Use **Keep** to pin main characters against bulk deletion.
+5. Open **Characters** to edit a speaker. Use **Keep** to pin main characters against bulk deletion, and to carry them into every chat when colors are saved **Per chat**.
 6. Use the clearly labeled actions under **Process chat** when you need to discover, colorize, verify, recolor, or refresh dialogue.
 
 ## Highlights
@@ -25,7 +25,7 @@ A SillyTavern extension that gives each character's dialogue a consistent visual
 - **Narrator style**: configure dedicated narrator colors, gradients, and text styles. Narrator styling works across LLM prompts, DOM rendering, legend, statistics, and conflict reports.
 - **Attribution reviews**: verifier suggestions are queued for explicit human review by default. Accept, edit, or reject suggestions segment by segment or in bulk.
 - **Automatic NPC gradients**: optionally randomize gradients for newly discovered NPCs while excluding the current card, group cards, and user persona. Off by default.
-- **Persona coloring**: color your own dialogue too. "Add my persona" under Characters → Advanced adds the active persona as a tracked character, marked with a **You** badge and sorted to the top. The "Color my persona's dialogue" toggle under Automation keeps that entry in step with persona switches and renames; in LLM engine mode it also lets color tags be written into your own message text, which no other user message ever receives. Off by default.
+- **Persona coloring**: color your own dialogue too. "Add my persona" under Characters → Advanced adds the active persona as a tracked character, marked with a **You** badge and sorted to the top. Once your persona is in the list your own messages are colored, in either engine — in LLM engine mode that means color tags written into your own message text, which no other user message ever receives. "Add my persona automatically" under Automation does the adding for you and keeps the entry in step with persona switches and renames.
 - **Automatic gradients for every new character**: a separate default-off override can randomize gradients for every newly created entry.
 - **Global gradient drift**: optionally animate every gradient without changing each character's individual Drift setting. Off by default.
 - **Fonts and text styles**: assign installed font families and Normal, Bold, Italic, or Bold Italic styling per character. Optional remote Google Font loading is disclosed, disabled by default, and bounded when enabled.
@@ -79,7 +79,7 @@ Independently of that setting, a correction naming a speaker who is not already 
 
 ## Storage Scopes
 
-- **Per chat**: one color table for the current chat. A durable ID is stored in chat metadata so renaming the chat does not lose its colors.
+- **Per chat**: one color table for the current chat. A durable ID is stored in chat metadata so renaming the chat does not lose its colors. Characters marked **Keep** are carried into every chat with the same character or group.
 - **Per card**: one table shared by chats using the current character card or group identity.
 - **Global**: one table shared everywhere.
 
@@ -91,7 +91,7 @@ Older per-card/global data remains available and is migrated without destructive
 
 The **Characters** section searches names, aliases, groups, fonts, and status. Sorting is available by name, dialogue activity, or group.
 
-- **Keep**: pins an entry so clear and bulk-delete actions skip it.
+- **Keep**: pins an entry so clear and bulk-delete actions skip it. Under **Per chat** storage a pinned character is also added to every chat with the same character or group, keeping the exact color you gave them, so a new chat no longer starts empty. Turning Keep off stops that everywhere.
 - **Edit**: reveals the full character editor.
 - **Color and Harmony**: choose a color directly or open keyboard-accessible complementary, triadic, and analogous suggestions.
 - **Lock**: prevents regeneration and reset from changing that character. Locking has no deletion side effects.
@@ -190,8 +190,8 @@ LLM mode supports prompt depth, system/user role, and two delivery modes:
 - **Prose feels worse in LLM mode**: use a system prompt role, increase prompt depth, use the manual macro, or switch to Local mode.
 - **The model ignores color tags**: confirm the engine is LLM and the extension is enabled. Try a different prompt role or use Colorize missing.
 - **Local colors disappear on refresh**: Local mode is render-only. Use LLM mode for persisted solid tags.
-- **Auto-colorize does not run**: it only triggers when the latest colorable message contains no color block or existing font tags. Your own messages are only colorable when "Color my persona's dialogue" is on.
-- **My persona has no color in LLM mode**: adding the persona is not enough on its own. LLM mode colors text by editing message content, so it leaves your messages alone until "Color my persona's dialogue" is enabled. Local mode colors them without editing anything.
+- **Auto-colorize does not run**: it only triggers when the latest colorable message contains no color block or existing font tags. Your own messages are only colorable once your persona is in the character list.
+- **My persona has no color in LLM mode**: LLM mode colors text by editing message content, so it leaves your messages alone until your persona is in the character list with a color. Adding it is the opt-in; before 5.11.0 a separate toggle was needed as well. Local mode colors them without editing anything.
 - **An LLM profile is unavailable**: connection profiles require a compatible SillyTavern ConnectionManagerRequestService.
 - **A selected font is not visible**: install it locally, or explicitly enable remote Google Font loading under Appearance and Automation.
 - **Gradient drift is paused**: the device's Reduce Motion preference intentionally disables it.

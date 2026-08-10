@@ -893,24 +893,28 @@ test('toast restore reverts only operation-touched fields', () => {
     }
 });
 
-test('the LLM engine leaves user messages alone by default', () => {
+test('the LLM engine leaves user messages alone while the persona has no color', () => {
     withPersona('Marisol', () => {
         settings.autoPersonaCharacter = false;
         assert.equal(isColorableMessage({ is_user: true, name: 'Marisol' }), false);
     });
 });
 
-test('opting in lets the LLM engine color the persona own messages', () => {
+// Having picked a color for yourself is the opt-in. Hunting for a second checkbox after
+// adding your own persona by hand only looked like the feature was broken.
+test('a persona with a color gets their own messages colored, toggle or not', () => {
     withPersona('Marisol', () => {
-        settings.autoPersonaCharacter = true;
-        ensurePersonaCharacter({ silent: true });
-        assert.equal(isColorableMessage({ is_user: true, name: 'Marisol' }), true);
+        for (const autoPersonaCharacter of [false, true]) {
+            settings.autoPersonaCharacter = autoPersonaCharacter;
+            ensurePersonaCharacter({ silent: true });
+            assert.equal(isColorableMessage({ is_user: true, name: 'Marisol' }), true,
+                `a tracked persona is colorable with the auto-add setting ${autoPersonaCharacter}`);
+        }
     });
 });
 
-test('opting in does not open up other user messages', () => {
+test('a colored persona does not open up other user messages', () => {
     withPersona('Marisol', () => {
-        settings.autoPersonaCharacter = true;
         ensurePersonaCharacter({ silent: true });
         assert.equal(isColorableMessage({ is_user: true, name: 'Diego' }), false);
         assert.equal(isColorableMessage({ is_user: true }), false);
@@ -930,11 +934,14 @@ test('a missing message is never colorable', () => {
     assert.equal(isColorableMessage(null), false);
 });
 
-test('persona coloring stays off unless it is explicitly enabled', async () => {
+// The registry is the gate now. A settings flag here would put user messages back behind a
+// switch that can be off while the persona is sitting in the list with a color on it.
+test('the persona gate reads the registry, not a setting', async () => {
     const source = await readFile(new URL('../src/live-colors.js', import.meta.url), 'utf8');
     const start = source.indexOf('export function isColorableMessage(');
     const section = source.slice(start, source.indexOf('\n}', start));
-    assert.match(section, /settings\.autoPersonaCharacter\s*!==\s*true/);
+    assert.match(section, /personaKey && personaKey === messageKey/);
+    assert.doesNotMatch(section, /autoPersonaCharacter/);
 });
 
 test('connection profile IDs migrate and reload only from device-local storage', () => {
