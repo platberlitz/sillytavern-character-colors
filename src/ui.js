@@ -3957,6 +3957,7 @@ export function syncUIWithSettings() {
     if ($('dc-prompt-depth')) $('dc-prompt-depth').value = settings.promptDepth ?? 1;
     if ($('dc-prompt-role')) $('dc-prompt-role').value = settings.promptRole || 'system';
     if ($('dc-prompt-mode')) $('dc-prompt-mode').value = settings.promptMode || 'inject';
+    if ($('dc-auto-prompt-mode')) $('dc-auto-prompt-mode').checked = settings.autoPromptMode !== false;
     if ($('dc-sort')) $('dc-sort').value = settings.sortMode || 'name';
     syncProcessControlState();
     refreshAttributionReviewStatus();
@@ -4243,6 +4244,7 @@ function buildSettingsPanelHtml() {
                         <div class="dc-field-row"><label class="dc-inline-label" for="dc-prompt-depth">Prompt depth</label><input type="number" id="dc-prompt-depth" min="0" max="99" value="1" class="text_pole"></div>
                         <div class="dc-field-row"><label class="dc-inline-label" for="dc-prompt-role">Prompt role</label><select id="dc-prompt-role" class="text_pole"><option value="system">System</option><option value="user">User</option></select></div>
                         <div class="dc-field-row"><label class="dc-inline-label" for="dc-prompt-mode">Prompt mode</label><select id="dc-prompt-mode" class="text_pole"><option value="inject">Inject automatically</option><option value="macro">Use macro manually</option></select></div>
+                        <label class="checkbox_label"><input type="checkbox" id="dc-auto-prompt-mode" aria-describedby="dc-auto-prompt-mode-note"><span>Switch to macro when detected</span></label><small id="dc-auto-prompt-mode-note">On by default: when <code>{{dialoguecolors}}</code> appears in your preset prompts, system prompt, story string, or author's note, the instructions travel through the macro instead of also being injected.</small>
                         <div id="dc-system-prompt-container" style="display:none;"><label for="dc-system-prompt-text" class="dc-inline-label">Macro text</label><textarea id="dc-system-prompt-text" readonly class="text_pole dc-macro-text">{{dialoguecolors}}</textarea><button id="dc-copy-system-prompt" class="menu_button">Copy macro</button></div>
                     </div>
                     <div class="dc-dom-only dc-stack" style="display:none;">
@@ -4838,6 +4840,7 @@ function bindSettingsPanelControls($) {
     };
     $('dc-prompt-role').onchange = e => { settings.promptRole = e.target.value; saveData(); injectPrompt(); };
     $('dc-prompt-mode').onchange = e => { settings.promptMode = e.target.value; saveData(); injectPrompt(); };
+    $('dc-auto-prompt-mode').onchange = e => { settings.autoPromptMode = e.target.checked; saveData(); injectPrompt(); };
     $('dc-copy-system-prompt').onclick = () => {
         const textarea = $('dc-system-prompt-text');
         if (!textarea) return;

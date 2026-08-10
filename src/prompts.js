@@ -2,7 +2,7 @@
 import { resolveCharacterKeyByNameOrAlias } from './color-blocks.js';
 import { applyThemeReadabilityAndBrightness, getBrightnessOffset, getBrightnessTargetLightnessRange, getCustomPaletteMeta, getCustomPalettes, getEntryEffectiveColor, getThemeLightnessBounds } from './palettes.js';
 import { getNarratorVisual } from './narrator-style.js';
-import { escapeHtml, extension_prompt_roles, extension_prompt_types, setExtensionPrompt } from './st-api.js';
+import { escapeHtml, extension_prompt_roles, extension_prompt_types, extension_settings, getContext, power_user, setExtensionPrompt } from './st-api.js';
 import { MODULE_NAME, characterColors, isDomEngine, settings } from './state.js';
 import { normalizeAliases, normalizeHexColor } from './utils.js';
 
@@ -320,6 +320,46 @@ function updatePromptUi() {
     updateSystemPromptDisplay();
 }
 
+const DIALOGUE_COLORS_MACRO_PATTERN = /\{\{\s*dialoguecolors\s*\}\}/i;
+
+// Places a user can realistically type {{dialoguecolors}} by hand: the chat
+// completion preset prompts, the text completion system prompt and story
+// string, and the author's note (chat override first, global default second).
+// ponytail: text scan only. It cannot see whether a preset prompt is enabled in
+// the current prompt order, and it does not read World Info or character cards,
+// which load asynchronously. Resolve through promptManager if that bites.
+function collectUserPromptSources() {
+    let context = null;
+    try {
+        context = getContext?.();
+    } catch {
+        context = null;
+    }
+    const sources = [
+        power_user?.sysprompt?.content,
+        power_user?.context?.story_string,
+        context?.chatMetadata?.note_prompt,
+        extension_settings?.note?.default,
+    ];
+    const presetPrompts = context?.chatCompletionSettings?.prompts;
+    if (Array.isArray(presetPrompts)) {
+        for (const prompt of presetPrompts) sources.push(prompt?.content);
+    }
+    return sources;
+}
+
+export function promptHasDialogueColorsMacro() {
+    return collectUserPromptSources().some(value => typeof value === 'string' && DIALOGUE_COLORS_MACRO_PATTERN.test(value));
+}
+
+// The dropdown is the manual choice; auto-detection can upgrade 'inject' to
+// 'macro' so the instruction is not delivered twice when the macro is present.
+export function getEffectivePromptMode() {
+    if (settings.promptMode === 'macro') return 'macro';
+    if (settings.autoPromptMode !== false && promptHasDialogueColorsMacro()) return 'macro';
+    return 'inject';
+}
+
 export function flushPromptInjection() {
     if (injectDebouncedTimer) clearTimeout(injectDebouncedTimer);
     injectDebouncedTimer = null;
@@ -329,7 +369,7 @@ export function flushPromptInjection() {
     }
 
     let promptText = '';
-    if (settings.enabled && !isDomEngine() && settings.promptMode !== 'macro') {
+    if (settings.enabled && !isDomEngine() && getEffectivePromptMode() !== 'macro') {
         promptText = buildMinimalPromptInstruction();
     } else if (settings.enabled && isDomEngine() && settings.domStealthColors) {
         promptText = buildDomStealthColorsInstruction();
@@ -357,7 +397,7 @@ export function updateSystemPromptDisplay() {
     const container = document.getElementById('dc-system-prompt-container');
     if (!container) return;
 
-    if (settings.promptMode === 'macro' && settings.enabled && !isDomEngine()) {
+    if (getEffectivePromptMode() === 'macro' && settings.enabled && !isDomEngine()) {
         container.style.display = 'block';
         const textarea = document.getElementById('dc-system-prompt-text');
         if (textarea) textarea.value = '{{dialoguecolors}}';

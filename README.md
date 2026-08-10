@@ -169,6 +169,8 @@ LLM mode supports prompt depth, system/user role, and two delivery modes:
 - **Inject automatically**: add instructions on each generation.
 - **Use macro manually**: expose `{{dialoguecolors}}` for placement in your own prompt.
 
+**Switch to macro when detected** is on by default. It scans your chat completion preset prompts, system prompt, story string, and author's note for `{{dialoguecolors}}`, and delivers through the macro whenever it finds one, so placing the macro yourself does not also inject a second copy of the instructions. It does not read World Info or character cards, and it cannot tell whether a preset prompt is enabled in the current prompt order. Turn it off to always inject.
+
 ## Installation
 
 1. Open SillyTavern, then go to Extensions and choose Install Extension.

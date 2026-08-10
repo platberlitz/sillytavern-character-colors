@@ -80,7 +80,7 @@ export let expandedCharacterRows = new Set();
 // Runtime-only selection for character list bulk actions.
 export const selectedCharacterKeys = new Set();
 
-export let settings = { enabled: true, themeMode: 'auto', narratorStyle: { enabled: false, baseColor: '#888888', gradient: null, gradientGenerator: null }, narratorColor: '#888888', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, thoughtSymbols: '*', disableNarration: true, colorStorageScope: DEFAULT_COLOR_STORAGE_SCOPE, autoScanNewMessages: true, autoLockDetected: true, autoPersonaCharacter: false, persistPersonaColor: false, autoRandomNpcGradients: false, autoRandomAllGradients: false, driftAllGradientColors: false, gradientRandomMasterSeed: '', colorVisionPreviewMode: 'none', colorVisionPreviewSeverity: 100, colorVisionPreviewTarget: 'all', gradientAnimationMode: 'auto', forceBoldText: false, enableRightClick: false, promptDepth: 1, autoRecolor: true, autoColorize: false, completePartialColorize: true, llmAttributionCheck: false, llmAttributionParallel: false, attributionConservativeOnly: false, attributionReviewPolicy: 'review', attributionMaxTokens: 4096, attributionVerifyPasses: 1, allowRemoteFonts: false, domStealthColors: true, markUncertainDialogue: false, disableToasts: false, llmConnectionProfile: null, attributionConnectionProfile: null, colorSchemaVersion: COLOR_SCHEMA_VERSION, promptMode: 'inject', promptRole: 'system', sortMode: 'name', coloringEngine: 'llm' };
+export let settings = { enabled: true, themeMode: 'auto', narratorStyle: { enabled: false, baseColor: '#888888', gradient: null, gradientGenerator: null }, narratorColor: '#888888', colorTheme: 'pastel', brightness: 0, highlightMode: false, autoScanOnLoad: true, showLegend: false, thoughtSymbols: '*', disableNarration: true, colorStorageScope: DEFAULT_COLOR_STORAGE_SCOPE, autoScanNewMessages: true, autoLockDetected: true, autoPersonaCharacter: false, persistPersonaColor: false, autoRandomNpcGradients: false, autoRandomAllGradients: false, driftAllGradientColors: false, gradientRandomMasterSeed: '', colorVisionPreviewMode: 'none', colorVisionPreviewSeverity: 100, colorVisionPreviewTarget: 'all', gradientAnimationMode: 'auto', forceBoldText: false, enableRightClick: false, promptDepth: 1, autoRecolor: true, autoColorize: false, completePartialColorize: true, llmAttributionCheck: false, llmAttributionParallel: false, attributionConservativeOnly: false, attributionReviewPolicy: 'review', attributionMaxTokens: 4096, attributionVerifyPasses: 1, allowRemoteFonts: false, domStealthColors: true, markUncertainDialogue: false, disableToasts: false, llmConnectionProfile: null, attributionConnectionProfile: null, colorSchemaVersion: COLOR_SCHEMA_VERSION, promptMode: 'inject', autoPromptMode: true, promptRole: 'system', sortMode: 'name', coloringEngine: 'llm' };
 
 export const TOGGLE_SETTING_DEFAULTS = Object.freeze({
     enabled: true,
@@ -107,6 +107,7 @@ export const TOGGLE_SETTING_DEFAULTS = Object.freeze({
     domStealthColors: true,
     markUncertainDialogue: false,
     disableToasts: false,
+    autoPromptMode: true,
 });
 
 export const GLOBAL_TOGGLE_KEYS = Object.freeze(Object.keys(TOGGLE_SETTING_DEFAULTS));
