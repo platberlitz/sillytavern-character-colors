@@ -38,6 +38,7 @@ export const DYNAMIC_CONTROL_HELP_TEXT = Object.freeze({
     '.dc-more': 'Open or close this character’s editing controls.',
     '.dc-swap': 'Choose two characters in sequence to swap their colors.',
     '.dc-harmony': 'Open accessible harmony suggestions for this character color.',
+    '.dc-rename': 'Change this character’s primary name.',
     '.dc-alias': 'Add an alternate name that maps to this character.',
     '.dc-group': 'Assign this character to a group label.',
     '.dc-del': 'Delete this character from the list. Turn off Keep first if pinned.',
@@ -1647,6 +1648,7 @@ export function buildCharRowHtml(k, v) {
                     <button type="button" class="dc-swap menu_button" data-key="${safeKey}" data-focus-id="swap">Swap</button>
                     <label class="dc-compact-label">Style <select class="dc-style-select text_pole" data-key="${safeKey}" data-focus-id="style" aria-label="Dialogue style for ${escapeAttr(v.name)}"><option value=""${!v.style ? ' selected' : ''}>Normal</option><option value="bold"${v.style === 'bold' ? ' selected' : ''}>Bold</option><option value="italic"${v.style === 'italic' ? ' selected' : ''}>Italic</option><option value="bold italic"${v.style === 'bold italic' ? ' selected' : ''}>Bold italic</option></select></label>
                     <button type="button" class="dc-font menu_button" data-key="${safeKey}" data-focus-id="font">${fontName ? 'Edit Font' : 'Set Font'}</button>
+                    <button type="button" class="dc-rename menu_button" data-key="${safeKey}" data-focus-id="rename">Rename</button>
                     <button type="button" class="dc-alias menu_button" data-key="${safeKey}" data-focus-id="alias">Add Alias</button>
                     <button type="button" class="dc-group menu_button" data-key="${safeKey}" data-focus-id="group">${v.group ? 'Edit Group' : 'Set Group'}</button>
                     <button type="button" class="dc-del menu_button dc-danger-button" data-key="${safeKey}" data-focus-id="delete">Delete</button>
@@ -1868,6 +1870,38 @@ function handleAliasClick(aliasBtn) {
             }
         }
         else close();
+    };
+    inputRow.querySelector('.dc-inline-submit').onclick = submit;
+    inputRow.querySelector('.dc-inline-cancel').onclick = close;
+    inp.onkeydown = ev => { if (ev.key === 'Enter') submit(); if (ev.key === 'Escape') close(); };
+}
+
+function handleRenameClick(renameBtn) {
+    const row = renameBtn.closest('.dc-char');
+    const existing = row.querySelector('.dc-inline-input');
+    if (existing) { existing.remove(); return; }
+    const key = renameBtn.dataset.key;
+    const currentName = characterColors[key]?.name;
+    if (!currentName) return;
+    const inputRow = document.createElement('div');
+    inputRow.className = 'dc-inline-input';
+    const inputId = buildCharacterControlId('dc-rename-input', key);
+    inputRow.innerHTML = `<label class="dc-visually-hidden" for="${escapeAttr(inputId)}">New name for ${escapeHtml(currentName)}</label><input id="${escapeAttr(inputId)}" type="text" class="text_pole" value="${escapeAttr(currentName)}"><button type="button" class="menu_button dc-inline-submit">Rename</button><button type="button" class="menu_button dc-inline-cancel">Cancel</button>`;
+    row.appendChild(inputRow);
+    const inp = inputRow.querySelector('input');
+    inp.focus();
+    inp.select();
+    const close = () => { inputRow.remove(); focusCharacterControl(key, 'rename'); };
+    const submit = () => {
+        if (inp.value.trim() === currentName) { close(); return; }
+        const nextKey = normalizeRegistryIdentity(inp.value);
+        if (!renameCharacter(key, inp.value, { notify: true })) {
+            inp.setAttribute('aria-invalid', 'true');
+            inp.focus({ preventScroll: true });
+            return;
+        }
+        inputRow.remove();
+        focusCharacterControl(nextKey, 'rename');
     };
     inputRow.querySelector('.dc-inline-submit').onclick = submit;
     inputRow.querySelector('.dc-inline-cancel').onclick = close;
@@ -2759,6 +2793,8 @@ function handleCharListClick(e) {
     if (harmonyBtn) { showHarmonyPopup(harmonyBtn.dataset.key, harmonyBtn); return; }
     const aliasRemoveBtn = t.closest('.dc-alias-remove');
     if (aliasRemoveBtn) { handleAliasRemoveClick(e, aliasRemoveBtn); return; }
+    const renameBtn = t.closest('.dc-rename');
+    if (renameBtn) { handleRenameClick(renameBtn); return; }
     const aliasBtn = t.closest('.dc-alias');
     if (aliasBtn) { handleAliasClick(aliasBtn); return; }
     const fontBtn = t.closest('.dc-font');
@@ -3316,28 +3352,53 @@ export function applyRestoredPersonaColor() {
     return true;
 }
 
-// Follows a persona rename so the color the user picked stays with them, rather than
-// stranding the old entry and auto-assigning a fresh color to the new name.
-export function renamePersonaCharacter(oldName, newName) {
-    const previousKey = resolveCharacterKeyByNameOrAlias(oldName);
-    const nextName = normalizeRegistryIdentityName(String(newName ?? ''));
-    const nextKey = normalizeRegistryIdentity(nextName);
-    if (!previousKey || !nextName || !nextKey || isReservedCharacterIdentity(nextName) || previousKey === nextKey) return false;
-    if (characterColors[nextKey]) return false;
+export function renameCharacter(oldNameOrKey, newName, { notify = false, renamePersonaPin = false } = {}) {
+    const previousKey = Object.prototype.hasOwnProperty.call(characterColors, oldNameOrKey)
+        ? oldNameOrKey
+        : resolveCharacterKeyByNameOrAlias(oldNameOrKey);
     const entry = characterColors[previousKey];
-    if (!entry) return false;
+    const rawName = String(newName ?? '').trim();
+    const nextName = normalizeRegistryIdentityName(rawName);
+    const nextKey = normalizeRegistryIdentity(nextName);
+    if (!entry) {
+        if (notify) toast.warning('That character is no longer in the list.');
+        return false;
+    }
+    if (!rawName || !nextName || !nextKey || /[\r\n\t\[\]=,()]/.test(rawName)) {
+        if (notify) toast.warning('Character names cannot contain brackets, commas, equals signs, parentheses, line breaks, reserved words, or more than 120 characters.');
+        return false;
+    }
+    if (isReservedCharacterIdentity(nextName)) {
+        if (notify) toast.warning('Narrator identities are reserved for the Narration editor.');
+        return false;
+    }
+    const existingKey = resolveCharacterKeyByNameOrAlias(nextName);
+    if (existingKey && existingKey !== previousKey) {
+        if (notify) toast.warning(`${escapeHtml(nextName)} already belongs to another character.`);
+        return false;
+    }
+    if (previousKey === nextKey && entry.name === nextName) return false;
+
     entry.name = nextName;
-    characterColors[nextKey] = entry;
-    delete characterColors[previousKey];
-    if (expandedCharacterRows.delete(previousKey)) expandedCharacterRows.add(nextKey);
-    renamePinnedPersonaColor(oldName, nextName);
-    // The entry carries its own Keep flag to the new key, so the next save re-pins it there.
-    // Only the old pin has to go, or new chats would seed the old name back as a second one.
-    removePinnedCharacterKey(previousKey);
+    if (previousKey !== nextKey) {
+        characterColors[nextKey] = entry;
+        delete characterColors[previousKey];
+        if (expandedCharacterRows.delete(previousKey)) expandedCharacterRows.add(nextKey);
+        if (selectedCharacterKeys.delete(previousKey)) selectedCharacterKeys.add(nextKey);
+        if (swapMode === previousKey) setSwapMode(nextKey);
+        removePinnedCharacterKey(previousKey);
+    }
+    if (renamePersonaPin) renamePinnedPersonaColor(oldNameOrKey, nextName);
     clearSpeakerRegexCache();
     commit();
     repaintDomAfterCharacterDataChange(0);
     return true;
+}
+
+// Follows a persona rename so the color the user picked stays with them, rather than
+// stranding the old entry and auto-assigning a fresh color to the new name.
+export function renamePersonaCharacter(oldName, newName) {
+    return renameCharacter(oldName, newName, { renamePersonaPin: true });
 }
 
 export function updateStorageScopeStatus() {
@@ -3925,6 +3986,7 @@ export function syncUIWithSettings() {
     if ($('dc-auto-lock')) $('dc-auto-lock').checked = settings.autoLockDetected !== false;
     if ($('dc-auto-persona')) $('dc-auto-persona').checked = settings.autoPersonaCharacter === true;
     if ($('dc-persist-persona-color')) $('dc-persist-persona-color').checked = settings.persistPersonaColor === true;
+    if ($('dc-clear-unpinned-new-chat')) $('dc-clear-unpinned-new-chat').checked = settings.clearUnpinnedOnNewChat === true;
     if ($('dc-auto-random-gradients')) $('dc-auto-random-gradients').checked = settings.autoRandomNpcGradients === true;
     if ($('dc-auto-random-all-gradients')) $('dc-auto-random-all-gradients').checked = settings.autoRandomAllGradients === true;
     if ($('dc-auto-random-gradients')) $('dc-auto-random-gradients').disabled = settings.autoRandomAllGradients === true;
@@ -4265,7 +4327,7 @@ function buildSettingsPanelHtml() {
             </details>
             <details class="dc-section" id="dc-page-automation" data-dc-page="automation" data-dc-disclosure="automation" role="tabpanel" aria-labelledby="dc-tab-automation" tabindex="-1">
                 <summary>Automation</summary>
-                <div class="dc-toggle-grid"><label class="checkbox_label"><input type="checkbox" id="dc-autoscan"><span>Scan when the character list is empty</span></label><label class="checkbox_label"><input type="checkbox" id="dc-autoscan-new"><span>Scan new messages</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-lock"><span>Lock new characters</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-persona" data-help="Adds your active persona to the character list automatically. Your own dialogue is colored whenever your persona is in the list, however it got there; in the LLM engine that writes color tags into your own messages."><span>Add my persona automatically</span></label><label class="checkbox_label"><input type="checkbox" id="dc-persist-persona-color" data-help="Keeps your persona's color the same in every new chat, even when colors are stored per chat or per card."><span>Keep my persona's color everywhere</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-random-gradients"><span>Random gradients for new NPCs</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-random-all-gradients"><span>Random gradients for every new character</span></label><label class="checkbox_label"><input type="checkbox" id="dc-drift-all-gradients"><span>Drift every gradient color</span></label><label class="checkbox_label dc-llm-only"><input type="checkbox" id="dc-auto-colorize"><span>Colorize missing tags automatically</span></label><label class="checkbox_label dc-llm-only"><input type="checkbox" id="dc-complete-partial" data-help="When the model colors only some of a message's dialogue, the uncolored lines are attributed and colored locally. No extra LLM request is made."><span>Complete partly colored messages</span></label><label class="checkbox_label"><input type="checkbox" id="dc-right-click"><span>Manual dialogue reassignment</span></label><label class="checkbox_label"><input type="checkbox" id="dc-disable-toasts"><span>Reduce routine notifications</span></label></div>
+                <div class="dc-toggle-grid"><label class="checkbox_label"><input type="checkbox" id="dc-autoscan"><span>Scan when the character list is empty</span></label><label class="checkbox_label"><input type="checkbox" id="dc-autoscan-new"><span>Scan new messages</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-lock"><span>Lock new characters</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-persona" data-help="Adds your active persona to the character list automatically. Your own dialogue is colored whenever your persona is in the list, however it got there; in the LLM engine that writes color tags into your own messages."><span>Add my persona automatically</span></label><label class="checkbox_label"><input type="checkbox" id="dc-persist-persona-color" data-help="Keeps your persona's color the same in every new chat, even when colors are stored per chat or per card."><span>Keep my persona's color everywhere</span></label><label class="checkbox_label"><input type="checkbox" id="dc-clear-unpinned-new-chat" data-help="Clears the character list when a new chat starts. Only characters marked Keep survive."><span>Clear all but Keep characters on new chat</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-random-gradients"><span>Random gradients for new NPCs</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-random-all-gradients"><span>Random gradients for every new character</span></label><label class="checkbox_label"><input type="checkbox" id="dc-drift-all-gradients"><span>Drift every gradient color</span></label><label class="checkbox_label dc-llm-only"><input type="checkbox" id="dc-auto-colorize"><span>Colorize missing tags automatically</span></label><label class="checkbox_label dc-llm-only"><input type="checkbox" id="dc-complete-partial" data-help="When the model colors only some of a message's dialogue, the uncolored lines are attributed and colored locally. No extra LLM request is made."><span>Complete partly colored messages</span></label><label class="checkbox_label"><input type="checkbox" id="dc-right-click"><span>Manual dialogue reassignment</span></label><label class="checkbox_label"><input type="checkbox" id="dc-disable-toasts"><span>Reduce routine notifications</span></label></div>
             </details>
             <details class="dc-section" id="dc-page-library" data-dc-page="library" data-dc-disclosure="library" role="tabpanel" aria-labelledby="dc-tab-library" tabindex="-1">
                 <summary>Style library</summary>
@@ -4655,6 +4717,7 @@ function bindSettingsPanelControls($) {
         if (e.target.checked) pinCurrentPersonaColor();
         saveData();
     };
+    $('dc-clear-unpinned-new-chat').onchange = e => { settings.clearUnpinnedOnNewChat = e.target.checked; saveData(); };
     $('dc-auto-random-gradients').onchange = e => { settings.autoRandomNpcGradients = e.target.checked; saveData(); };
     $('dc-auto-random-all-gradients').onchange = e => {
         settings.autoRandomAllGradients = e.target.checked;

@@ -105,7 +105,7 @@ const hooks = registerHooks({
 
 const stApi = await import(stApiUrl);
 const { setTestContext } = stApi;
-const { addCharacter, createCanvasGradientFill, ensurePersonaCharacter, exportLegendPng, isPersonaEntry, renamePersonaCharacter, updateLegend } = await import('../src/ui.js');
+const { addCharacter, createCanvasGradientFill, ensurePersonaCharacter, exportLegendPng, isPersonaEntry, renameCharacter, renamePersonaCharacter, updateLegend } = await import('../src/ui.js');
 const { isColorableMessage } = await import('../src/live-colors.js');
 const { getPersonaName } = await import('../src/palettes.js');
 const {
@@ -378,6 +378,49 @@ test('renaming the persona moves its entry and keeps its color', () => {
         assert.equal(registry().marisol, undefined);
         assert.equal(registry()['marisol vega'].name, 'Marisol Vega');
         assert.equal(registry()['marisol vega'].color, color);
+    });
+});
+
+test('renaming a character rekeys the full entry and refuses unsafe or owned names', () => {
+    withPersona('', () => {
+        registry().alice = {
+            name: 'Alice', baseColor: '#112233', color: '#112233', aliases: ['Al'],
+            dialogueCount: 7, locked: true, group: 'Leads', style: 'italic', font: 'Inter',
+        };
+        registry().bob = { name: 'Bob', baseColor: '#445566', color: '#445566', aliases: ['Bobby'] };
+        state.expandedCharacterRows.add('alice');
+        state.selectedCharacterKeys.add('alice');
+        state.setSwapMode('alice');
+        try {
+            assert.equal(renameCharacter('alice', 'Alice Cooper'), true);
+            assert.equal(registry().alice, undefined);
+            assert.deepEqual({
+                name: registry()['alice cooper'].name,
+                aliases: registry()['alice cooper'].aliases,
+                dialogueCount: registry()['alice cooper'].dialogueCount,
+                locked: registry()['alice cooper'].locked,
+                group: registry()['alice cooper'].group,
+                style: registry()['alice cooper'].style,
+                font: registry()['alice cooper'].font,
+            }, {
+                name: 'Alice Cooper', aliases: ['Al'], dialogueCount: 7, locked: true,
+                group: 'Leads', style: 'italic', font: 'Inter',
+            });
+            assert.equal(state.expandedCharacterRows.has('alice cooper'), true);
+            assert.equal(state.selectedCharacterKeys.has('alice cooper'), true);
+            assert.equal(state.swapMode, 'alice cooper');
+
+            assert.equal(renameCharacter('alice cooper', 'ALICE COOPER'), true);
+            assert.equal(registry()['alice cooper'].name, 'ALICE COOPER');
+            for (const refused of ['Bobby', 'Narrator', 'Bad[Name', '']) {
+                assert.equal(renameCharacter('alice cooper', refused), false);
+                assert.equal(registry()['alice cooper'].name, 'ALICE COOPER');
+            }
+        } finally {
+            state.expandedCharacterRows.clear();
+            state.selectedCharacterKeys.clear();
+            state.setSwapMode(null);
+        }
     });
 });
 

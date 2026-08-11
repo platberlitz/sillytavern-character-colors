@@ -58,8 +58,9 @@ test('chat seeding and transient reset preserve scoped state', () => {
     assert.match(changed, /tryLoadFromCard\(\{ colorsOnly: true \}\)/);
 
     const reset = functionSection(main, 'resetDialogueCountsForNewChat');
-    assert.doesNotMatch(reset, /\bcommit\s*\(/);
-    assert.match(reset, /if \(changed\) updateCharList\(\)/);
+    assert.match(reset, /settings\.clearUnpinnedOnNewChat === true/);
+    assert.match(reset, /if \(removed\) \{[\s\S]*?commit\(\)/);
+    assert.match(reset, /else if \(changed\) updateCharList\(\)/);
 });
 
 test('host event wiring deduplicates aliases, flushes prompts, and reconciles deletions', () => {

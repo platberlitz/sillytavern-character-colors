@@ -249,6 +249,37 @@ test('persisted disable cannot overwrite an explicit first enable, and lifecycle
     }
 });
 
+test('new-chat clearing is opt-in and preserves only Keep characters', () => {
+    const previousClearSetting = state.settings.clearUnpinnedOnNewChat;
+    try {
+        state.settings.enabled = true;
+        main.syncAutomaticRuntime();
+        resetRegistry();
+        state.characterColors.alice = { name: 'Alice', color: '#112233', aliases: [], dialogueCount: 4 };
+        state.characterColors.bob = { name: 'Bob', color: '#445566', aliases: [], dialogueCount: 6, keep: true };
+
+        state.settings.clearUnpinnedOnNewChat = false;
+        main.resetDialogueCountsForNewChat();
+        assert.deepEqual(Object.keys(state.characterColors), ['alice', 'bob']);
+        assert.equal(state.characterColors.alice.dialogueCount, 0);
+        assert.equal(state.characterColors.bob.dialogueCount, 0);
+
+        state.characterColors.alice.dialogueCount = 4;
+        state.characterColors.bob.dialogueCount = 6;
+        state.settings.clearUnpinnedOnNewChat = true;
+        main.resetDialogueCountsForNewChat();
+        assert.deepEqual(Object.keys(state.characterColors), ['bob']);
+        assert.equal(state.characterColors.bob.dialogueCount, 0);
+        assert.deepEqual(Object.keys(storage.getStoredColorData(storage.getStorageKey()).colors), ['bob']);
+    } finally {
+        state.settings.clearUnpinnedOnNewChat = previousClearSetting;
+        state.settings.enabled = false;
+        main.syncAutomaticRuntime();
+        resetRegistry();
+        stApi.setTestContext(baseContext());
+    }
+});
+
 test('a server-loaded enabled transition runs the registered runtime lifecycle', async () => {
     const previousRecord = structuredClone(stApi.extension_settings[state.MODULE_NAME]);
     const previousFetch = globalThis.fetch;

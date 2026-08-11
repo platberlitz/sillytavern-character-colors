@@ -2,11 +2,12 @@
 import { clearDomCache } from './attribution.js';
 import { destroyGradientAnimationController } from './animation-controller.js';
 import { recountDialogueCountsFromChat, scanAllMessages, stripColorBlocksFromDisplay } from './color-blocks.js';
+import { deleteCharacterKeys } from './character-operations.js';
 import { setupContextMenu } from './context-menu.js';
 import { DOM_RETRY_REFRESH_DELAYS, POST_MUTATION_DOM_REPAIR_DELAY_MS, clearDecoratedWatchers, clearDialogueCountCache, clearSessionAttributionVerifications, decorateAllMessages, reconcileMessageQuoteOverridesAfterDeletion, refreshDomDialogueCounts, scheduleDomRefreshSeries, scheduleDomSettleRefresh, scheduleMessageDomRepair, setupChatObserver, setupChatRootObserver, startDomHealthCheck, stopDomHealthCheck, undecorateAllMessages } from './dom-engine.js';
 import { scheduleCustomFontRefresh } from './fonts.js';
 import { redo, undo } from './history.js';
-import { applyHtmlBreakingSpanRepair, applyToolCallMessageRepair, onNewMessage, resumePendingChatSave } from './live-colors.js';
+import { applyHtmlBreakingSpanRepair, applyToolCallMessageRepair, commit, onNewMessage, repaintDomAfterCharacterDataChange, resumePendingChatSave } from './live-colors.js';
 import { consumeMainAiQuietGenerationEnd, populateProfileDropdown } from './llm.js';
 import { detectTheme, getReadableSurfaceSignature, invalidateThemeCache } from './palettes.js';
 import { buildMinimalPromptInstruction, flushPromptInjection, injectPrompt } from './prompts.js';
@@ -154,6 +155,8 @@ export function resetDialogueCountsForNewChat() {
     if (!settings.enabled || !automaticRuntimeActive) return;
     setLastProcessedMessageSignature('');
 
+    const removed = settings.clearUnpinnedOnNewChat === true
+        && deleteCharacterKeys(Object.keys(characterColors)).removedKeys.length > 0;
     let changed = false;
     for (const entry of Object.values(characterColors)) {
         if (!entry || typeof entry !== 'object') continue;
@@ -162,7 +165,10 @@ export function resetDialogueCountsForNewChat() {
         changed = true;
     }
 
-    if (changed) updateCharList();
+    if (removed) {
+        commit();
+        repaintDomAfterCharacterDataChange(0);
+    } else if (changed) updateCharList();
 }
 
 export function handleChatChanged() {

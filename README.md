@@ -96,7 +96,8 @@ The **Characters** section searches names, aliases, groups, fonts, and status. S
 - **Color and Harmony**: choose a color directly or open keyboard-accessible complementary, triadic, and analogous suggestions.
 - **Lock**: prevents regeneration and reset from changing that character. Locking has no deletion side effects.
 - **Swap**: exchanges complete color and gradient data with another character.
-- **Style, Font, Alias, Group**: set typography and identity metadata directly.
+- **Rename**: change the character's primary name. **Add Alias** keeps the primary name and adds another name that resolves to it.
+- **Style, Font, Group**: set typography and metadata directly.
 - **Gradient**: enable, randomize, configure, animate, or apply a reusable preset.
 - **Delete**: reviews the target first and remains blocked while Keep is active.
 
@@ -121,6 +122,7 @@ Adding an existing canonical name or alias reveals its current row instead of si
 - Effective colors are adjusted for at least 4.5:1 text contrast against the rendered chat surface in Auto, or against the forced mode's reference surface. Speaker metadata remains available to assistive technology without adding visible name tags to dialogue.
 - Scan on load only when the current character list is empty, or scan each new message.
 - Automatically lock detected speakers, assign random gradients to new NPCs or every new character, and optionally drift every gradient. Generated gradients are kept perceptually distinct from the colors other characters already use.
+- Optionally clear every character except those marked **Keep** when a new chat starts. This is off by default.
 - Enable manual dialogue reassignment by pointer, long press, or keyboard.
 - Complete partly colored messages (LLM engine, on by default): when the model tags only some of a message's dialogue, the uncolored lines are attributed and colored locally as the message arrives — no extra LLM request.
 - Reduce routine success notifications without suppressing required validation and safety feedback.
