@@ -14,7 +14,7 @@ import { buildMinimalPromptInstruction, flushPromptInjection, injectPrompt } fro
 import { eventSource, event_types, getContext } from './st-api.js';
 import { attributionChatGeneration, autoSyncPendingRecord, characterColors, expandedCharacterRows, groupProfiles, isDomEngine, isStreamingGenerationActive, lastCharKey, lastProcessedMessageSignature, pendingAttributionVerifications, runtimeState, selectedCharacterKeys, setAttributionChatGeneration, setEnabledLifecycleSynchronizer, setIsStreamingGenerationActive, setLastCharKey, setLastProcessedMessageSignature, setPendingAttributionVerifications, setSwapMode, settings, swapMode } from './state.js';
 import { beginStreamingPaint, endStreamingPaint } from './streaming-paint.js';
-import { confirmAutoSyncRecord, doAutoSyncMarkersMatch, ensureRegexScript, getAutoSyncRecord, getCharKey, getStorageKey, initAutoSync, loadData, migrateLegacyLocalStorageIfNeeded, migrateRenamedCharacterStorage, stopAutoSyncPolling, syncAutoSyncPolling, tryLoadFromCard, updateAutoSyncUI } from './storage.js';
+import { confirmAutoSyncRecord, doAutoSyncMarkersMatch, ensureRegexScript, getAutoSyncRecord, getCharKey, getStorageKey, initAutoSync, loadData, markCurrentPersonaKept, migrateLegacyLocalStorageIfNeeded, migrateRenamedCharacterStorage, saveData, stopAutoSyncPolling, syncAutoSyncPolling, tryLoadFromCard, updateAutoSyncUI } from './storage.js';
 import { applyRestoredPersonaColor, applyThemeOrBrightnessChange, clearAutoColorizeIndicators, createUI, ensurePersonaCharacter, renamePersonaCharacter, syncUIWithSettings, updateCharList } from './ui.js';
 import { cancelStreamingAttributionVerification, captureLoadedAttributionMessageBaseline, clearAutoAttributionVerificationQueue, queueAutoAttributionVerificationForRenderedMessages, scheduleStreamingAttributionVerification } from './verify.js';
 
@@ -351,7 +351,7 @@ export function registerEventHandlers() {
             scheduleDomRefreshSeries(0);
             scheduleCustomFontRefresh(0);
             // Run post-generation verification sweep for unverified rendered messages.
-            queueAutoAttributionVerificationForRenderedMessages({ delay: 300 });
+            if (isDomEngine()) queueAutoAttributionVerificationForRenderedMessages({ delay: 300 });
         },
         chatCreated: resetDialogueCountsForNewChat,
         chatChanged: handleChatChanged,
@@ -369,9 +369,13 @@ export function registerEventHandlers() {
             // before anything repaints, whether or not the persona entry is auto-created.
             // applyRestoredPersonaColor persists and repaints the swap; the settings list
             // alone would leave the chat showing the previous persona's color.
+            const autoPersona = settings.autoPersonaCharacter === true;
             const restored = applyRestoredPersonaColor();
-            if (settings.autoPersonaCharacter === true) ensurePersonaCharacter({ silent: true });
-            else if (!restored) return;
+            if (autoPersona) ensurePersonaCharacter({ silent: true });
+            const kept = markCurrentPersonaKept();
+            if (kept) saveData();
+            if (!isDomEngine()) decorateAllMessages();
+            if (!autoPersona && !restored && !kept) return;
             updateCharList();
         },
         personaRenamed: payload => {

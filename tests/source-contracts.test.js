@@ -628,18 +628,21 @@ test('assigned colors are kept apart perceptually, not just by hue and lightness
 test('the LLM engine never edits or registers a tool-call message', () => {
     const predicate = functionSection(sources['utils.js'], 'isToolCallMessage');
     const colorable = functionSection(sources['live-colors.js'], 'isColorableMessage');
+    const persona = functionSection(sources['live-colors.js'], 'isTrackedPersonaMessage');
+    const newMessage = functionSection(sources['live-colors.js'], 'onNewMessage');
 
     // SillyTavern's own coreChat filter reads the invocation array, not is_system.
     assert.match(predicate, /Array\.isArray\(msg\?\.extra\?\.tool_invocations\)/);
 
-    // Ordering is the contract: the is_user tier below returns true for any host message, and a
-    // tool call is a host message. is_system must not appear here -- /hide sets it on ordinary
-    // character messages whose saved tags still have to follow a color change.
-    assert.match(
-        colorable,
-        /if \(!msg\) return false;\s*if \(isToolCallMessage\(msg\)\) return false;\s*if \(!msg\.is_user\) return true;/s,
-    );
+    // User messages are never eligible for LLM mutation; tracked persona users have a separate
+    // DOM-only predicate. is_system must not appear here -- /hide sets it on ordinary character
+    // messages whose saved tags still have to follow a color change.
+    assert.match(colorable, /return !msg\.is_user/);
     assert.doesNotMatch(colorable, /is_system/);
+    assert.match(persona, /personaKey && personaKey === messageKey/);
+    const personaGuard = newMessage.indexOf('if (!isColorableMessage(lastMsg))');
+    assert.ok(personaGuard >= 0 && personaGuard < newMessage.indexOf('processColorBlocksInText'),
+        'onNewMessage must reject user messages before ingestion/remapping');
 
     for (const site of ['applyLiveColorReplacements', 'recolorAllMessages', 'colorizeMessages', 'onNewMessage']) {
         assert.match(
@@ -648,6 +651,21 @@ test('the LLM engine never edits or registers a tool-call message', () => {
             `${site} must keep routing every write and registration through the one predicate`,
         );
     }
+});
+
+test('hybrid persona decoration never recounts dialogue or queues the verifier', () => {
+    const target = functionSection(sources['dom-engine.js'], 'isDomTargetMessage');
+    const decorateAll = functionSection(sources['dom-engine.js'], 'decorateAllMessages');
+    const observed = functionSection(sources['dom-engine.js'], 'decorateObservedMessages');
+    const mainHandlers = functionSection(sources['main.js'], 'registerEventHandlers');
+    const refreshSeries = functionSection(sources['dom-engine.js'], 'scheduleDomRefreshSeries');
+
+    assert.match(target, /isDomEngine\(\) \|\| isTrackedPersonaMessage\(msg\)/);
+    assert.match(decorateAll, /const countResult = isDomEngine\(\)[\s\S]*?refreshDomDialogueCounts/);
+    assert.match(decorateAll, /if \(isDomEngine\(\)\) queueAutoAttributionVerificationForRenderedMessages\(\)/);
+    assert.match(observed, /if \(isDomEngine\(\) && options\.queueVerification !== false\)/);
+    assert.match(mainHandlers, /if \(isDomEngine\(\)\) queueAutoAttributionVerificationForRenderedMessages\(\{ delay: 300 \}\)/);
+    assert.match(refreshSeries, /if \(!hasDomTargetMessages\(\)\) \{\s*if \(!isDomEngine\(\)\) scheduleDecorateAll\(delay, true\)/);
 });
 
 test('the tool-call repair reverses only this extension own canonical markup', () => {

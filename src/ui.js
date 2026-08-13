@@ -18,7 +18,7 @@ import { applyGradientPreset, applyThemeReadabilityAndBrightness, buildCharacter
 import { injectPrompt, updateSystemPromptDisplay } from './prompts.js';
 import { escapeHtml, eventSource, event_types, getContext } from './st-api.js';
 import { autoRecolorHintShown, characterColors, expandedCharacterRows, groupProfiles, isDomEngine, searchTerm, selectedCharacterKeys, setAutoRecolorHintShown, setCharacterColors, setGroupProfiles, setSearchTerm, setSwapMode, settings, swapMode, synchronizeEnabledLifecycle } from './state.js';
-import { analyzeColorImport, analyzeSettingsImport, analyzeStylePackImport, applyCardData, applyColorImport, applySettingsImport, applyStylePackImport, archiveStoredColorData, deleteCustomGradientPreset, disableAutoSync, enableAutoSync, exportColors, exportSettings, getArchivedColorData, getCurrentStorageScope, getCustomGradientPresets, getLegendPosition, getStorageKey, getStorageKeyForScope, getStorageLabelForKey, getStorageScopeDescriptor, getStylePackRegistry, getUserColorDataStore, normalizeColorDataEntry, normalizeToggleSettings, pinCurrentPersonaColor, readCardData, removePinnedCharacterKey, renameCustomGradientPreset, renamePinnedPersonaColor, restoreAllSettingsToDefaults, restoreArchivedColorData, restorePinnedPersonaColor, saveCustomGradientPreset, saveData, saveLegendPosition, saveToCard, switchColorStorageScope, updateAutoSyncUI } from './storage.js';
+import { analyzeColorImport, analyzeSettingsImport, analyzeStylePackImport, applyCardData, applyColorImport, applySettingsImport, applyStylePackImport, archiveStoredColorData, deleteCustomGradientPreset, disableAutoSync, enableAutoSync, exportColors, exportSettings, getArchivedColorData, getCurrentStorageScope, getCustomGradientPresets, getLegendPosition, getStorageKey, getStorageKeyForScope, getStorageLabelForKey, getStorageScopeDescriptor, getStylePackRegistry, getUserColorDataStore, markCurrentPersonaKept, normalizeColorDataEntry, normalizeToggleSettings, pinCurrentPersonaColor, readCardData, removePinnedCharacterKey, renameCustomGradientPreset, renamePinnedPersonaColor, restoreAllSettingsToDefaults, restoreArchivedColorData, restorePinnedPersonaColor, saveCustomGradientPreset, saveData, saveLegendPosition, saveToCard, switchColorStorageScope, updateAutoSyncUI } from './storage.js';
 import { buildStylePackEnvelope } from './style-pack-adapter.js';
 import { escapeAttr, getGoogleFontFamily, htmlToNode, normalizeEntryGradientGenerator, normalizeGoogleFontName, normalizeHexColor, normalizeManualColorInput, toast } from './utils.js';
 import { AUTO_HIGH_ATTRIBUTION_CONFIDENCE, cancelStreamingAttributionVerification, clearAutoAttributionVerificationQueue, getAttributionVerifyPasses, queueAutoAttributionVerificationForRenderedMessages, runAttributionVerification, verifyLatestAttributionsWithLLM, verifyVisibleAttributionsWithLLM } from './verify.js';
@@ -3318,10 +3318,11 @@ export function ensurePersonaCharacter({ silent = false } = {}) {
             return;
         }
         if (resolveCharacterKeyByNameOrAlias(name)) {
+            if (markCurrentPersonaKept()) saveData();
             if (!silent) addCharacter(name);
             return;
         }
-        const result = addCharacter(name, undefined, { origin: 'persona' });
+        const result = addCharacter(name, undefined, { origin: 'persona', keep: settings.keepPersonaCharacter === true });
         if (result?.added && !silent) toast.success(`Added ${escapeHtml(name)}`);
     } catch (error) {
         console.warn('[Dialogue Colors] Could not add the active persona.', error);
@@ -3985,6 +3986,7 @@ export function syncUIWithSettings() {
     if ($('dc-autoscan-new')) $('dc-autoscan-new').checked = settings.autoScanNewMessages !== false;
     if ($('dc-auto-lock')) $('dc-auto-lock').checked = settings.autoLockDetected !== false;
     if ($('dc-auto-persona')) $('dc-auto-persona').checked = settings.autoPersonaCharacter === true;
+    if ($('dc-keep-persona')) $('dc-keep-persona').checked = settings.keepPersonaCharacter === true;
     if ($('dc-persist-persona-color')) $('dc-persist-persona-color').checked = settings.persistPersonaColor === true;
     if ($('dc-clear-unpinned-new-chat')) $('dc-clear-unpinned-new-chat').checked = settings.clearUnpinnedOnNewChat === true;
     if ($('dc-auto-random-gradients')) $('dc-auto-random-gradients').checked = settings.autoRandomNpcGradients === true;
@@ -4327,7 +4329,7 @@ function buildSettingsPanelHtml() {
             </details>
             <details class="dc-section" id="dc-page-automation" data-dc-page="automation" data-dc-disclosure="automation" role="tabpanel" aria-labelledby="dc-tab-automation" tabindex="-1">
                 <summary>Automation</summary>
-                <div class="dc-toggle-grid"><label class="checkbox_label"><input type="checkbox" id="dc-autoscan"><span>Scan when the character list is empty</span></label><label class="checkbox_label"><input type="checkbox" id="dc-autoscan-new"><span>Scan new messages</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-lock"><span>Lock new characters</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-persona" data-help="Adds your active persona to the character list automatically. Your own dialogue is colored whenever your persona is in the list, however it got there; in the LLM engine that writes color tags into your own messages."><span>Add my persona automatically</span></label><label class="checkbox_label"><input type="checkbox" id="dc-persist-persona-color" data-help="Keeps your persona's color the same in every new chat, even when colors are stored per chat or per card."><span>Keep my persona's color everywhere</span></label><label class="checkbox_label"><input type="checkbox" id="dc-clear-unpinned-new-chat" data-help="Clears the character list when a new chat starts. Only characters marked Keep survive."><span>Clear all but Keep characters on new chat</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-random-gradients"><span>Random gradients for new NPCs</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-random-all-gradients"><span>Random gradients for every new character</span></label><label class="checkbox_label"><input type="checkbox" id="dc-drift-all-gradients"><span>Drift every gradient color</span></label><label class="checkbox_label dc-llm-only"><input type="checkbox" id="dc-auto-colorize"><span>Colorize missing tags automatically</span></label><label class="checkbox_label dc-llm-only"><input type="checkbox" id="dc-complete-partial" data-help="When the model colors only some of a message's dialogue, the uncolored lines are attributed and colored locally. No extra LLM request is made."><span>Complete partly colored messages</span></label><label class="checkbox_label"><input type="checkbox" id="dc-right-click"><span>Manual dialogue reassignment</span></label><label class="checkbox_label"><input type="checkbox" id="dc-disable-toasts"><span>Reduce routine notifications</span></label></div>
+                <div class="dc-toggle-grid"><label class="checkbox_label"><input type="checkbox" id="dc-autoscan"><span>Scan when the character list is empty</span></label><label class="checkbox_label"><input type="checkbox" id="dc-autoscan-new"><span>Scan new messages</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-lock"><span>Lock new characters</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-persona" data-help="Adds your active persona to the character list automatically. Your own dialogue is colored locally when your persona has a color, without an LLM call."><span>Add my persona automatically</span></label><label class="checkbox_label"><input type="checkbox" id="dc-keep-persona" data-help="Marks an already tracked active persona as Keep and marks future manual or automatic persona entries as Kept. It does not add a persona or assign a color by itself."><span>Keep my persona entry</span></label><label class="checkbox_label"><input type="checkbox" id="dc-persist-persona-color" data-help="Keeps your persona's color the same in every new chat, even when colors are stored per chat or per card."><span>Keep my persona's color everywhere</span></label><label class="checkbox_label"><input type="checkbox" id="dc-clear-unpinned-new-chat" data-help="Clears the character list when a new chat starts. Only characters marked Keep survive."><span>Clear all but Keep characters on new chat</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-random-gradients"><span>Random gradients for new NPCs</span></label><label class="checkbox_label"><input type="checkbox" id="dc-auto-random-all-gradients"><span>Random gradients for every new character</span></label><label class="checkbox_label"><input type="checkbox" id="dc-drift-all-gradients"><span>Drift every gradient color</span></label><label class="checkbox_label dc-llm-only"><input type="checkbox" id="dc-auto-colorize"><span>Colorize missing tags automatically</span></label><label class="checkbox_label dc-llm-only"><input type="checkbox" id="dc-complete-partial" data-help="When the model colors only some of a message's dialogue, the uncolored lines are attributed and colored locally. No extra LLM request is made."><span>Complete partly colored messages</span></label><label class="checkbox_label"><input type="checkbox" id="dc-right-click"><span>Manual dialogue reassignment</span></label><label class="checkbox_label"><input type="checkbox" id="dc-disable-toasts"><span>Reduce routine notifications</span></label></div>
             </details>
             <details class="dc-section" id="dc-page-library" data-dc-page="library" data-dc-disclosure="library" role="tabpanel" aria-labelledby="dc-tab-library" tabindex="-1">
                 <summary>Style library</summary>
@@ -4710,6 +4712,12 @@ function bindSettingsPanelControls($) {
         if (e.target.checked) ensurePersonaCharacter({ silent: true });
         updateCharList();
     };
+    $('dc-keep-persona').onchange = e => {
+        settings.keepPersonaCharacter = e.target.checked;
+        markCurrentPersonaKept();
+        saveData();
+        updateCharList();
+    };
     $('dc-persist-persona-color').onchange = e => {
         settings.persistPersonaColor = e.target.checked;
         // Pin whatever the persona looks like right now, so enabling the option keeps the
@@ -4820,6 +4828,7 @@ function bindSettingsPanelControls($) {
             clearAutoAttributionVerificationQueue({ clearCooldown: true });
             cancelStreamingAttributionVerification({ clearOverrides: true });
             undecorateAllMessages();
+            scheduleDomRefreshSeries(0);
             scheduleCustomFontRefresh(0);
         }
     };

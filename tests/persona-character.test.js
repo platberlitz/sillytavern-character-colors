@@ -106,7 +106,7 @@ const hooks = registerHooks({
 const stApi = await import(stApiUrl);
 const { setTestContext } = stApi;
 const { addCharacter, createCanvasGradientFill, ensurePersonaCharacter, exportLegendPng, isPersonaEntry, renameCharacter, renamePersonaCharacter, updateLegend } = await import('../src/ui.js');
-const { isColorableMessage } = await import('../src/live-colors.js');
+const { isColorableMessage, isTrackedPersonaMessage } = await import('../src/live-colors.js');
 const { getPersonaName } = await import('../src/palettes.js');
 const {
     CHAT_SCOPE_METADATA_KEY,
@@ -122,6 +122,7 @@ const {
     getPinnedPersonaColors,
     getStorageScopeDescriptor,
     loadData,
+    markCurrentPersonaKept,
     migrateColorSchemaIfNeeded,
     normalizeStoredSettings,
     pinCurrentPersonaColor,
@@ -308,6 +309,46 @@ function withPersona(personaName, run) {
 test('the active persona name comes from the SillyTavern context', () => {
     withPersona('Marisol', () => {
         assert.equal(getPersonaName(), 'Marisol');
+    });
+});
+
+test('persona Keep enforcement is off by default and never creates an entry', () => {
+    withPersona('Marisol', () => {
+        assert.equal(settings.keepPersonaCharacter, false);
+        assert.equal(markCurrentPersonaKept(), false);
+        assert.deepEqual(Object.keys(registry()), []);
+    });
+});
+
+test('persona Keep enforcement marks canonical and alias entries only when enabled', () => {
+    withPersona('Marisol', () => {
+        settings.keepPersonaCharacter = true;
+        registry().mari = { name: 'Mari', aliases: ['Marisol'], keep: false, baseColor: '#aabbcc', color: '#aabbcc' };
+        assert.equal(markCurrentPersonaKept(), true);
+        assert.equal(registry().mari.keep, true);
+        assert.equal(markCurrentPersonaKept(), false);
+    });
+});
+
+test('disabling persona Keep enforcement does not unkeep an existing entry', () => {
+    withPersona('Marisol', () => {
+        registry().marisol = { name: 'Marisol', aliases: [], keep: true, baseColor: '#aabbcc', color: '#aabbcc' };
+        settings.keepPersonaCharacter = false;
+        assert.equal(markCurrentPersonaKept(), false);
+        assert.equal(registry().marisol.keep, true);
+    });
+});
+
+test('new persona entries inherit Keep only while the preference is enabled', () => {
+    withPersona('Marisol', () => {
+        settings.keepPersonaCharacter = true;
+        ensurePersonaCharacter({ silent: true });
+        assert.equal(registry().marisol.keep, true);
+    });
+    withPersona('Marisol', () => {
+        settings.keepPersonaCharacter = false;
+        ensurePersonaCharacter({ silent: true });
+        assert.equal(registry().marisol.keep, false);
     });
 });
 
@@ -943,15 +984,16 @@ test('the LLM engine leaves user messages alone while the persona has no color',
     });
 });
 
-// Having picked a color for yourself is the opt-in. Hunting for a second checkbox after
-// adding your own persona by hand only looked like the feature was broken.
-test('a persona with a color gets their own messages colored, toggle or not', () => {
+// Having picked a color for yourself is the opt-in; Keep is independent of DOM eligibility.
+test('a tracked persona is a DOM target but never an LLM color target', () => {
     withPersona('Marisol', () => {
         for (const autoPersonaCharacter of [false, true]) {
             settings.autoPersonaCharacter = autoPersonaCharacter;
             ensurePersonaCharacter({ silent: true });
-            assert.equal(isColorableMessage({ is_user: true, name: 'Marisol' }), true,
-                `a tracked persona is colorable with the auto-add setting ${autoPersonaCharacter}`);
+            const message = { is_user: true, name: 'Marisol' };
+            assert.equal(isTrackedPersonaMessage(message), true,
+                `a tracked persona is a DOM target with the auto-add setting ${autoPersonaCharacter}`);
+            assert.equal(isColorableMessage(message), false);
         }
     });
 });
@@ -960,7 +1002,9 @@ test('a colored persona does not open up other user messages', () => {
     withPersona('Marisol', () => {
         ensurePersonaCharacter({ silent: true });
         assert.equal(isColorableMessage({ is_user: true, name: 'Diego' }), false);
+        assert.equal(isTrackedPersonaMessage({ is_user: true, name: 'Diego' }), false);
         assert.equal(isColorableMessage({ is_user: true }), false);
+        assert.equal(isTrackedPersonaMessage({ is_user: true }), false);
     });
 });
 
@@ -968,8 +1012,10 @@ test('character messages stay colorable regardless of the setting', () => {
     withPersona('Marisol', () => {
         settings.autoPersonaCharacter = false;
         assert.equal(isColorableMessage({ is_user: false, name: 'Diego' }), true);
+        assert.equal(isTrackedPersonaMessage({ is_user: false, name: 'Diego' }), false);
         settings.autoPersonaCharacter = true;
         assert.equal(isColorableMessage({ is_user: false, name: 'Diego' }), true);
+        assert.equal(isTrackedPersonaMessage({ is_user: false, name: 'Diego' }), false);
     });
 });
 
@@ -981,7 +1027,7 @@ test('a missing message is never colorable', () => {
 // switch that can be off while the persona is sitting in the list with a color on it.
 test('the persona gate reads the registry, not a setting', async () => {
     const source = await readFile(new URL('../src/live-colors.js', import.meta.url), 'utf8');
-    const start = source.indexOf('export function isColorableMessage(');
+    const start = source.indexOf('export function isTrackedPersonaMessage(');
     const section = source.slice(start, source.indexOf('\n}', start));
     assert.match(section, /personaKey && personaKey === messageKey/);
     assert.doesNotMatch(section, /autoPersonaCharacter/);

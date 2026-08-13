@@ -277,6 +277,25 @@ test('bulk unchanged LLM output uses local fallback without a second request', a
     assert.equal(localFallbacks, 1);
 });
 
+test('LLM colorization skips tracked persona user messages without changing text or calling the provider', async () => {
+    const message = { name: 'Alice', is_user: true, mes: 'Alice says "Hello."' };
+    let requests = 0;
+    const live = await loadLiveColorsModule({
+        getContext: () => chatContext('chat-a', [message]),
+        characterColors: { alice: { name: 'Alice', color: '#123456', aliases: [] } },
+        isDomEngine: () => false,
+        setIsColorizing() {},
+        setColorizeButtonBusy() {},
+        syncAllEffectiveColors() {},
+        callLLMWithProfile: async () => { requests++; return ''; },
+    });
+
+    const original = message.mes;
+    await live.colorizeMessages('all');
+    assert.equal(requests, 0);
+    assert.equal(message.mes, original);
+});
+
 test('bulk colorization rechecks tool eligibility after the provider await', async () => {
     const request = deferred();
     const chat = [{ name: 'Alice', is_user: false, extra: {}, mes: '"Hello."' }];

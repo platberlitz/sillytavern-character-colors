@@ -2276,6 +2276,16 @@ function findPersonaRegistryKey(personaIdentity) {
     return '';
 }
 
+export function markCurrentPersonaKept() {
+    if (settings.keepPersonaCharacter !== true) return false;
+    const personaIdentity = normalizeRegistryIdentity(getPersonaName());
+    const key = findPersonaRegistryKey(personaIdentity);
+    const entry = key ? characterColors[key] : null;
+    if (!entry || entry.keep === true) return false;
+    entry.keep = true;
+    return true;
+}
+
 // Only the look is pinned. Aliases, dialogue counts and group membership stay
 // per-scope, because those describe the chat rather than the user.
 function buildPinnedPersonaColor(entry) {
@@ -2727,7 +2737,8 @@ export function loadData(options = {}) {
     // the persona option holds, not the one the pin captured in some other chat.
     const pinsRestored = restorePinnedCharacters();
     const personaRestored = restorePinnedPersonaColor();
-    if ((migrateColorSchemaIfNeeded() || personaRestored || pinsRestored) && options.persistMigrations !== false) {
+    const personaKept = markCurrentPersonaKept();
+    if ((migrateColorSchemaIfNeeded() || personaRestored || pinsRestored || personaKept) && options.persistMigrations !== false) {
         saveData({ preserveEffectiveColors: true });
     }
     setColorHistory([createHistorySnapshot()]); setHistoryIndex(0);

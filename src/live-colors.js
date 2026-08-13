@@ -32,23 +32,25 @@ const COLORIZE_MAX_INDIVIDUAL_LLM_FALLBACKS = 2;
 const COLORIZE_RUN_MAX_LLM_REQUESTS = 4;
 const COLORIZE_RUN_MAX_LLM_RETRIES = 1;
 
-// The LLM engine rewrites message text in place, so user-authored messages are only tagged
-// once the persona is in the color list: having picked a color for yourself is the opt-in,
-// and it holds however the entry got there. Only your own lines qualify - any other user
-// message, in a group or from a second persona, stays untouched.
-//
-// The tool-call test has to come first: a tool-call message is not a user message, so without
-// it the !msg.is_user tier below returns true and the engine treats a JSON payload as dialogue.
-export function isColorableMessage(msg) {
+export function isTrackedPersonaMessage(msg) {
     if (isHostSystemOrToolMessage?.(msg)) return false;
     if (!msg) return false;
     if (isToolCallMessage(msg)) return false;
-    if (!msg.is_user) return true;
+    if (!msg.is_user) return false;
     const personaName = getPersonaName();
     if (!personaName) return false;
     const personaKey = resolveCharacterKeyByNameOrAlias(personaName);
     const messageKey = resolveCharacterKeyByNameOrAlias(String(msg.name ?? '').trim());
     return !!personaKey && personaKey === messageKey;
+}
+
+// LLM mode rewrites message text in place. User messages are always excluded;
+// tracked persona messages are painted locally by the DOM engine instead.
+export function isColorableMessage(msg) {
+    if (isHostSystemOrToolMessage?.(msg)) return false;
+    if (!msg) return false;
+    if (isToolCallMessage(msg)) return false;
+    return !msg.is_user;
 }
 
 function normalizeContextId(value) {
@@ -651,7 +653,7 @@ export function applyLiveColorChangesFromSnapshot(snapshot, keys = Object.keys(s
         scheduleCustomFontRefresh(options.saveImmediately ? 0 : 120);
         return 0;
     }
-    if (options.repaintStyles) scheduleDomRefreshSeries(options.saveImmediately ? 0 : 120);
+    scheduleDomRefreshSeries(options.saveImmediately ? 0 : 120);
     scheduleCustomFontRefresh(options.saveImmediately ? 0 : 120);
     if (!settings.autoRecolor && !options.force) return 0;
     const list = Array.isArray(keys) ? keys : [keys];
@@ -663,7 +665,7 @@ export function applyLiveColorChangesFromSnapshot(snapshot, keys = Object.keys(s
 }
 
 export function repaintDomAfterCharacterDataChange(delay = 0) {
-    if (isDomEngine()) scheduleDomRefreshSeries(delay);
+    scheduleDomRefreshSeries(delay);
     scheduleCustomFontRefresh(delay);
 }
 
@@ -1892,6 +1894,10 @@ export function onNewMessage() {
         const chatBinding = captureChatBinding(ctx);
         const lastMsg = chat[chat.length - 1];
         if (isHostSystemOrToolMessage(lastMsg)) return;
+        if (!isColorableMessage(lastMsg)) {
+            scheduleDomRefreshSeries(0);
+            return;
+        }
         const text = lastMsg?.mes || '';
         const sigId = lastMsg?.id ?? lastMsg?.send_date ?? '';
         const signature = `${chat.length}|${sigId}|${text}`;

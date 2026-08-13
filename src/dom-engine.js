@@ -5,7 +5,7 @@ import { unregisterGradientAnimationRoot } from './animation-controller.js';
 import { buildUniqueKnownColorStatsLookup, collectFontColorsFromText, countFontColorOccurrencesFromText, resolveCharacterKeyByNameOrAlias } from './color-blocks.js';
 import { applyCustomFontsToFontTags, applyCustomFontsToMessageElements, clearCustomFontsFromFontTags, loadGoogleFont, scheduleCardStyle, scheduleCustomFontRefresh } from './fonts.js';
 import { applyGradientText, clearGradientText, getVisualRenderState } from './gradient-rendering.js';
-import { queueColorStateSave } from './live-colors.js';
+import { isTrackedPersonaMessage, queueColorStateSave } from './live-colors.js';
 import { getNarratorVisual } from './narrator-style.js';
 import { applyThemeReadabilityAndBrightness } from './palettes.js';
 import { escapeHtml, eventSource, event_types, getContext } from './st-api.js';
@@ -31,6 +31,19 @@ function getMessageText(message) {
 
 function getMessageSpeaker(message) {
     return String(message?.name ?? message?.speaker ?? '');
+}
+
+export function isDomTargetMessage(msg) {
+    if (!msg || isHostSystemOrToolMessage(msg)) return false;
+    return isDomEngine() || isTrackedPersonaMessage(msg);
+}
+
+function hasDomTargetMessages(chat = getContext()?.chat || []) {
+    return isDomEngine() || (Array.isArray(chat) && chat.some(isTrackedPersonaMessage));
+}
+
+function isHybridPersonaMessage(msg) {
+    return !isDomEngine() && isTrackedPersonaMessage(msg);
 }
 
 function getChatContextIdentity(ctx) {
@@ -211,8 +224,9 @@ export function waitForDomFrame(maxWaitMs = 80) {
 
 export function getMessageDomReadiness(mesElement, msg, mesIndex) {
     const mesText = mesElement?.querySelector?.('.mes_text');
-    if (!mesText || !msg || isHostSystemOrToolMessage(msg)) return { ready: false, totalSegments: 0, matchedSegments: 0, expectedDecorations: 0, coloredDecorations: 0, correctDecorations: 0 };
-    if (mesText.querySelector('font[color]') || collectFontColorsFromText(msg.mes).size) {
+    if (!mesText || !msg || !isDomTargetMessage(msg)) return { ready: false, totalSegments: 0, matchedSegments: 0, expectedDecorations: 0, coloredDecorations: 0, correctDecorations: 0 };
+    const hasPersistedFontColors = mesText.querySelector('font[color]') || collectFontColorsFromText(msg.mes).size;
+    if (hasPersistedFontColors && !isHybridPersonaMessage(msg)) {
         return { ready: true, totalSegments: 0, matchedSegments: 0, expectedDecorations: 0, coloredDecorations: 0, correctDecorations: 0 };
     }
     const attribution = attributeDialogueSegments(msg.mes, msg.name, {
@@ -224,6 +238,9 @@ export function getMessageDomReadiness(mesElement, msg, mesIndex) {
     const emphasisSegments = attribution.segments.filter(seg => seg.delimiter === '*' || seg.delimiter === '_');
     const qElements = Array.from(mesText.querySelectorAll('q'));
     const emElements = Array.from(mesText.querySelectorAll('em'));
+    if (hasPersistedFontColors && isHybridPersonaMessage(msg) && !qElements.length && !emElements.length) {
+        return { ready: true, totalSegments: 0, matchedSegments: 0, expectedDecorations: 0, coloredDecorations: mesText.querySelectorAll('[data-dc-colored]').length, correctDecorations: 0 };
+    }
     const totalSegments = quoteSegments.length + emphasisSegments.length;
     const expectedDecorations = quoteSegments.filter(seg => seg.assignment).length + emphasisSegments.filter(seg => seg.assignment).length;
     let matchedSegments = 0;
@@ -304,7 +321,7 @@ export function waitForMessageDomReadyForDecoration(messageIndex, msg, timeoutMs
 
 export async function refreshAndDecorateMessageDom(messageIndex, message, options = {}) {
     let target = captureMessageDomTarget(messageIndex, message);
-    if (!target || !isMessageDomWriteTargetCurrent(target)) return false;
+    if (!target || !isDomTargetMessage(target.message) || !isMessageDomWriteTargetCurrent(target)) return false;
     const { message: msg, messageIndex: index } = target;
     if (target.mesElement && suspendMessageDomWorkForEdit(target.mesElement, index)) return false;
     if (!isMessageDomWriteTargetCurrent(target)) return false;
@@ -336,7 +353,7 @@ export async function refreshAndDecorateMessageDom(messageIndex, message, option
 
 export async function decorateMessageDomFromCurrentRender(messageIndex, message, options = {}) {
     const target = captureMessageDomTarget(messageIndex, message);
-    if (!target) return false;
+    if (!target || !isDomTargetMessage(target.message)) return false;
     const { message: msg, messageIndex: index } = target;
     const isCurrent = () => isMessageDomWriteTargetCurrent(target)
         && (!options.isCurrent || options.isCurrent());
@@ -381,7 +398,7 @@ export function scheduleMessageDomFollowupRepair(messageIndex, repainted) {
     if (isStreamingOwnedMessage(index)) return;
     if (suspendMessageDomWorkForEdit(getMessageElementByIndex(index), index)) return;
     const target = captureMessageDomTarget(index);
-    if (!target) return;
+    if (!target || !isDomTargetMessage(target.message)) return;
     // Cancel any in-flight follow-ups for this message first so we never
     // stack overlapping repair passes that fight each other.
     cancelMessageDomFollowupRepairs(index);
@@ -397,7 +414,7 @@ export function scheduleMessageDomFollowupRepair(messageIndex, repainted) {
                 if (!tracked.length) messageDomFollowupTimers.delete(index);
             }
             try {
-                if (!settings.enabled || !isDomEngine()) return;
+                if (!settings.enabled || !hasDomTargetMessages()) return;
                 if (!isMessageDomTargetCurrent(target)) return;
                 const msg = target.message;
                 const mesElement = getMessageElementByIndex(index);
@@ -470,7 +487,7 @@ export function scheduleMessageDomRepair(mesIndex, options = {}) {
     if (isStreamingOwnedMessage(index)) return false;
     if (suspendMessageDomWorkForEdit(getMessageElementByIndex(index), index)) return false;
     const target = captureMessageDomTarget(index);
-    if (!target) return false;
+    if (!target || !isDomTargetMessage(target.message)) return false;
 
     const source = options.source || 'fallback';
     if (source === 'observer' && messageDomRepairSources.has(index)) return false;
@@ -487,11 +504,11 @@ export function scheduleMessageDomRepair(mesIndex, options = {}) {
     const delay = Math.max(0, Number(options.delay ?? POST_MUTATION_DOM_REPAIR_DELAY_MS) || 0);
     const timer = setTimeout(async () => {
         try {
-            if (!settings.enabled || !isDomEngine()) return;
+            if (!settings.enabled || !hasDomTargetMessages()) return;
             if (!isCurrent()) return;
 
             const msg = target.message;
-            if (!msg || isHostSystemOrToolMessage(msg)) return;
+            if (!msg || !isDomTargetMessage(msg)) return;
             if (suspendMessageDomWorkForEdit(getMessageElementByIndex(index), index)) return;
 
             await decorateMessageDomFromCurrentRender(index, msg, {
@@ -503,7 +520,7 @@ export function scheduleMessageDomRepair(mesIndex, options = {}) {
 
             if (!isCurrent()) return;
 
-            if (options.verify !== false) {
+            if (isDomEngine() && options.verify !== false) {
                 queueAutoAttributionVerificationForMessage(index, {
                     force: options.forceVerify === true,
                     delay: options.verifyDelay ?? AUTO_ATTRIBUTION_VERIFY_DELAY_MS,
@@ -1742,7 +1759,7 @@ export function undecorateMessageDom(mesElement, options = {}) {
     if (mesText) {
         clearLegacyNarratorContainerStyle(mesText);
         mesText.querySelectorAll('[data-dc-colored], [data-dc-seg]').forEach(clearSegmentDecoration);
-        clearCustomFontsFromFontTags(mesText);
+        if (options.preserveFontTags !== true) clearCustomFontsFromFontTags(mesText);
         if (options.preserveNarrator !== true) clearNarratorTextSpans(mesText);
     }
     // Tear down the external-rebuild watcher so it doesn't re-decorate
@@ -1751,24 +1768,45 @@ export function undecorateMessageDom(mesElement, options = {}) {
     if (options.clearWatcher !== false) unregisterGradientAnimationRoot(mesElement);
 }
 
+function decorateTrackedPersonaFontTags(mesText, msg) {
+    const key = resolveCharacterKeyByNameOrAlias(getMessageSpeaker(msg).trim());
+    const entry = key ? characterColors[key] : null;
+    if (!entry) return false;
+    const assignment = { key, name: entry.name, color: entry.color, font: entry.font };
+    let decorated = false;
+    mesText.querySelectorAll('font[color]').forEach((fontElement, index) => {
+        applySegmentDecoration({ index: `font:${index}`, assignment }, fontElement);
+        decorated = true;
+    });
+    return decorated;
+}
+
 export function decorateMessageDom(mesElement, msg, mesIndex) {
     const mesText = mesElement?.querySelector?.('.mes_text');
-    if (!mesText) return { decorated: false, createdCharacters: false, needsRetry: !!msg && !isHostSystemOrToolMessage(msg) };
+    if (!mesText) return { decorated: false, createdCharacters: false, needsRetry: isDomTargetMessage(msg) };
     if (suspendMessageDomWorkForEdit(mesElement, mesIndex)) return { decorated: false, createdCharacters: false, needsRetry: false };
-    undecorateMessageDom(mesElement, { clearWatcher: false, preserveNarrator: true });
+    const manageDecoration = isDomEngine() || msg?.is_user === true;
+    const targetMessage = isDomTargetMessage(msg);
+    if (manageDecoration) {
+        undecorateMessageDom(mesElement, {
+            clearWatcher: !isDomEngine() && !targetMessage,
+            preserveNarrator: true,
+            preserveFontTags: !isDomEngine(),
+        });
+    }
     if (!settings.enabled || !msg || isHostSystemOrToolMessage(msg)) {
         clearNarratorTextSpans(mesText);
         return { decorated: false, createdCharacters: false };
     }
+    if (!targetMessage) {
+        if (msg.is_user) clearNarratorTextSpans(mesText);
+        return { decorated: false, createdCharacters: false };
+    }
     const hasPersistedFontColors = mesText.querySelector('font[color]') || collectFontColorsFromText(msg.mes).size;
-    if (hasPersistedFontColors) {
+    if (hasPersistedFontColors && !isHybridPersonaMessage(msg)) {
         clearNarratorTextSpans(mesText);
         applyCustomFontsToFontTags(mesText, msg.mes);
         clearDecoratedWatcher(mesElement);
-        return { decorated: false, createdCharacters: false };
-    }
-    if (!isDomEngine()) {
-        clearNarratorTextSpans(mesText);
         return { decorated: false, createdCharacters: false };
     }
 
@@ -1779,6 +1817,9 @@ export function decorateMessageDom(mesElement, msg, mesIndex) {
     });
 
     let decorated = false;
+    if (isHybridPersonaMessage(msg) && hasPersistedFontColors) {
+        decorated = decorateTrackedPersonaFontTags(mesText, msg) || decorated;
+    }
     const applyDecoration = (seg, el) => {
         decorated = applySegmentDecoration(seg, el) || decorated;
     };
@@ -1892,6 +1933,7 @@ export function attachMessageSettleObserver(mesElement, mesIndex) {
     if (!mesElement?.isConnected) return;
     if (isStreamingOwnedMessage(mesIndex)) return;
     if (suspendMessageDomWorkForEdit(mesElement, mesIndex)) return;
+    if (!isDomTargetMessage(getContext()?.chat?.[Number(mesIndex)])) return;
     // Keep the original deadline bounded. Reattaching after every failed
     // decoration would restart the timeout forever on permanently mismatched
     // markup.
@@ -1943,6 +1985,7 @@ export function watchDecoratedMessage(mesElement, mesIndex) {
     if (!mesElement?.isConnected) return;
     if (isStreamingOwnedMessage(mesIndex)) return;
     if (suspendMessageDomWorkForEdit(mesElement, mesIndex)) return;
+    if (!isDomTargetMessage(getContext()?.chat?.[Number(mesIndex)])) return;
     // Tear down any existing watcher for this element first.
     clearDecoratedWatcher(mesElement);
 
@@ -1950,7 +1993,7 @@ export function watchDecoratedMessage(mesElement, mesIndex) {
     if (!initialMesText) return;
 
     const observer = new MutationObserver(() => {
-        if (!mesElement.isConnected || !settings.enabled || !isDomEngine()) {
+        if (!mesElement.isConnected || !settings.enabled || !hasDomTargetMessages()) {
             clearDecoratedWatcher(mesElement);
             return;
         }
@@ -1964,7 +2007,7 @@ export function watchDecoratedMessage(mesElement, mesIndex) {
         const currentMesText = mesElement.querySelector('.mes_text');
         if (!currentMesText || !currentMesText.isConnected) return;
         const msg = getContext()?.chat?.[repairIndex];
-        if (!msg || isHostSystemOrToolMessage(msg)) return;
+        if (!msg || !isDomTargetMessage(msg)) return;
         if (!getMessageDomHealthRepairType(mesElement, msg, repairIndex, { bootstrap: true })
             && !currentMesText.querySelector('font[color]')
             && !collectFontColorsFromText(msg.mes).size) return;
@@ -2048,13 +2091,16 @@ const healthRefreshAttempts = new Map();
 
 export function getMessageDomHealthRepairType(mesElement, msg, mesIndex, options = {}) {
     const mesText = mesElement?.querySelector?.('.mes_text');
-    if (!mesText || !msg || isHostSystemOrToolMessage(msg)) return '';
+    if (!mesText || !msg || !isDomTargetMessage(msg)) return '';
     if (suspendMessageDomWorkForEdit(mesElement, mesIndex)) return '';
-    if (mesText.querySelector('font[color]') || collectFontColorsFromText(msg.mes).size) return '';
+    const hasPersistedFontColors = mesText.querySelector('font[color]') || collectFontColorsFromText(msg.mes).size;
+    if (hasPersistedFontColors && !isHybridPersonaMessage(msg)) return '';
     const readiness = getMessageDomReadiness(mesElement, msg, mesIndex);
     const narrator = getNarratorVisual(settings, applyThemeReadabilityAndBrightness);
     const narratorMissing = narrator && !mesText.querySelector('[data-dc-narrator]')
         && hasNarratorTextNodesToDecorate(mesText);
+    if (isHybridPersonaMessage(msg) && hasPersistedFontColors
+        && !mesText.querySelector('font[data-dc-colored]')) return 'decorate';
     if (readiness.totalSegments === 0) {
         return narratorMissing ? 'decorate' : '';
     }
@@ -2070,7 +2116,7 @@ export function getMessageDomHealthRepairType(mesElement, msg, mesIndex, options
 }
 
 export function runDomHealthCheck() {
-    if (!settings.enabled || !isDomEngine()) {
+    if (!settings.enabled || !hasDomTargetMessages()) {
         stopDomHealthCheck();
         return;
     }
@@ -2095,6 +2141,10 @@ export function runDomHealthCheck() {
         const repairIndex = Number(mesElement.getAttribute('mesid'));
         if (isStreamingOwnedMessage(repairIndex)) continue;
         if (suspendMessageDomWorkForEdit(mesElement, repairIndex)) continue;
+        if (!isDomTargetMessage(chat[repairIndex])) {
+            if (!isDomEngine() && chat[repairIndex]?.is_user) undecorateMessageDom(mesElement, { preserveFontTags: true });
+            continue;
+        }
         if (watcher?.mesText !== currentMesText) {
             clearDecoratedWatcher(mesElement);
             // The host replaced .mes_text, so any decorations are gone. Reset
@@ -2115,6 +2165,10 @@ export function runDomHealthCheck() {
         if (!Number.isFinite(mesIndex) || mesIndex < 0) continue;
         if (runtimeState.messageDomRepairTimers.has(mesIndex)) continue;
         const msg = chat[mesIndex];
+        if (!isDomTargetMessage(msg)) {
+            if (!isDomEngine() && msg?.is_user) undecorateMessageDom(mesElement, { preserveFontTags: true });
+            continue;
+        }
         if (isStreamingOwnedMessage(mesIndex)) continue;
         if (suspendMessageDomWorkForEdit(mesElement, mesIndex)) continue;
         const attemptsKey = `${mesIndex}:${hashMessageText(msg?.mes)}`;
@@ -2153,7 +2207,7 @@ export function runDomHealthCheck() {
 }
 
 export function startDomHealthCheck() {
-    if (!settings.enabled || !isDomEngine() || runtimeState.domHealthCheckTimer) return;
+    if (!settings.enabled || !hasDomTargetMessages() || runtimeState.domHealthCheckTimer) return;
     runtimeState.domHealthCheckTimer = setInterval(runDomHealthCheck, DOM_HEALTH_CHECK_INTERVAL_MS);
 }
 
@@ -2183,7 +2237,10 @@ export function stopDomHealthCheck() {
  */
 
 export function scheduleDomSettleRefresh(delays = DOM_RETRY_REFRESH_DELAYS, reason = 'settle') {
-    if (!isDomEngine()) return;
+    if (!settings.enabled || !hasDomTargetMessages()) {
+        clearDomSettleRefreshes();
+        return;
+    }
     startDomHealthCheck();
     const refreshDelays = Array.isArray(delays) && delays.length ? delays : [400];
     const context = getContext();
@@ -2208,7 +2265,7 @@ export function scheduleDomSettleRefresh(delays = DOM_RETRY_REFRESH_DELAYS, reas
                     pendingDomSettleRefreshCount = 0;
                 }
             }
-            if (!settings.enabled || !isDomEngine()) return;
+            if (!settings.enabled || !hasDomTargetMessages()) return;
             if (chatGeneration !== attributionChatGeneration) return;
             const currentContext = getContext();
             if (currentContext?.chat !== chat || getChatContextIdentity(currentContext) !== contextIdentity) return;
@@ -2223,6 +2280,11 @@ export function scheduleDomSettleRefresh(delays = DOM_RETRY_REFRESH_DELAYS, reas
 }
 
 export function scheduleDomRefreshSeries(delay = 0) {
+    if (!settings.enabled) return;
+    if (!hasDomTargetMessages()) {
+        if (!isDomEngine()) scheduleDecorateAll(delay, true);
+        return;
+    }
     startDomHealthCheck();
     scheduleDecorateAll(delay);
 }
@@ -2231,14 +2293,23 @@ export function decorateAllMessages() {
     const previousDecoratingState = isDecoratingDom;
     isDecoratingDom = true;
     try {
-        if (!settings.enabled || !isDomEngine()) {
+        if (!settings.enabled) {
             stopDomHealthCheck();
             undecorateAllMessages();
             return;
         }
         const ctx = getContext();
         const chat = ctx?.chat || [];
-        const countResult = refreshDomDialogueCounts(chat);
+        if (!hasDomTargetMessages(chat)) {
+            document.querySelectorAll('#chat .mes[mesid]').forEach(mesElement => {
+                const mesIndex = Number(mesElement.getAttribute('mesid'));
+                if (chat[mesIndex]?.is_user) undecorateMessageDom(mesElement, { preserveFontTags: true });
+            });
+            return;
+        }
+        const countResult = isDomEngine()
+            ? refreshDomDialogueCounts(chat)
+            : { changed: false, countsChanged: false };
         let changedColorData = countResult.changed;
         document.querySelectorAll('#chat .mes[mesid]').forEach(mesElement => {
             const mesIndex = Number(mesElement.getAttribute('mesid'));
@@ -2267,7 +2338,7 @@ export function decorateAllMessages() {
             queueColorStateSave({ data: false, history: false, injectPrompt: false });
         }
         updateLegend();
-        queueAutoAttributionVerificationForRenderedMessages();
+        if (isDomEngine()) queueAutoAttributionVerificationForRenderedMessages();
     } finally {
         isDecoratingDom = previousDecoratingState;
         if (pendingDeferredMutations) {
@@ -2285,7 +2356,7 @@ export function decorateMessageElementByIndex(mesElement, mesIndex) {
 }
 
 export function decorateObservedMessages(elements, options = {}) {
-    if (!settings.enabled || !isDomEngine() || !elements?.length) return;
+    if (!settings.enabled || !hasDomTargetMessages() || !elements?.length) return;
     const previousDecoratingState = isDecoratingDom;
     isDecoratingDom = true;
     let createdCharacters = false;
@@ -2296,7 +2367,12 @@ export function decorateObservedMessages(elements, options = {}) {
             const mesIndex = Number(mesElement.getAttribute('mesid'));
             if (isStreamingOwnedMessage(mesIndex)) continue;
             if (suspendMessageDomWorkForEdit(mesElement, mesIndex)) continue;
-            verificationElements.push(mesElement);
+            const msg = getContext()?.chat?.[mesIndex];
+            if (!isDomTargetMessage(msg)) {
+                if (!isDomEngine() && msg?.is_user) undecorateMessageDom(mesElement, { preserveFontTags: true });
+                continue;
+            }
+            if (isDomEngine()) verificationElements.push(mesElement);
             const result = decorateMessageElementByIndex(mesElement, mesIndex);
             if (result.createdCharacters) createdCharacters = true;
             if (result.needsRetry) {
@@ -2316,11 +2392,11 @@ export function decorateObservedMessages(elements, options = {}) {
         queueColorStateSave({ history: false, injectPrompt: false });
     }
     updateLegend();
-    if (options.queueVerification !== false) queueAutoAttributionVerificationForElements(verificationElements);
+    if (isDomEngine() && options.queueVerification !== false) queueAutoAttributionVerificationForElements(verificationElements);
 }
 
-export function scheduleDecorateAll(delay = 100) {
-    if (!isDomEngine()) return;
+export function scheduleDecorateAll(delay = 100, allowEmpty = false) {
+    if (!settings.enabled || (!allowEmpty && !hasDomTargetMessages())) return;
     startDomHealthCheck();
     const now = Date.now();
     if (!decorateAllFirstCallTime) decorateAllFirstCallTime = now;
@@ -2344,10 +2420,12 @@ export function disconnectChatObserver() {
 }
 
 export function queueObservedMessageDecoration(mesElement) {
-    if (!mesElement?.isConnected || !settings.enabled || !isDomEngine()) return;
+    if (!mesElement?.isConnected || !settings.enabled) return;
     const mesIndex = Number(mesElement.getAttribute('mesid'));
     if (isStreamingOwnedMessage(mesIndex)) return;
     if (suspendMessageDomWorkForEdit(mesElement, mesIndex)) return;
+    const msg = getContext()?.chat?.[mesIndex];
+    if (!isDomTargetMessage(msg)) return;
     const now = Date.now();
     if (!observedDecorationFirstCallTime) observedDecorationFirstCallTime = now;
     runtimeState.pendingObservedMessages.add(mesElement);
@@ -2358,15 +2436,15 @@ export function queueObservedMessageDecoration(mesElement) {
         observedDecorationFirstCallTime = 0;
         const pending = Array.from(runtimeState.pendingObservedMessages || []);
         runtimeState.pendingObservedMessages.clear();
-        if (!settings.enabled || !isDomEngine()) return;
+        if (!settings.enabled || !hasDomTargetMessages()) return;
         for (const pendingElement of pending) {
             if (!pendingElement?.isConnected) continue;
             const pendingIndex = Number(pendingElement?.getAttribute?.('mesid'));
             if (!Number.isFinite(pendingIndex) || pendingIndex < 0) continue;
             const msg = getContext()?.chat?.[pendingIndex];
             const mesText = pendingElement?.querySelector?.('.mes_text');
-            if (!mesText || !msg || isHostSystemOrToolMessage(msg)) continue;
-            if (mesText.querySelector('font[color]') || collectFontColorsFromText(msg.mes).size) {
+            if (!mesText || !msg || !isDomTargetMessage(msg)) continue;
+            if (!isHybridPersonaMessage(msg) && (mesText.querySelector('font[color]') || collectFontColorsFromText(msg.mes).size)) {
                 applyCustomFontsToFontTags(mesText, msg.mes);
                 continue;
             }
@@ -2425,13 +2503,11 @@ export function setupChatObserver() {
                 const mesIndex = Number(mesElement?.getAttribute?.('mesid'));
                 if (suspendMessageDomWorkForEdit(mesElement, mesIndex)) continue;
                 fontTargets.add(mesElement);
-                if (!isDomEngine()) continue;
-                observed.add(mesElement);
+                if (isDomTargetMessage(getContext()?.chat?.[mesIndex])) observed.add(mesElement);
             }
         }
         if (!isDomEngine()) {
             applyCustomFontsToMessageElements(fontTargets);
-            return;
         }
         for (const mesElement of observed) queueObservedMessageDecoration(mesElement);
     });
