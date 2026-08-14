@@ -257,11 +257,12 @@ const SENTENCE_LEADING_PATTERN = /(?:^|[.!?…])[\s"'*_~([{<>|«»\-–—]*$/;
 // character list changes (loadData/addCharacter/deleteCharacter/renameCharacter).
 export const speakerRegexCache = new Map();
 const CJK_SPEAKER_PATTERN = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+function escapeRegexForUnicode(value) { return escapeRegex(value).replaceAll('\\-', '\\x2d'); }
 
 function getSpeakerNameRegex(speakerKey) {
     let regex = speakerRegexCache.get(speakerKey);
     if (!regex) {
-        const name = `${escapeRegex(speakerKey)}(?:['’]s?)?`;
+        const name = `${escapeRegexForUnicode(speakerKey)}(?:['’]s?)?`;
         regex = new RegExp(CJK_SPEAKER_PATTERN.test(speakerKey)
             ? name
             : `(?<![\\p{L}\\p{N}])${name}(?![\\p{L}\\p{N}])`, 'giu');
@@ -535,7 +536,7 @@ export function findAddressedSpeakerKeys(segmentText, lookup, sortedLookupKeys) 
             const trailingBoundary = CJK_SPEAKER_PATTERN.test(speakerKey) ? '' : '(?![\\p{L}\\p{N}])';
             regex = new RegExp(
                 `(?:^[\\s"'“”«»‘’(\\[]*|[,;:]\\s*|\\b(?:oh|hey|hi|hello|yo|well|please|thanks|sorry|look|listen|wait|stop|yes|no|goodbye|bye)[,!\\s]+)`
-                + `${escapeRegex(speakerKey)}${trailingBoundary}\\s*(?=[,!?.:…—–-]|["'“”«»‘’)\\]\\s]*$)`,
+                + `${escapeRegexForUnicode(speakerKey)}${trailingBoundary}\\s*(?=[,!?.:…—–-]|["'“”«»‘’)\\]\\s]*$)`,
                 'iu',
             );
             vocativeRegexCache.set(speakerKey, regex);

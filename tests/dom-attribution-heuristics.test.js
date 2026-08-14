@@ -335,6 +335,17 @@ test('whoever the last quote addressed answers it', () => {
     });
 });
 
+test('hyphenated names work in registry, inline, and addressed-speaker attribution', () => {
+    withCharacters(['Dana', 'SCP-173'], () => {
+        const [registry] = attribute('SCP-173 said, "Registry speaker."', 'Dana');
+        assert.equal(registry.speaker, 'SCP-173');
+
+        const results = attribute('SCP-682 said, "SCP-173, wait."\n"In a minute."\n[COLORS:SCP-682=#112233]', 'Dana');
+        assert.deepEqual(results.map(entry => entry.speaker), ['SCP-682', 'SCP-173']);
+        assert.equal(results[1].method, 'addressed-speaker-reply');
+    });
+});
+
 test('punctuation around a speaker label does not cost it its adjacency', () => {
     withCharacters(['Dana', 'Alice'], () => {
         const plain = attribute('Alice: "Hello there friend."', 'Dana')[0];
