@@ -436,6 +436,72 @@ test('LLM font observer survives DOM-health teardown and disconnects on master d
     documentElements.delete('chat');
 });
 
+test('LLM observer retries partial colorization once per non-editing mutation batch', () => {
+    const chat = new FakeElement();
+    const messageElement = new FakeElement();
+    const mutation = { type: 'childList', target: messageElement, addedNodes: [] };
+    const previous = {
+        autoScanNewMessages: state.settings.autoScanNewMessages,
+        coloringEngine: state.settings.coloringEngine,
+        completePartialColorize: state.settings.completePartialColorize,
+        enabled: state.settings.enabled,
+        setTimeout: globalThis.setTimeout,
+    };
+    let retries = 0;
+
+    messageElement.nodeType = Node.ELEMENT_NODE;
+    messageElement.setAttribute('mesid', '0');
+    messageElement.matches = selector => selector === '.mes[mesid]';
+    documentElements.set('chat', chat);
+    stApi.setTestContext({ ...baseContext(), chat: [{ name: 'Card', mes: '<font color="#112233">"Hi"</font> there' }] });
+    state.settings.enabled = true;
+    state.settings.autoScanNewMessages = true;
+    state.settings.coloringEngine = 'llm';
+    state.settings.completePartialColorize = true;
+    globalThis.setTimeout = (_callback, delay) => {
+        if (delay === 600) retries++;
+        return 0;
+    };
+
+    try {
+        domEngine.setupChatObserver();
+        const observer = state.runtimeState.chatObserver;
+
+        observer.callback([mutation, mutation]);
+        assert.equal(retries, 1, 'one mutation batch should schedule one retry');
+
+        state.settings.completePartialColorize = false;
+        observer.callback([mutation]);
+        assert.equal(retries, 1, 'disabled partial completion should not retry');
+
+        state.settings.completePartialColorize = true;
+        state.settings.coloringEngine = 'dom';
+        observer.callback([mutation]);
+        assert.equal(retries, 1, 'DOM mode should not retry LLM colorization');
+
+        state.settings.coloringEngine = 'llm';
+        const textarea = new FakeElement();
+        textarea.closest = selector => selector === '.mes[mesid]' ? messageElement : null;
+        messageElement.querySelector = selector => selector === domEngine.MESSAGE_EDIT_TEXTAREA_SELECTOR ? textarea : null;
+        observer.callback([mutation]);
+        assert.equal(retries, 1, 'active message edits should not retry');
+
+        state.settings.enabled = false;
+        messageElement.querySelector = () => null;
+        observer.callback([mutation]);
+        assert.equal(retries, 1, 'master disable should not retry');
+    } finally {
+        globalThis.setTimeout = previous.setTimeout;
+        state.settings.autoScanNewMessages = previous.autoScanNewMessages;
+        state.settings.coloringEngine = previous.coloringEngine;
+        state.settings.completePartialColorize = previous.completePartialColorize;
+        state.settings.enabled = previous.enabled;
+        domEngine.disconnectChatObserver();
+        documentElements.delete('chat');
+        stApi.setTestContext(baseContext());
+    }
+});
+
 test('host system messages are rejected by live and manual coloring paths', () => {
     const message = {
         name: 'SillyTavern System',

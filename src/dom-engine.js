@@ -5,7 +5,7 @@ import { unregisterGradientAnimationRoot } from './animation-controller.js';
 import { buildUniqueKnownColorStatsLookup, collectFontColorsFromText, countFontColorOccurrencesFromText, resolveCharacterKeyByNameOrAlias } from './color-blocks.js';
 import { applyCustomFontsToFontTags, applyCustomFontsToMessageElements, clearCustomFontsFromFontTags, loadGoogleFont, scheduleCardStyle, scheduleCustomFontRefresh } from './fonts.js';
 import { applyGradientText, clearGradientText, getVisualRenderState } from './gradient-rendering.js';
-import { isTrackedPersonaMessage, queueColorStateSave } from './live-colors.js';
+import { isTrackedPersonaMessage, onNewMessage, queueColorStateSave } from './live-colors.js';
 import { getNarratorVisual } from './narrator-style.js';
 import { applyThemeReadabilityAndBrightness } from './palettes.js';
 import { escapeHtml, eventSource, event_types, getContext } from './st-api.js';
@@ -2508,6 +2508,7 @@ export function setupChatObserver() {
         }
         if (!isDomEngine()) {
             applyCustomFontsToMessageElements(fontTargets);
+            if (settings.completePartialColorize && fontTargets.size > 0) onNewMessage();
         }
         for (const mesElement of observed) queueObservedMessageDecoration(mesElement);
     });
