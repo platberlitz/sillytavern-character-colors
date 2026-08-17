@@ -47,7 +47,7 @@ const hooks = registerHooks({
     },
 });
 
-const { flushPromptInjection, getEffectivePromptMode, promptHasDialogueColorsMacro } = await import('../src/prompts.js');
+const { flushPromptInjection, getEffectivePromptMode, promptHasDialogueColorsMacro, stripMacroComments } = await import('../src/prompts.js');
 const { settings } = await import('../src/state.js');
 const stApi = await import(stApiUrl);
 
@@ -118,4 +118,70 @@ test('the DOM engine ignores prompt modes entirely', () => {
     settings.domStealthColors = false;
     stApi.power_user.sysprompt = { content: '{{dialoguecolors}}' };
     assert.equal(flushPromptInjection(), '');
+});
+
+// SillyBunny ships a preset whose README prompt says "added `{{dialoguecolors}}`"
+// inside a {{// ...}} comment; the model never sees a comment, so it is not delivery.
+const README_COMMENT = '{{// README\n- Formatting: added `{{dialoguecolors}}`. Remove it if you do not use it.}}{{trim}}';
+
+test('a macro mentioned inside a {{// }} comment does not switch to macro mode', () => {
+    for (const seed of [
+        () => stApi.setTestContext({ chat: [], chatMetadata: {}, chatCompletionSettings: { prompts: [{ content: README_COMMENT }, { content: 'Formatting rules.' }] } }),
+        () => { stApi.power_user.sysprompt = { content: `Be helpful. ${README_COMMENT}` }; },
+        () => stApi.setTestContext({ chat: [], chatMetadata: { note_prompt: README_COMMENT } }),
+    ]) {
+        reset();
+        seed();
+        assert.equal(promptHasDialogueColorsMacro(), false);
+        assert.equal(getEffectivePromptMode(), 'inject');
+        assert.match(flushPromptInjection(), /Dialogue Colors/);
+    }
+});
+
+test('a live macro next to a commented mention still counts', () => {
+    reset();
+    stApi.setTestContext({
+        chat: [],
+        chatMetadata: {},
+        chatCompletionSettings: { prompts: [{ content: README_COMMENT }, { content: 'Formatting:\n- {{getvar::length}}\n- {{dialoguecolors}}' }] },
+    });
+    assert.equal(promptHasDialogueColorsMacro(), true);
+    assert.equal(getEffectivePromptMode(), 'macro');
+    assert.equal(flushPromptInjection(), '');
+});
+
+test('stripMacroComments removes nested comments and keeps everything else', () => {
+    assert.equal(stripMacroComments('a {{// x {{y}} {{z::{{w}}}} }} b'), 'a  b');
+    assert.equal(stripMacroComments('{{//one}}{{//two}}keep {{macro}}'), 'keep {{macro}}');
+    assert.equal(stripMacroComments('plain {{macro}} text'), 'plain {{macro}} text');
+    // An unterminated comment is treated as dead through the end of the text.
+    assert.equal(stripMacroComments('a {{// open {{dialoguecolors}}'), 'a ');
+});
+
+test('only preset prompts enabled in the active prompt order are scanned', () => {
+    const prompts = [
+        { identifier: 'colors', content: 'Colors: {{dialoguecolors}}' },
+        { identifier: 'main', content: 'Main prompt.' },
+    ];
+    const enabled = new Set(['main']);
+    const promptManager = {
+        activeCharacter: { id: 100001 },
+        getPromptsForCharacter: (character, onlyEnabled) => onlyEnabled ? prompts.filter(p => enabled.has(p.identifier)) : prompts,
+    };
+    reset();
+    stApi.setTestContext({ chat: [], chatMetadata: {}, promptManager, chatCompletionSettings: { prompts } });
+    assert.equal(promptHasDialogueColorsMacro(), false);
+    assert.equal(getEffectivePromptMode(), 'inject');
+
+    enabled.add('colors');
+    assert.equal(promptHasDialogueColorsMacro(), true);
+    assert.equal(getEffectivePromptMode(), 'macro');
+
+    // Without a usable prompt manager the full preset list is scanned as before.
+    reset();
+    stApi.setTestContext({ chat: [], chatMetadata: {}, promptManager: { activeCharacter: null }, chatCompletionSettings: { prompts } });
+    assert.equal(promptHasDialogueColorsMacro(), true);
+    reset();
+    stApi.setTestContext({ chat: [], chatMetadata: {}, promptManager: { activeCharacter: { id: 1 }, getPromptsForCharacter: () => { throw new Error('boom'); } }, chatCompletionSettings: { prompts } });
+    assert.equal(promptHasDialogueColorsMacro(), true);
 });

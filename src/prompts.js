@@ -322,12 +322,36 @@ function updatePromptUi() {
 
 const DIALOGUE_COLORS_MACRO_PATTERN = /\{\{\s*dialoguecolors\s*\}\}/i;
 
+// A {{// ...}} comment never reaches the model, so a macro written inside one (a
+// preset README noting "added {{dialoguecolors}}") is not delivery. Comments hold
+// nested macros, so the closer is the "}}" that returns the brace depth to zero,
+// not the first one.
+export function stripMacroComments(text) {
+    let out = '';
+    let cursor = 0;
+    for (;;) {
+        const start = text.indexOf('{{//', cursor);
+        if (start === -1) return out + text.slice(cursor);
+        out += text.slice(cursor, start);
+        let depth = 0;
+        let i = start;
+        while (i < text.length) {
+            if (text.startsWith('{{', i)) { depth++; i += 2; continue; }
+            if (text.startsWith('}}', i)) { depth--; i += 2; if (!depth) break; continue; }
+            i++;
+        }
+        cursor = i;
+    }
+}
+
 // Places a user can realistically type {{dialoguecolors}} by hand: the chat
 // completion preset prompts, the text completion system prompt and story
 // string, and the author's note (chat override first, global default second).
-// ponytail: text scan only. It cannot see whether a preset prompt is enabled in
-// the current prompt order, and it does not read World Info or character cards,
-// which load asynchronously. Resolve through promptManager if that bites.
+// Only preset prompts enabled in the active prompt order are sent, so only
+// those count; a disabled one holding the macro would otherwise silence the
+// injection while delivering nothing.
+// ponytail: text scan only. It does not read World Info or character cards,
+// which load asynchronously, and it does not check which API is active.
 function collectUserPromptSources() {
     let context = null;
     try {
@@ -341,7 +365,16 @@ function collectUserPromptSources() {
         context?.chatMetadata?.note_prompt,
         extension_settings?.note?.default,
     ];
-    const presetPrompts = context?.chatCompletionSettings?.prompts;
+    let presetPrompts = null;
+    const manager = context?.promptManager;
+    try {
+        if (manager?.activeCharacter && typeof manager.getPromptsForCharacter === 'function') {
+            presetPrompts = manager.getPromptsForCharacter(manager.activeCharacter, true);
+        }
+    } catch {
+        presetPrompts = null;
+    }
+    if (!Array.isArray(presetPrompts)) presetPrompts = context?.chatCompletionSettings?.prompts;
     if (Array.isArray(presetPrompts)) {
         for (const prompt of presetPrompts) sources.push(prompt?.content);
     }
@@ -349,7 +382,7 @@ function collectUserPromptSources() {
 }
 
 export function promptHasDialogueColorsMacro() {
-    return collectUserPromptSources().some(value => typeof value === 'string' && DIALOGUE_COLORS_MACRO_PATTERN.test(value));
+    return collectUserPromptSources().some(value => typeof value === 'string' && DIALOGUE_COLORS_MACRO_PATTERN.test(stripMacroComments(value)));
 }
 
 // The dropdown is the manual choice; auto-detection can upgrade 'inject' to
