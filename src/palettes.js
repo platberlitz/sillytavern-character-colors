@@ -1671,6 +1671,30 @@ function isPrimaryConversationIdentity(name) {
     }
 }
 
+// The character the card is for: the solo card's own name, or every member of a group.
+// Persona and the conversation names are deliberately not in here.
+export function getCardCharacterNames(context = getContext()) {
+    try {
+        const currentCharacter = context?.characters?.[context?.characterId];
+        return [currentCharacter?.name, ...getCurrentGroupCharacterNames(context)]
+            .map(value => String(value ?? '').trim())
+            .filter(Boolean);
+    } catch {
+        return [];
+    }
+}
+
+export function isCardCharacterName(name) {
+    const identity = normalizeRegistryIdentity(name);
+    return !!identity && getCardCharacterNames().some(candidate => normalizeRegistryIdentity(candidate) === identity);
+}
+
+// Default on: the card's own character is the one a user least wants swept away by a clear
+// or left behind by a new chat, so it is marked Keep on creation, like Lock is.
+export function shouldAutoKeepCardCharacter(name) {
+    return settings.keepCardCharacter !== false && isCardCharacterName(name);
+}
+
 export function shouldAutoRandomizeNpcGradient(name) {
     return settings.autoRandomNpcGradients === true && !isPrimaryConversationIdentity(name);
 }
@@ -1939,7 +1963,7 @@ export function buildCharacterEntry(name, options = {}) {
         baseColor,
         name: trimmedName,
         locked,
-        keep: !!options.keep,
+        keep: !!options.keep || (!bypassAutomation && shouldAutoKeepCardCharacter(trimmedName)),
         aliases: normalizeAliases(options.aliases),
         style: VALID_STYLES.has(options.style) ? options.style : '',
         dialogueCount: Number.isFinite(options.dialogueCount) && options.dialogueCount > 0 ? Math.floor(options.dialogueCount) : 0,

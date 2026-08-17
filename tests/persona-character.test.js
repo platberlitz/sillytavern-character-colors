@@ -105,7 +105,7 @@ const hooks = registerHooks({
 
 const stApi = await import(stApiUrl);
 const { setTestContext } = stApi;
-const { addCharacter, createCanvasGradientFill, ensurePersonaCharacter, exportLegendPng, isPersonaEntry, renameCharacter, renamePersonaCharacter, updateLegend } = await import('../src/ui.js');
+const { addCharacter, createCanvasGradientFill, ensurePersonaCharacter, exportLegendPng, isPersonaEntry, isPinnedPersonaEntry, renameCharacter, renamePersonaCharacter, updateLegend } = await import('../src/ui.js');
 const { isColorableMessage, isTrackedPersonaMessage } = await import('../src/live-colors.js');
 const { getPersonaName } = await import('../src/palettes.js');
 const {
@@ -122,6 +122,7 @@ const {
     getPinnedPersonaColors,
     getStorageScopeDescriptor,
     loadData,
+    markCardCharactersKept,
     markCurrentPersonaKept,
     migrateColorSchemaIfNeeded,
     normalizeStoredSettings,
@@ -129,6 +130,7 @@ const {
     renamePinnedPersonaColor,
     restorePinnedPersonaColor,
     saveData,
+    syncPinnedPersonaColors,
     tryLoadFromCard,
 } = await import('../src/storage.js');
 const { createRestoreSnapshot } = await import('../src/history.js');
@@ -1008,6 +1010,155 @@ test('a colored persona does not open up other user messages', () => {
     });
 });
 
+test('a user message under any tracked name is a DOM target, not only the active persona', () => {
+    withPersona('Marisol', () => {
+        ensurePersonaCharacter({ silent: true });
+        registry().diego = { name: 'Diego', baseColor: '#aabbcc', color: '#aabbcc' };
+        assert.equal(isTrackedPersonaMessage({ is_user: true, name: 'Marisol' }), true);
+        assert.equal(isTrackedPersonaMessage({ is_user: true, name: 'Diego' }), true);
+        assert.equal(isTrackedPersonaMessage({ is_user: true, name: 'Rin' }), false);
+        assert.equal(isColorableMessage({ is_user: true, name: 'Diego' }), false);
+    });
+});
+
+// Multi-persona pins: a persona that is not active is joined to the table by name, and only
+// when the chat shows the user speaking under that name.
+function pinPersona(name, color) {
+    setTestContext({ chat: [], chatMetadata: {}, name1: name });
+    ensurePersonaCharacter({ silent: true });
+    const key = name.toLowerCase();
+    registry()[key].baseColor = color;
+    registry()[key].color = color;
+    pinCurrentPersonaColor();
+}
+
+test('every persona the chat was played under is restored, absent ones are not', () => {
+    withPersona('Marisol', () => {
+        settings.persistPersonaColor = true;
+        pinPersona('Diego', '#00ccdd');
+        pinPersona('Ines', '#dd00cc');
+        pinPersona('Marisol', '#ff00aa');
+        for (const key of Object.keys(registry())) delete registry()[key];
+        setTestContext({
+            chat: [{ is_user: true, name: 'Diego', mes: 'hi' }, { is_user: false, name: 'Ines', mes: 'an NPC, not the user' }],
+            chatMetadata: {},
+            name1: 'Marisol',
+        });
+        assert.equal(restorePinnedPersonaColor(), true);
+        assert.equal(registry().marisol.baseColor, '#ff00aa');
+        assert.equal(registry().diego.baseColor, '#00ccdd');
+        assert.deepEqual(Object.keys(registry()).sort(), ['diego', 'marisol']);
+        // A second pass settles the effective color and creates nothing more.
+        restorePinnedPersonaColor();
+        assert.deepEqual(Object.keys(registry()).sort(), ['diego', 'marisol']);
+        assert.equal(restorePinnedPersonaColor(), false);
+    });
+});
+
+test('a present persona edited while another is active updates its own pin', () => {
+    withPersona('Marisol', () => {
+        settings.persistPersonaColor = true;
+        pinPersona('Diego', '#00ccdd');
+        pinPersona('Marisol', '#ff00aa');
+        setTestContext({ chat: [{ is_user: true, name: 'Diego', mes: 'hi' }], chatMetadata: {}, name1: 'Marisol' });
+        registry().diego.baseColor = '#123456';
+        registry().diego.color = '#123456';
+        assert.equal(syncPinnedPersonaColors(), true);
+        assert.equal(getPinnedPersonaColors().diego.baseColor, '#123456');
+        assert.equal(getPinnedPersonaColors().marisol.baseColor, '#ff00aa');
+        assert.equal(syncPinnedPersonaColors(), false);
+    });
+});
+
+test('an NPC sharing a pinned persona name is left alone unless the chat was played under it', () => {
+    withPersona('Marisol', () => {
+        settings.persistPersonaColor = true;
+        pinPersona('Diego', '#00ccdd');
+        pinPersona('Marisol', '#ff00aa');
+        // Diego is only an NPC here: no user message carries the name.
+        setTestContext({ chat: [{ is_user: false, name: 'Diego', mes: 'npc' }], chatMetadata: {}, name1: 'Marisol' });
+        registry().diego.baseColor = '#123456';
+        registry().diego.color = '#123456';
+        assert.equal(syncPinnedPersonaColors(), false);
+        assert.equal(getPinnedPersonaColors().diego.baseColor, '#00ccdd');
+        assert.equal(restorePinnedPersonaColor(), false);
+        assert.equal(registry().diego.baseColor, '#123456');
+        assert.equal(isPinnedPersonaEntry(registry().diego), true);
+        assert.equal(isPinnedPersonaEntry(registry().marisol), false);
+        settings.persistPersonaColor = false;
+        assert.equal(isPinnedPersonaEntry(registry().diego), false);
+    });
+});
+
+// The card's own character is Kept by default: on creation, like Lock, and on load for
+// tables that predate the option.
+function withCard(names, run) {
+    const previousColors = { ...registry() };
+    for (const key of Object.keys(registry())) delete registry()[key];
+    Object.assign(settings, DEFAULT_SETTINGS);
+    const characters = names.map((name, index) => ({ name, avatar: `${name.toLowerCase()}.png`, id: index }));
+    const context = names.length > 1
+        ? { chat: [], chatMetadata: {}, name1: 'Marisol', characters, groupId: 'g1', groups: [{ id: 'g1', members: characters.map(c => c.avatar) }] }
+        : { chat: [], chatMetadata: {}, name1: 'Marisol', characters, characterId: 0 };
+    setTestContext(context);
+    try {
+        return run();
+    } finally {
+        state.setCharacterColors(previousColors);
+        Object.assign(settings, DEFAULT_SETTINGS);
+        setTestContext({ chat: [], chatMetadata: {} });
+    }
+}
+
+test('the card character is kept on creation by default, other speakers are not', () => {
+    withCard(['Aventurine'], () => {
+        assert.equal(settings.keepCardCharacter, true);
+        addCharacter('Aventurine');
+        addCharacter('Rin');
+        assert.equal(registry().aventurine.keep, true);
+        assert.equal(registry().rin.keep, false);
+    });
+    withCard(['Aventurine'], () => {
+        settings.keepCardCharacter = false;
+        addCharacter('Aventurine');
+        assert.equal(registry().aventurine.keep, false);
+    });
+});
+
+test('an existing card character is kept on load, every member in a group, unless the option is off', () => {
+    withCard(['Aventurine'], () => {
+        registry().aventurine = { name: 'Aventurine', keep: false, baseColor: '#aabbcc', color: '#aabbcc' };
+        registry().rin = { name: 'Rin', keep: false, baseColor: '#aabbcc', color: '#aabbcc' };
+        assert.equal(markCardCharactersKept(), true);
+        assert.equal(registry().aventurine.keep, true);
+        assert.equal(registry().rin.keep, false);
+        assert.equal(markCardCharactersKept(), false);
+    });
+    withCard(['Aventurine', 'Ratio'], () => {
+        registry().aventurine = { name: 'Aventurine', keep: false, baseColor: '#aabbcc', color: '#aabbcc' };
+        registry().ratio = { name: 'Ratio', keep: false, baseColor: '#aabbcc', color: '#aabbcc' };
+        assert.equal(markCardCharactersKept(), true);
+        assert.equal(registry().aventurine.keep, true);
+        assert.equal(registry().ratio.keep, true);
+    });
+    withCard(['Aventurine'], () => {
+        settings.keepCardCharacter = false;
+        registry().aventurine = { name: 'Aventurine', keep: false, baseColor: '#aabbcc', color: '#aabbcc' };
+        assert.equal(markCardCharactersKept(), false);
+        assert.equal(registry().aventurine.keep, false);
+    });
+});
+
+test('an alias of the card character counts, and the persona is not a card character', () => {
+    withCard(['Aventurine'], () => {
+        registry().aven = { name: 'Aven', aliases: ['Aventurine'], keep: false, baseColor: '#aabbcc', color: '#aabbcc' };
+        registry().marisol = { name: 'Marisol', keep: false, baseColor: '#aabbcc', color: '#aabbcc' };
+        assert.equal(markCardCharactersKept(), true);
+        assert.equal(registry().aven.keep, true);
+        assert.equal(registry().marisol.keep, false);
+    });
+});
+
 test('character messages stay colorable regardless of the setting', () => {
     withPersona('Marisol', () => {
         settings.autoPersonaCharacter = false;
@@ -1029,8 +1180,9 @@ test('the persona gate reads the registry, not a setting', async () => {
     const source = await readFile(new URL('../src/live-colors.js', import.meta.url), 'utf8');
     const start = source.indexOf('export function isTrackedPersonaMessage(');
     const section = source.slice(start, source.indexOf('\n}', start));
-    assert.match(section, /personaKey && personaKey === messageKey/);
+    assert.match(section, /return !!messageKey && !!characterColors\[messageKey\]/);
     assert.doesNotMatch(section, /autoPersonaCharacter/);
+    assert.doesNotMatch(section, /getPersonaName/);
 });
 
 test('connection profile IDs migrate and reload only from device-local storage', () => {

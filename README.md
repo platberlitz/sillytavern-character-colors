@@ -8,7 +8,7 @@ A SillyTavern extension that gives each character's dialogue a consistent visual
 2. On **Current setup**, enable the extension and choose where colors are saved: **Per chat**, **Per card**, or **Global**.
 3. Choose the **LLM** or **Local (DOM-only)** engine.
 4. Use **Scan entire chat** to discover existing speakers, or start chatting so new speakers are detected automatically.
-5. Open **Characters** to edit a speaker. Use **Keep** to pin main characters against bulk deletion, and to carry them into every chat when colors are saved **Per chat**.
+5. Open **Characters** to edit a speaker. Use **Keep** to pin main characters against bulk deletion, and to carry them into every chat when colors are saved **Per chat**. The card's own character is Kept automatically unless you turn that off.
 6. Use the clearly labeled actions under **Process chat** when you need to discover, colorize, verify, recolor, or refresh dialogue.
 
 ## Highlights
@@ -25,7 +25,7 @@ A SillyTavern extension that gives each character's dialogue a consistent visual
 - **Narrator style**: configure dedicated narrator colors, gradients, and text styles. Narrator styling works across LLM prompts, DOM rendering, legend, statistics, and conflict reports.
 - **Attribution reviews**: verifier suggestions are queued for explicit human review by default. Accept, edit, or reject suggestions segment by segment or in bulk.
 - **Automatic NPC gradients**: optionally randomize gradients for newly discovered NPCs while excluding the current card, group cards, and user persona. Off by default.
-- **Persona coloring**: color your own dialogue too. "Add my persona" under Characters → Advanced adds the active persona as a tracked character, marked with a **You** badge and sorted to the top. Once your persona has a color, its messages are rendered locally in either engine; LLM mode never writes tags into user messages or makes a request for this. "Add my persona automatically" under Automation does the adding for you and keeps the entry in step with persona switches and renames. **Keep my persona entry** marks an existing tracked persona Kept and applies Keep to later manual or automatic additions, without adding or coloring a persona by itself.
+- **Persona coloring**: color your own dialogue too. "Add my persona" under Characters → Advanced adds the active persona as a tracked character, marked with a **You** badge and sorted to the top. Once your persona has a color, its messages are rendered locally in either engine; LLM mode never writes tags into user messages or makes a request for this. "Add my persona automatically" under Automation does the adding for you and keeps the entry in step with persona switches and renames. **Keep my persona entry** marks an existing tracked persona Kept and applies Keep to later manual or automatic additions, without adding or coloring a persona by itself. **Keep each persona's color everywhere** remembers a color for every persona you use, outside the per-chat, per-card, or global table, and brings each one back in every chat: switching personas restores the new one's color, a chat played under several personas shows every one of them in its own color, and editing a persona's color anywhere updates it everywhere. Your other personas are marked with a **Persona** badge while that option is on. Independently of any option, a user message is colored whenever the name it was sent under is in the character list, not only when it matches the active persona.
 - **Automatic gradients for every new character**: a separate default-off override can randomize gradients for every newly created entry.
 - **Global gradient drift**: optionally animate every gradient without changing each character's individual Drift setting. Off by default.
 - **Fonts and text styles**: assign installed font families and Normal, Bold, Italic, or Bold Italic styling per character. Optional remote Google Font loading is disclosed, disabled by default, and bounded when enabled.
@@ -91,7 +91,7 @@ Older per-card/global data remains available and is migrated without destructive
 
 The **Characters** section searches names, aliases, groups, fonts, and status. Sorting is available by name, dialogue activity, or group.
 
-- **Keep**: pins an entry so clear and bulk-delete actions skip it. Under **Per chat** storage a pinned character is also added to every chat with the same character or group, keeping the exact color you gave them, so a new chat no longer starts empty. Turning Keep off stops that everywhere.
+- **Keep**: pins an entry so clear and bulk-delete actions skip it. Under **Per chat** storage a pinned character is also added to every chat with the same character or group, keeping the exact color you gave them, so a new chat no longer starts empty. Turning Keep off stops that everywhere. The character on the current card (every member, in a group chat) is Kept automatically by default; see **Keep the card's character** under Appearance and Automation.
 - **Edit**: reveals the full character editor.
 - **Color and Harmony**: choose a color directly or open keyboard-accessible complementary, triadic, and analogous suggestions.
 - **Lock**: prevents regeneration and reset from changing that character. Locking has no deletion side effects.
@@ -122,6 +122,7 @@ Adding an existing canonical name or alias reveals its current row instead of si
 - Effective colors are adjusted for at least 4.5:1 text contrast against the rendered chat surface in Auto, or against the forced mode's reference surface. Speaker metadata remains available to assistive technology without adding visible name tags to dialogue.
 - Scan on load only when the current character list is empty, or scan each new message.
 - Automatically lock detected speakers, assign random gradients to new NPCs or every new character, and optionally drift every gradient. Generated gradients are kept perceptually distinct from the colors other characters already use.
+- **Keep the card's character** (on by default): the character the current card is for — an Aventurine card keeps Aventurine — is marked Keep when its entry is created and again whenever a chat loads, so it survives clears and, under Per chat storage, follows you into every chat with that card. In a group chat every member counts. Turn it off to manage Keep on card characters by hand; it never adds a character or assigns a color by itself.
 - Optionally clear every character except those marked **Keep** when a new chat starts. This is off by default.
 - Enable manual dialogue reassignment by pointer, long press, or keyboard.
 - Complete partly colored messages (LLM engine, on by default): when the model tags only some of a message's dialogue, the uncolored lines are attributed and colored locally as the message arrives — no extra LLM request.
@@ -195,6 +196,8 @@ LLM mode supports prompt depth, system/user role, and two delivery modes:
 - **Local colors disappear on refresh**: Local mode is render-only. Use LLM mode for persisted solid tags.
 - **Auto-colorize does not run**: it only triggers when the latest colorable message contains no color block or existing font tags. Your own messages are only colorable once your persona is in the character list.
 - **My persona has no color in LLM mode**: add the active persona under Characters, or enable **Add my persona automatically**. Once the tracked entry has a color, LLM mode renders matching user messages locally without editing their text or making an LLM call. **Keep my persona entry** only controls Keep; it does not add a persona or assign a color.
+- **I play several personas and only the active one is colored**: update to 6.0.0 or later. Earlier versions painted only the active persona's messages; now any user message whose name is in the character list is painted, and **Keep each persona's color everywhere** gives every persona its own remembered color. If a persona that spoke in the chat has no entry, turn that option on: its color is restored the next time the chat loads.
+- **The card's character cannot be deleted, or comes back Kept**: **Keep the card's character** is on by default. Turn it off under Appearance and Automation, or un-Keep the entry and delete it; while the option is on, the entry is Kept again the next time the chat loads.
 - **An LLM profile is unavailable**: connection profiles require a compatible SillyTavern ConnectionManagerRequestService.
 - **A selected font is not visible**: install it locally, or explicitly enable remote Google Font loading under Appearance and Automation.
 - **Gradient drift is paused**: the device's Reduce Motion preference intentionally disables it.

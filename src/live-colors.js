@@ -7,7 +7,7 @@ import { scheduleCustomFontRefresh } from './fonts.js';
 import { saveHistory } from './history.js';
 import { callLLMWithProfile, classifyLlmRequestError } from './llm.js';
 import { getNarratorVisual } from './narrator-style.js';
-import { applyThemeReadabilityAndBrightness, getBaseColor, getEntryEffectiveColor, getPersonaName, invalidateThemeCache, syncAllEffectiveColors } from './palettes.js';
+import { applyThemeReadabilityAndBrightness, getBaseColor, getEntryEffectiveColor, invalidateThemeCache, syncAllEffectiveColors } from './palettes.js';
 import { buildColorMetadataPromptLines, buildLLMColorizeRules, buildThoughtSymbolColorPromptRule, getThoughtDelimiterSymbols, injectPrompt } from './prompts.js';
 import { generateQuietPrompt, getContext } from './st-api.js';
 import { COLOR_STATE_SAVE_DELAY_MS, LIVE_CHAT_SAVE_DELAY_MS, attributionChatGeneration, characterColors, colorStateSaveTimer, isAutoColorizing, isColorizing, isDomEngine, isRecoloring, lastProcessedMessageSignature, liveChatSaveTimer, pendingColorStateHistory, pendingColorStateInjectPrompt, pendingColorStateSaveData, pendingColorStateUpdateList, setColorStateSaveTimer, setIsAutoColorizing, setIsColorizing, setIsRecoloring, setLastProcessedMessageSignature, setLiveChatSaveTimer, setPendingColorStateHistory, setPendingColorStateInjectPrompt, setPendingColorStateSaveData, setPendingColorStateUpdateList, setPendingLiveChatSave, settings } from './state.js';
@@ -32,16 +32,17 @@ const COLORIZE_MAX_INDIVIDUAL_LLM_FALLBACKS = 2;
 const COLORIZE_RUN_MAX_LLM_REQUESTS = 4;
 const COLORIZE_RUN_MAX_LLM_RETRIES = 1;
 
+// A user message carries the name of the persona it was sent as. Any tracked name is a
+// target, not only the active persona, so a chat played under several personas keeps
+// every one of them colored after a switch. The registry stays the gate: a name that is
+// not in the list is not painted, whoever sent it.
 export function isTrackedPersonaMessage(msg) {
     if (isHostSystemOrToolMessage?.(msg)) return false;
     if (!msg) return false;
     if (isToolCallMessage(msg)) return false;
     if (!msg.is_user) return false;
-    const personaName = getPersonaName();
-    if (!personaName) return false;
-    const personaKey = resolveCharacterKeyByNameOrAlias(personaName);
     const messageKey = resolveCharacterKeyByNameOrAlias(String(msg.name ?? '').trim());
-    return !!personaKey && personaKey === messageKey;
+    return !!messageKey && !!characterColors[messageKey];
 }
 
 // LLM mode rewrites message text in place. User messages are always excluded;

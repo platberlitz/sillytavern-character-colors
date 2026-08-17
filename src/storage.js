@@ -8,7 +8,7 @@ import { createHistorySnapshot, parseHistorySnapshot, saveHistory, showUndoToast
 import { analyzeJsonSource } from './import-codec.js';
 import { applyLiveColorChangesFromSnapshot, captureEffectiveColorSnapshot, commit, flushColorStateSave } from './live-colors.js';
 import { normalizeNarratorStyle, setNarratorStyle } from './narrator-style.js';
-import { COLOR_THEMES, CUSTOM_PALETTE_KEY, CUSTOM_PALETTE_META_KEY, applyThemeReadabilityAndBrightness, buildCharacterEntry, deriveBaseColorFromEffectiveColor, getBaseColor, getPersonaName, getRepairedBaseLightnessWindow, invalidateThemeCache, normalizeCustomPalettes, syncAllEffectiveColors } from './palettes.js';
+import { COLOR_THEMES, CUSTOM_PALETTE_KEY, CUSTOM_PALETTE_META_KEY, applyThemeReadabilityAndBrightness, buildCharacterEntry, deriveBaseColorFromEffectiveColor, getBaseColor, getCardCharacterNames, getPersonaName, getRepairedBaseLightnessWindow, invalidateThemeCache, normalizeCustomPalettes, syncAllEffectiveColors } from './palettes.js';
 import { injectPrompt } from './prompts.js';
 import { extension_settings, getCharacters, getContext, getRequestHeaders, saveCharacterDebounced, saveMetadata, saveSettings, saveSettingsDebounced } from './st-api.js';
 import { ACTIVE_SETTING_KEYS, AUTO_SYNC_SAVE_TIMEOUT_MS, COLOR_SCHEMA_VERSION, COLOR_STORAGE_SCOPES, DEFAULT_COLOR_STORAGE_SCOPE, GLOBAL_SETTINGS_V2_KEY, GLOBAL_VISUAL_KEYS, LEGACY_AUTO_SYNC_ENABLED_KEY, LEGACY_GLOBAL_SETTINGS_KEY, LEGEND_POSITION_KEY, MODULE_NAME, PORTABLE_SETTING_KEYS, PRESETS_KEY, TOGGLE_SETTING_DEFAULTS, autoSyncEnabled, autoSyncInterval, autoSyncLastTimestamp, autoSyncLastWriterId, autoSyncPendingRecord, autoSyncSaveTimeout, autoSyncSequence, autoSyncStatusError, characterColors, colorHistory, colorStateSaveTimer, createLatestRequestGate, expandedCharacterRows, getAutoSyncRecordDisposition, groupProfiles, historyIndex, lastCharKey, lastProcessedMessageSignature, pendingColorStateHistory, pendingColorStateInjectPrompt, pendingColorStateSaveData, pendingColorStateUpdateList, preserveLocalRemoteFontConsent, selectedCharacterKeys, setAutoSyncEnabled, setAutoSyncInterval, setAutoSyncLastTimestamp, setAutoSyncLastWriterId, setAutoSyncPendingRecord, setAutoSyncSaveTimeout, setAutoSyncSequence, setAutoSyncStatusError, setCharacterColors, setColorHistory, setExpandedCharacterRows, setGroupProfiles, setHistoryIndex, setLastCharKey, setLastProcessedMessageSignature, setSwapMode, settings, swapMode, synchronizeEnabledLifecycle } from './state.js';
@@ -2266,20 +2266,36 @@ function resolvePinnedPersonaColor(store, personaName = getPersonaName()) {
     return { key, pinned: key ? store[key] : null, migrated };
 }
 
-function findPersonaRegistryKey(personaIdentity) {
-    if (!personaIdentity) return '';
+function findRegistryKeyByIdentity(identity) {
+    if (!identity) return '';
     for (const [key, entry] of Object.entries(characterColors)) {
         if (!entry) continue;
-        if (normalizeRegistryIdentity(entry.name) === personaIdentity) return key;
-        if ((entry.aliases || []).some(alias => normalizeRegistryIdentity(alias) === personaIdentity)) return key;
+        if (normalizeRegistryIdentity(entry.name) === identity) return key;
+        if ((entry.aliases || []).some(alias => normalizeRegistryIdentity(alias) === identity)) return key;
     }
     return '';
+}
+
+// The card's own character (every member, in a group) is Kept whenever it is in the list.
+// Creation already does this through buildCharacterEntry; this catches tables that existed
+// before the option did, and entries the user un-kept, on the next load.
+export function markCardCharactersKept() {
+    if (settings.keepCardCharacter === false) return false;
+    let changed = false;
+    for (const name of getCardCharacterNames()) {
+        const key = findRegistryKeyByIdentity(normalizeRegistryIdentity(name));
+        const entry = key ? characterColors[key] : null;
+        if (!entry || entry.keep === true) continue;
+        entry.keep = true;
+        changed = true;
+    }
+    return changed;
 }
 
 export function markCurrentPersonaKept() {
     if (settings.keepPersonaCharacter !== true) return false;
     const personaIdentity = normalizeRegistryIdentity(getPersonaName());
-    const key = findPersonaRegistryKey(personaIdentity);
+    const key = findRegistryKeyByIdentity(personaIdentity);
     const entry = key ? characterColors[key] : null;
     if (!entry || entry.keep === true) return false;
     entry.keep = true;
@@ -2306,7 +2322,7 @@ export function pinCurrentPersonaColor() {
     if (settings.persistPersonaColor !== true) return false;
     const personaIdentity = normalizeRegistryIdentity(getPersonaName());
     if (!personaIdentity) return false;
-    const entry = characterColors[findPersonaRegistryKey(personaIdentity)];
+    const entry = characterColors[findRegistryKeyByIdentity(personaIdentity)];
     const pinned = buildPinnedPersonaColor(entry);
     if (!pinned) return false;
     const store = getPinnedPersonaColors();
@@ -2314,6 +2330,60 @@ export function pinCurrentPersonaColor() {
     if (!resolved.key || jsonValuesEqual(resolved.pinned, pinned)) return resolved.migrated;
     store[resolved.key] = pinned;
     return true;
+}
+
+// The personas this chat was played under, by the name each user message carries. A pinned
+// persona that is not active can only be joined to the table by name, and a name is only
+// trusted as that persona here when the chat itself shows it speaking as the user; an NPC
+// who merely shares a name with one of the user's personas is left alone.
+// ponytail: walks the whole chat on every save once two or more personas are pinned; cache
+// by chat identity and length if that ever shows up in a profile.
+function getChatUserPersonaIdentities() {
+    const identities = new Set();
+    let chat = [];
+    try {
+        chat = getContext()?.chat || [];
+    } catch {
+        chat = [];
+    }
+    if (!Array.isArray(chat)) return identities;
+    for (const message of chat) {
+        if (!message?.is_user) continue;
+        const identity = normalizeRegistryIdentity(String(message.name ?? ''));
+        if (identity) identities.add(identity);
+    }
+    return identities;
+}
+
+// Every pinned persona other than the active one that this chat was played under, paired
+// with the pin's own key. resolvePinnedPersonaColor owns the active persona's key, so a
+// record whose name is the active persona's is skipped rather than joined by name. The
+// chat is only walked when there is a candidate to check it against.
+function collectPresentPinnedPersonas(store, activeIdentity) {
+    const candidates = [];
+    for (const [pinKey, stored] of Object.entries(store)) {
+        const identity = normalizeRegistryIdentity(String(stored?.name ?? ''));
+        if (identity && identity !== activeIdentity) candidates.push({ pinKey, identity, stored });
+    }
+    if (!candidates.length) return candidates;
+    const chatIdentities = getChatUserPersonaIdentities();
+    return candidates.filter(candidate => chatIdentities.has(candidate.identity));
+}
+
+// Writes every persona present in this chat back to its pin, so a color edited while some
+// other persona is active is not reverted the next time that persona is restored.
+export function syncPinnedPersonaColors() {
+    let changed = pinCurrentPersonaColor();
+    if (settings.persistPersonaColor !== true) return changed;
+    const store = getPinnedPersonaColors();
+    const activeIdentity = normalizeRegistryIdentity(getPersonaName());
+    for (const { pinKey, identity, stored } of collectPresentPinnedPersonas(store, activeIdentity)) {
+        const pinned = buildPinnedPersonaColor(characterColors[findRegistryKeyByIdentity(identity)]);
+        if (!pinned || jsonValuesEqual(buildPinnedPersonaColor(stored), pinned)) continue;
+        store[pinKey] = pinned;
+        changed = true;
+    }
+    return changed;
 }
 
 export function renamePinnedPersonaColor(oldName, newName) {
@@ -2333,15 +2403,26 @@ export function renamePinnedPersonaColor(oldName, newName) {
 // user's own colour is never nudged aside by whoever else is in this chat.
 export function restorePinnedPersonaColor() {
     if (settings.persistPersonaColor !== true) return false;
+    const store = getPinnedPersonaColors();
     const personaName = getPersonaName();
     const personaIdentity = normalizeRegistryIdentity(personaName);
-    const resolved = resolvePinnedPersonaColor(getPinnedPersonaColors(), personaName);
-    const pinned = buildPinnedPersonaColor(personaIdentity ? resolved.pinned : null);
-    if (!pinned) return resolved.migrated;
-    const existingKey = findPersonaRegistryKey(personaIdentity);
+    const resolved = resolvePinnedPersonaColor(store, personaName);
+    let changed = resolved.migrated;
+    if (applyPinnedPersonaLook(personaName, personaIdentity, buildPinnedPersonaColor(personaIdentity ? resolved.pinned : null))) changed = true;
+    // The other personas this chat was played under get their pins back too, so a chat
+    // with several of the user's personas in it shows every one in its own color.
+    for (const { identity, stored } of collectPresentPinnedPersonas(store, personaIdentity)) {
+        if (applyPinnedPersonaLook(stored.name, identity, buildPinnedPersonaColor(stored))) changed = true;
+    }
+    return changed;
+}
+
+function applyPinnedPersonaLook(name, identity, pinned) {
+    if (!pinned) return false;
+    const existingKey = findRegistryKeyByIdentity(identity);
     if (existingKey) {
         const entry = characterColors[existingKey];
-        if (jsonValuesEqual(buildPinnedPersonaColor(entry), pinned)) return resolved.migrated;
+        if (jsonValuesEqual(buildPinnedPersonaColor(entry), pinned)) return false;
         entry.baseColor = pinned.baseColor;
         entry.color = pinned.color;
         entry.style = pinned.style;
@@ -2350,7 +2431,7 @@ export function restorePinnedPersonaColor() {
         entry.gradientGenerator = cloneJsonValue(pinned.gradientGenerator);
         return true;
     }
-    const built = buildCharacterEntry(personaName, {
+    const built = buildCharacterEntry(name, {
         color: pinned.baseColor,
         colorMode: 'base',
         origin: 'persona',
@@ -2582,7 +2663,7 @@ export function saveData(options = {}) {
     setGroupProfiles(normalizeGroupProfiles(groupProfiles));
     settings.colorSchemaVersion = COLOR_SCHEMA_VERSION;
     if (!options.preserveEffectiveColors) syncAllEffectiveColors();
-    pinCurrentPersonaColor();
+    syncPinnedPersonaColors();
     syncPinnedCharacters();
     try {
         let storageKey = getStorageKey();
@@ -2738,7 +2819,8 @@ export function loadData(options = {}) {
     const pinsRestored = restorePinnedCharacters();
     const personaRestored = restorePinnedPersonaColor();
     const personaKept = markCurrentPersonaKept();
-    if ((migrateColorSchemaIfNeeded() || personaRestored || pinsRestored || personaKept) && options.persistMigrations !== false) {
+    const cardKept = markCardCharactersKept();
+    if ((migrateColorSchemaIfNeeded() || personaRestored || pinsRestored || personaKept || cardKept) && options.persistMigrations !== false) {
         saveData({ preserveEffectiveColors: true });
     }
     setColorHistory([createHistorySnapshot()]); setHistoryIndex(0);

@@ -639,7 +639,10 @@ test('the LLM engine never edits or registers a tool-call message', () => {
     // messages whose saved tags still have to follow a color change.
     assert.match(colorable, /return !msg\.is_user/);
     assert.doesNotMatch(colorable, /is_system/);
-    assert.match(persona, /personaKey && personaKey === messageKey/);
+    // Any tracked name is a DOM target, so a chat played under several personas keeps
+    // all of them colored; the registry, not the active persona, is the gate.
+    assert.match(persona, /return !!messageKey && !!characterColors\[messageKey\]/);
+    assert.doesNotMatch(persona, /getPersonaName/);
     const personaGuard = newMessage.indexOf('if (!isColorableMessage(lastMsg))');
     assert.ok(personaGuard >= 0 && personaGuard < newMessage.indexOf('processColorBlocksInText'),
         'onNewMessage must reject user messages before ingestion/remapping');
@@ -666,6 +669,22 @@ test('hybrid persona decoration never recounts dialogue or queues the verifier',
     assert.match(observed, /if \(isDomEngine\(\) && options\.queueVerification !== false\)/);
     assert.match(mainHandlers, /if \(isDomEngine\(\)\) queueAutoAttributionVerificationForRenderedMessages\(\{ delay: 300 \}\)/);
     assert.match(refreshSeries, /if \(!hasDomTargetMessages\(\)\) \{\s*if \(!isDomEngine\(\)\) scheduleDecorateAll\(delay, true\)/);
+});
+
+test('persona pins and the card character are synced where every save and load already passes', () => {
+    const save = functionSection(sources['storage.js'], 'saveData');
+    const load = functionSection(sources['storage.js'], 'loadData');
+    const build = functionSection(sources['palettes.js'], 'buildCharacterEntry');
+
+    // Every present persona goes back to its pin before the Keep pins are written, so a
+    // persona that is also Kept carries the color the persona option holds.
+    assert.match(save, /syncPinnedPersonaColors\(\);\s*syncPinnedCharacters\(\);/);
+    // Load order: Keep pins, then persona pins over them, then the card character marked
+    // Kept, and any of the three is enough to persist.
+    assert.match(load, /restorePinnedCharacters\(\);[\s\S]*?restorePinnedPersonaColor\(\);[\s\S]*?markCurrentPersonaKept\(\);[\s\S]*?markCardCharactersKept\(\);/);
+    assert.match(load, /personaKept \|\| cardKept\)/);
+    // The card character is Kept on creation the way Lock is, and imports keep their own flag.
+    assert.match(build, /keep: !!options\.keep \|\| \(!bypassAutomation && shouldAutoKeepCardCharacter\(trimmedName\)\)/);
 });
 
 test('the tool-call repair reverses only this extension own canonical markup', () => {
