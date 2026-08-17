@@ -1,19 +1,20 @@
 // live-colors.js - extracted from index.js (mechanical split)
 import { attributeDialogueSegments, clearSpeakerRegexCache, colorizeMessageText, ensureCharacterEntry } from './attribution.js';
 import { isHostSystemOrToolMessage } from './attribution-store.js';
-import { collectFontColorsFromText, countFontColorStatsFromKnownColors, parseColorAssignmentsFromText, parseNamedColorAssignmentsFromText, processColorBlocksInText, refreshTransientNarratorCount, resolveCharacterKeyByNameOrAlias, stripColorBlockFromElement } from './color-blocks.js';
+import { collectFontColorsFromText, countFontColorStatsFromKnownColors, parseColorAssignmentsFromText, parseColorMetadataPairs, parseNamedColorAssignmentsFromText, parseTrailingColorMetadata, processColorBlocksInText, refreshTransientNarratorCount, resolveCharacterKeyByNameOrAlias, stripColorBlockFromElement, stripTrailingColorMetadata } from './color-blocks.js';
 import { DOM_RETRY_REFRESH_DELAYS, decorateAllMessages, refreshMessageDom, scheduleDomRefreshSeries, scheduleDomSettleRefresh } from './dom-engine.js';
 import { scheduleCustomFontRefresh } from './fonts.js';
+import { normalizeRegistryIdentityName } from './group-profiles.js';
 import { saveHistory } from './history.js';
 import { callLLMWithProfile, classifyLlmRequestError } from './llm.js';
 import { getNarratorVisual } from './narrator-style.js';
 import { applyThemeReadabilityAndBrightness, getBaseColor, getEntryEffectiveColor, invalidateThemeCache, syncAllEffectiveColors } from './palettes.js';
-import { buildColorMetadataPromptLines, buildLLMColorizeRules, buildThoughtSymbolColorPromptRule, getThoughtDelimiterSymbols, injectPrompt } from './prompts.js';
+import { buildColorMetadataPromptLines, buildLLMColorizeRules, buildThoughtSymbolColorPromptRule, formatColorBlockPair, getThoughtDelimiterSymbols, injectPrompt } from './prompts.js';
 import { generateQuietPrompt, getContext } from './st-api.js';
 import { COLOR_STATE_SAVE_DELAY_MS, LIVE_CHAT_SAVE_DELAY_MS, attributionChatGeneration, characterColors, colorStateSaveTimer, isAutoColorizing, isColorizing, isDomEngine, isRecoloring, lastProcessedMessageSignature, liveChatSaveTimer, pendingColorStateHistory, pendingColorStateInjectPrompt, pendingColorStateSaveData, pendingColorStateUpdateList, setColorStateSaveTimer, setIsAutoColorizing, setIsColorizing, setIsRecoloring, setLastProcessedMessageSignature, setLiveChatSaveTimer, setPendingColorStateHistory, setPendingColorStateInjectPrompt, setPendingColorStateSaveData, setPendingColorStateUpdateList, setPendingLiveChatSave, settings } from './state.js';
 import { getStorageKey, saveData } from './storage.js';
 import { clearAutoColorizeIndicators, hideAutoColorizeIndicator, setColorizeButtonBusy, setRecolorButtonBusy, showAutoColorizeIndicator, updateCharList, updateLegend, updateStorageScopeStatus } from './ui.js';
-import { findHtmlTagRanges, hashMessageText, isCompositeSpeakerLabel, isToolCallMessage, normalizeHexColor, normalizeSegmentText, splitsHtmlTag, toast } from './utils.js';
+import { findHtmlTagRanges, getMessageElementByIndex, hashMessageText, isCompositeSpeakerLabel, isToolCallMessage, normalizeHexColor, normalizeSegmentText, splitsHtmlTag, toast } from './utils.js';
 
 let pendingAutoColorizeRetry = false;
 let chatSaveInFlight = null;
@@ -298,7 +299,7 @@ function deferUnconfirmedChatSave(record, operation, outcome) {
 }
 
 async function saveChatRecord(record, forceRetry) {
-    if (!record?.dirty) return (record?.confirmedVersion || 0) >= (record?.version || 0);
+    if (!record?.dirty) return true;
 
     if (chatSaveInFlight) {
         await chatSaveInFlight;
@@ -390,7 +391,7 @@ async function saveChatRecord(record, forceRetry) {
         && isChatBindingCurrent(saveBinding)) {
         return saveChatRecord(record, false);
     }
-    return outcome?.confirmed === true && !record.dirty;
+    return outcome?.accepted === true && !record.dirty;
 }
 
 function queueCapturedChatSave(binding, { immediate = true } = {}) {
@@ -431,15 +432,15 @@ export function updateTextColorReferences(rawText, replacements) {
     const normalized = normalizeColorReplacementMap(replacements);
     if (!Object.keys(normalized).length) return { updatedText: rawText, changed: false };
     const fontTagRegex = /<font\b[^>]*\bcolor\s*=\s*["']?(#[0-9a-fA-F]{6})["']?[^>]*>/gi;
-    const colorBlockRegex = /\[COLORS?:([^\]]*)\]/gi;
     let updated = String(rawText ?? '').replace(fontTagRegex, (match, oldHex) => {
         const replacement = normalized[normalizeHexColor(oldHex, null)];
         if (!replacement) return match;
         return match.replace(/(\bcolor\s*=\s*["']?)(#[0-9a-fA-F]{6})(["']?)/i, `$1${replacement}$3`);
     });
-    updated = updated.replace(colorBlockRegex, (fullMatch, pairsStr) => {
+    const block = parseTrailingColorMetadata(updated);
+    if (block) {
         const seenPairs = new Set();
-        const newPairs = pairsStr.split(',').map(pair => {
+        const newPairs = block.pairs.split(',').map(pair => {
             const eqIdx = pair.indexOf('=');
             if (eqIdx === -1) return pair;
             const namePart = pair.substring(0, eqIdx);
@@ -447,17 +448,16 @@ export function updateTextColorReferences(rawText, replacements) {
             const replacement = normalized[normalizeHexColor(rawColor, null)];
             return replacement ? `${namePart}=${replacement}` : pair;
         }).filter(pair => {
+            if (!isSafeColorMetadataPair(pair)) return false;
             const eqIdx = pair.indexOf('=');
-            if (eqIdx === -1) return true;
             const color = normalizeHexColor(pair.substring(eqIdx + 1).trim(), null);
-            if (!color) return true;
             const key = `${pair.substring(0, eqIdx).trim().toLowerCase()}\u0000${color}`;
             if (seenPairs.has(key)) return false;
             seenPairs.add(key);
             return true;
         }).join(',');
-        return fullMatch.replace(pairsStr, newPairs);
-    });
+        updated = updated.slice(0, block.pairsStart) + newPairs + updated.slice(block.pairsEnd);
+    }
     return { updatedText: updated, changed: updated !== String(rawText ?? '') };
 }
 
@@ -486,14 +486,14 @@ export function flushChatSave() {
     const record = binding
         ? [...chatSaveRecords].find(candidate => areChatBindingsEqual(candidate.binding, binding))
         : null;
-    return record ? saveChatRecord(record, true) : Promise.resolve(false);
+    return record ? saveChatRecord(record, true) : Promise.resolve(true);
 }
 
 export function buildGlobalColorAssignmentLookup(chat) {
     const latestByColor = {};
     const namesByColor = {};
     for (const msg of chat || []) {
-        if (isHostSystemOrToolMessage(msg)) continue;
+        if (msg?.is_user || isHostSystemOrToolMessage(msg)) continue;
         const parsed = parseColorAssignmentsFromText(msg?.mes || '');
         for (const [color, name] of Object.entries(parsed.latestByColor)) {
             latestByColor[color] = name;
@@ -737,7 +737,7 @@ export function normalizeColorizedTextForComparison(text) {
 }
 
 function stripLLMColorMetadata(text) {
-    return String(text ?? '').replace(/(?:\r\n?|\n)?\[COLORS?:[^\]\r\n]*\][ \t]*(?:\r\n?|\n)?$/i, '');
+    return stripTrailingColorMetadata(text);
 }
 
 function unwrapLLMColorizeResponse(text) {
@@ -825,9 +825,13 @@ export function parseCanonicalFontMarkup(text) {
 }
 
 function getSafeMetadataName(value) {
-    const name = String(value ?? '').trim();
-    if (!name || name.length > 128 || /[\u0000-\u001f\u007f-\u009f\u2028\u2029\[\]=,()<>]/.test(name)) return '';
+    const name = normalizeRegistryIdentityName(value);
+    if (!name || /[\[\]=,()]/.test(name)) return '';
     return name;
+}
+
+function isSafeColorMetadataPair(pair) {
+    return parseColorMetadataPairs(String(pair ?? '')).length === 1;
 }
 
 function getValidatedAssignmentsForColors(colors, narratorColor = null, pendingEntries = [], preservedAssignments = []) {
@@ -1062,7 +1066,7 @@ export function fillUncoloredDialogueGaps(rawText, messageSpeakerName = '', opti
 
     const narratorColor = getNarratorVisual(settings, applyThemeReadabilityAndBrightness)?.color || null;
     const metadata = formatValidatedColorMetadata(getValidatedAssignmentsForColors(parseCanonicalFontMarkup(updatedText)?.colors, narratorColor));
-    if (metadata && !/\[COLORS?:([^\]]*)\]/i.test(updatedText)) updatedText += `\n[COLORS:${metadata}]`;
+    if (metadata && !parseTrailingColorMetadata(updatedText)) updatedText += `\n[COLORS:${metadata}]`;
     return {
         updatedText,
         changed: updatedText !== source,
@@ -1097,8 +1101,16 @@ function completeLLMResultGaps(result, speakerName) {
 // ToolManager's formatter is a private static, it is not reachable through st-api.js, and
 // reimplementing it would rewrite bytes that were never damaged.
 export function restoreColorizedToolCallText(rawText) {
+    const block = parseTrailingColorMetadata(rawText);
+    if (!block || block.label !== 'COLORS') return null;
+    const assignments = parseNamedColorAssignmentsFromText(rawText);
+    if (!assignments.length || assignments.length !== block.pairs.split(',').length) return null;
     const parsed = parseCanonicalFontMarkup(stripLLMColorMetadata(rawText));
     if (!parsed || !parsed.sawFont) return null;
+    const representedColors = new Set(parsed.colors);
+    const metadataColors = new Set(assignments.map(assignment => assignment.color));
+    if (representedColors.size !== metadataColors.size
+        || [...representedColors].some(color => !metadataColors.has(color))) return null;
     return parsed.projection;
 }
 
@@ -1114,7 +1126,7 @@ function removeUnreferencedCharacterEntries(candidateNames, chat) {
         if (authorKey) referencedKeys.add(authorKey);
         const text = msg?.mes || '';
         if (!text) continue;
-        for (const { name } of parseNamedColorAssignmentsFromText(text)) {
+        for (const { name } of (msg?.is_user ? [] : parseNamedColorAssignmentsFromText(text))) {
             const key = resolveCharacterKeyByNameOrAlias(name);
             if (key) referencedKeys.add(key);
         }
@@ -1210,7 +1222,11 @@ export function repairHtmlBreakingColorSpans(chat = getContext()?.chat) {
         if (repaired === parsed) continue;
         // The trailing color block is carried over untouched: it names characters, and dropping
         // a span is not evidence that the chat has stopped using the color it carried.
-        msg.mes = `${repaired.canonicalText}${rawText.slice(withoutMetadata.length)}`;
+        const block = parseTrailingColorMetadata(rawText);
+        const metadata = block?.pairs.split(',').every(isSafeColorMetadataPair)
+            ? rawText.slice(block.removeStart)
+            : '';
+        msg.mes = `${repaired.canonicalText}${metadata}`;
         report.repairedIndices.push(i);
     }
     return report;
@@ -1249,13 +1265,15 @@ export async function colorizeMessageWithLLM(rawText, messageSpeakerName = '') {
     let defaultSpeakerColor = null;
     for (const entry of Object.values(characterColors)) {
         const color = getEntryEffectiveColor(entry);
-        charList.push(`${entry.name}=${color}`);
-        if (entry.name.toLowerCase() === trimmedSpeaker.toLowerCase()) {
+        const pair = formatColorBlockPair(entry.name, color);
+        if (pair) charList.push(pair);
+        const safeEntryName = normalizeRegistryIdentityName(entry.name);
+        if (safeEntryName && safeEntryName.toLowerCase() === trimmedSpeaker.toLowerCase()) {
             defaultSpeakerColor = color;
         }
     }
     const narratorColor = getNarratorVisual(settings, applyThemeReadabilityAndBrightness)?.color || null;
-    if (narratorColor) charList.push(`Narrator=${narratorColor}`);
+    if (narratorColor) charList.push(formatColorBlockPair('Narrator', narratorColor));
     if (!charList.length) return null;
 
     const thoughtSymbols = getThoughtDelimiterSymbols();
@@ -1270,7 +1288,8 @@ export async function colorizeMessageWithLLM(rawText, messageSpeakerName = '') {
     lines.push(...buildColorMetadataPromptLines());
     if (thoughtSymbols.length) lines.push(`- ${buildThoughtSymbolColorPromptRule(thoughtSymbols)}`);
     if (narratorColor) lines.push(`- Narrator text: <font color="${narratorColor}">...</font>.`);
-    if (trimmedSpeaker && defaultSpeakerColor) lines.push(`- Default speaker (message author): ${trimmedSpeaker}=${defaultSpeakerColor}.`);
+    const defaultSpeakerPair = formatColorBlockPair(trimmedSpeaker, defaultSpeakerColor);
+    if (defaultSpeakerPair) lines.push(`- Default speaker (message author): ${defaultSpeakerPair}.`);
     lines.push('');
     lines.push(rawText);
 
@@ -1342,10 +1361,11 @@ export async function colorizeMultipleMessagesWithLLM(messageBatch) {
     const charList = [];
     for (const entry of Object.values(characterColors)) {
         const color = getEntryEffectiveColor(entry);
-        charList.push(`${entry.name}=${color}`);
+        const pair = formatColorBlockPair(entry.name, color);
+        if (pair) charList.push(pair);
     }
     const narratorColor = getNarratorVisual(settings, applyThemeReadabilityAndBrightness)?.color || null;
-    if (narratorColor) charList.push(`Narrator=${narratorColor}`);
+    if (narratorColor) charList.push(formatColorBlockPair('Narrator', narratorColor));
     if (!charList.length) return createBatchColorizeResult([], 'invalid-input');
 
     const thoughtSymbols = getThoughtDelimiterSymbols();
@@ -1438,8 +1458,6 @@ export async function recolorAllMessages() {
     setRecolorButtonBusy(true);
 
     try {
-        const colorBlockRegex = /\[COLORS?:([^\]]*)\]/gi;
-        const fontTagRegex = /<font\b[^>]*\bcolor\s*=\s*["']?(#[0-9a-fA-F]{6})["']?[^>]*>/gi;
         syncAllEffectiveColors();
 
         // Step 1: Build global reverse map with ambiguity tracking.
@@ -1447,7 +1465,7 @@ export async function recolorAllMessages() {
         const globalLatestByColor = {};
         const globalNamesByColor = {};
         for (const msg of chat) {
-            if (isHostSystemOrToolMessage(msg)) continue;
+            if (msg?.is_user || isHostSystemOrToolMessage(msg)) continue;
             const text = msg?.mes || '';
             const parsed = parseColorAssignmentsFromText(text);
             for (const [color, name] of Object.entries(parsed.latestByColor)) {
@@ -1505,28 +1523,7 @@ export async function recolorAllMessages() {
 
             if (!Object.keys(replacements).length) continue;
 
-            // Replace <font color=X> tags in raw msg.mes text
-            let updated = rawText.replace(fontTagRegex, (match, oldHex) => {
-                const key = oldHex.toLowerCase();
-                if (replacements[key]) {
-                    return match.replace(/(\bcolor\s*=\s*["']?)(#[0-9a-fA-F]{6})(["']?)/i, `$1${replacements[key]}$3`);
-                }
-                return match;
-            });
-
-            // Update [COLORS:] block colors in raw text
-            updated = updated.replace(colorBlockRegex, (fullMatch, pairsStr) => {
-                const newPairs = pairsStr.split(',').map(pair => {
-                    const eqIdx = pair.indexOf('=');
-                    if (eqIdx === -1) return pair;
-                    const namePart = pair.substring(0, eqIdx);
-                    const rawColor = pair.substring(eqIdx + 1).trim();
-                    const key = rawColor.toLowerCase();
-                    if (replacements[key]) return `${namePart}=${replacements[key]}`;
-                    return pair;
-                }).join(',');
-                return fullMatch.replace(pairsStr, newPairs);
-            });
+            const updated = updateTextColorReferences(rawText, replacements).updatedText;
 
             if (updated !== rawText) {
                 msg.mes = updated;
@@ -1859,7 +1856,7 @@ export async function colorizeMessages(targetMode = 'all') {
                 await refreshMessageDom(index, updated.message);
             }
             if (!isColorizeRunCurrent(run)) return;
-            refreshTransientNarratorCount(chat.filter(msg => !isHostSystemOrToolMessage(msg)));
+            refreshTransientNarratorCount(chat);
             scheduleCustomFontRefresh(0);
             updateLegend();
             const suffix = skippedNoColor > 0 ? ` (${skippedNoColor} skipped - no speaker/color match)` : '';
@@ -1879,10 +1876,13 @@ export async function colorizeMessages(targetMode = 'all') {
     }
 }
 
-export function onNewMessage() {
+export function onNewMessage(indexArg = null, messageArg = null, chatArg = null) {
     if (!settings.enabled || !settings.autoScanNewMessages) return;
     const scheduledContext = getContext();
-    const scheduledChat = scheduledContext?.chat;
+    const scheduledChat = chatArg ?? scheduledContext?.chat;
+    const scheduledIndex = Number.isInteger(Number(indexArg)) && Number(indexArg) >= 0 ? Number(indexArg) : null;
+    const scheduledMessage = messageArg
+        ?? (Array.isArray(scheduledChat) && scheduledIndex !== null ? scheduledChat[scheduledIndex] : null);
     const scheduledStorageKey = getStorageKey();
     const scheduledChatGeneration = attributionChatGeneration;
     setTimeout(async () => {
@@ -1893,7 +1893,9 @@ export function onNewMessage() {
         const chat = ctx?.chat || [];
         if (!chat.length) return;
         const chatBinding = captureChatBinding(ctx);
-        const lastMsg = chat[chat.length - 1];
+        const index = scheduledIndex ?? chat.length - 1;
+        const lastMsg = scheduledMessage ?? chat[index];
+        if (!lastMsg || chat[index] !== lastMsg) return;
         if (isHostSystemOrToolMessage(lastMsg)) return;
         if (!isColorableMessage(lastMsg)) {
             scheduleDomRefreshSeries(0);
@@ -1903,11 +1905,11 @@ export function onNewMessage() {
         const sigId = lastMsg?.id ?? lastMsg?.send_date ?? '';
         const signature = `${chat.length}|${sigId}|${text}`;
         if (signature === lastProcessedMessageSignature) {
-            stripColorBlockFromElement(document.querySelector('.mes:last-child .mes_text'));
+            stripColorBlockFromElement(getMessageElementByIndex(index)?.querySelector('.mes_text'));
             scheduleDomRefreshSeries();
             return;
         }
-        if (settings.autoColorize && isColorableMessage(lastMsg) && isAutoColorizing && !/\[COLORS?:[^\]]*\]/i.test(text)) {
+        if (settings.autoColorize && isColorableMessage(lastMsg) && isAutoColorizing && !parseTrailingColorMetadata(text)) {
             pendingAutoColorizeRetry = true;
             setLastProcessedMessageSignature('');
             return;
@@ -1916,7 +1918,7 @@ export function onNewMessage() {
         const registryBeforeIngest = getPersistentRegistryFingerprint();
         const colorStats = processColorBlocksInText(text);
         countFontColorStatsFromKnownColors(text, colorStats.countedKeys);
-        refreshTransientNarratorCount(chat.filter(msg => !isHostSystemOrToolMessage(msg)));
+        refreshTransientNarratorCount(chat);
         const foundColorBlock = colorStats.foundColorBlock;
         const hadRemapping = colorStats.hadRemapping;
         const remappedAssignments = colorStats.remappedAssignments;
@@ -1955,10 +1957,10 @@ export function onNewMessage() {
                     latestRemapChanged = true;
                     void queueCapturedChatSave(chatBinding);
                 }
-                updateVisibleMessageColors(chat.length - 1, remapReplacements);
+                updateVisibleMessageColors(index, remapReplacements);
             }
         }
-        stripColorBlockFromElement(document.querySelector('.mes:last-child .mes_text'));
+        stripColorBlockFromElement(getMessageElementByIndex(index)?.querySelector('.mes_text'));
 
         // Keep chat colors in sync when receive-time color conflict remapping happens.
         if (hadRemapping && settings.autoRecolor) {
@@ -1984,7 +1986,7 @@ export function onNewMessage() {
                     rawText: completionInput,
                     speakerName: lastMsg.name,
                     message: lastMsg,
-                    msgIndex: chat.length - 1,
+                    msgIndex: index,
                     messageHash: hashMessageText(completionInput),
                     messageId: lastMsg.id ?? null,
                     sendDate: lastMsg.send_date ?? null,
@@ -2001,7 +2003,7 @@ export function onNewMessage() {
                     await queueCapturedChatSave(chatBinding, { immediate: true });
                     if (isCapturedChatBindingCurrent(chatBinding)
                         && isColorizeMessageCurrent(chat, completionEntry, completion.updatedText)) {
-                        await refreshMessageDom(chat.length - 1, lastMsg);
+                        await refreshMessageDom(index, lastMsg);
                     }
                     updateCharList();
                 }
@@ -2018,12 +2020,12 @@ export function onNewMessage() {
             const hasExistingColors = collectFontColorsFromText(text).size > 0;
             if (!hasExistingColors) {
                 setIsAutoColorizing(true);
-                const lastMesEl = document.querySelector('.mes:last-child');
+                const lastMesEl = getMessageElementByIndex(index);
                 clearAutoColorizeIndicators();
                 showAutoColorizeIndicator(lastMesEl);
                 // Capture identity + current text so we can revalidate after the LLM await
                 // (the user may swipe/edit/regenerate, or a new message may arrive, mid-call).
-                const mesIndex = chat.length - 1;
+                const mesIndex = index;
                 const capturedChat = chat;
                 const colorizeInput = lastMsg.mes || text;
                 const autoColorizeBinding = chatBinding;

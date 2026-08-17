@@ -3,10 +3,11 @@ import { normalizeGroupProfiles } from './group-profiles.js';
 import { applyLiveColorChangesFromSnapshot, captureEffectiveColorSnapshot, commit, refreshEffectiveColorsAfterRestore } from './live-colors.js';
 import { normalizeNarratorStyle, setNarratorStyle } from './narrator-style.js';
 import { characterColors, colorHistory, expandedCharacterRows, groupProfiles, historyIndex, lastCharKey, selectedCharacterKeys, setCharacterColors, setColorHistory, setExpandedCharacterRows, setGroupProfiles, setHistoryIndex, setSwapMode, settings, swapMode } from './state.js';
+import { captureHistoryPinState, restoreHistoryPinState } from './storage.js';
 
-export function createHistorySnapshot(colors = characterColors, profiles = groupProfiles, narratorSource = settings) {
+export function createHistorySnapshot(colors = characterColors, profiles = groupProfiles, narratorSource = settings, pins = captureHistoryPinState()) {
     const narratorStyle = normalizeNarratorStyle(narratorSource?.narratorStyle ?? narratorSource, { legacy: narratorSource });
-    return JSON.stringify({ version: 3, colors, groupProfiles: profiles, narratorStyle });
+    return JSON.stringify({ version: 4, colors, groupProfiles: profiles, narratorStyle, pins });
 }
 
 export function parseHistorySnapshot(snapshot) {
@@ -22,6 +23,7 @@ export function parseHistorySnapshot(snapshot) {
             colors: parsed.colors,
             groupProfiles: normalizeGroupProfiles(parsed.groupProfiles),
             narratorStyle: (parsed.version === 3 || parsed.narratorStyle) ? normalizeNarratorStyle(parsed.narratorStyle) : null,
+            pins: parsed.version >= 4 && parsed.pins && typeof parsed.pins === 'object' ? parsed.pins : null,
         };
     }
     return {
@@ -29,6 +31,7 @@ export function parseHistorySnapshot(snapshot) {
         colors: parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {},
         groupProfiles: {},
         narratorStyle: null,
+        pins: null,
     };
 }
 
@@ -77,6 +80,7 @@ function restoreHistorySnapshot(snapshot, { history = false, expanded = null, sw
     setCharacterColors(JSON.parse(JSON.stringify(parsed.colors)));
     setGroupProfiles(parsed.groupProfiles);
     if (parsed.narratorStyle) setNarratorStyle(settings, parsed.narratorStyle);
+    if (parsed.pins) restoreHistoryPinState(parsed.pins);
     if (expanded) setExpandedCharacterRows(new Set(expanded));
     if (swap !== undefined) setSwapMode(swap);
     pruneRuntimeCharacterState();
@@ -130,8 +134,9 @@ export function createRestoreSnapshot() {
         const colors = restoreAppliedChanges(base.colors, applied.colors, current.colors);
         const profiles = restoreAppliedChanges(base.groupProfiles, applied.groupProfiles, current.groupProfiles);
         const narratorStyle = restoreAppliedChanges(base.narratorStyle, applied.narratorStyle, current.narratorStyle);
+        const pins = restoreAppliedChanges(base.pins, applied.pins, current.pins);
         const currentExpanded = [...expandedCharacterRows];
-        restoreHistorySnapshot(createHistorySnapshot(colors, profiles, { narratorStyle }), {
+        restoreHistorySnapshot(createHistorySnapshot(colors, profiles, { narratorStyle }, pins), {
             history: true,
             expanded: jsonEqual(currentExpanded, applied.expanded) ? base.expanded : currentExpanded,
             swap: jsonEqual(swapMode, applied.swap) ? base.swap : swapMode,

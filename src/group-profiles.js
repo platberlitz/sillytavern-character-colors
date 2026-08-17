@@ -34,7 +34,7 @@ function normalizeRegistryIdentityText(value, maximum = MAX_REGISTRY_IDENTITY_LE
         .normalize('NFKC')
         .replace(/\s+/g, ' ')
         .trim();
-    if (!normalized || normalized.length > limit || /[\u0000-\u001F\u007F]/.test(normalized)) return '';
+    if (!normalized || normalized.length > limit || /[\u0000-\u001F\u007F<>{}]/.test(normalized)) return '';
     return normalized;
 }
 

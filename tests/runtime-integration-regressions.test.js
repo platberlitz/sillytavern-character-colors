@@ -34,7 +34,9 @@ export const event_types = {
     CHARACTER_MESSAGE_RENDERED: 'character_message_rendered', USER_MESSAGE_RENDERED: 'user_message_rendered',
     MESSAGE_UPDATED: 'message_updated', MESSAGE_SWIPED: 'message_swiped', MESSAGE_DELETED: 'message_deleted',
     STREAM_TOKEN_RECEIVED: 'stream_token', SMOOTH_STREAM_TOKEN_RECEIVED: 'smooth_stream_token',
-    GENERATION_ENDED: 'generation_ended', CHAT_CREATED: 'chat_created', GROUP_CHAT_CREATED: 'group_chat_created',
+    GENERATION_ENDED: 'generation_ended', GENERATION_STOPPED: 'generation_stopped',
+    GENERATION_ERROR: 'generation_error', CHAT_RESET: 'chat_reset',
+    CHAT_CREATED: 'chat_created', GROUP_CHAT_CREATED: 'group_chat_created',
     CHARACTER_RENAMED: 'character_renamed', PERSONA_CHANGED: 'persona_changed',
     PERSONA_UPDATED: 'persona_updated', PERSONA_RENAMED: 'persona_renamed',
 };
@@ -169,8 +171,10 @@ const storage = await import('../src/storage.js');
 const main = await import('../src/main.js');
 const contextMenu = await import('../src/context-menu.js');
 const domEngine = await import('../src/dom-engine.js');
+const { getTransientNarratorCount } = await import('../src/narrator-style.js');
 const { buildDialogueRegex, DIALOGUE_SKIP_GROUP } = await import('../src/color-blocks.js');
 const { isColorableMessage } = await import('../src/live-colors.js');
+main.registerEventHandlers();
 hooks.deregister();
 
 const baseContext = () => ({
@@ -187,7 +191,66 @@ function resetRegistry() {
     for (const key of Object.keys(state.characterColors)) delete state.characterColors[key];
 }
 
-test('persisted disable cannot overwrite an explicit first enable, and lifecycle mutations clear streaming state', () => {
+test('enabled synchronization retries host macro and regex setup while already active', () => {
+    const previous = {
+        autoScanOnLoad: state.settings.autoScanOnLoad,
+        coloringEngine: state.settings.coloringEngine,
+        enabled: state.settings.enabled,
+        moduleRecord: structuredClone(stApi.extension_settings[state.MODULE_NAME]),
+        regex: structuredClone(stApi.extension_settings.regex),
+        setTimeout: globalThis.setTimeout,
+        clearTimeout: globalThis.clearTimeout,
+    };
+    const timers = [];
+    let macroRegistrations = 0;
+    globalThis.setTimeout = (callback, delay) => {
+        const timer = { callback, delay, cleared: false };
+        timers.push(timer);
+        return timer;
+    };
+    globalThis.clearTimeout = timer => { if (timer) timer.cleared = true; };
+
+    try {
+        state.settings.enabled = true;
+        state.settings.autoScanOnLoad = false;
+        state.settings.coloringEngine = 'llm';
+        stApi.setTestContext({ ...baseContext(), registerMacro: undefined });
+        assert.equal(main.syncAutomaticRuntime(), true);
+        const firstRegexTimer = timers.filter(timer => timer.delay === 1000).at(-1);
+        assert.ok(firstRegexTimer);
+
+        stApi.setTestContext({
+            ...baseContext(),
+            registerMacro(name) {
+                assert.equal(name, 'dialoguecolors');
+                macroRegistrations++;
+            },
+        });
+        assert.equal(main.syncAutomaticRuntime(), false);
+        const secondRegexTimer = timers.filter(timer => timer.delay === 1000).at(-1);
+        assert.notEqual(secondRegexTimer, firstRegexTimer);
+        assert.equal(firstRegexTimer.cleared, true);
+        assert.equal(macroRegistrations, 1);
+
+        secondRegexTimer.callback();
+        assert.equal(stApi.extension_settings.regex.some(rule => rule.id === 'dialogue-colors:trim-font-tags:v1'), true);
+    } finally {
+        state.settings.enabled = false;
+        main.syncAutomaticRuntime();
+        state.settings.autoScanOnLoad = previous.autoScanOnLoad;
+        state.settings.coloringEngine = previous.coloringEngine;
+        state.settings.enabled = previous.enabled;
+        if (previous.moduleRecord === undefined) delete stApi.extension_settings[state.MODULE_NAME];
+        else stApi.extension_settings[state.MODULE_NAME] = previous.moduleRecord;
+        if (previous.regex === undefined) delete stApi.extension_settings.regex;
+        else stApi.extension_settings.regex = previous.regex;
+        globalThis.setTimeout = previous.setTimeout;
+        globalThis.clearTimeout = previous.clearTimeout;
+        stApi.setTestContext(baseContext());
+    }
+});
+
+test('portable disable cannot overwrite an explicit local enable, and lifecycle mutations clear streaming state', () => {
     const enabledControl = new FakeElement();
     enabledControl.checked = false;
     documentElements.set('dc-enabled', enabledControl);
@@ -200,8 +263,9 @@ test('persisted disable cannot overwrite an explicit first enable, and lifecycle
         legacyLocalStorageMigrated: true,
     };
     stApi.setTestContext(baseContext());
+    state.settings.enabled = true;
     storage.loadData({ persistPrevious: false, persistMigrations: false, allowMetadataPersistence: false });
-    assert.equal(state.settings.enabled, false);
+    assert.equal(state.settings.enabled, true);
 
     try {
         enabledControl.checked = true;
@@ -249,6 +313,74 @@ test('persisted disable cannot overwrite an explicit first enable, and lifecycle
     }
 });
 
+test('render, update, and swipe events retain targets and debounce one exact recount', () => {
+    const previous = {
+        autoScanNewMessages: state.settings.autoScanNewMessages,
+        autoScanOnLoad: state.settings.autoScanOnLoad,
+        coloringEngine: state.settings.coloringEngine,
+        enabled: state.settings.enabled,
+        setTimeout: globalThis.setTimeout,
+        clearTimeout: globalThis.clearTimeout,
+    };
+    const chat = [
+        {
+            id: 'm-0',
+            name: 'Alice',
+            mes: '<font color="#112233">"One"</font> <font color="#888888">aside</font>\n[COLORS:Alice=#112233,Narrator=#888888]',
+        },
+        { id: 'm-1', name: 'Bob', mes: '<font color="#445566">"Two"</font>\n[COLORS:Bob=#445566]' },
+    ];
+    const timers = [];
+    globalThis.setTimeout = (callback, delay) => {
+        const timer = { callback, delay, cleared: false };
+        timers.push(timer);
+        return timer;
+    };
+    globalThis.clearTimeout = timer => { if (timer) timer.cleared = true; };
+
+    try {
+        resetRegistry();
+        state.characterColors.alice = { name: 'Alice', color: '#112233', aliases: [], dialogueCount: 99 };
+        state.characterColors.bob = { name: 'Bob', color: '#445566', aliases: [], dialogueCount: 99 };
+        stApi.setTestContext({ ...baseContext(), chat });
+        state.settings.enabled = true;
+        state.settings.autoScanNewMessages = false;
+        state.settings.autoScanOnLoad = false;
+        state.settings.coloringEngine = 'dom';
+        main.syncAutomaticRuntime();
+
+        stApi.eventSource.emit(stApi.event_types.CHARACTER_MESSAGE_RENDERED, 0, 'normal');
+        stApi.eventSource.emit(stApi.event_types.CHARACTER_MESSAGE_RENDERED, 1, 'normal');
+        assert.deepEqual([...state.runtimeState.messageDomRepairTimers.keys()].sort(), [0, 1]);
+
+        state.settings.coloringEngine = 'llm';
+        stApi.eventSource.emit(stApi.event_types.MESSAGE_UPDATED, 0);
+        const firstRecount = state.runtimeState.dialogueRecountTimer;
+        stApi.eventSource.emit(stApi.event_types.MESSAGE_SWIPED, 1);
+        const secondRecount = state.runtimeState.dialogueRecountTimer;
+        assert.notEqual(secondRecount, firstRecount);
+        assert.equal(firstRecount.cleared, true);
+
+        secondRecount.callback();
+        assert.equal(state.characterColors.alice.dialogueCount, 1);
+        assert.equal(state.characterColors.bob.dialogueCount, 1);
+        assert.equal(getTransientNarratorCount(chat), 1);
+        assert.equal(state.runtimeState.dialogueRecountTimer, null);
+    } finally {
+        state.settings.enabled = false;
+        main.syncAutomaticRuntime();
+        state.runtimeState.messageDomRepairTimers.clear();
+        resetRegistry();
+        stApi.setTestContext(baseContext());
+        state.settings.autoScanNewMessages = previous.autoScanNewMessages;
+        state.settings.autoScanOnLoad = previous.autoScanOnLoad;
+        state.settings.coloringEngine = previous.coloringEngine;
+        state.settings.enabled = previous.enabled;
+        globalThis.setTimeout = previous.setTimeout;
+        globalThis.clearTimeout = previous.clearTimeout;
+    }
+});
+
 test('new-chat clearing is opt-in and preserves only Keep characters', () => {
     const previousClearSetting = state.settings.clearUnpinnedOnNewChat;
     try {
@@ -280,7 +412,7 @@ test('new-chat clearing is opt-in and preserves only Keep characters', () => {
     }
 });
 
-test('a server-loaded enabled transition runs the registered runtime lifecycle', async () => {
+test('a server-loaded portable record cannot disable the local runtime', async () => {
     const previousRecord = structuredClone(stApi.extension_settings[state.MODULE_NAME]);
     const previousFetch = globalThis.fetch;
     let disconnected = false;
@@ -306,14 +438,12 @@ test('a server-loaded enabled transition runs the registered runtime lifecycle',
             sequence: (current.sequence || 0) + 1,
             settings: { ...current.settings, enabled: false },
         });
+        assert.equal(Object.prototype.hasOwnProperty.call(remote.settings, 'enabled'), false);
         const disposition = storage.applyAutoSyncRecord(remote, { serverVerified: true });
         assert.equal(disposition, 'apply');
-        for (let attempt = 0; attempt < 20 && state.settings.enabled; attempt++) {
-            await new Promise(resolve => setTimeout(resolve, 25));
-        }
-        assert.equal(state.settings.enabled, false);
-        assert.equal(disconnected, true);
-        assert.equal(state.streamingSession.active, false);
+        assert.equal(state.settings.enabled, true);
+        assert.equal(disconnected, false);
+        assert.equal(state.streamingSession.active, true);
     } finally {
         state.settings.enabled = false;
         main.syncAutomaticRuntime();
@@ -352,11 +482,14 @@ test('an old server response waits behind its own queued local save', async () =
 
 test('master disable removes context focusability and blocks every document entry event', async () => {
     const managed = new FakeElement();
+    const legend = new FakeElement();
+    legend.style.display = 'block';
     managed.setAttribute('data-dc-context-focus', 'tabindex');
     managed.setAttribute('tabindex', '0');
     managed.setAttribute('aria-keyshortcuts', 'Shift+F10');
     documentQueries.set('[data-dc-context-focus]', [managed]);
     documentQueries.set('#chat .mes_text', []);
+    documentElements.set('dc-legend-float', legend);
 
     state.settings.enabled = true;
     state.settings.enableRightClick = true;
@@ -372,6 +505,7 @@ test('master disable removes context focusability and blocks every document entr
     assert.equal(managed.hasAttribute('tabindex'), false);
     assert.equal(managed.hasAttribute('aria-keyshortcuts'), false);
     assert.equal(managed.hasAttribute('data-dc-context-focus'), false);
+    assert.equal(legend.style.display, 'none');
 
     let prevented = 0;
     const target = new FakeElement();
@@ -388,6 +522,7 @@ test('master disable removes context focusability and blocks every document entr
 
     documentQueries.delete('[data-dc-context-focus]');
     documentQueries.delete('#chat .mes_text');
+    documentElements.delete('dc-legend-float');
 });
 
 test('deletion reconciliation keeps current and ambiguous ID-less overrides without guessing', () => {

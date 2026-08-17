@@ -6,6 +6,10 @@ export const ATTRIBUTION_REVIEW_METADATA_KEY = 'dialogue_colors_attribution_revi
 export const ATTRIBUTION_OVERRIDES_METADATA_KEY = 'dialogue_colors_overrides';
 export const MAX_PENDING_ATTRIBUTION_REVIEWS = 200;
 export const MAX_RECENT_ATTRIBUTION_DECISIONS = 100;
+export const MAX_RAW_PENDING_ATTRIBUTION_REVIEWS = 400;
+export const MAX_RAW_RECENT_ATTRIBUTION_DECISIONS = 200;
+export const MAX_ATTRIBUTION_OVERRIDE_SEGMENTS = 512;
+export const MAX_ATTRIBUTION_OVERRIDE_VARIANTS = 64;
 export const ATTRIBUTION_STORE_VERSION = ATTRIBUTION_REVIEW_STORE_VERSION;
 export const MAX_PENDING_REVIEWS = MAX_PENDING_ATTRIBUTION_REVIEWS;
 export const MAX_RECENT_DECISIONS = MAX_RECENT_ATTRIBUTION_DECISIONS;
@@ -301,9 +305,20 @@ function normalizeStoredReview(value, fallbackStatus, now) {
     return review;
 }
 
-function valuesFromCollection(value) {
-    if (Array.isArray(value)) return value;
-    return isPlainObject(value) ? Object.values(value) : [];
+function entriesFromCollection(value, limit) {
+    if (Array.isArray(value)) return value.slice(0, limit).map((item, index) => [String(index), item]);
+    if (!isPlainObject(value)) return [];
+    const entries = [];
+    for (const key in value) {
+        if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+        entries.push([key, value[key]]);
+        if (entries.length >= limit) break;
+    }
+    return entries;
+}
+
+function valuesFromCollection(value, limit) {
+    return entriesFromCollection(value, limit).map(([, item]) => item);
 }
 
 function compareOldest(left, right) {
@@ -344,13 +359,14 @@ function boundStore(store, now) {
 
 export function createAttributionReviewStore(value = {}, options = {}) {
     const now = getNow(options);
-    const pending = valuesFromCollection(value?.pending)
+    const normalizedPending = valuesFromCollection(value?.pending, MAX_RAW_PENDING_ATTRIBUTION_REVIEWS)
         .map(review => normalizeStoredReview(review, ATTRIBUTION_REVIEW_STATUS.PENDING, now))
-        .filter(review => review && review.status === ATTRIBUTION_REVIEW_STATUS.PENDING);
-    const recentFromPending = valuesFromCollection(value?.pending)
-        .map(review => normalizeStoredReview(review, ATTRIBUTION_REVIEW_STATUS.PENDING, now))
-        .filter(review => review && review.status !== ATTRIBUTION_REVIEW_STATUS.PENDING);
-    const recent = valuesFromCollection(value?.recent ?? value?.decisions)
+        .filter(Boolean);
+    const pending = normalizedPending
+        .filter(review => review.status === ATTRIBUTION_REVIEW_STATUS.PENDING);
+    const recentFromPending = normalizedPending
+        .filter(review => review.status !== ATTRIBUTION_REVIEW_STATUS.PENDING);
+    const recent = valuesFromCollection(value?.recent ?? value?.decisions, MAX_RAW_RECENT_ATTRIBUTION_DECISIONS)
         .map(review => normalizeStoredReview(review, ATTRIBUTION_REVIEW_STATUS.STALE, now))
         .filter(review => review && review.status !== ATTRIBUTION_REVIEW_STATUS.PENDING);
     return boundStore({
@@ -597,6 +613,25 @@ function valueFromMap(map, key) {
     return isPlainObject(map) ? map[String(key)] : undefined;
 }
 
+function hasOwnValues(value) {
+    if (!isPlainObject(value)) return false;
+    for (const key in value) {
+        if (Object.prototype.hasOwnProperty.call(value, key)) return true;
+    }
+    return false;
+}
+
+function copyBoundedObject(value, limit = MAX_ATTRIBUTION_OVERRIDE_SEGMENTS) {
+    if (!isPlainObject(value)) return {};
+    return Object.fromEntries(entriesFromCollection(value, limit));
+}
+
+function boundOverrideSegmentMaps(entry) {
+    for (const mapName of ['segments', 'sources', 'confidences', 'reviewIds', 'records']) {
+        if (isPlainObject(entry[mapName])) entry[mapName] = copyBoundedObject(entry[mapName]);
+    }
+}
+
 function speakerFromOverride(value) {
     if (typeof value === 'string') return boundedString(value, 80);
     if (!isPlainObject(value)) return '';
@@ -607,7 +642,7 @@ function seedFrozenAttributionSegments(entry, freezeSegments, targetSegmentKey) 
     if (!isPlainObject(entry) || !isPlainObject(freezeSegments)) return;
     if (!isPlainObject(entry.segments)) entry.segments = {};
     if (!isPlainObject(entry.sources)) entry.sources = {};
-    for (const [rawKey, value] of Object.entries(freezeSegments)) {
+    for (const [rawKey, value] of entriesFromCollection(freezeSegments, MAX_ATTRIBUTION_OVERRIDE_SEGMENTS)) {
         const index = normalizedIndex(rawKey);
         if (index === null) continue;
         const key = String(index);
@@ -623,7 +658,7 @@ function seedFrozenAttributionSegments(entry, freezeSegments, targetSegmentKey) 
         for (const mapName of ['confidences', 'reviewIds']) {
             if (!isPlainObject(entry[mapName])) continue;
             delete entry[mapName][key];
-            if (!Object.keys(entry[mapName]).length) delete entry[mapName];
+            if (!hasOwnValues(entry[mapName])) delete entry[mapName];
         }
     }
 }
@@ -631,7 +666,7 @@ function seedFrozenAttributionSegments(entry, freezeSegments, targetSegmentKey) 
 function storedOverrideMessageFingerprint(entry) {
     let fingerprint = boundedString(entry?.messageFingerprint, 80);
     if (isPlainObject(entry?.records)) {
-        for (const record of Object.values(entry.records)) {
+        for (const [, record] of entriesFromCollection(entry.records, MAX_ATTRIBUTION_OVERRIDE_SEGMENTS)) {
             const recordFingerprint = boundedString(record?.messageFingerprint, 80);
             if (!recordFingerprint) continue;
             if (fingerprint && fingerprint !== recordFingerprint) return null;
@@ -663,6 +698,99 @@ function isLegacyHashOverrideEntry(entry, expectedHash, expectedTextLength) {
         messageHash: expectedHash,
         textLength: expectedTextLength,
     });
+}
+
+function messageSwipeIdFor(message) {
+    if (!message || !Object.prototype.hasOwnProperty.call(message, 'swipe_id')) return null;
+    return boundedString(message.swipe_id, 64);
+}
+
+export function getAttributionOverrideVariantKey(entry) {
+    return `v1_${stableHash([
+        boundedString(entry?.messageId, 120),
+        boundedString(entry?.messageFingerprint, 80),
+        boundedString(entry?.hash, 32),
+        Number.isInteger(entry?.textLength) ? entry.textLength : '',
+        Object.prototype.hasOwnProperty.call(entry || {}, 'swipeId') ? boundedString(entry.swipeId, 64) : '',
+    ].join('\u0000'))}`;
+}
+
+function cloneBoundedOverrideEntry(entry, includeVariants = false) {
+    if (!isPlainObject(entry)) return null;
+    const clone = {};
+    for (const key of [
+        'hash', 'messageId', 'messageFingerprint', 'textLength', 'swipeId',
+        'verificationStatus', 'verifiedHash', 'verifiedAt', 'verifiedVersion',
+    ]) {
+        if (Object.prototype.hasOwnProperty.call(entry, key)) clone[key] = entry[key];
+    }
+    for (const mapName of ['segments', 'sources', 'confidences', 'reviewIds', 'records']) {
+        if (isPlainObject(entry[mapName])) clone[mapName] = copyBoundedObject(entry[mapName]);
+    }
+    if (includeVariants && isPlainObject(entry.variants)) {
+        const variants = {};
+        for (const [key, variant] of entriesFromCollection(entry.variants, MAX_ATTRIBUTION_OVERRIDE_VARIANTS)) {
+            const bounded = cloneBoundedOverrideEntry(variant, false);
+            if (bounded) variants[key] = bounded;
+        }
+        if (hasOwnValues(variants)) clone.variants = variants;
+    }
+    return clone;
+}
+
+function overrideEntryMatchesIdentity(entry, identity) {
+    if (!isPlainObject(entry) || !identity.expectedHash || entry.hash !== identity.expectedHash) return false;
+    if (isLegacyHashOverrideEntry(entry, identity.expectedHash, identity.textLength)) return true;
+    const storedMessageId = boundedString(entry.messageId, 120);
+    const storedFingerprint = storedOverrideMessageFingerprint(entry);
+    if (storedFingerprint === null) return false;
+    if ((identity.messageId || storedMessageId)
+        && (!identity.messageId || !storedMessageId || identity.messageId !== storedMessageId)) return false;
+    if (identity.messageFingerprint && storedFingerprint
+        && identity.messageFingerprint !== storedFingerprint) return false;
+    if (!identity.messageId && !storedMessageId && identity.messageFingerprint !== storedFingerprint) return false;
+    if (Number.isInteger(entry.textLength) && entry.textLength !== identity.textLength) return false;
+    if (Object.prototype.hasOwnProperty.call(entry, 'swipeId')
+        && boundedString(entry.swipeId, 64) !== (identity.swipeId ?? '')) return false;
+    return true;
+}
+
+function activateAttributionOverrideEntry(overrideMap, messageKey, identity) {
+    const current = overrideMap[messageKey];
+    if (overrideEntryMatchesIdentity(current, identity)) {
+        boundOverrideSegmentMaps(current);
+        if (isPlainObject(current.variants)) {
+            const variants = {};
+            for (const [key, variant] of entriesFromCollection(current.variants, MAX_ATTRIBUTION_OVERRIDE_VARIANTS)) {
+                const bounded = cloneBoundedOverrideEntry(variant, false);
+                if (bounded) variants[key] = bounded;
+            }
+            if (hasOwnValues(variants)) current.variants = variants;
+            else delete current.variants;
+        }
+        return current;
+    }
+
+    const variants = {};
+    for (const [key, variant] of entriesFromCollection(current?.variants, MAX_ATTRIBUTION_OVERRIDE_VARIANTS)) {
+        const bounded = cloneBoundedOverrideEntry(variant, false);
+        if (bounded) variants[key] = bounded;
+    }
+    const archived = cloneBoundedOverrideEntry(current, false);
+    if (archived?.hash) variants[getAttributionOverrideVariantKey(archived)] = archived;
+
+    let active = null;
+    for (const [key, variant] of entriesFromCollection(variants, MAX_ATTRIBUTION_OVERRIDE_VARIANTS)) {
+        if (!overrideEntryMatchesIdentity(variant, identity)) continue;
+        active = variant;
+        delete variants[key];
+        break;
+    }
+    active ||= { segments: {} };
+    if (hasOwnValues(variants)) active.variants = copyBoundedObject(variants, MAX_ATTRIBUTION_OVERRIDE_VARIANTS);
+    else delete active.variants;
+    overrideMap[messageKey] = active;
+    return active;
 }
 
 export function getAttributionOverrideRecord(overrideMap, messageIndex, segmentIndex) {
@@ -725,28 +853,27 @@ export function setAttributionOverrideRecord(overrideMap, review, options = {}) 
         && currentMessageFingerprint !== reviewMessageFingerprint) return false;
     const messageFingerprint = currentMessageFingerprint || reviewMessageFingerprint;
     const messageKey = String(messageIndex);
-    let entry = overrideMap[messageKey];
-    const storedMessageId = boundedString(entry?.messageId, 120);
-    const storedMessageFingerprint = storedOverrideMessageFingerprint(entry);
-    const legacyHashMatch = isLegacyHashOverrideEntry(
-        entry,
-        expectedHash,
-        message === undefined ? null : text.length,
-    );
-    const identityMismatch = !legacyHashMatch && (storedMessageFingerprint === null
-        || ((messageId || storedMessageId) && (!messageId || !storedMessageId || messageId !== storedMessageId))
-        || (messageFingerprint && storedMessageFingerprint && messageFingerprint !== storedMessageFingerprint)
-        || (!messageId && !storedMessageId && messageFingerprint && storedMessageFingerprint !== messageFingerprint));
-    if (!isPlainObject(entry) || (expectedHash && entry.hash !== expectedHash) || identityMismatch) {
-        entry = { segments: {} };
-        if (expectedHash) entry.hash = expectedHash;
-        overrideMap[messageKey] = entry;
-    }
+    const swipeId = messageSwipeIdFor(message);
+    let entry = expectedHash
+        ? activateAttributionOverrideEntry(overrideMap, messageKey, {
+            expectedHash,
+            messageId,
+            messageFingerprint,
+            textLength: message === undefined ? null : text.length,
+            swipeId,
+        })
+        : cloneBoundedOverrideEntry(overrideMap[messageKey], true) || { segments: {} };
+    overrideMap[messageKey] = entry;
     if (expectedHash) entry.hash = expectedHash;
     if (messageId) entry.messageId = messageId;
     else delete entry.messageId;
     if (messageFingerprint) entry.messageFingerprint = messageFingerprint;
     if (message !== undefined) entry.textLength = text.length;
+    if (message !== undefined) {
+        if (swipeId === null) delete entry.swipeId;
+        else entry.swipeId = swipeId;
+    }
+    boundOverrideSegmentMaps(entry);
     if (!isPlainObject(entry.segments)) entry.segments = {};
     if (!isPlainObject(entry.sources)) entry.sources = {};
     const segmentKey = String(segmentIndex);
@@ -756,7 +883,7 @@ export function setAttributionOverrideRecord(overrideMap, review, options = {}) 
         for (const mapName of ['confidences', 'reviewIds', 'records']) {
             if (!isPlainObject(entry[mapName])) continue;
             delete entry[mapName][segmentKey];
-            if (!Object.keys(entry[mapName]).length) delete entry[mapName];
+            if (!hasOwnValues(entry[mapName])) delete entry[mapName];
         }
     }
     entry.segments[segmentKey] = speaker;
@@ -820,6 +947,7 @@ export function deleteAttributionOverrideRecord(overrideMap, messageIndex, segme
     if (messageKey === 'null' || segmentKey === 'null') return false;
     const entry = overrideMap[messageKey];
     if (!isPlainObject(entry)) return false;
+    boundOverrideSegmentMaps(entry);
     let deleted = false;
     for (const mapName of ['segments', 'sources', 'confidences', 'reviewIds', 'records']) {
         const map = entry[mapName];
@@ -827,6 +955,17 @@ export function deleteAttributionOverrideRecord(overrideMap, messageIndex, segme
         delete map[segmentKey];
         deleted = true;
     }
+    if (!deleted || hasOwnValues(entry.segments)) return deleted;
+    for (const key of ['verificationStatus', 'verifiedHash', 'verifiedAt', 'verifiedVersion']) delete entry[key];
+    const variants = entriesFromCollection(entry.variants, MAX_ATTRIBUTION_OVERRIDE_VARIANTS);
+    if (!variants.length) {
+        delete overrideMap[messageKey];
+        return true;
+    }
+    const [[, promoted], ...remaining] = variants;
+    const active = cloneBoundedOverrideEntry(promoted, false) || { segments: {} };
+    if (remaining.length) active.variants = Object.fromEntries(remaining);
+    overrideMap[messageKey] = active;
     return deleted;
 }
 

@@ -393,6 +393,63 @@ test('a transparent page background no longer reads as dark', () => {
     });
 });
 
+test('CSS Color 4 surfaces use native canvas conversion before compositing', () => {
+    const previousThemeMode = settings.themeMode;
+    const previousCreateElement = document.createElement;
+    const previousQuerySelector = document.querySelector;
+    const previousGetComputedStyle = globalThis.getComputedStyle;
+    const previousBodyParent = document.body.parentElement;
+    const middle = { parentElement: document.body };
+    const target = { parentElement: middle };
+    const parsed = new Set();
+    let fillStyle = '#000000';
+    const context = {
+        clearRect() {},
+        fillRect() {},
+        get fillStyle() { return fillStyle; },
+        set fillStyle(value) { fillStyle = String(value); },
+        getImageData() {
+            parsed.add(fillStyle);
+            if (fillStyle.startsWith('oklch(')) return { data: [200, 200, 200, 255] };
+            if (fillStyle.startsWith('lab(')) return { data: [100, 0, 0, 128] };
+            if (fillStyle.startsWith('color(')) return { data: [0, 100, 0, 128] };
+            throw new Error(`unexpected color ${fillStyle}`);
+        },
+    };
+    try {
+        settings.themeMode = 'auto';
+        document.body.parentElement = null;
+        document.querySelector = () => target;
+        document.createElement = tag => tag === 'canvas'
+            ? { width: 0, height: 0, getContext: () => context }
+            : null;
+        globalThis.getComputedStyle = element => ({
+            backgroundColor: element === document.body
+                ? 'oklch(80% 0 0)'
+                : element === middle
+                    ? 'lab(40% 40 20 / 50%)'
+                    : 'color(display-p3 0 0.5 0 / 50%)',
+        });
+        invalidateThemeCache();
+
+        assert.equal(getContrastSurfaceColor(), '#4b6432');
+        assert.deepEqual([...parsed].sort(), [
+            'color(display-p3 0 0.5 0 / 50%)',
+            'lab(40% 40 20 / 50%)',
+            'oklch(80% 0 0)',
+        ]);
+    } finally {
+        settings.themeMode = previousThemeMode;
+        if (previousCreateElement === undefined) delete document.createElement;
+        else document.createElement = previousCreateElement;
+        document.querySelector = previousQuerySelector;
+        globalThis.getComputedStyle = previousGetComputedStyle;
+        if (previousBodyParent === undefined) delete document.body.parentElement;
+        else document.body.parentElement = previousBodyParent;
+        invalidateThemeCache();
+    }
+});
+
 test('an unsafe midpoint inside a narrow stop interval falls back to a solid readable visual', () => {
     withPalette({ themeMode: 'dark', brightness: 0 }, () => {
         const entry = {};

@@ -1,7 +1,7 @@
 // main.js - extracted from index.js (mechanical split)
 import { clearDomCache } from './attribution.js';
 import { destroyGradientAnimationController } from './animation-controller.js';
-import { recountDialogueCountsFromChat, scanAllMessages, stripColorBlocksFromDisplay } from './color-blocks.js';
+import { recountDialogueCountsFromChat, refreshTransientNarratorCount, scanAllMessages, stripColorBlocksFromDisplay } from './color-blocks.js';
 import { deleteCharacterKeys } from './character-operations.js';
 import { setupContextMenu } from './context-menu.js';
 import { DOM_RETRY_REFRESH_DELAYS, POST_MUTATION_DOM_REPAIR_DELAY_MS, clearDecoratedWatchers, clearDialogueCountCache, clearSessionAttributionVerifications, decorateAllMessages, reconcileMessageQuoteOverridesAfterDeletion, refreshDomDialogueCounts, scheduleDomRefreshSeries, scheduleDomSettleRefresh, scheduleMessageDomRepair, setupChatObserver, setupChatRootObserver, startDomHealthCheck, stopDomHealthCheck, undecorateAllMessages } from './dom-engine.js';
@@ -15,7 +15,7 @@ import { eventSource, event_types, getContext } from './st-api.js';
 import { attributionChatGeneration, autoSyncPendingRecord, characterColors, expandedCharacterRows, groupProfiles, isDomEngine, isStreamingGenerationActive, lastCharKey, lastProcessedMessageSignature, pendingAttributionVerifications, runtimeState, selectedCharacterKeys, setAttributionChatGeneration, setEnabledLifecycleSynchronizer, setIsStreamingGenerationActive, setLastCharKey, setLastProcessedMessageSignature, setPendingAttributionVerifications, setSwapMode, settings, swapMode } from './state.js';
 import { beginStreamingPaint, endStreamingPaint } from './streaming-paint.js';
 import { confirmAutoSyncRecord, doAutoSyncMarkersMatch, ensureRegexScript, getAutoSyncRecord, getCharKey, getStorageKey, initAutoSync, loadData, markCurrentPersonaKept, migrateLegacyLocalStorageIfNeeded, migrateRenamedCharacterStorage, saveData, stopAutoSyncPolling, syncAutoSyncPolling, tryLoadFromCard, updateAutoSyncUI } from './storage.js';
-import { applyRestoredPersonaColor, applyThemeOrBrightnessChange, clearAutoColorizeIndicators, createUI, ensurePersonaCharacter, renamePersonaCharacter, syncUIWithSettings, updateCharList } from './ui.js';
+import { applyRestoredPersonaColor, applyThemeOrBrightnessChange, clearAutoColorizeIndicators, createUI, ensurePersonaCharacter, renamePersonaCharacter, syncUIWithSettings, updateCharList, updateLegend } from './ui.js';
 import { cancelStreamingAttributionVerification, captureLoadedAttributionMessageBaseline, clearAutoAttributionVerificationQueue, queueAutoAttributionVerificationForRenderedMessages, scheduleStreamingAttributionVerification } from './verify.js';
 
 let lastAppliedAutoTheme = null;
@@ -97,6 +97,8 @@ function stopAutomaticRuntime() {
     runtimeState.chatChangedRafId = null;
     clearTimeout(runtimeState.chatChangedSettleTimer);
     runtimeState.chatChangedSettleTimer = null;
+    clearTimeout(runtimeState.dialogueRecountTimer);
+    runtimeState.dialogueRecountTimer = null;
     stopDomHealthCheck();
     clearDecoratedWatchers();
     undecorateAllMessages();
@@ -108,6 +110,7 @@ function stopAutomaticRuntime() {
     destroyGradientAnimationController();
     scheduleCustomFontRefresh(0);
     flushPromptInjection();
+    updateLegend();
 }
 
 export function syncAutomaticRuntime() {
@@ -116,25 +119,20 @@ export function syncAutomaticRuntime() {
         return false;
     }
     const activated = startAutomaticRuntime();
-    if (!activated) {
-        if (!settings.enabled) stopAutomaticRuntime();
-        return false;
-    }
+    scheduleRegexScriptInstall();
+    registerDialogueColorsMacro();
+    if (!activated) return false;
 
     // A chat/card may have changed while disabled. Load and reconcile that
     // context before any activation repaint or observer can use the old table.
     handleChatChanged();
-    scheduleRegexScriptInstall();
     setupContextMenu();
-    registerDialogueColorsMacro();
     invalidateThemeCache();
     lastAppliedAutoTheme = settings.themeMode === 'auto' ? detectTheme() : null;
     lastAppliedAutoSurface = settings.themeMode === 'auto' ? getReadableSurfaceSignature() : null;
     if (lastAppliedAutoTheme) applyThemeOrBrightnessChange(() => {}, { saveImmediately: true });
     return true;
 }
-
-setEnabledLifecycleSynchronizer(syncAutomaticRuntime);
 
 export function registerKeyboardShortcuts() {
     if (runtimeState.keyboardSetup) return;
@@ -152,6 +150,9 @@ export function registerKeyboardShortcuts() {
 }
 
 export function resetDialogueCountsForNewChat() {
+    loudGenerationActive = false;
+    clearTimeout(runtimeState.dialogueRecountTimer);
+    runtimeState.dialogueRecountTimer = null;
     if (!settings.enabled || !automaticRuntimeActive) return;
     setLastProcessedMessageSignature('');
 
@@ -172,6 +173,9 @@ export function resetDialogueCountsForNewChat() {
 }
 
 export function handleChatChanged() {
+    loudGenerationActive = false;
+    clearTimeout(runtimeState.dialogueRecountTimer);
+    runtimeState.dialogueRecountTimer = null;
     if (!settings.enabled) {
         stopAutomaticRuntime();
         return;
@@ -218,7 +222,9 @@ export function handleChatChanged() {
     void applyHtmlBreakingSpanRepair({ silent: true })
         .catch(error => console.error('[Dialogue Colors] HTML markup repair failed:', error));
     if (settings.autoPersonaCharacter === true) ensurePersonaCharacter({ silent: true });
-    if (!isDomEngine()) recountDialogueCountsFromChat();
+    const chat = getContext()?.chat || [];
+    if (!isDomEngine()) recountDialogueCountsFromChat(chat);
+    else refreshTransientNarratorCount(chat);
     updateCharList();
     injectPrompt();
     stripColorBlocksFromDisplay();
@@ -266,12 +272,53 @@ export function handleChatChanged() {
     }
 }
 
+function scheduleExactDialogueRecount(chat) {
+    if (!Array.isArray(chat)) return;
+    clearTimeout(runtimeState.dialogueRecountTimer);
+    runtimeState.dialogueRecountTimer = setTimeout(() => {
+        runtimeState.dialogueRecountTimer = null;
+        if (!settings.enabled || !automaticRuntimeActive || getContext()?.chat !== chat) return;
+        let countsChanged;
+        if (isDomEngine()) {
+            const result = refreshDomDialogueCounts(chat);
+            countsChanged = result.changed || result.countsChanged;
+            refreshTransientNarratorCount(chat);
+        } else {
+            countsChanged = recountDialogueCountsFromChat(chat);
+        }
+        if (countsChanged) updateCharList();
+        updateLegend();
+    }, 100);
+}
+
+export function handleCharacterMessageRendered(mesIndex) {
+    if (!settings.enabled || !automaticRuntimeActive) return;
+    const chat = getContext()?.chat;
+    const index = Number(mesIndex);
+    const message = Array.isArray(chat) && Number.isInteger(index) && index >= 0 ? chat[index] : null;
+    if (message) {
+        scheduleMessageDomRepair(index, {
+            delay: 0,
+            source: 'lifecycle',
+            forceVerify: true,
+            verifyDelay: 250,
+            renderFallback: false,
+        });
+        onNewMessage(index, message, chat);
+    } else {
+        onNewMessage();
+    }
+    scheduleDomRefreshSeries(120);
+    scheduleCustomFontRefresh(120);
+}
+
 export function handleMessageUpdated(mesIndex) {
     if (!settings.enabled || !automaticRuntimeActive) return;
     // A swipe reuses the same mesid with an entirely different body, so the
     // frozen streaming assignments and the cached target must both be dropped.
     cancelStreamingAttributionVerification();
     endStreamingPaint();
+    scheduleExactDialogueRecount(getContext()?.chat);
     const index = Number(mesIndex);
     if (Number.isFinite(index) && index >= 0) {
         scheduleMessageDomRepair(index, {
@@ -299,18 +346,23 @@ export function handleMessageUpdated(mesIndex) {
 
 export function handleMessageDeleted() {
     if (!settings.enabled || !automaticRuntimeActive) return;
+    clearTimeout(runtimeState.dialogueRecountTimer);
+    runtimeState.dialogueRecountTimer = null;
     cancelStreamingAttributionVerification();
     endStreamingPaint();
     reconcileMessageQuoteOverridesAfterDeletion();
     clearDialogueCountCache();
+    const chat = getContext()?.chat || [];
     let countsChanged;
     if (isDomEngine()) {
-        const result = refreshDomDialogueCounts();
+        const result = refreshDomDialogueCounts(chat);
         countsChanged = result.changed || result.countsChanged;
+        refreshTransientNarratorCount(chat);
     } else {
-        countsChanged = recountDialogueCountsFromChat();
+        countsChanged = recountDialogueCountsFromChat(chat);
     }
     if (countsChanged) updateCharList();
+    updateLegend();
     scheduleDomRefreshSeries(0);
     scheduleCustomFontRefresh(0);
 }
@@ -326,7 +378,7 @@ export function registerEventHandlers() {
         generationAfterCommands: (_type, _options, dryRun) => {
             if (settings.enabled && automaticRuntimeActive && !dryRun) flushPromptInjection();
         },
-        characterMessageRendered: () => { if (settings.enabled && automaticRuntimeActive) { onNewMessage(); scheduleDomRefreshSeries(120); scheduleCustomFontRefresh(120); } },
+        characterMessageRendered: handleCharacterMessageRendered,
         messageRendered: () => { if (settings.enabled && automaticRuntimeActive) { scheduleDomRefreshSeries(120); scheduleCustomFontRefresh(120); } },
         messageUpdated: handleMessageUpdated,
         messageDeleted: handleMessageDeleted,
@@ -353,6 +405,7 @@ export function registerEventHandlers() {
             // Run post-generation verification sweep for unverified rendered messages.
             if (isDomEngine()) queueAutoAttributionVerificationForRenderedMessages({ delay: 300 });
         },
+        generationInterrupted: () => { loudGenerationActive = false; },
         chatCreated: resetDialogueCountsForNewChat,
         chatChanged: handleChatChanged,
         characterRenamed: (oldValue, newValue) => {
@@ -405,6 +458,14 @@ export function registerEventHandlers() {
         eventSource.on(eventName, runtimeState.eventHandlers.streamToken);
     }
     if (event_types.GENERATION_ENDED) eventSource.on(event_types.GENERATION_ENDED, runtimeState.eventHandlers.generationEnded);
+    for (const eventName of new Set([
+        event_types.GENERATION_STOPPED,
+        event_types.GENERATION_ERROR,
+        event_types.GENERATION_FAILED,
+        event_types.CHAT_RESET,
+    ].filter(Boolean))) {
+        eventSource.on(eventName, runtimeState.eventHandlers.generationInterrupted);
+    }
     if (event_types.CHAT_CREATED) eventSource.on(event_types.CHAT_CREATED, runtimeState.eventHandlers.chatCreated);
     if (event_types.GROUP_CHAT_CREATED) eventSource.on(event_types.GROUP_CHAT_CREATED, runtimeState.eventHandlers.chatCreated);
     eventSource.on(event_types.CHAT_CHANGED, runtimeState.eventHandlers.chatChanged);
@@ -438,6 +499,16 @@ export function registerDialogueColorsMacro() {
     }
 }
 
+export async function install() {
+    setEnabledLifecycleSynchronizer(syncAutomaticRuntime);
+    globalThis.DialogueColorsInterceptor = async function (_chat, _contextSize, _abort, type) {
+        if (type !== 'quiet' && settings.enabled && automaticRuntimeActive && !isDomEngine()) flushPromptInjection();
+    };
+    registerEventHandlers();
+    await new Promise(resolve => setTimeout(resolve, 100));
+    init();
+}
+
 export function init() {
     // Load enough state to render the settings UI, but do not migrate or persist
     // anything until the stored enabled flag is known.
@@ -468,6 +539,3 @@ export function init() {
         }
     }, 500);
 }
-
-// External generation interceptor called by SillyTavern during prompt generation.
-globalThis.DialogueColorsInterceptor = async function (chat, contextSize, abort, type) { if (type !== 'quiet' && settings.enabled && automaticRuntimeActive && !isDomEngine()) flushPromptInjection(); };

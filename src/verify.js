@@ -3,6 +3,7 @@ import { attributeDialogueSegments, clearSpeakerRegexCache, ensureCharacterEntry
 import { ATTRIBUTION_SOURCE, ATTRIBUTION_VERIFICATION_STATUS, isHostSystemOrToolMessage, normalizeAttributionConfidence } from './attribution-store.js';
 import { buildNameColorLookup, collectFontColorsFromText, parseNamedColorAssignmentsFromText, resolveCharacterKeyByNameOrAlias } from './color-blocks.js';
 import { cancelMessageDomFollowupRepairs, clearMessageDomRepairTimer, clearStreamingAttributionOverrides, decorateMessageDomFromCurrentRender, decorateObservedMessages, getMessageAttributionFreezeSegments, getMessageQuoteOverrideEntry, getMessageQuoteOverrideOptions, isMessageAttributionVerified, markMessageAttributionVerified, refreshAndDecorateMessageDom, scheduleMessageDomFollowupRepair, setMessageQuoteOverride, setStreamingAttributionOverride, suspendMessageDomWorkForEdit, upsertAttributionReview } from './dom-engine.js';
+import { normalizeRegistryIdentityName } from './group-profiles.js';
 import { callLLMWithProfile, classifyLlmRequestError } from './llm.js';
 import { hasAttributionVerifierBallotQuorum, isSpeakerNamePresentInText, normalizeAttributionVerifyPasses, reduceAttributionVerifierBallots } from './verify-consensus.js';
 import { commit, repaintDomAfterCharacterDataChange } from './live-colors.js';
@@ -55,8 +56,8 @@ function isAutomaticVerification(options = {}) {
 
 export function normalizeAttributionVerifierSpeaker(value) {
     if (typeof value !== 'string') return null;
-    const speaker = value.trim();
-    if (!speaker || speaker.length > 80 || RESERVED_VERIFIER_SPEAKER_SYNTAX.test(speaker)) return null;
+    const speaker = normalizeRegistryIdentityName(value, 80);
+    if (!speaker || RESERVED_VERIFIER_SPEAKER_SYNTAX.test(speaker)) return null;
     if (RESERVED_VERIFIER_SPEAKER_NAMES.has(speaker.toLowerCase()) || isCompositeSpeakerLabel(speaker)) return null;
     return speaker;
 }
@@ -124,6 +125,49 @@ export function getAutoAttributionMessageId(msg) {
     return id === null || id === undefined ? '' : String(id);
 }
 
+function captureVerifierMessageState(msg, index) {
+    return {
+        index,
+        message: msg,
+        messageId: getAutoAttributionMessageId(msg),
+        name: String(msg?.name ?? ''),
+        text: String(msg?.mes ?? ''),
+        isUser: msg?.is_user === true,
+        isSystem: msg?.is_system === true,
+        isHostSystemOrTool: isHostSystemOrToolMessage(msg),
+        swipeId: msg?.swipe_id ?? null,
+    };
+}
+
+function captureVerifierPrecedingContext(chat, mesIndex) {
+    if (!Array.isArray(chat) || !Number.isSafeInteger(mesIndex) || mesIndex < 0) return [];
+    const context = [];
+    for (let index = mesIndex - 1; index >= 0 && context.length < MAX_ATTRIBUTION_VERIFIER_CONTEXT_MESSAGES; index--) {
+        const msg = chat[index];
+        if (!msg || isHostSystemOrToolMessage(msg)) continue;
+        context.push(captureVerifierMessageState(msg, index));
+    }
+    return context.reverse();
+}
+
+function isVerifierMessageStateCurrent(snapshot, msg, index) {
+    if (!snapshot || snapshot.index !== index || snapshot.message !== msg) return false;
+    const current = captureVerifierMessageState(msg, index);
+    return current.messageId === snapshot.messageId
+        && current.name === snapshot.name
+        && current.text === snapshot.text
+        && current.isUser === snapshot.isUser
+        && current.isSystem === snapshot.isSystem
+        && current.isHostSystemOrTool === snapshot.isHostSystemOrTool
+        && current.swipeId === snapshot.swipeId;
+}
+
+function isVerifierPrecedingContextCurrent(snapshot, chat, mesIndex) {
+    const current = captureVerifierPrecedingContext(chat, mesIndex);
+    return Array.isArray(snapshot) && current.length === snapshot.length
+        && snapshot.every((message, index) => isVerifierMessageStateCurrent(message, current[index]?.message, current[index]?.index));
+}
+
 export function captureLoadedAttributionMessageBaseline(chat = getContext()?.chat) {
     loadedAttributionMessageTextsById.clear();
     loadedAttributionMessageTextByObject = new WeakMap();
@@ -184,6 +228,7 @@ function areVerifierSettingsCurrent(snapshot) {
 
 function captureAttributionMessageIdentity(mesIndex, msg, options = {}, chat = getContext()?.chat) {
     const text = String(msg?.mes ?? '');
+    const messageState = captureVerifierMessageState(msg, mesIndex);
     return {
         mesIndex,
         chat,
@@ -191,6 +236,12 @@ function captureAttributionMessageIdentity(mesIndex, msg, options = {}, chat = g
         messageId: getAutoAttributionMessageId(msg),
         messageHash: hashMessageText(text),
         text,
+        messageName: messageState.name,
+        messageIsUser: messageState.isUser,
+        messageIsSystem: messageState.isSystem,
+        messageIsHostSystemOrTool: messageState.isHostSystemOrTool,
+        swipeId: messageState.swipeId,
+        precedingContext: captureVerifierPrecedingContext(chat, mesIndex),
         chatGeneration: attributionChatGeneration,
         cancellationEpoch: attributionVerificationEpoch,
         verifierSettings: captureVerifierSettings(options),
@@ -205,6 +256,13 @@ function isAttributionMessageIdentityCurrent(identity, { allowAppendedText = fal
     if (!Array.isArray(chat) || chat !== identity.chat) return false;
     const msg = chat[identity.mesIndex];
     if (msg !== identity.message || getAutoAttributionMessageId(msg) !== identity.messageId) return false;
+    const messageState = captureVerifierMessageState(msg, identity.mesIndex);
+    if (messageState.name !== identity.messageName
+        || messageState.isUser !== identity.messageIsUser
+        || messageState.isSystem !== identity.messageIsSystem
+        || messageState.isHostSystemOrTool !== identity.messageIsHostSystemOrTool
+        || messageState.swipeId !== identity.swipeId
+        || !isVerifierPrecedingContextCurrent(identity.precedingContext, chat, identity.mesIndex)) return false;
     if (identity.verifierSettings.automatic
         && !identity.verifierSettings.includeLoaded
         && isLoadedAttributionMessage(msg)) return false;
@@ -454,9 +512,11 @@ export async function drainAutoAttributionVerificationQueue() {
                         includeLoaded: item.includeLoaded === true,
                         expectedIdentity: item,
                     });
-                    queueAutoAttributionVerificationAfterCorrections(item.mesIndex, result, {
-                        includeLoaded: item.includeLoaded,
-                    });
+                    if (isAttributionMessageIdentityCurrent(item)) {
+                        queueAutoAttributionVerificationAfterCorrections(item.mesIndex, result, {
+                            includeLoaded: item.includeLoaded,
+                        });
+                    }
                     return result;
                 },
                 { automatic: true, queue: false, queueKey: `auto:${currentKey}`, cancellationEpoch: item.cancellationEpoch }
@@ -636,7 +696,7 @@ Rules:
 10. Correction indexes must exactly match the supplied segment indexes.`;
 }
 
-function buildAttributionVerifierRequest(msg, mesIndex, segments, lookup) {
+function buildAttributionVerifierRequest(msg, mesIndex, segments, lookup, capturedPrecedingContext = null) {
     const thoughtSymbols = getThoughtDelimiterSymbols()
         .slice(0, 8)
         .map(symbol => boundVerifierText(formatPromptLiteralSymbol(symbol), 24));
@@ -674,26 +734,15 @@ function buildAttributionVerifierRequest(msg, mesIndex, segments, lookup) {
     if (ctx?.name2) addKnownName(ctx.name2);
 
     const chat = Array.isArray(ctx?.chat) ? ctx.chat : [];
-    if (Number.isFinite(mesIndex) && mesIndex >= 0) {
-        for (let i = Math.max(0, mesIndex - 3); i < mesIndex; i++) {
-            const pastMsg = chat[i];
-            if (pastMsg?.name) addKnownName(pastMsg.name);
-        }
-    }
-
-    const precedingContext = [];
-    if (Number.isFinite(mesIndex) && mesIndex >= 0) {
-        for (let i = Math.max(0, mesIndex - MAX_ATTRIBUTION_VERIFIER_CONTEXT_MESSAGES); i < mesIndex; i++) {
-            const pastMsg = chat[i];
-            if (pastMsg) {
-                precedingContext.push({
-                    index: i,
-                    speaker: boundVerifierText(pastMsg.name || 'Unknown', 80),
-                    text: boundVerifierText(String(pastMsg.mes || '').trim().replace(/\s+/g, ' '), MAX_ATTRIBUTION_VERIFIER_CONTEXT_CHARS),
-                });
-            }
-        }
-    }
+    const precedingMessages = Array.isArray(capturedPrecedingContext)
+        ? capturedPrecedingContext
+        : captureVerifierPrecedingContext(chat, mesIndex);
+    for (const pastMsg of precedingMessages) addKnownName(pastMsg.name);
+    const precedingContext = precedingMessages.map(pastMsg => ({
+        index: pastMsg.index,
+        speaker: boundVerifierText(pastMsg.name || 'Unknown', 80),
+        text: boundVerifierText(pastMsg.text.trim().replace(/\s+/g, ' '), MAX_ATTRIBUTION_VERIFIER_CONTEXT_CHARS),
+    }));
     const sourceSegments = Array.isArray(segments) ? segments : [];
     const submittedSegments = sourceSegments.slice(0, MAX_ATTRIBUTION_VERIFIER_SEGMENTS);
     const boundedSegments = submittedSegments.map(seg => ({
@@ -776,24 +825,28 @@ export function isVerifierSpeakerGroundedInChat(speaker, msg, mesIndex, chat = g
     const name = normalizeAttributionVerifierSpeaker(speaker);
     if (!name) return false;
     const texts = [msg?.mes, msg?.name];
-    const messages = Array.isArray(chat) ? chat : [];
-    if (Number.isFinite(mesIndex)) {
-        for (let i = Math.max(0, mesIndex - MAX_ATTRIBUTION_VERIFIER_CONTEXT_MESSAGES); i < mesIndex; i++) {
-            texts.push(messages[i]?.mes, messages[i]?.name);
-        }
+    for (const contextMessage of captureVerifierPrecedingContext(chat, mesIndex)) {
+        texts.push(contextMessage.text, contextMessage.name);
     }
     return isSpeakerNamePresentInText(name, texts);
 }
 
-function captureAttributionVerificationTarget(mesIndex, msg, segments, options = {}, chat = getContext()?.chat) {
+function captureAttributionVerificationTarget(identity, segments) {
     return {
-        ...captureAttributionMessageIdentity(mesIndex, msg, options, chat),
+        ...identity,
         segments: new Map(segments.map(segment => [segment.index, {
             index: segment.index,
             start: segment.start,
             end: segment.end,
             text: segment.text,
             delimiter: segment.delimiter,
+            assignmentKey: segment.assignment?.key ?? null,
+            assignmentName: segment.assignment?.name ?? null,
+            assignmentColor: segment.assignment?.color ?? null,
+            confidence: segment.confidence ?? null,
+            provenanceSource: segment.provenance?.source ?? null,
+            provenanceMethod: segment.provenance?.method ?? null,
+            evidence: JSON.stringify(segment.evidence ?? null),
         }])),
     };
 }
@@ -807,7 +860,14 @@ function hasCurrentVerifierSegments(target, segments) {
     for (const original of target.segments.values()) {
         const next = current.get(original.index);
         if (!next || next.start !== original.start || next.end !== original.end
-            || next.text !== original.text || next.delimiter !== original.delimiter) return false;
+            || next.text !== original.text || next.delimiter !== original.delimiter
+            || (next.assignment?.key ?? null) !== original.assignmentKey
+            || (next.assignment?.name ?? null) !== original.assignmentName
+            || (next.assignment?.color ?? null) !== original.assignmentColor
+            || (next.confidence ?? null) !== original.confidence
+            || (next.provenance?.source ?? null) !== original.provenanceSource
+            || (next.provenance?.method ?? null) !== original.provenanceMethod
+            || JSON.stringify(next.evidence ?? null) !== original.evidence) return false;
     }
     return true;
 }
@@ -872,7 +932,7 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
         mesIndex,
     });
     const segments = attribution.segments;
-    const target = captureAttributionVerificationTarget(mesIndex, msg, segments, options, chat);
+    const target = captureAttributionVerificationTarget(executionIdentity, segments);
     if (!segments.length) {
         if (!isAttributionVerificationTargetCurrent(target)) return unchecked;
         if (!skipMarkVerified && !useTransientOverrides && isAttributionVerificationTargetCurrent(target)) {
@@ -887,10 +947,10 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
 
     const localAssignments = parseNamedColorAssignmentsFromText(msg.mes);
     const lookup = buildNameColorLookup(localAssignments);
-    const request = buildAttributionVerifierRequest(msg, mesIndex, segments, lookup);
+    const request = buildAttributionVerifierRequest(msg, mesIndex, segments, lookup, target.precedingContext);
     if (!request.hasAllSegments) {
         console.warn(`[Dialogue Colors] Skipped attribution verification for message ${mesIndex}: too many dialogue segments.`);
-        if (!useTransientOverrides && isAttributionVerificationTargetCurrent(target)) clearStreamingAttributionOverrides(mesIndex);
+        if (!useTransientOverrides && isAttributionVerificationTargetAndSegmentsCurrent(target)) clearStreamingAttributionOverrides(mesIndex);
         return unchecked;
     }
 
@@ -952,13 +1012,13 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
                 timeoutMs: ATTRIBUTION_VERIFIER_TIMEOUT_MS,
             });
         } catch (e) {
-            const cancelled = e?.name === 'AbortError'
-                || !isAttributionVerificationTargetCurrent(target, { allowAppendedText: useTransientOverrides });
+            const targetCurrent = isAttributionVerificationTargetAndSegmentsCurrent(target, { allowAppendedText: useTransientOverrides });
+            const cancelled = e?.name === 'AbortError' || !targetCurrent;
             if (!cancelled) {
                 console.warn('[Dialogue Colors] LLM attribution verification failed:', e);
                 if (trackFailure) recordAutoAttributionVerifyFailure(verifyKey, mesIndex);
                 if (!quiet) toast.warning('Color verification failed (see console).');
-                if (!useTransientOverrides && isAttributionVerificationTargetCurrent(target)) clearStreamingAttributionOverrides(mesIndex);
+                if (!useTransientOverrides && targetCurrent) clearStreamingAttributionOverrides(mesIndex);
             }
             return cancelled
                 ? unchecked
@@ -984,9 +1044,10 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
     }
 
     if (!hasAttributionVerifierBallotQuorum(validBallots, passes)) {
+        if (!isAttributionVerificationTargetAndSegmentsCurrent(target, { allowAppendedText: useTransientOverrides })) return unchecked;
         if (trackFailure) recordAutoAttributionVerifyFailure(verifyKey, mesIndex);
         if (!quiet) toast.warning('Color verification failed (see console).');
-        if (!useTransientOverrides && isAttributionVerificationTargetCurrent(target)) clearStreamingAttributionOverrides(mesIndex);
+        if (!useTransientOverrides && isAttributionVerificationTargetAndSegmentsCurrent(target)) clearStreamingAttributionOverrides(mesIndex);
         return unchecked;
     }
 
@@ -996,10 +1057,8 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
         mesIndex,
     });
     const validCorrections = reduceAttributionVerifierBallots(ballots);
-    if (!hasCurrentVerifierSegments(target, currentAttribution.segments)) {
-        if (trackFailure && isAttributionVerificationTargetCurrent(target, { allowAppendedText: useTransientOverrides })) {
-            recordAutoAttributionVerifyFailure(verifyKey, mesIndex);
-        }
+    if (!isAttributionVerificationTargetCurrent(target, { allowAppendedText: useTransientOverrides })
+        || !hasCurrentVerifierSegments(target, currentAttribution.segments)) {
         return unchecked;
     }
     failedAutoAttributionVerifyAttempts.delete(verifyKey);
@@ -1025,7 +1084,7 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
         aborted: true,
     });
     for (const correction of validCorrections) {
-        if (!isAttributionVerificationTargetCurrent(target, { allowAppendedText: useTransientOverrides })) { staleTarget = true; break; }
+        if (!isAttributionVerificationTargetAndSegmentsCurrent(target, { allowAppendedText: useTransientOverrides })) { staleTarget = true; break; }
         const seg = segmentByIndex.get(correction.index);
         let { assignment } = resolveVerifierSpeakerName(correction.speaker, currentLookup);
         // Under full auto-accept the user opted out of review, so an unconfigured
@@ -1094,6 +1153,7 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
     }
 
     if (createdCharacters) {
+        if (!isAttributionVerificationTargetAndSegmentsCurrent(target, { allowAppendedText: useTransientOverrides })) return abortedResult();
         clearSpeakerRegexCache();
         commit();
         repaintDomAfterCharacterDataChange(0);
@@ -1142,7 +1202,7 @@ export async function verifyAttributionsWithLLM(mesIndex, options = {}) {
         }
     } else {
         const mesElement = document.querySelector(`#chat .mes[mesid="${mesIndex}"]`) || document.querySelectorAll('#chat .mes[mesid]')[mesIndex];
-        if (mesElement && isAttributionVerificationTargetCurrent(target, { allowAppendedText: useTransientOverrides })) {
+        if (mesElement && isAttributionVerificationTargetAndSegmentsCurrent(target, { allowAppendedText: useTransientOverrides })) {
             decorateObservedMessages([mesElement], { queueVerification: false });
         }
     }

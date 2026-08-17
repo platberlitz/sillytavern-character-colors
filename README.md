@@ -138,7 +138,7 @@ Local-mode assignments are stored as per-chat quote overrides. LLM-mode assignme
 
 - Save, load, and delete complete assignment presets.
 - Generate custom palettes from a name and mood notes, or save current colors as a palette.
-- Apply 16 built-in gradient presets or manage reusable custom gradient presets from a character's gradient editor.
+- Apply 37 built-in gradient presets or manage reusable custom gradient presets from a character's gradient editor.
 - Export/import color data and settings as JSON. Imports are analyzed before any changes are applied.
 - Build portable **Style packs** (`dialogue-colors-style-pack` v1) from selected custom palettes, palette metadata, custom gradient presets, optional assignment presets, and safe appearance values. This format is separate from the internal color schema version.
 - Style-pack files are local-only and reviewed before installation. Palette, gradient, and assignment-preset conflicts can keep, rename, or replace per category; assignment application and appearance changes are explicit opt-ins.

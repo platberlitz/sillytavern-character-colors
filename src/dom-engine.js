@@ -1,6 +1,6 @@
 // dom-engine.js - extracted from index.js (mechanical split)
 import { attributeDialogueSegments } from './attribution.js';
-import { ATTRIBUTION_REVIEW_METADATA_KEY, ATTRIBUTION_REVIEW_STATUS, ATTRIBUTION_SOURCE, ATTRIBUTION_VERIFICATION_STATUS, createAttributionStore, createMessageFingerprint, deleteAttributionOverrideRecord, getAttributionConfidenceBand, isHostSystemOrToolMessage, isLegacyAttributionOverrideEntry, normalizeAttributionConfidence, normalizeAttributionSource, setAttributionOverrideRecord } from './attribution-store.js';
+import { ATTRIBUTION_REVIEW_METADATA_KEY, ATTRIBUTION_REVIEW_STATUS, ATTRIBUTION_SOURCE, ATTRIBUTION_VERIFICATION_STATUS, MAX_ATTRIBUTION_OVERRIDE_SEGMENTS, MAX_ATTRIBUTION_OVERRIDE_VARIANTS, createAttributionReviewStore, createAttributionStore, createMessageFingerprint, deleteAttributionOverrideRecord, getAttributionConfidenceBand, getAttributionOverrideVariantKey, isHostSystemOrToolMessage, isLegacyAttributionOverrideEntry, normalizeAttributionConfidence, normalizeAttributionEvidence, normalizeAttributionSource, setAttributionOverrideRecord } from './attribution-store.js';
 import { unregisterGradientAnimationRoot } from './animation-controller.js';
 import { buildUniqueKnownColorStatsLookup, collectFontColorsFromText, countFontColorOccurrencesFromText, resolveCharacterKeyByNameOrAlias } from './color-blocks.js';
 import { applyCustomFontsToFontTags, applyCustomFontsToMessageElements, clearCustomFontsFromFontTags, loadGoogleFont, scheduleCardStyle, scheduleCustomFontRefresh } from './fonts.js';
@@ -8,10 +8,10 @@ import { applyGradientText, clearGradientText, getVisualRenderState } from './gr
 import { isTrackedPersonaMessage, onNewMessage, queueColorStateSave } from './live-colors.js';
 import { getNarratorVisual } from './narrator-style.js';
 import { applyThemeReadabilityAndBrightness } from './palettes.js';
-import { escapeHtml, eventSource, event_types, getContext } from './st-api.js';
+import { escapeHtml, eventSource, event_types, getContext, saveMetadata } from './st-api.js';
 import { ATTRIBUTION_VERIFIER_VERSION, AUTO_ATTRIBUTION_VERIFY_DELAY_MS, attributionChatGeneration, characterColors, isDomEngine, runtimeState, settings, streamingAttributionOverrides, streamingSession } from './state.js';
 import { isPlainObject } from './storage.js';
-import { applyTextStyle, clearTextStyle } from './text-style-rendering.js';
+import { applyTextStyle, clearTextStyle, TEXT_STYLE_MARKER_ATTRIBUTE } from './text-style-rendering.js';
 import { updateLegend } from './ui.js';
 import { captureOpenDetailsState, getGoogleFontFamily, getMessageElementByIndex, hashMessageText, normalizeSegmentText, restoreOpenDetailsState, stripColorBlocks } from './utils.js';
 import { queueAutoAttributionVerificationForElements, queueAutoAttributionVerificationForMessage, queueAutoAttributionVerificationForRenderedMessages } from './verify.js';
@@ -247,7 +247,8 @@ export function getMessageDomReadiness(mesElement, msg, mesIndex) {
     let correctDecorations = 0;
     const countMatch = (seg, el) => {
         matchedSegments++;
-        if (seg.assignment && el.getAttribute('data-dc-speaker') === seg.assignment.key) correctDecorations++;
+        if (seg.assignment && el.getAttribute('data-dc-speaker') === seg.assignment.key
+            && isSegmentOwnedVisualCurrent(seg, el)) correctDecorations++;
     };
     // Must use the same matching rules as decorateMessageDom, or readiness will
     // keep demanding re-renders for messages that decorated fine.
@@ -360,6 +361,10 @@ export async function decorateMessageDomFromCurrentRender(messageIndex, message,
     if (!isCurrent()) return false;
     if (target.mesElement && suspendMessageDomWorkForEdit(target.mesElement, index)) return false;
     if (!isCurrent()) return false;
+    if (isStreamingOwnedMessage(index)) {
+        const { paintStreamingMessage } = await import('./streaming-paint.js');
+        return isCurrent() && paintStreamingMessage();
+    }
     let { ready, mesElement: readyMesElement, edited, stale } = await waitForMessageDomReadyForDecoration(index, msg, options.timeoutMs ?? 400, isCurrent);
     if (edited || stale || !isCurrent()) return false;
     if (!ready && options.renderFallback !== false && renderMessageDomFallbackForTarget(target)) {
@@ -547,6 +552,104 @@ export function scheduleMessageDomRepair(mesIndex, options = {}) {
 
 // ===== DOM coloring engine (non-destructive) =====
 export const OVERRIDES_METADATA_KEY = 'dialogue_colors_overrides';
+export const MAX_PERSISTED_ATTRIBUTION_OVERRIDE_MESSAGES = 1000;
+export const MAX_ATTRIBUTION_RECONCILE_MESSAGES = 4000;
+export const MAX_ATTRIBUTION_RECONCILE_RECORDS = 2000;
+const MAX_ATTRIBUTION_RECONCILE_CANDIDATES = 128;
+
+function boundedOwnEntries(value, limit) {
+    if (!isPlainObject(value)) return { entries: [], truncated: false };
+    const entries = [];
+    let truncated = false;
+    for (const key in value) {
+        if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+        if (entries.length >= limit) {
+            truncated = true;
+            break;
+        }
+        entries.push([key, value[key]]);
+    }
+    return { entries, truncated };
+}
+
+function hasOwnEntries(value) {
+    if (!isPlainObject(value)) return false;
+    for (const key in value) {
+        if (Object.prototype.hasOwnProperty.call(value, key)) return true;
+    }
+    return false;
+}
+
+function cloneBoundedOverrideEntry(entry, includeVariants = true) {
+    if (!isPlainObject(entry)) return null;
+    const clone = {};
+    for (const key of Object.keys(entry)) {
+        if (key === 'variants' && !includeVariants) continue;
+        if (key === 'segments' || key === 'sources' || key === 'confidences' || key === 'reviewIds' || key === 'records') {
+            const { entries } = boundedOwnEntries(entry[key], MAX_ATTRIBUTION_OVERRIDE_SEGMENTS);
+            if (!entries.length) continue;
+            if (key === 'segments') {
+                clone[key] = Object.fromEntries(entries.map(([segmentKey, value]) => [segmentKey,
+                    value === null ? null : String(isPlainObject(value) ? value.speaker ?? value.name ?? '' : value).slice(0, 80),
+                ]));
+            } else if (key === 'sources') {
+                clone[key] = Object.fromEntries(entries.map(([segmentKey, value]) => [segmentKey, normalizeAttributionSource(value)]));
+            } else if (key === 'confidences') {
+                clone[key] = Object.fromEntries(entries.map(([segmentKey, value]) => [segmentKey, normalizeAttributionConfidence(value)]));
+            } else if (key === 'reviewIds') {
+                clone[key] = Object.fromEntries(entries.map(([segmentKey, value]) => [segmentKey, String(value ?? '').slice(0, 96)]));
+            } else clone[key] = Object.fromEntries(entries.map(([segmentKey, record]) => [segmentKey, isPlainObject(record) ? {
+                    speaker: String(record.speaker ?? record.name ?? '').slice(0, 80),
+                    source: normalizeAttributionSource(record.source),
+                    confidence: normalizeAttributionConfidence(record.confidence),
+                    evidence: normalizeAttributionEvidence(record.evidence),
+                    messageFingerprint: String(record.messageFingerprint ?? '').slice(0, 80),
+                    segmentFingerprint: String(record.segmentFingerprint ?? '').slice(0, 80),
+                    reviewId: String(record.reviewId ?? '').slice(0, 96),
+                    ...(Number.isFinite(Number(record.reviewedAt)) ? { reviewedAt: Number(record.reviewedAt) } : {}),
+                } : null]));
+            continue;
+        }
+        clone[key] = entry[key];
+    }
+    if (!clone.segments) clone.segments = {};
+    if (includeVariants) {
+        const variants = {};
+        for (const [key, variant] of boundedOwnEntries(entry.variants, MAX_ATTRIBUTION_OVERRIDE_VARIANTS).entries) {
+            const bounded = cloneBoundedOverrideEntry(variant, false);
+            if (bounded) variants[key] = bounded;
+        }
+        if (hasOwnEntries(variants)) clone.variants = variants;
+    }
+    return clone;
+}
+
+function getBoundedOverrideScope(metadata) {
+    const source = metadata?.[OVERRIDES_METADATA_KEY];
+    if (!isPlainObject(source)) return null;
+    const entries = [];
+    for (const [key, entry] of boundedOwnEntries(source, MAX_PERSISTED_ATTRIBUTION_OVERRIDE_MESSAGES).entries) {
+        entries.push([key, isPlainObject(entry) ? cloneBoundedOverrideEntry(entry) : entry]);
+    }
+    return Object.fromEntries(entries);
+}
+
+function getBoundedOverrideMapForWrite(source, prioritizedKey = '') {
+    const map = {};
+    let count = 0;
+    if (isPlainObject(source) && prioritizedKey
+        && Object.prototype.hasOwnProperty.call(source, prioritizedKey)) {
+        map[prioritizedKey] = source[prioritizedKey];
+        count++;
+    }
+    for (const [key, entry] of boundedOwnEntries(source, MAX_PERSISTED_ATTRIBUTION_OVERRIDE_MESSAGES).entries) {
+        if (key === prioritizedKey) continue;
+        if (count >= MAX_PERSISTED_ATTRIBUTION_OVERRIDE_MESSAGES) break;
+        map[key] = entry;
+        count++;
+    }
+    return map;
+}
 
 export let decorateAllTimer = null;
 
@@ -637,7 +740,10 @@ let lastSavedChatMetadataScope = null;
 let lastSavedChatMetadataBinding = null;
 let dirtyChatMetadataScope = null;
 let dirtyChatMetadataBinding = null;
-let pendingChatMetadataSave = null;
+let dirtyChatMetadataAttempts = 0;
+let activeChatMetadataSave = null;
+let queuedChatMetadataSave = null;
+export const CHAT_METADATA_SAVE_ATTEMPT_LIMIT = 2;
 
 function captureChatMetadataBinding(metadata = getChatMetadataStore(), ctx = getContext()) {
     return {
@@ -660,58 +766,94 @@ function isChatMetadataBindingCurrent(binding) {
     return chatMetadataBindingsEqual(binding, captureChatMetadataBinding());
 }
 
-export function saveChatMetadata() {
-    const ctx = getContext();
-    const metadata = getChatMetadataStore();
-    const scope = snapshotChatMetadataScope(metadata);
-    const binding = captureChatMetadataBinding(metadata, ctx);
-    dirtyChatMetadataScope = scope;
-    dirtyChatMetadataBinding = binding;
-    let result;
-    let debounced = false;
-    try {
-        // The host debounce is cancellable and returns no settlement signal;
-        // bind durable attribution writes to this chat's immediate save instead.
-        if (typeof ctx?.saveMetadata === 'function') {
-            result = ctx.saveMetadata();
-        } else if (typeof ctx?.saveMetadataDebounced === 'function') {
-            debounced = true;
-            result = ctx.saveMetadataDebounced();
-        } else {
-            return null;
-        }
-    } catch (error) {
-        console.warn('[Dialogue Colors] Failed to save chat metadata:', error);
-        return null;
-    }
+function createChatMetadataSaveRequest(binding, scope) {
+    let resolve;
+    const promise = new Promise(settle => { resolve = settle; });
+    return { binding, scope, promise, resolve };
+}
 
-    const settle = () => {
-        if (!isChatMetadataBindingCurrent(binding) || snapshotChatMetadataScope(metadata) !== scope) return;
-        lastSavedChatMetadataScope = scope;
-        lastSavedChatMetadataBinding = binding;
-        if (chatMetadataBindingsEqual(dirtyChatMetadataBinding, binding) && dirtyChatMetadataScope === scope) {
+function finishChatMetadataSave(request, result, error = null) {
+    if (error) console.warn('[Dialogue Colors] Failed to save chat metadata:', error);
+    const durable = result === true && isChatMetadataBindingCurrent(request.binding)
+        && snapshotChatMetadataScope(request.binding.metadata) === request.scope;
+    if (durable) {
+        lastSavedChatMetadataScope = request.scope;
+        lastSavedChatMetadataBinding = request.binding;
+        if (chatMetadataBindingsEqual(dirtyChatMetadataBinding, request.binding)
+            && dirtyChatMetadataScope === request.scope) {
             dirtyChatMetadataScope = null;
             dirtyChatMetadataBinding = null;
+            dirtyChatMetadataAttempts = 0;
         }
-    };
-
-    if (result && typeof result.then === 'function') {
-        const pending = { binding, scope };
-        pendingChatMetadataSave = pending;
-        Promise.resolve(result).then(value => {
-            if (value !== false && pendingChatMetadataSave === pending) settle();
-        }, error => {
-            console.warn('[Dialogue Colors] Failed to save chat metadata:', error);
-        }).finally(() => {
-            if (pendingChatMetadataSave === pending) pendingChatMetadataSave = null;
-        });
-    } else if ((!debounced && result !== false) || result === true) {
-        // A synchronous saveMetadata call has settled on return. Debounced
-        // hosts must explicitly confirm; undefined can mean the call was folded
-        // into or cancelled by another debounce.
-        settle();
     }
-    return result;
+    request.resolve(durable);
+    if (activeChatMetadataSave === request) activeChatMetadataSave = null;
+    const next = queuedChatMetadataSave;
+    queuedChatMetadataSave = null;
+    if (next) startChatMetadataSave(next);
+}
+
+function startChatMetadataSave(request) {
+    activeChatMetadataSave = request;
+    if (!isChatMetadataBindingCurrent(request.binding)) {
+        finishChatMetadataSave(request, false);
+        return;
+    }
+    const latestScope = snapshotChatMetadataScope(request.binding.metadata);
+    if (latestScope !== request.scope) request.scope = latestScope;
+    if (chatMetadataBindingsEqual(dirtyChatMetadataBinding, request.binding)
+        && dirtyChatMetadataScope === request.scope) dirtyChatMetadataAttempts++;
+    let result;
+    try {
+        result = saveMetadata();
+    } catch (error) {
+        finishChatMetadataSave(request, false, error);
+        return;
+    }
+    if (result && typeof result.then === 'function') {
+        Promise.resolve(result).then(
+            value => finishChatMetadataSave(request, value),
+            error => finishChatMetadataSave(request, false, error),
+        );
+    } else {
+        finishChatMetadataSave(request, result);
+    }
+}
+
+function queueChatMetadataSave(binding, scope) {
+    if (activeChatMetadataSave
+        && chatMetadataBindingsEqual(activeChatMetadataSave.binding, binding)
+        && activeChatMetadataSave.scope === scope
+        && !queuedChatMetadataSave) return activeChatMetadataSave.promise;
+    if (queuedChatMetadataSave && chatMetadataBindingsEqual(queuedChatMetadataSave.binding, binding)) {
+        queuedChatMetadataSave.scope = scope;
+        return queuedChatMetadataSave.promise;
+    }
+    const request = createChatMetadataSaveRequest(binding, scope);
+    if (!activeChatMetadataSave) startChatMetadataSave(request);
+    else {
+        if (queuedChatMetadataSave) queuedChatMetadataSave.resolve(false);
+        queuedChatMetadataSave = request;
+    }
+    return request.promise;
+}
+
+export function saveChatMetadata() {
+    const metadata = getChatMetadataStore();
+    if (!metadata) return Promise.resolve(false);
+    const binding = captureChatMetadataBinding(metadata);
+    const scope = snapshotChatMetadataScope(metadata);
+    if (!chatMetadataBindingsEqual(dirtyChatMetadataBinding, binding) || dirtyChatMetadataScope !== scope) {
+        dirtyChatMetadataBinding = binding;
+        dirtyChatMetadataScope = scope;
+        dirtyChatMetadataAttempts = 0;
+    }
+    return queueChatMetadataSave(binding, scope);
+}
+
+export function retryDirtyChatMetadataSave() {
+    if (!dirtyChatMetadataBinding || !isChatMetadataBindingCurrent(dirtyChatMetadataBinding)) return Promise.resolve(false);
+    return queueChatMetadataSave(dirtyChatMetadataBinding, dirtyChatMetadataScope);
 }
 
 // A chat metadata save is a full rewrite of the chat file - the host stores
@@ -723,8 +865,10 @@ export function snapshotChatMetadataScope(metadata = getChatMetadataStore()) {
     if (!metadata) return null;
     try {
         return JSON.stringify([
-            metadata[OVERRIDES_METADATA_KEY] ?? null,
-            metadata[ATTRIBUTION_REVIEW_METADATA_KEY] ?? null,
+            getBoundedOverrideScope(metadata),
+            isPlainObject(metadata[ATTRIBUTION_REVIEW_METADATA_KEY])
+                ? createAttributionReviewStore(metadata[ATTRIBUTION_REVIEW_METADATA_KEY], { now: 0 })
+                : null,
         ]);
     } catch (_) {
         return null;
@@ -740,15 +884,20 @@ export function saveChatMetadataIfChanged(before, metadata = getChatMetadataStor
     const savedScope = chatMetadataBindingsEqual(lastSavedChatMetadataBinding, binding)
         ? lastSavedChatMetadataScope
         : null;
-    const pendingSameScope = pendingChatMetadataSave
-        && chatMetadataBindingsEqual(pendingChatMetadataSave.binding, binding)
-        && pendingChatMetadataSave.scope === after;
+    const pendingSameScope = (activeChatMetadataSave
+        && chatMetadataBindingsEqual(activeChatMetadataSave.binding, binding)
+        && activeChatMetadataSave.scope === after)
+        || (queuedChatMetadataSave
+            && chatMetadataBindingsEqual(queuedChatMetadataSave.binding, binding)
+            && queuedChatMetadataSave.scope === after);
     const dirtySameScope = chatMetadataBindingsEqual(dirtyChatMetadataBinding, binding)
         && dirtyChatMetadataScope === after;
     const baseline = before === null || before === undefined ? savedScope : before;
     const changed = baseline === null || baseline === undefined || after === null || baseline !== after;
     if (!changed && !dirtySameScope) return false;
     if (pendingSameScope) return false;
+    if (dirtySameScope && dirtyChatMetadataAttempts >= CHAT_METADATA_SAVE_ATTEMPT_LIMIT) return false;
+    if (changed && (!dirtySameScope || dirtyChatMetadataScope !== after)) dirtyChatMetadataAttempts = 0;
     dirtyChatMetadataScope = after;
     dirtyChatMetadataBinding = binding;
     saveChatMetadata();
@@ -833,7 +982,7 @@ export function clearStreamingAttributionOverrides(mesIndex = null) {
 function getStoredMessageFingerprint(entry) {
     let fingerprint = typeof entry?.messageFingerprint === 'string' ? entry.messageFingerprint.trim() : '';
     if (isPlainObject(entry?.records)) {
-        for (const record of Object.values(entry.records)) {
+        for (const [, record] of boundedOwnEntries(entry.records, MAX_ATTRIBUTION_OVERRIDE_SEGMENTS).entries) {
             const recordFingerprint = typeof record?.messageFingerprint === 'string' ? record.messageFingerprint.trim() : '';
             if (!recordFingerprint) continue;
             if (fingerprint && fingerprint !== recordFingerprint) return null;
@@ -858,6 +1007,7 @@ function getMessageAttributionIdentity(msg) {
         hash: hashMessageText(text),
         messageId: getStableMessageId(msg),
         messageFingerprint: createMessageFingerprint({ name: getMessageSpeaker(msg), mes: text }),
+        swipeId: Object.prototype.hasOwnProperty.call(msg || {}, 'swipe_id') ? String(msg.swipe_id ?? '').slice(0, 64) : null,
         textLength: text.length,
     };
 }
@@ -876,6 +1026,8 @@ function messageQuoteOverrideEntryMatches(entry, msg) {
     const storedLength = Number(entry.textLength);
     const hasStoredLength = Number.isInteger(storedLength) && storedLength >= 0;
     if (hasStoredLength && storedLength !== identity.textLength) return false;
+    if (Object.prototype.hasOwnProperty.call(entry, 'swipeId')
+        && String(entry.swipeId ?? '') !== (identity.swipeId ?? '')) return false;
     // ID-less records are safe only when they carry the stronger text+speaker
     // fingerprint and explicit text length introduced by the provenance store.
     if (!storedMessageId && !identity.messageId && (!storedFingerprint || !hasStoredLength)) return false;
@@ -887,6 +1039,8 @@ function applyMessageAttributionIdentity(entry, msg) {
     entry.hash = identity.hash;
     entry.messageFingerprint = identity.messageFingerprint;
     entry.textLength = identity.textLength;
+    if (identity.swipeId === null) delete entry.swipeId;
+    else entry.swipeId = identity.swipeId;
     if (identity.messageId) entry.messageId = identity.messageId;
     else delete entry.messageId;
     return entry;
@@ -902,18 +1056,47 @@ function createMessageQuoteOverrideEntry(msg) {
     return applyMessageAttributionIdentity({ segments: {} }, msg);
 }
 
+function findMessageQuoteOverrideEntry(bucket, msg) {
+    if (messageQuoteOverrideEntryMatches(bucket, msg)) return { entry: bucket, variantKey: null };
+    for (const [variantKey, variant] of boundedOwnEntries(bucket?.variants, MAX_ATTRIBUTION_OVERRIDE_VARIANTS).entries) {
+        if (messageQuoteOverrideEntryMatches(variant, msg)) return { entry: variant, variantKey };
+    }
+    return null;
+}
+
+function activateMessageQuoteOverrideEntry(map, key, msg) {
+    const bucket = map[key];
+    const found = findMessageQuoteOverrideEntry(bucket, msg);
+    if (found?.variantKey === null) {
+        const bounded = cloneBoundedOverrideEntry(bucket);
+        map[key] = bounded;
+        return bounded;
+    }
+    const variants = {};
+    for (const [variantKey, variant] of boundedOwnEntries(bucket?.variants, MAX_ATTRIBUTION_OVERRIDE_VARIANTS).entries) {
+        if (variantKey === found?.variantKey) continue;
+        const bounded = cloneBoundedOverrideEntry(variant, false);
+        if (bounded) variants[variantKey] = bounded;
+    }
+    const archived = cloneBoundedOverrideEntry(bucket, false);
+    if (archived?.hash) variants[getAttributionOverrideVariantKey(archived)] = archived;
+    const entry = found ? cloneBoundedOverrideEntry(found.entry, false) : createMessageQuoteOverrideEntry(msg);
+    if (hasOwnEntries(variants)) entry.variants = Object.fromEntries(
+        boundedOwnEntries(variants, MAX_ATTRIBUTION_OVERRIDE_VARIANTS).entries,
+    );
+    map[key] = entry;
+    return entry;
+}
+
 export function getMessageQuoteOverrideEntry(mesIndex, msg, create = false) {
     const index = Number(mesIndex);
     if (!Number.isInteger(index) || index < 0 || !msg) return null;
     const map = getQuoteOverridesMap(create);
     if (!map) return null;
     const key = String(index);
-    let entry = map[key];
-    if (!messageQuoteOverrideEntryMatches(entry, msg)) {
-        if (!create) return null;
-        entry = createMessageQuoteOverrideEntry(msg);
-        map[key] = entry;
-    }
+    const found = findMessageQuoteOverrideEntry(map[key], msg);
+    if (!found && !create) return null;
+    const entry = create ? activateMessageQuoteOverrideEntry(map, key, msg) : found.entry;
     const migrated = migrateLegacyMessageQuoteOverrideEntry(entry, msg);
     if (!isPlainObject(entry.segments)) {
         if (!create) return null;
@@ -932,9 +1115,11 @@ export function getMessageAttributionFreezeSegments(mesIndex, msg, targetSegment
         mesIndex,
     });
     const frozen = {};
+    let frozenCount = 0;
     for (const segment of attribution.segments) {
         if (segment.index === target) continue;
         frozen[String(segment.index)] = segment.assignment?.name || segment.assignment?.key || null;
+        if (++frozenCount >= MAX_ATTRIBUTION_OVERRIDE_SEGMENTS) break;
     }
     return frozen;
 }
@@ -953,6 +1138,8 @@ export function setMessageQuoteOverride(mesIndex, msg, segmentIndex, speakerName
     try {
         speaker = String(speakerName ?? '').trim();
         if (!speaker) return false;
+        const speakerKey = resolveCharacterKeyByNameOrAlias(speaker);
+        if (speakerKey && characterColors[speakerKey]?.name) speaker = String(characterColors[speakerKey].name).trim() || speaker;
         source = normalizeAttributionSource(normalizedOptions.source, ATTRIBUTION_SOURCE.MANUAL);
         if (normalizedOptions.confidence !== undefined) {
             confidence = normalizeAttributionConfidence(normalizedOptions.confidence);
@@ -974,17 +1161,6 @@ export function setMessageQuoteOverride(mesIndex, msg, segmentIndex, speakerName
     const metadataBefore = snapshotChatMetadataScope(metadata);
     const existingMap = isPlainObject(metadata[OVERRIDES_METADATA_KEY]) ? metadata[OVERRIDES_METADATA_KEY] : null;
     const messageKey = String(index);
-    const segmentKey = String(normalizedSegmentIndex);
-    const existingEntry = existingMap?.[messageKey];
-    if (messageQuoteOverrideEntryMatches(existingEntry, msg)) {
-        migrateLegacyMessageQuoteOverrideEntry(existingEntry, msg);
-    }
-    const entryIsNew = !messageQuoteOverrideEntryMatches(existingEntry, msg);
-    const baseEntry = entryIsNew ? createMessageQuoteOverrideEntry(msg) : existingEntry;
-    const entry = { ...baseEntry };
-    for (const mapName of ['segments', 'sources', 'confidences', 'reviewIds', 'records']) {
-        if (isPlainObject(baseEntry[mapName])) entry[mapName] = { ...baseEntry[mapName] };
-    }
     const identity = getMessageAttributionIdentity(msg);
     const review = {
         messageIndex: index,
@@ -998,17 +1174,22 @@ export function setMessageQuoteOverride(mesIndex, msg, segmentIndex, speakerName
         ...(evidence === undefined ? {} : { evidence }),
     };
     const hasFreezeSegments = Object.prototype.hasOwnProperty.call(normalizedOptions, 'freezeSegments');
-    const freezeSegments = hasFreezeSegments
-        ? { ...getMessageAttributionFreezeSegments(index, msg, normalizedSegmentIndex), ...(isPlainObject(normalizedOptions.freezeSegments) ? normalizedOptions.freezeSegments : {}) }
-        : undefined;
+    const freezeSegments = hasFreezeSegments ? getMessageAttributionFreezeSegments(index, msg, normalizedSegmentIndex) : undefined;
+    if (freezeSegments && isPlainObject(normalizedOptions.freezeSegments)) {
+        for (const [key, value] of boundedOwnEntries(normalizedOptions.freezeSegments, MAX_ATTRIBUTION_OVERRIDE_SEGMENTS).entries) {
+            freezeSegments[key] = value;
+        }
+    }
     const requestedStatus = Object.values(ATTRIBUTION_VERIFICATION_STATUS).includes(normalizedOptions.verificationStatus)
         ? normalizedOptions.verificationStatus
-        : Object.values(ATTRIBUTION_VERIFICATION_STATUS).includes(entry.verificationStatus)
+        : Object.values(ATTRIBUTION_VERIFICATION_STATUS).includes(
+            findMessageQuoteOverrideEntry(existingMap?.[messageKey], msg)?.entry?.verificationStatus,
+        )
             ? undefined
             : source === ATTRIBUTION_SOURCE.LLM
                 ? ATTRIBUTION_VERIFICATION_STATUS.AUTO_APPLIED
                 : ATTRIBUTION_VERIFICATION_STATUS.CLEAN;
-    const workingMap = { [messageKey]: entry };
+    const workingMap = getBoundedOverrideMapForWrite(existingMap, messageKey);
     const applied = setAttributionOverrideRecord(workingMap, review, {
         message: msg,
         speaker,
@@ -1026,8 +1207,8 @@ export function setMessageQuoteOverride(mesIndex, msg, segmentIndex, speakerName
     if (!applied) return false;
     const nextEntry = applyMessageAttributionIdentity(workingMap[messageKey], msg);
     try {
-        if (existingMap) existingMap[messageKey] = nextEntry;
-        else metadata[OVERRIDES_METADATA_KEY] = { [messageKey]: nextEntry };
+        workingMap[messageKey] = nextEntry;
+        metadata[OVERRIDES_METADATA_KEY] = workingMap;
     } catch (_) {
         return false;
     }
@@ -1038,20 +1219,24 @@ export function setMessageQuoteOverride(mesIndex, msg, segmentIndex, speakerName
 
 export function deleteMessageQuoteOverride(mesIndex, msg, segmentIndex) {
     const map = getQuoteOverridesMap(false);
-    const entry = getMessageQuoteOverrideEntry(mesIndex, msg, false);
     const metadataBefore = snapshotChatMetadataScope();
-    if (!map || !entry || !deleteAttributionOverrideRecord(map, mesIndex, segmentIndex)) return false;
+    const key = String(mesIndex);
+    if (!map || !findMessageQuoteOverrideEntry(map[key], msg)) return false;
+    const entry = activateMessageQuoteOverrideEntry(map, key, msg);
+    if (!deleteAttributionOverrideRecord(map, mesIndex, segmentIndex)) return false;
     // Frozen siblings only exist to protect a real override. Once the last
     // non-frozen override on a message is gone, drop them so the message
     // returns to fully automatic attribution.
     const sources = isPlainObject(entry.sources) ? entry.sources : {};
-    const hasRealOverride = Object.keys(isPlainObject(entry.segments) ? entry.segments : {})
-        .some(key => sources[key] !== ATTRIBUTION_SOURCE.FROZEN);
+    const segmentEntries = boundedOwnEntries(entry.segments, MAX_ATTRIBUTION_OVERRIDE_SEGMENTS).entries;
+    const hasRealOverride = segmentEntries.some(([segmentKey]) => sources[segmentKey] !== ATTRIBUTION_SOURCE.FROZEN);
     if (!hasRealOverride) {
-        for (const key of Object.keys(entry.segments || {})) {
-            if (sources[key] === ATTRIBUTION_SOURCE.FROZEN) deleteAttributionOverrideRecord(map, mesIndex, key);
+        for (const [segmentKey] of segmentEntries) {
+            if (sources[segmentKey] === ATTRIBUTION_SOURCE.FROZEN) deleteAttributionOverrideRecord(map, mesIndex, segmentKey);
         }
     }
+    const metadata = getChatMetadataStore();
+    if (metadata) metadata[OVERRIDES_METADATA_KEY] = getBoundedOverrideMapForWrite(map, key);
     streamingSession.assignments.clear();
     saveChatMetadataIfChanged(metadataBefore);
     return true;
@@ -1062,58 +1247,150 @@ export function restoreMessageQuoteOverrideEntry(mesIndex, snapshot) {
     const map = getQuoteOverridesMap(true);
     if (!map) return false;
     const key = String(mesIndex);
-    if (snapshot && isPlainObject(snapshot)) map[key] = JSON.parse(JSON.stringify(snapshot));
-    else delete map[key];
+    const current = map[key];
+    const variants = {};
+    for (const [variantKey, variant] of boundedOwnEntries(current?.variants, MAX_ATTRIBUTION_OVERRIDE_VARIANTS).entries) {
+        const bounded = cloneBoundedOverrideEntry(variant, false);
+        if (bounded) variants[variantKey] = bounded;
+    }
+    if (snapshot && isPlainObject(snapshot)) {
+        const restored = cloneBoundedOverrideEntry(snapshot, false);
+        const archived = cloneBoundedOverrideEntry(current, false);
+        if (archived?.hash && getAttributionOverrideVariantKey(archived) !== getAttributionOverrideVariantKey(restored)) {
+            variants[getAttributionOverrideVariantKey(archived)] = archived;
+        }
+        for (const [variantKey, variant] of boundedOwnEntries(snapshot.variants, MAX_ATTRIBUTION_OVERRIDE_VARIANTS).entries) {
+            const bounded = cloneBoundedOverrideEntry(variant, false);
+            if (bounded) variants[variantKey] = bounded;
+        }
+        delete variants[getAttributionOverrideVariantKey(restored)];
+        if (hasOwnEntries(variants)) restored.variants = Object.fromEntries(
+            boundedOwnEntries(variants, MAX_ATTRIBUTION_OVERRIDE_VARIANTS).entries,
+        );
+        map[key] = restored;
+    } else {
+        const [promoted, ...remaining] = boundedOwnEntries(current?.variants, MAX_ATTRIBUTION_OVERRIDE_VARIANTS).entries;
+        if (!promoted) delete map[key];
+        else {
+            const restored = cloneBoundedOverrideEntry(promoted[1], false);
+            if (remaining.length) restored.variants = Object.fromEntries(remaining);
+            map[key] = restored;
+        }
+    }
+    const metadata = getChatMetadataStore();
+    if (metadata) metadata[OVERRIDES_METADATA_KEY] = getBoundedOverrideMapForWrite(map, key);
     streamingSession.assignments.clear();
     saveChatMetadataIfChanged(metadataBefore);
     return true;
 }
 
+function addReconciledOverrideEntry(next, targetKey, entry, preferActive = false) {
+    const candidate = cloneBoundedOverrideEntry(entry, false);
+    if (!candidate) return;
+    const existing = next[targetKey];
+    if (!existing) {
+        next[targetKey] = candidate;
+        return;
+    }
+    const candidateKey = getAttributionOverrideVariantKey(candidate);
+    if (candidateKey === getAttributionOverrideVariantKey(existing)) return;
+    if (preferActive) {
+        const variants = Object.fromEntries(
+            boundedOwnEntries(existing.variants, MAX_ATTRIBUTION_OVERRIDE_VARIANTS).entries,
+        );
+        delete existing.variants;
+        variants[getAttributionOverrideVariantKey(existing)] = existing;
+        if (hasOwnEntries(variants)) candidate.variants = Object.fromEntries(
+            boundedOwnEntries(variants, MAX_ATTRIBUTION_OVERRIDE_VARIANTS).entries,
+        );
+        next[targetKey] = candidate;
+        return;
+    }
+    const variants = isPlainObject(existing.variants) ? existing.variants : (existing.variants = {});
+    if (boundedOwnEntries(variants, MAX_ATTRIBUTION_OVERRIDE_VARIANTS).entries.length < MAX_ATTRIBUTION_OVERRIDE_VARIANTS) {
+        variants[candidateKey] = candidate;
+    }
+}
+
 // The host renumbers mesid values after deletion while this metadata remains
-// index-keyed. Rebuild the map from the stored message identity before a later
-// main.js deletion hook starts using it.
+// index-keyed. Activation runs this too because deletions can happen while the
+// extension is disabled and no deletion event reaches us.
 export function reconcileMessageQuoteOverridesAfterDeletion(chat = getContext()?.chat, options = {}) {
-    const messages = Array.isArray(chat) ? chat : null;
+    const messages = Array.isArray(chat) ? chat.slice(0, MAX_ATTRIBUTION_RECONCILE_MESSAGES) : null;
     const map = getQuoteOverridesMap(false);
     if (!messages || !map) return false;
+    const metadataBefore = snapshotChatMetadataScope();
+    const source = boundedOwnEntries(map, MAX_PERSISTED_ATTRIBUTION_OVERRIDE_MESSAGES);
+    const records = [];
+    for (const [originKey, bucket] of source.entries) {
+        if (!isPlainObject(bucket)) continue;
+        records.push({ originKey, entry: bucket });
+        for (const [, variant] of boundedOwnEntries(bucket.variants, MAX_ATTRIBUTION_OVERRIDE_VARIANTS).entries) {
+            if (records.length >= MAX_ATTRIBUTION_RECONCILE_RECORDS) break;
+            records.push({ originKey, entry: variant });
+        }
+        if (records.length >= MAX_ATTRIBUTION_RECONCILE_RECORDS) break;
+    }
+
+    const indicesById = new Map();
+    const indicesByFingerprint = new Map();
+    const indicesByHash = new Map();
+    const addIndex = (lookup, key, index) => {
+        if (!key) return;
+        const indices = lookup.get(key) || [];
+        if (indices.length < MAX_ATTRIBUTION_RECONCILE_CANDIDATES + 1) indices.push(index);
+        lookup.set(key, indices);
+    };
+    messages.forEach((message, index) => {
+        if (!message) return;
+        addIndex(indicesById, getStableMessageId(message), index);
+        addIndex(indicesByFingerprint, getMessageAttributionIdentity(message).messageFingerprint, index);
+        addIndex(indicesByHash, hashMessageText(getMessageText(message)), index);
+    });
+
     const next = {};
-    const pending = [];
-    for (const [key, entry] of Object.entries(map)) {
-        if (!isPlainObject(entry)) {
-            pending.push([key, entry]);
+    for (const { originKey, entry } of records) {
+        const originIndex = Number(originKey);
+        if (Number.isInteger(originIndex) && originIndex >= 0
+            && messageQuoteOverrideEntryMatches(entry, messages[originIndex])) {
+            addReconciledOverrideEntry(next, originKey, entry, true);
             continue;
         }
-        const index = Number(key);
-        if (Number.isInteger(index) && index >= 0 && messageQuoteOverrideEntryMatches(entry, messages[index])) {
-            next[key] = entry;
-        } else {
-            pending.push([key, entry]);
-        }
-    }
-    if (options.deletion === false) return false;
-    for (const [, entry] of pending) {
-        if (!isPlainObject(entry)) continue;
+        const messageId = getStableMessageId({ id: entry.messageId });
+        const fingerprint = getStoredMessageFingerprint(entry);
+        const candidates = messageId
+            ? (indicesById.get(messageId) || [])
+            : fingerprint
+                ? (indicesByFingerprint.get(fingerprint) || [])
+                : (indicesByHash.get(String(entry.hash || '')) || []);
         const matches = [];
-        for (let index = 0; index < messages.length; index++) {
+        for (const index of candidates.slice(0, MAX_ATTRIBUTION_RECONCILE_CANDIDATES + 1)) {
             if (messageQuoteOverrideEntryMatches(entry, messages[index])) matches.push(index);
+            if (matches.length > 1) break;
         }
-        if (!matches.length) continue;
-        const targetKey = String(matches[0]);
-        // Ambiguous identity is safer left inert at its old key than erased or
-        // attached to an arbitrary duplicate.
-        if (matches.length !== 1 || Object.prototype.hasOwnProperty.call(next, targetKey)) return false;
-        next[targetKey] = entry;
+        if (matches.length === 1 && candidates.length <= MAX_ATTRIBUTION_RECONCILE_CANDIDATES) {
+            const targetKey = String(matches[0]);
+            addReconciledOverrideEntry(next, targetKey, entry, true);
+            continue;
+        }
+        // A body mismatch under the same message ID is another swipe, not a
+        // deletion. ID-less or duplicate records are equally unsafe to guess.
+        if (!messageId || candidates.length || options.deletion === false) {
+            addReconciledOverrideEntry(next, originKey, entry, false);
+        }
     }
-    const currentKeys = Object.keys(map);
-    const nextKeys = Object.keys(next);
-    const unchanged = currentKeys.length === nextKeys.length
-        && nextKeys.every(key => map[key] === next[key]);
-    if (unchanged) return false;
-    const metadataBefore = snapshotChatMetadataScope();
-    for (const key of currentKeys) delete map[key];
-    Object.assign(map, next);
+
+    const metadata = getChatMetadataStore();
+    if (!metadata) return false;
+    const nextMap = getBoundedOverrideMapForWrite(next);
+    metadata[OVERRIDES_METADATA_KEY] = nextMap;
+    const changed = source.truncated || snapshotChatMetadataScope(metadata) !== metadataBefore;
+    if (!changed) {
+        metadata[OVERRIDES_METADATA_KEY] = map;
+        return false;
+    }
     streamingSession.assignments.clear();
-    saveChatMetadataIfChanged(metadataBefore);
+    saveChatMetadataIfChanged(source.truncated ? '__raw_override_overflow__' : metadataBefore, metadata);
     return true;
 }
 
@@ -1141,7 +1418,9 @@ export function clearSessionAttributionVerifications() {
     lastSavedChatMetadataBinding = null;
     dirtyChatMetadataScope = null;
     dirtyChatMetadataBinding = null;
-    pendingChatMetadataSave = null;
+    dirtyChatMetadataAttempts = 0;
+    if (queuedChatMetadataSave) queuedChatMetadataSave.resolve(false);
+    queuedChatMetadataSave = null;
 }
 
 export function markMessageAttributionVerified(mesIndex, msg, verificationStatus = ATTRIBUTION_VERIFICATION_STATUS.CLEAN, options = {}) {
@@ -1304,7 +1583,7 @@ function getMessageDialogueCounts(msg, mesIndex, liveKeys) {
     const overrideOptions = getMessageQuoteOverrideOptions(mesIndex, msg);
     const cacheKey = [
         mesIndex,
-        hashMessageText(getMessageText(msg)),
+        getMessageText(msg),
         getMessageSpeaker(msg),
         JSON.stringify(overrideOptions),
     ].join('\u0001');
@@ -1460,7 +1739,7 @@ export function resolveDomSegmentIndexForElement(segmentEl, mesIndex, msg) {
     if (!mesText) return NaN;
 
     const attribution = attributeDialogueSegments(msg.mes, msg.name, {
-        autoAddMessageSpeaker: true,
+        autoAddMessageSpeaker: false,
         ...getMessageQuoteOverrideOptions(mesIndex, msg),
         mesIndex,
     });
@@ -1509,6 +1788,45 @@ function readOwnedStyleState(el, attribute) {
     } catch (_) {
         return null;
     }
+}
+
+function isOwnedStyleCurrent(el, property, attribute) {
+    const state = readOwnedStyleState(el, attribute);
+    return !!state
+        && el.style.getPropertyValue(property) === state.applied
+        && el.style.getPropertyPriority(property) === state.appliedPriority;
+}
+
+function isSegmentOwnedVisualCurrent(seg, el) {
+    if (el.getAttribute('data-dc-colored') !== '1'
+        || !isOwnedStyleCurrent(el, 'color', SEGMENT_COLOR_STATE_ATTRIBUTE)) return false;
+    const entryKey = characterColors[seg.assignment.key]
+        ? seg.assignment.key
+        : resolveCharacterKeyByNameOrAlias(seg.assignment.name || seg.assignment.key);
+    const entry = entryKey ? characterColors[entryKey] : null;
+    const visual = getVisualRenderState(entry || { color: seg.assignment.color, baseColor: seg.assignment.color }, { target: 'chat' });
+    const hasGradient = !!visual.gradientCss;
+    if (el.classList.contains('dc-gradient-text') !== hasGradient) return false;
+    if (hasGradient) {
+        if (!el.getAttribute('data-dc-gradient') || !el.style.getPropertyValue('--dc-gradient')) return false;
+        if (el.classList.contains('dc-gradient-animated') !== visual.effectiveAnimation.enabled) return false;
+        if (el.classList.contains('dc-gradient-reverse') !== visual.effectiveAnimation.reverse) return false;
+    }
+    const font = entry?.font || seg.assignment.font;
+    if (getGoogleFontFamily(font)) {
+        if (!isOwnedStyleCurrent(el, 'font-family', SEGMENT_FONT_STATE_ATTRIBUTE)) return false;
+    } else if (el.hasAttribute(SEGMENT_FONT_STATE_ATTRIBUTE)) return false;
+    const expectedStyle = String(entry?.style || '');
+    const expectsBold = settings.forceBoldText === true || expectedStyle.includes('bold');
+    const expectsItalic = expectedStyle.includes('italic');
+    if (expectsBold !== (el.style.getPropertyValue('font-weight') === 'bold')) return false;
+    if (expectsItalic !== (el.style.getPropertyValue('font-style') === 'italic')) return false;
+    if ((expectsBold || expectsItalic) !== el.hasAttribute(TEXT_STYLE_MARKER_ATTRIBUTE)) return false;
+    const expectsHighlightStyle = settings.highlightMode && !hasGradient;
+    if (expectsHighlightStyle) {
+        if (!isOwnedStyleCurrent(el, 'background-color', SEGMENT_HIGHLIGHT_STATE_ATTRIBUTE)) return false;
+    } else if (el.hasAttribute(SEGMENT_HIGHLIGHT_STATE_ATTRIBUTE)) return false;
+    return true;
 }
 
 function applyOwnedStyle(el, property, value, attribute, legacyOwned = false) {
@@ -1882,12 +2200,13 @@ export function clearDecoratedWatchers() {
 // long-lived decorated watcher) for a single .mes element.
 
 // Disconnect the long-lived decorated watcher for a single .mes element.
-export function clearDecoratedWatcher(mesElement) {
+export function clearDecoratedWatcher(mesElement, options = {}) {
     const watcher = runtimeState.decoratedWatchers.get(mesElement);
     if (watcher) {
         try { watcher.observer.disconnect(); } catch (_) { /* ignored */ }
         runtimeState.decoratedWatchers.delete(mesElement);
     }
+    if (options.keepAnimationRoot !== true) unregisterGradientAnimationRoot(mesElement);
 }
 
 // Maximum time to wait for a message's DOM to settle before giving up.
@@ -1907,6 +2226,7 @@ export function clearMessageObservers(mesElement) {
         try { watcher.observer.disconnect(); } catch (_) { /* ignored */ }
         runtimeState.decoratedWatchers.delete(mesElement);
     }
+    unregisterGradientAnimationRoot(mesElement);
 }
 
 function clearMessageSettleObservers() {
@@ -1987,7 +2307,7 @@ export function watchDecoratedMessage(mesElement, mesIndex) {
     if (suspendMessageDomWorkForEdit(mesElement, mesIndex)) return;
     if (!isDomTargetMessage(getContext()?.chat?.[Number(mesIndex)])) return;
     // Tear down any existing watcher for this element first.
-    clearDecoratedWatcher(mesElement);
+    clearDecoratedWatcher(mesElement, { keepAnimationRoot: true });
 
     const initialMesText = mesElement.querySelector('.mes_text');
     if (!initialMesText) return;

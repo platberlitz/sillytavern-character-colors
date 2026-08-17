@@ -55,6 +55,34 @@ async function loadLiveColorsModule(overrides = {}) {
             const color = String(value ?? '').toLowerCase();
             return /^#[0-9a-f]{6}$/.test(color) ? color : fallback;
         },
+        normalizeRegistryIdentityName(value) {
+            const name = typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
+            return name && !/[<>{}]/.test(name) ? name : '';
+        },
+        formatColorBlockPair(name, color) {
+            const safeName = typeof name === 'string' && !/[\[\]=,()<>{}]/.test(name) ? name.trim() : '';
+            const safeColor = /^#[0-9a-f]{6}$/i.test(String(color ?? '')) ? String(color).toLowerCase() : '';
+            return safeName && safeColor ? `${safeName}=${safeColor}` : '';
+        },
+        parseTrailingColorMetadata(text) {
+            const source = String(text ?? '');
+            const match = /(^|\r\n?|\n)([ \t]*)\[(COLORS?):([^\]\r\n]*)\][ \t]*((?:\r\n?|\n)?[ \t]*)$/i.exec(source);
+            if (!match) return null;
+            const start = match.index + match[1].length + match[2].length;
+            const pairsStart = start + source.slice(start).indexOf(':') + 1;
+            return { source, label: match[3].toUpperCase(), pairs: match[4], pairsStart, pairsEnd: pairsStart + match[4].length, removeStart: match.index };
+        },
+        parseColorMetadataPairs(text) {
+            return String(text ?? '').split(',').flatMap(pair => {
+                const match = pair.match(/^([^=\[\]()<>{}]+)=((?:#[0-9a-f]{6}))$/i);
+                return match ? [{ name: match[1].trim(), aliases: [], color: match[2].toLowerCase() }] : [];
+            });
+        },
+        stripTrailingColorMetadata(text) {
+            const source = String(text ?? '');
+            const match = /(^|\r\n?|\n)[ \t]*\[COLORS?:[^\]\r\n]*\][ \t]*(?:(?:\r\n?|\n)?[ \t]*)$/i.exec(source);
+            return match ? source.slice(0, match.index) : source;
+        },
         getEntryEffectiveColor: entry => entry?.color,
         classifyLlmRequestError: error => ({ category: 'unknown', retryable: false, status: error?.status ?? null }),
         // Mirrors the real predicate rather than stubbing it out, so the write paths under test
@@ -123,6 +151,7 @@ function bulkColorizeStubs(chat, callLLMWithProfile, onLocalFallback = () => {})
         attributeDialogueSegments: () => ({ segments: [], createdCharacters: false }),
         buildLLMColorizeRules: () => [],
         buildColorMetadataPromptLines: () => [],
+        formatColorBlockPair: (name, color) => `${name}=${color}`,
         hashMessageText: value => String(value),
         colorizeMessageText(rawText) {
             onLocalFallback(rawText);
@@ -193,7 +222,7 @@ test('a save waiting behind the global gate resumes only for its durable chat', 
     assert.equal(savedB, 0);
 });
 
-test('a fulfilled void host save is terminal but not reported as confirmed', async () => {
+test('a fulfilled void host save is accepted and never warned as failed', async () => {
     let saves = 0;
     let pending = null;
     const chat = [{ mes: 'changed' }];
@@ -203,10 +232,10 @@ test('a fulfilled void host save is terminal but not reported as confirmed', asy
     });
 
     live.queueChatSave();
-    assert.equal(await live.flushChatSave(), false);
+    assert.equal(await live.flushChatSave(), true);
     assert.equal(saves, 1);
     assert.equal(pending, false, 'an accepted unconfirmed save must not remain queued forever');
-    assert.equal(await live.flushChatSave(), false);
+    assert.equal(await live.flushChatSave(), true);
     await delay(30);
     assert.equal(saves, 1, 'void settlement must not trigger an endless confirmation retry');
 });

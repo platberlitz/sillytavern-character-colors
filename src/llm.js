@@ -1,6 +1,6 @@
 // llm.js - extracted from index.js (mechanical split)
 import { generateQuietPrompt, getContext } from './st-api.js';
-import { settings } from './state.js';
+import { MODULE_NAME, settings } from './state.js';
 
 const DEFAULT_LLM_MAX_TOKENS = 2000;
 const MAX_LLM_MAX_TOKENS = 131072;
@@ -215,7 +215,52 @@ function reserveMainAiRequestTurn() {
     return { predecessor, release };
 }
 
+function suppressAmbientExtensionPrompt(context) {
+    const prompt = context?.extensionPrompts?.[MODULE_NAME];
+    const setPrompt = context?.setExtensionPrompt;
+    if (!prompt?.value || typeof setPrompt !== 'function') return () => {};
+    const snapshot = { ...prompt };
+    setPrompt.call(context, MODULE_NAME, '', snapshot.position, snapshot.depth, snapshot.scan, snapshot.role, snapshot.filter);
+    const suppressed = context.extensionPrompts?.[MODULE_NAME];
+    return () => {
+        if (context.extensionPrompts?.[MODULE_NAME] !== suppressed) return;
+        setPrompt.call(context, MODULE_NAME, snapshot.value, snapshot.position, snapshot.depth, snapshot.scan, snapshot.role, snapshot.filter);
+    };
+}
+
+async function requestFromMainAi(userContent, systemInstruction, maxTokens, quietOptions) {
+    let context = null;
+    try { context = getContext(); } catch { /* unavailable on older hosts */ }
+    if (typeof context?.generateRaw === 'function') {
+        return context.generateRaw({
+            prompt: userContent,
+            systemPrompt: systemInstruction,
+            responseLength: maxTokens,
+            quietToLoud: false,
+            trimNames: false,
+            ...(quietOptions.jsonSchema ? { jsonSchema: quietOptions.jsonSchema } : {}),
+        });
+    }
+
+    const restorePrompt = suppressAmbientExtensionPrompt(context);
+    try {
+        const quietPrompt = systemInstruction
+            ? `${systemInstruction}\n\n[USER/DATA MESSAGE]\n${userContent}`
+            : userContent;
+        return await generateQuietPrompt({
+            quietPrompt,
+            responseLength: maxTokens,
+            ...quietOptions,
+        });
+    } finally {
+        restorePrompt();
+    }
+}
+
 async function callMainAi(userContent, systemInstruction, maxTokens, timeoutMs, quietOptions, externalSignal) {
+    if (/\{\{|\}\}/.test(userContent)) {
+        throw annotateLlmRequestError(new TypeError('Main AI auxiliary requests reject macro delimiters in untrusted content.'));
+    }
     const cancellation = createRequestCancellation(externalSignal, timeoutMs);
     const turn = reserveMainAiRequestTurn();
 
@@ -241,9 +286,6 @@ async function callMainAi(userContent, systemInstruction, maxTokens, timeoutMs, 
             quietName: quietOptions.quietName,
             generationEndConsumed: false,
         };
-        const quietPrompt = systemInstruction
-            ? `${systemInstruction}\n\n[USER/DATA MESSAGE]\n${userContent}`
-            : userContent;
         // SillyTavern does not expose an AbortSignal for generateQuietPrompt.
         // The consumer races cancellation, while this settlement chain retains
         // the lock and active quiet-request tag until the host really finishes.
@@ -253,11 +295,7 @@ async function callMainAi(userContent, systemInstruction, maxTokens, timeoutMs, 
                     const reason = cancellation.signal.reason;
                     throw reason instanceof Error ? reason : createAbortError('LLM request was cancelled');
                 }
-                return generateQuietPrompt({
-                    quietPrompt,
-                    responseLength: maxTokens,
-                    ...quietOptions,
-                });
+                return requestFromMainAi(userContent, systemInstruction, maxTokens, quietOptions);
             })
             .then(
                 value => ({ ok: true, value }),

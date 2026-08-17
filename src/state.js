@@ -5,7 +5,8 @@ import { GROUP_PROFILE_RENAME, normalizeGroupKey, normalizeRegistryIdentity, res
 export const RUNTIME_GUARD_KEY = '__dialogueColorsRuntime_v1';
 
 export const runtimeState = {
-    initialized: true,
+    initializing: false,
+    initialized: false,
     contextMenuSetup: false,
     keyboardSetup: false,
     eventsRegistered: false,
@@ -18,6 +19,7 @@ export const runtimeState = {
     domHealthCheckTimer: null,
     chatChangedRafId: null,
     chatChangedSettleTimer: null,
+    dialogueRecountTimer: null,
     // Per-message self-terminating observers that replace the old polling settle timers.
     // Keyed by the .mes element; value is { observer, fallbackTimer }.
     messageSettleObservers: new Map(),
@@ -119,7 +121,7 @@ export const GLOBAL_VISUAL_KEYS = Object.freeze(['thoughtSymbols', 'themeMode', 
 
 export const PORTABLE_SETTING_KEYS = Object.freeze([...new Set([
     ...GLOBAL_VISUAL_KEYS,
-    ...GLOBAL_TOGGLE_KEYS,
+    ...GLOBAL_TOGGLE_KEYS.filter(key => key !== 'enabled'),
     'narratorStyle',
     'narratorColor',
     'colorStorageScope',
@@ -132,7 +134,7 @@ export const PORTABLE_SETTING_KEYS = Object.freeze([...new Set([
 
 export const GLOBAL_SETTINGS_V2_KEYS = PORTABLE_SETTING_KEYS;
 
-export const ACTIVE_SETTING_KEYS = Object.freeze([...PORTABLE_SETTING_KEYS, 'llmConnectionProfile', 'attributionConnectionProfile']);
+export const ACTIVE_SETTING_KEYS = Object.freeze([...PORTABLE_SETTING_KEYS, 'enabled', 'llmConnectionProfile', 'attributionConnectionProfile']);
 
 export const LEGACY_AUTO_SYNC_ENABLED_KEY = 'dc_autosync_enabled';
 

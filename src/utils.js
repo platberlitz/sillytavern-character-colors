@@ -1,5 +1,5 @@
 // utils.js - extracted from index.js (mechanical split)
-import { pruneReducibleCompositeEntries } from './color-blocks.js';
+import { pruneReducibleCompositeEntries, stripTrailingColorMetadata } from './color-blocks.js';
 import { cloneGradient, normalizeGradient } from './gradients.js';
 import { normalizeGroupName, normalizeRegistryIdentity, normalizeRegistryIdentityName } from './group-profiles.js';
 import { GRADIENT_GENERATOR_ALGORITHM, normalizeGradientGenerator } from './seeded-gradient-generator.js';
@@ -195,7 +195,7 @@ export function stripFontTags(text) {
 }
 
 export function stripColorBlocks(text) {
-    return String(text ?? '').replace(/\n?\[COLORS?:[^\]]*\]/gi, '');
+    return stripTrailingColorMetadata(text);
 }
 
 // SillyTavern's tool calling posts one synthetic message per round of invocations: a <details>
@@ -266,21 +266,100 @@ export function isCompositeSpeakerLabel(rawName) {
 // points at the same byte of the original; callers slice their segment text out of the original.
 export const HTML_TAG_QUOTE_MASK = '\ufffe';
 
+const HTML_VOID_ELEMENTS = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr']);
+const HTML_RAW_OR_CODE_ELEMENTS = new Set(['script', 'style', 'textarea', 'title', 'xmp', 'iframe', 'noembed', 'noframes', 'plaintext', 'pre', 'code']);
+
+function findHtmlTagEnd(source, start) {
+    let quote = '';
+    for (let i = start + 1; i < source.length; i++) {
+        const ch = source[i];
+        if (quote) {
+            if (ch === quote) quote = '';
+        } else if (ch === '"' || ch === "'") {
+            quote = ch;
+        } else if (ch === '>') {
+            return i + 1;
+        }
+    }
+    return -1;
+}
+
 export function maskHtmlTagQuotes(text) {
-    return String(text ?? '').replace(/<([^>]+)>/g, (match, contents) => (contents.includes('"')
-        ? `<${contents.replaceAll('"', HTML_TAG_QUOTE_MASK)}>`
-        : match));
+    const source = String(text ?? '');
+    const chars = source.split('');
+    for (const range of findHtmlTagRanges(source)) {
+        for (let i = range.start; i < range.end; i++) {
+            if (chars[i] === '"') chars[i] = HTML_TAG_QUOTE_MASK;
+        }
+    }
+    return chars.join('');
 }
 
 // The spans of every HTML tag in the text, as [start, end) offsets. Used to prove that a pair of
 // insertion points sits outside element markup before anything is written between them.
 export function findHtmlTagRanges(text) {
+    const source = String(text ?? '');
     const ranges = [];
-    const tagRegex = /<[^>]+>/g;
-    let match;
-    while ((match = tagRegex.exec(String(text ?? ''))) !== null) {
-        ranges.push({ start: match.index, end: match.index + match[0].length });
+    const rawRanges = [];
+    const stack = [];
+    let cursor = 0;
+    while (cursor < source.length) {
+        const rawElement = stack.at(-1)?.raw ? stack.at(-1) : null;
+        if (rawElement) {
+            const close = new RegExp(`<\\/\\s*${rawElement.name}\\s*>`, 'ig');
+            close.lastIndex = cursor;
+            const match = close.exec(source);
+            if (!match) {
+                rawRanges.push({ start: rawElement.openStart, end: source.length });
+                break;
+            }
+            const range = {
+                start: match.index,
+                end: match.index + match[0].length,
+                name: rawElement.name,
+                closing: true,
+                stackBefore: stack.map(item => item.name),
+            };
+            stack.pop();
+            range.stackAfter = stack.map(item => item.name);
+            ranges.push(range);
+            rawRanges.push({ start: rawElement.openStart, end: range.end });
+            cursor = range.end;
+            continue;
+        }
+
+        const start = source.indexOf('<', cursor);
+        if (start === -1) break;
+        if (source.startsWith('<!--', start)) {
+            const commentEnd = source.indexOf('-->', start + 4);
+            const end = commentEnd === -1 ? source.length : commentEnd + 3;
+            const signature = stack.map(item => item.name);
+            ranges.push({ start, end, name: '', closing: false, stackBefore: signature, stackAfter: signature });
+            cursor = end;
+            continue;
+        }
+        const end = findHtmlTagEnd(source, start);
+        if (end === -1) break;
+        const tag = source.slice(start, end);
+        const match = tag.match(/^<\s*(\/?)\s*([A-Za-z][A-Za-z0-9:-]*)(?=\s|\/?>)/);
+        if (!match) { cursor = start + 1; continue; }
+        const closing = !!match[1];
+        const name = match[2].toLowerCase();
+        const range = { start, end, name, closing, stackBefore: stack.map(item => item.name) };
+        if (closing) {
+            const owner = stack.map(item => item.name).lastIndexOf(name);
+            if (owner >= 0) stack.length = owner;
+        } else if (!HTML_VOID_ELEMENTS.has(name) && !/\/\s*>$/.test(tag)) {
+            stack.push({ name, raw: HTML_RAW_OR_CODE_ELEMENTS.has(name), openStart: start });
+        }
+        range.stackAfter = stack.map(item => item.name);
+        ranges.push(range);
+        cursor = end;
     }
+    Object.defineProperties(ranges, {
+        rawRanges: { value: rawRanges },
+        sourceLength: { value: source.length },
+    });
     return ranges;
 }
 
@@ -288,13 +367,33 @@ export function findHtmlTagRanges(text) {
 // markup. A boundary that lands exactly on a tag edge is fine -- that wraps the tag whole, which
 // renders; a boundary strictly inside one destroys the element.
 export function splitsHtmlTag(start, end, ranges) {
-    return (ranges || []).some(range => (start > range.start && start < range.end)
-        || (end > range.start && end < range.end));
+    const tags = Array.isArray(ranges) ? ranges : [];
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end <= start) return true;
+    if (tags.some(range => (start > range.start && start < range.end)
+        || (end > range.start && end < range.end))) return true;
+    if ((tags.rawRanges || []).some(range => start < range.end && end > range.start)) return true;
+
+    const stackAt = position => {
+        let stack = [];
+        for (const range of tags) {
+            if (position <= range.start) return position === range.start ? range.stackBefore : stack;
+            if (position < range.end) return null;
+            stack = range.stackAfter;
+        }
+        return stack;
+    };
+    const startStack = stackAt(start);
+    const endStack = stackAt(end);
+    return !startStack || !endStack || startStack.length !== endStack.length
+        || startStack.some((name, index) => name !== endStack[index]);
 }
 
 export function makeLengthPreservingSearchText(text) {
-    return String(text ?? '')
-        .replace(/<[^>]+>/g, match => ' '.repeat(match.length))
+    let source = String(text ?? '');
+    for (const range of [...findHtmlTagRanges(source)].reverse()) {
+        source = source.slice(0, range.start) + ' '.repeat(range.end - range.start) + source.slice(range.end);
+    }
+    return source
         .replace(/&(?:[a-z]+|#[0-9]+|#x[0-9a-f]+);/gi, match => ' '.repeat(match.length))
         .replace(/[*_`~]/g, ' ');
 }

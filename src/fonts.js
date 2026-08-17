@@ -208,7 +208,13 @@ function applyOwnedAttribute(element, name, value, stateAttribute) {
     const hasValue = element.hasAttribute(name);
     const currentValue = element.getAttribute(name) || '';
     let state = readOwnedAttributeState(element, stateAttribute);
-    if (!state || !hasValue || currentValue !== state.applied) {
+    if (state && (!hasValue || currentValue !== state.applied)) {
+        // Another owner changed the accessibility/name metadata after us.
+        // Drop our marker without overwriting or later restoring their value.
+        element.removeAttribute(stateAttribute);
+        return false;
+    }
+    if (!state) {
         state = { hadValue: hasValue, value: currentValue, applied: value };
     } else {
         state.applied = value;

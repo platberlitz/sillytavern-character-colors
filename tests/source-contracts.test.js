@@ -70,7 +70,7 @@ test('legacy DOM overrides migrate only after current-message identity validatio
     const matches = functionSection(sources['dom-engine.js'], 'messageQuoteOverrideEntryMatches');
     const migrate = functionSection(sources['dom-engine.js'], 'migrateLegacyMessageQuoteOverrideEntry');
 
-    assert.match(lookup, /messageQuoteOverrideEntryMatches\(entry,\s*msg\)/);
+    assert.match(lookup, /findMessageQuoteOverrideEntry\(map\[key\],\s*msg\)/);
     assert.match(lookup, /migrateLegacyMessageQuoteOverrideEntry\(entry,\s*msg\)/);
     assert.match(lookup, /if\s*\(migrated\)\s*saveChatMetadata\(\)/);
     for (const identityField of ['hash', 'messageId', 'messageFingerprint', 'textLength']) {
@@ -232,7 +232,7 @@ test('the streaming painter owns its message alone', () => {
     // Re-entrancy has to be blocked synchronously; our own writes re-trigger the
     // observer, and isDecoratingDom is already restored by then.
     assert.match(paint, /if \(!streamingSession\.active \|\| streamingSession\.painting\) return false/);
-    assert.match(paint, /streamingSession\.painting = true;[\s\S]*?finally \{\s*streamingSession\.painting = false;/);
+    assert.match(paint, /streamingSession\.painting = true;[\s\S]*?finally \{\s*[\s\S]*?streamingSession\.painting = false;/);
     // The flag alone is not enough: mutation records queued by our own writes
     // are delivered in a later microtask, once painting is already false. The
     // observer has to be detached across the write and reattached after it, or
@@ -325,9 +325,11 @@ test('fullscreen is opt-in and reversible', () => {
     assert.doesNotMatch(source, /class="[^"]*dc-fullscreen(?![-\w])/);
     assert.match(bind, /toggle\.addEventListener\('click', \(\) => toggleSettingsFullscreen\(toggle\)\)/);
     assert.match(enter, /classList\.add\('dc-fullscreen'\)/);
-    assert.match(enter, /setAttribute\('aria-modal', 'true'\)/);
+    assert.match(enter, /\['aria-modal', panel\.getAttribute\('aria-modal'\), 'true'\]/);
+    assert.match(enter, /claimOutsideInert\(panel\)/);
     assert.match(exit, /classList\.remove\('dc-fullscreen'\)/);
-    assert.match(exit, /removeAttribute\('aria-modal'\)/);
+    assert.match(exit, /releaseOwnedInert\(modalState\.inertElements\)/);
+    assert.match(exit, /previous === null\) panel\.removeAttribute\(name\)/);
     assert.match(exit, /opener\?\.offsetParent\) opener\.focus\(\)/);
     assert.match(bind, /e\.key === 'Escape'/);
 

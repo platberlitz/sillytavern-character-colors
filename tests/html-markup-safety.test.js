@@ -178,6 +178,22 @@ test('splitsHtmlTag only rejects boundaries strictly inside a tag', () => {
     assert.equal(splitsHtmlTag(0, text.length, ranges), false, 'wrapping the tags whole is fine');
 });
 
+test('HTML boundaries are quote-aware and require the same safe element context', () => {
+    const quoted = '<div data-label="1 > 0">"Hi."</div>';
+    const quotedRanges = findHtmlTagRanges(quoted);
+    assert.equal(splitsHtmlTag(quoted.indexOf('"Hi."'), quoted.indexOf('"Hi."') + 5, quotedRanges), false);
+    assert.equal(maskHtmlTagQuotes(quoted).length, quoted.length);
+
+    const crossed = '<b>"starts</b> and ends"';
+    assert.equal(splitsHtmlTag(crossed.indexOf('"'), crossed.lastIndexOf('"') + 1, findHtmlTagRanges(crossed)), true);
+
+    const code = '<code>"literal"</code>';
+    assert.equal(splitsHtmlTag(code.indexOf('"'), code.lastIndexOf('"') + 1, findHtmlTagRanges(code)), true);
+
+    const angleThought = '<I should leave.>';
+    assert.equal(splitsHtmlTag(0, angleThought.length, findHtmlTagRanges(angleThought)), true);
+});
+
 test('a message an older version broke is repaired without disturbing its real colors', () => {
     withCleanRegistry(() => {
         const color = bobColor();

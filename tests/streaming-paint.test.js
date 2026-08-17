@@ -42,9 +42,10 @@ const hooks = registerHooks({
 });
 
 const { attributeDialogueSegments, balanceStreamingText } = await import('../src/attribution.js');
-const { applySegmentDecoration, getStreamingAttributionOverrides, matchSegmentsToElements, setMessageQuoteOverride, setStreamingAttributionOverride } = await import('../src/dom-engine.js');
+const { applySegmentDecoration, getMessageDomReadiness, getStreamingAttributionOverrides, matchSegmentsToElements, setMessageQuoteOverride, setStreamingAttributionOverride } = await import('../src/dom-engine.js');
+const { applyCustomFontsToFontTags } = await import('../src/fonts.js');
 const { characterColors, resetStreamingSession, settings, streamingSession } = await import('../src/state.js');
-const { paintStreamingMessage } = await import('../src/streaming-paint.js');
+const { beginStreamingPaint, endStreamingPaint, paintStreamingMessage } = await import('../src/streaming-paint.js');
 const { cancelStreamingAttributionVerification } = await import('../src/verify.js');
 const { normalizeSegmentText } = await import('../src/utils.js');
 const { setTestContext } = await import(stApiUrl);
@@ -66,7 +67,7 @@ function withCharacters(names, run) {
     try {
         return run();
     } finally {
-        resetStreamingSession();
+        endStreamingPaint();
         for (const key of Object.keys(characterColors)) delete characterColors[key];
         Object.assign(characterColors, previousColors);
         settings.enabled = previousEnabled;
@@ -87,7 +88,7 @@ function streamTick(text, speaker, options = {}) {
 }
 
 function armSession(mesIndex = 0) {
-    resetStreamingSession();
+    endStreamingPaint();
     streamingSession.active = true;
     streamingSession.mesIndex = mesIndex;
 }
@@ -233,7 +234,11 @@ test('a saved correction repaints the streaming-owned gradient immediately', () 
             const mesText = fakeElement('Hello.');
             mesText.querySelectorAll = selector => selector === 'q' ? [quote] : [];
             armSession();
-            streamingSession.mesElement = { isConnected: true };
+            streamingSession.mesElement = {
+                isConnected: true,
+                getAttribute: name => name === 'mesid' ? '0' : null,
+                querySelector: selector => selector === '.mes_text' ? mesText : null,
+            };
             streamingSession.mesText = mesText;
 
             assert.equal(setMessageQuoteOverride(0, message, 0, 'Bob'), true);
@@ -345,7 +350,11 @@ test('streaming clears decoration from a rendered segment that disappears', () =
             const mesText = fakeElement('Hello.');
             mesText.querySelectorAll = selector => selector === 'q' ? [quote] : [];
             armSession();
-            streamingSession.mesElement = { isConnected: true };
+            streamingSession.mesElement = {
+                isConnected: true,
+                getAttribute: name => name === 'mesid' ? '0' : null,
+                querySelector: selector => selector === '.mes_text' ? mesText : null,
+            };
             streamingSession.mesText = mesText;
             assert.equal(paintStreamingMessage(), true);
             assert.equal(quote.getAttribute('data-dc-colored'), '1');
@@ -358,6 +367,122 @@ test('streaming clears decoration from a rendered segment that disappears', () =
     } finally {
         setTestContext({ chat: [], chatMetadata: {} });
     }
+});
+
+test('a growing segment keeps its first painted speaker', () => {
+    const message = { id: 'm-1', mes: 'Bob shrugged. "Fi', name: 'Alice' };
+    setTestContext({ chat: [message], chatMetadata: {} });
+    try {
+        withCharacters(['Alice', 'Bob'], () => {
+            const quote = fakeElement('Fi');
+            const mesText = fakeElement('Fi');
+            mesText.querySelectorAll = selector => selector === 'q' ? [quote] : [];
+            armSession();
+            streamingSession.mesElement = {
+                isConnected: true,
+                getAttribute: name => name === 'mesid' ? '0' : null,
+                querySelector: selector => selector === '.mes_text' ? mesText : null,
+            };
+            streamingSession.mesText = mesText;
+            assert.equal(paintStreamingMessage(), true);
+            assert.equal(quote.getAttribute('data-dc-speaker'), 'bob');
+
+            message.mes = 'Bob shrugged. "Fine." Alice added.';
+            quote.textContent = 'Fine.';
+            assert.equal(paintStreamingMessage(), true);
+            assert.equal(quote.getAttribute('data-dc-speaker'), 'bob');
+        });
+    } finally {
+        setTestContext({ chat: [], chatMetadata: {} });
+    }
+});
+
+test('a captured streaming session rejects a replaced chat root before painting', () => {
+    const originalDocument = globalThis.document;
+    const originalMutationObserver = globalThis.MutationObserver;
+    const message = { id: 'm-1', swipe_id: 0, mes: 'Alice said "Hello."', name: 'Alice' };
+    const quote = fakeElement('Hello.');
+    const mesText = fakeElement('Hello.');
+    mesText.querySelectorAll = selector => selector === 'q' ? [quote] : [];
+    const mesElement = {
+        isConnected: true,
+        getAttribute: name => name === 'mesid' ? '0' : null,
+        querySelector: selector => selector === '.mes_text' ? mesText : null,
+    };
+    const root = {
+        contains: element => element === mesElement,
+        querySelector: () => mesElement,
+    };
+    const replacementRoot = { contains: () => false, querySelector: () => null };
+    let currentRoot = root;
+    globalThis.document = {
+        ...originalDocument,
+        getElementById: id => id === 'chat' ? currentRoot : null,
+        querySelector: () => currentRoot.querySelector(),
+    };
+    globalThis.MutationObserver = class {
+        observe() {}
+        disconnect() {}
+    };
+    setTestContext({ chat: [message], chatMetadata: {} });
+    try {
+        withCharacters(['Alice'], () => {
+            assert.equal(beginStreamingPaint(), true);
+            quote.writes = 0;
+            currentRoot = replacementRoot;
+            assert.equal(paintStreamingMessage(), false);
+            assert.equal(streamingSession.active, false);
+            assert.equal(quote.writes, 0);
+        });
+    } finally {
+        globalThis.document = originalDocument;
+        globalThis.MutationObserver = originalMutationObserver;
+        setTestContext({ chat: [], chatMetadata: {} });
+    }
+});
+
+test('health readiness rejects wiped owned styles', () => {
+    const message = { id: 'm-1', name: 'Alice', mes: 'Alice said "Hello."' };
+    setTestContext({ chat: [message], chatMetadata: {} });
+    try {
+        withCharacters(['Alice'], () => {
+            const [segment] = attributeDialogueSegments(message.mes, message.name, { autoAddMessageSpeaker: false }).segments;
+            const quote = fakeElement('Hello.');
+            applySegmentDecoration(segment, quote);
+            const mesText = {
+                querySelector: () => null,
+                querySelectorAll(selector) {
+                    if (selector === 'q') return [quote];
+                    if (selector === 'em') return [];
+                    if (selector === '[data-dc-colored]') return quote.hasAttribute('data-dc-colored') ? [quote] : [];
+                    return [];
+                },
+            };
+            const mesElement = { querySelector: selector => selector === '.mes_text' ? mesText : null };
+            assert.equal(getMessageDomReadiness(mesElement, message, 0).correctDecorations, 1);
+            quote.style.removeProperty('color');
+            assert.equal(getMessageDomReadiness(mesElement, message, 0).correctDecorations, 0);
+        });
+    } finally {
+        setTestContext({ chat: [], chatMetadata: {} });
+    }
+});
+
+test('font ARIA ownership is relinquished after an external label change', () => {
+    withCharacters(['Alice'], () => {
+        const font = fakeElement('Hello.');
+        font.setAttribute('color', '#112233');
+        const mesText = {
+            querySelectorAll: selector => selector === 'font[color]' ? [font] : [],
+        };
+        const raw = '<font color="#112233">Hello.</font>\n[COLORS:Alice=#112233]';
+        assert.equal(applyCustomFontsToFontTags(mesText, raw), true);
+        assert.match(font.getAttribute('aria-label'), /^Alice:/);
+        font.setAttribute('aria-label', 'External description');
+        applyCustomFontsToFontTags(mesText, raw);
+        assert.equal(font.getAttribute('aria-label'), 'External description');
+        assert.equal(font.getAttribute('data-dc-aria-label'), null);
+    });
 });
 
 test('a wiped tick repaints to the same colour without a clear pass', () => {

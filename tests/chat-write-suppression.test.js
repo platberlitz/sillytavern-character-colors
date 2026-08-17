@@ -33,8 +33,11 @@ export const extension_prompt_roles = {};
 export const generateQuietPrompt = async () => '';
 export const registerMacro = () => {};
 export const getRequestHeaders = () => ({});
-export const saveMetadata = () => {};
-export const saveMetadataDebounced = () => {};
+export const saveMetadata = (...args) => {
+    if (typeof context.saveMetadata === 'function') return context.saveMetadata(...args);
+    return context.saveMetadataDebounced?.(...args);
+};
+export const saveMetadataDebounced = (...args) => context.saveMetadataDebounced?.(...args);
 `;
 
 globalThis.document ??= { body: {}, getElementById: () => null, querySelector: () => null, querySelectorAll: () => [] };
@@ -55,6 +58,8 @@ const {
     isMessageAttributionVerified,
     listAttributionReviews,
     markMessageAttributionVerified,
+    retryDirtyChatMetadataSave,
+    saveChatMetadata,
     saveChatMetadataIfChanged,
     setMessageQuoteOverride,
     upsertAttributionReview,
@@ -93,7 +98,7 @@ function withCountedChat(messages, run) {
     stApi.setTestContext({
         chat: messages,
         chatMetadata: metadata,
-        saveMetadata: () => { saves.count++; return Promise.resolve(); },
+        saveMetadata: () => { saves.count++; return true; },
         saveMetadataDebounced: () => { saves.debounced++; },
     });
     clearSessionAttributionVerifications();
@@ -312,7 +317,7 @@ test('queueing a review still attaches the store and saves', () => {
     });
 });
 
-test('a rejected metadata save leaves the scope dirty and retryable', async () => {
+test('failed and unverified metadata saves stay dirty with bounded automatic retry', async () => {
     const metadata = { [OVERRIDES_KEY]: { marker: 1 } };
     const attempts = [];
     let debounced = 0;
@@ -339,6 +344,11 @@ test('a rejected metadata save leaves the scope dirty and retryable', async () =
         assert.equal(attempts.length, 2);
         attempts[1].resolve();
         await new Promise(resolve => setImmediate(resolve));
+        assert.equal(saveChatMetadataIfChanged(null, metadata), false);
+        const manualRetry = retryDirtyChatMetadataSave();
+        assert.equal(attempts.length, 3);
+        attempts[2].resolve(true);
+        assert.equal(await manualRetry, true);
         assert.equal(saveChatMetadataIfChanged(null, metadata), false);
     } finally {
         console.warn = originalWarn;
@@ -384,6 +394,41 @@ test('an old chat save settlement cannot mark a new chat saved', async () => {
         await new Promise(resolve => setImmediate(resolve));
         assert.equal(saveChatMetadataIfChanged(null, secondMetadata), true);
         assert.equal(secondSaves, 1);
+    } finally {
+        clearSessionAttributionVerifications();
+        stApi.setTestContext({ chat: [], chatMetadata: {} });
+    }
+});
+
+test('metadata writes serialize and coalesce to the latest scope', async () => {
+    const metadata = { [OVERRIDES_KEY]: { marker: 1 } };
+    const attempts = [];
+    stApi.setTestContext({
+        chat: [{ id: 'one' }],
+        chatMetadata: metadata,
+        saveMetadata: () => {
+            const attempt = deferred();
+            attempt.marker = metadata[OVERRIDES_KEY].marker;
+            attempts.push(attempt);
+            return attempt.promise;
+        },
+    });
+    clearSessionAttributionVerifications();
+    try {
+        const settled = [];
+        const first = saveChatMetadata().then(() => settled.push('first'));
+        metadata[OVERRIDES_KEY].marker = 2;
+        const second = saveChatMetadata().then(() => settled.push('second'));
+        metadata[OVERRIDES_KEY].marker = 3;
+        const third = saveChatMetadata().then(() => settled.push('third'));
+
+        assert.deepEqual(attempts.map(attempt => attempt.marker), [1]);
+        attempts[0].resolve(true);
+        await new Promise(resolve => setImmediate(resolve));
+        assert.deepEqual(attempts.map(attempt => attempt.marker), [1, 3]);
+        attempts[1].resolve(true);
+        await Promise.all([first, second, third]);
+        assert.deepEqual(settled, ['first', 'second', 'third']);
     } finally {
         clearSessionAttributionVerifications();
         stApi.setTestContext({ chat: [], chatMetadata: {} });

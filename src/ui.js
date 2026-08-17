@@ -46,10 +46,8 @@ export const DYNAMIC_CONTROL_HELP_TEXT = Object.freeze({
 });
 
 function buildCharacterControlId(prefix, key) {
-    const token = Array.from(String(key ?? '')).map(character => /[A-Za-z0-9_-]/.test(character)
-        ? character
-        : `_${character.codePointAt(0).toString(16)}_`).join('');
-    return `${prefix}-${token || 'character'}`;
+    const token = Array.from(String(key ?? ''), character => character.codePointAt(0).toString(16)).join('-');
+    return `${prefix}-${token || 'empty'}`;
 }
 
 const GRADIENT_DIRECTIONS = Object.freeze([
@@ -79,6 +77,9 @@ const CHARACTER_LIST_RENDER_LIMIT = 500;
 const FLOATING_LEGEND_RENDER_LIMIT = 200;
 const DIALOG_LIST_RENDER_LIMIT = 500;
 const LEGEND_CANVAS_ENTRY_LIMIT = 500;
+const LEGEND_CANVAS_WIDTH_LIMIT = 1200;
+const UI_RESOURCE_WAIT_TIMEOUT_MS = 3000;
+const AVATAR_IMAGE_WAIT_TIMEOUT_MS = 5000;
 const STYLE_PACK_OVERRIDE_DIAGNOSTIC_LIMIT = 12;
 
 function captureUiMutationContext() {
@@ -142,6 +143,24 @@ function getDialogFocusables(dialog) {
         .filter(element => !element.hidden && element.getClientRects().length > 0);
 }
 
+function claimOutsideInert(element) {
+    const owned = [];
+    for (let current = element; current?.parentElement; current = current.parentElement) {
+        const parent = current.parentElement;
+        for (const sibling of parent.children || []) {
+            if (sibling === current || sibling.inert) continue;
+            sibling.inert = true;
+            owned.push(sibling);
+        }
+        if (parent === document.body) break;
+    }
+    return owned;
+}
+
+function releaseOwnedInert(elements) {
+    elements.forEach(element => { if (element?.inert) element.inert = false; });
+}
+
 function openDecisionDialog({ title, description = '', detailsHtml = '', choices = [], checkbox = null, input = null, formHtml = '', opener = document.activeElement }) {
     if (closeActiveUiDialog) closeActiveUiDialog(null, { restoreFocus: false });
     return new Promise(resolve => {
@@ -166,9 +185,7 @@ function openDecisionDialog({ title, description = '', detailsHtml = '', choices
         (document.body || document.documentElement).appendChild(backdrop);
         const dialog = backdrop.querySelector('.dc-dialog');
         registerGradientAnimationRoot(dialog);
-        const inertSiblings = [...((document.body?.children) ? document.body.children : [])]
-            .filter(element => element !== backdrop && !element.inert)
-            .map(element => { element.inert = true; return element; });
+        const inertSiblings = claimOutsideInert(backdrop);
         let closed = false;
         const close = (value, { restoreFocus = true } = {}) => {
             if (closed) return;
@@ -182,7 +199,7 @@ function openDecisionDialog({ title, description = '', detailsHtml = '', choices
                 formValues[field.dataset.dialogField] = field.type === 'checkbox' ? field.checked : field.value;
             });
             document.removeEventListener('keydown', onKeyDown, true);
-            inertSiblings.forEach(element => { element.inert = false; });
+            releaseOwnedInert(inertSiblings);
             unregisterGradientAnimationRoot(dialog);
             backdrop.remove();
             if (closeActiveUiDialog === close) closeActiveUiDialog = null;
@@ -447,28 +464,81 @@ export function getBadge(count) {
 
 // Phase 4A: Theme-aware PNG export
 
+function settleWithin(value, timeoutMs = UI_RESOURCE_WAIT_TIMEOUT_MS) {
+    return new Promise(resolve => {
+        let settled = false;
+        let timer = null;
+        const finish = () => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            resolve();
+        };
+        timer = setTimeout(finish, timeoutMs);
+        Promise.resolve(value).then(finish, finish);
+    });
+}
+
+function waitForStylesheet(link, timeoutMs = UI_RESOURCE_WAIT_TIMEOUT_MS) {
+    if (link?.dataset?.dcGoogleFontState !== 'loading' || typeof link.addEventListener !== 'function') {
+        return Promise.resolve();
+    }
+    return new Promise(resolve => {
+        let settled = false;
+        let timer = null;
+        const finish = () => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            link.removeEventListener?.('load', finish);
+            link.removeEventListener?.('error', finish);
+            resolve();
+        };
+        link.addEventListener('load', finish, { once: true });
+        link.addEventListener('error', finish, { once: true });
+        timer = setTimeout(finish, timeoutMs);
+    });
+}
+
 // Extract dominant color from avatar image
 export async function extractAvatarColor(imgSrc) {
     return new Promise(resolve => {
-        const img = new Image();
-        img.crossOrigin = 'anonymous';
-        img.onload = () => {
-            const canvas = document.createElement('canvas');
-            const ctx = canvas.getContext('2d');
-            canvas.width = 50; canvas.height = 50;
-            ctx.drawImage(img, 0, 0, 50, 50);
-            const data = ctx.getImageData(0, 0, 50, 50).data;
-            let r = 0, g = 0, b = 0, count = 0;
-            for (let i = 0; i < data.length; i += 4) {
-                if (data[i + 3] < 128) continue;
-                r += data[i]; g += data[i + 1]; b += data[i + 2]; count++;
-            }
-            if (count === 0) { resolve(null); return; }
-            r = Math.round(r / count); g = Math.round(g / count); b = Math.round(b / count);
-            resolve(`#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`);
+        let img;
+        try { img = new Image(); } catch { resolve(null); return; }
+        let settled = false;
+        let timer = null;
+        const finish = value => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            img.onload = null;
+            img.onerror = null;
+            resolve(value);
         };
-        img.onerror = () => resolve(null);
-        img.src = imgSrc;
+        try { img.crossOrigin = 'anonymous'; } catch { finish(null); return; }
+        img.onload = () => {
+            try {
+                const canvas = document.createElement('canvas');
+                canvas.width = 50; canvas.height = 50;
+                const ctx = canvas.getContext('2d');
+                if (!ctx) { finish(null); return; }
+                ctx.drawImage(img, 0, 0, 50, 50);
+                const data = ctx.getImageData(0, 0, 50, 50).data;
+                let r = 0, g = 0, b = 0, count = 0;
+                for (let i = 0; i < data.length; i += 4) {
+                    if (data[i + 3] < 128) continue;
+                    r += data[i]; g += data[i + 1]; b += data[i + 2]; count++;
+                }
+                if (count === 0) { finish(null); return; }
+                r = Math.round(r / count); g = Math.round(g / count); b = Math.round(b / count);
+                finish(`#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`);
+            } catch {
+                finish(null);
+            }
+        };
+        img.onerror = () => finish(null);
+        timer = setTimeout(() => finish(null), AVATAR_IMAGE_WAIT_TIMEOUT_MS);
+        try { img.src = imgSrc; } catch { finish(null); }
     });
 }
 
@@ -502,6 +572,7 @@ export async function exportLegendPng() {
         if (!decision.value || decision.value === 'cancel') return;
         if (decision.value === 'preview') colorVision = getColorVisionSimulationForTarget('ui');
     }
+    const narratorCount = narrator ? getTransientNarratorCount(getContext()?.chat) : null;
     const renderedEntries = entries.map(item => {
         const fontName = normalizeGoogleFontName(item.entry.font);
         const fontFamily = getGoogleFontFamily(fontName);
@@ -509,28 +580,40 @@ export async function exportLegendPng() {
         return {
             ...item,
             fontName,
+            text: item.kind === 'narrator' && narratorCount !== null ? `${item.label} (${narratorCount})` : item.label,
             canvasFont: `${textStyle.includes('italic') ? 'italic ' : ''}${settings.forceBoldText || textStyle.includes('bold') ? 'bold ' : ''}14px ${fontFamily || 'sans-serif'}`,
         };
     });
-    await Promise.all(renderedEntries
-        .filter(item => item.fontName)
-        .map(item => loadGoogleFont(item.fontName, { wait: true })));
+    await Promise.all([...new Set(renderedEntries.map(item => item.fontName).filter(Boolean))].map(fontName => {
+        loadGoogleFont(fontName);
+        const key = fontName.toLowerCase();
+        const link = [...document.querySelectorAll('link[data-dc-google-font], link[data-dc-google-font-fallback]')]
+            .find(candidate => String(candidate.dataset?.dcGoogleFont || candidate.dataset?.dcGoogleFontFallback || '').toLowerCase() === key);
+        return waitForStylesheet(link);
+    }));
     if (document.fonts?.load) {
-        await Promise.all(renderedEntries.filter(item => item.fontName).map(async item => {
-            try { await document.fonts.load(item.canvasFont); } catch { /* Canvas falls back to an available family. */ }
+        await Promise.all([...new Set(renderedEntries.filter(item => item.fontName).map(item => item.canvasFont))].map(async canvasFont => {
+            try { await settleWithin(document.fonts.load(canvasFont)); } catch { /* Canvas falls back to an available family. */ }
         }));
     }
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
     const lineHeight = 24, padding = 16, dotSize = 10;
-    canvas.width = 300;
+    if (!ctx) { toast.error('Could not create the legend image'); return; }
+    const textX = padding + dotSize + 8;
+    let widestText = 0;
+    renderedEntries.forEach(item => {
+        ctx.font = item.canvasFont;
+        widestText = Math.max(widestText, ctx.measureText(item.text).width);
+    });
+    canvas.width = Math.max(300, Math.min(LEGEND_CANVAS_WIDTH_LIMIT, Math.ceil(textX + widestText + padding)));
     const narrationGap = narrator && characterEntries.length ? 10 : 0;
     canvas.height = renderedEntries.length * lineHeight + narrationGap + padding * 2;
     const mode = settings.themeMode === 'auto' ? detectTheme() : settings.themeMode;
     ctx.fillStyle = mode === 'dark' ? '#1a1a2e' : '#f0f0f0';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     let rowY = padding + lineHeight / 2;
-    renderedEntries.forEach(({ entry: v, label, kind, canvasFont }) => {
+    renderedEntries.forEach(({ entry: v, text, kind, canvasFont }) => {
         if (kind === 'narrator' && characterEntries.length) {
             ctx.strokeStyle = mode === 'dark' ? '#596070' : '#c4c7ce';
             ctx.beginPath();
@@ -546,12 +629,16 @@ export async function exportLegendPng() {
         ctx.fillStyle = createCanvasGradientFill(ctx, v, { x: padding, y: y - dotSize / 2, width: dotSize, height: dotSize }, { colorVision });
         ctx.fill();
         ctx.font = canvasFont;
-        const textX = padding + dotSize + 8;
-        const count = kind === 'narrator' ? getTransientNarratorCount(getContext()?.chat) : null;
-        const text = kind === 'narrator' && count !== null ? `${label} (${count})` : label;
-        const textWidth = Math.max(1, ctx.measureText(text).width);
+        const availableTextWidth = canvas.width - textX - padding;
+        let fittedText = text;
+        if (ctx.measureText(fittedText).width > availableTextWidth) {
+            const characters = Array.from(fittedText);
+            while (characters.length && ctx.measureText(`${characters.join('')}…`).width > availableTextWidth) characters.pop();
+            fittedText = `${characters.join('')}…`;
+        }
+        const textWidth = Math.max(1, ctx.measureText(fittedText).width);
         ctx.fillStyle = createCanvasGradientFill(ctx, v, { x: textX, y: y - 12, width: textWidth, height: 17 }, { colorVision }) || safeColor;
-        ctx.fillText(text, textX, y + 5);
+        ctx.fillText(fittedText, textX, y + 5);
         rowY += lineHeight;
     });
     const a = document.createElement('a');
@@ -578,6 +665,18 @@ export function createLegend() {
         let isDragging = false;
         let activePointerId = null;
         let startX, startY, startLeft, startTop;
+
+        const getViewportEdges = () => {
+            const viewport = window.visualViewport;
+            const left = viewport?.offsetLeft || 0;
+            const top = viewport?.offsetTop || 0;
+            return {
+                left,
+                top,
+                right: left + (viewport?.width || window.innerWidth),
+                bottom: top + (viewport?.height || window.innerHeight),
+            };
+        };
 
         const onPointerDown = (e) => {
             if (!e.target.closest('.dc-legend-handle') || e.target.closest('button, input')) return;
@@ -606,8 +705,9 @@ export function createLegend() {
             let newLeft = startLeft + dx;
             let newTop = startTop + dy;
             const rect = legend.getBoundingClientRect();
-            newLeft = Math.max(0, Math.min(window.innerWidth - rect.width, newLeft));
-            newTop = Math.max(0, Math.min(window.innerHeight - rect.height, newTop));
+            const viewport = getViewportEdges();
+            newLeft = Math.max(viewport.left, Math.min(viewport.right - rect.width, newLeft));
+            newTop = Math.max(viewport.top, Math.min(viewport.bottom - rect.height, newTop));
             legend.style.left = newLeft + 'px';
             legend.style.top = newTop + 'px';
         };
@@ -625,10 +725,9 @@ export function createLegend() {
         const clampPosition = () => {
             if (legend.style.display === 'none') return;
             const rect = legend.getBoundingClientRect();
-            const viewportWidth = window.visualViewport?.width || window.innerWidth;
-            const viewportHeight = window.visualViewport?.height || window.innerHeight;
-            const left = Math.max(0, Math.min(viewportWidth - rect.width, rect.left));
-            const top = Math.max(0, Math.min(viewportHeight - rect.height, rect.top));
+            const viewport = getViewportEdges();
+            const left = Math.max(viewport.left, Math.min(viewport.right - rect.width, rect.left));
+            const top = Math.max(viewport.top, Math.min(viewport.bottom - rect.height, rect.top));
             legend.style.right = 'auto';
             legend.style.left = `${left}px`;
             legend.style.top = `${top}px`;
@@ -666,6 +765,7 @@ export function createLegend() {
         });
         window.addEventListener('resize', clampPosition);
         window.visualViewport?.addEventListener('resize', clampPosition);
+        window.visualViewport?.addEventListener('scroll', clampPosition);
 
         legend.addEventListener('pointerdown', onPointerDown);
         legend.addEventListener('pointermove', onPointerMove);
@@ -681,13 +781,14 @@ export function createLegend() {
 
 export function updateLegend() {
     const legend = createLegend();
+    const visible = !!settings.enabled && !!settings.showLegend;
     const allEntries = Object.entries(characterColors);
     const entries = allEntries.slice(0, FLOATING_LEGEND_RENDER_LIMIT);
     const omittedEntryCount = allEntries.length - entries.length;
     const narrator = getEffectiveNarratorVisual();
     const narratorCount = getTransientNarratorCount(getContext()?.chat);
     const signature = JSON.stringify({
-        visible: !!settings.showLegend,
+        visible,
         remoteFonts: settings.allowRemoteFonts === true,
         forceBold: settings.forceBoldText === true,
         driftAll: settings.driftAllGradientColors === true,
@@ -704,7 +805,7 @@ export function updateLegend() {
         ]),
         narrator: narrator ? [narratorCount, getVisualRenderState(narrator, { target: 'ui' }).fallbackColor, getGradientSignature(narrator), narrator.font, narrator.style] : null,
     });
-    if ((!allEntries.length && !narrator) || !settings.showLegend) {
+    if ((!allEntries.length && !narrator) || !visible) {
         legend.style.display = 'none';
         lastLegendSignature = signature;
         return;
@@ -734,9 +835,9 @@ export function updateLegend() {
         })() : '') + (omittedEntryCount
         ? `<p class="dc-list-limit">${omittedEntryCount} additional character${omittedEntryCount === 1 ? '' : 's'} omitted from the floating legend.</p>`
         : '');
-    legend.style.display = settings.showLegend ? 'block' : 'none';
-    if (focusSelector && settings.showLegend) legend.querySelector(focusSelector)?.focus({ preventScroll: true });
-    if (settings.showLegend) requestAnimationFrame(() => legend.__dcClampPosition?.());
+    legend.style.display = visible ? 'block' : 'none';
+    if (focusSelector && visible) legend.querySelector(focusSelector)?.focus({ preventScroll: true });
+    if (visible) requestAnimationFrame(() => legend.__dcClampPosition?.());
     registerGradientAnimationRoot(legend);
     refreshGradientAnimationState();
 }
@@ -1066,8 +1167,21 @@ function jumpToAttributionReviewMessage(presentation) {
     const reduceMotion = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
     messageElement.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'center' });
     const target = messageElement.querySelector(`[data-dc-seg="${presentation.review.segmentIndex}"]`) || messageElement.querySelector('.mes_text') || messageElement;
-    if (!target.hasAttribute('tabindex')) target.setAttribute('tabindex', '-1');
-    target.focus({ preventScroll: true });
+    const ownsTabIndex = !target.hasAttribute('tabindex');
+    const releaseTabIndex = () => {
+        target.removeEventListener?.('blur', releaseTabIndex);
+        if (ownsTabIndex && target.getAttribute('tabindex') === '-1') target.removeAttribute('tabindex');
+    };
+    if (ownsTabIndex) {
+        target.setAttribute('tabindex', '-1');
+        target.addEventListener('blur', releaseTabIndex, { once: true });
+    }
+    try {
+        target.focus({ preventScroll: true });
+        if (ownsTabIndex && document.activeElement !== target) releaseTabIndex();
+    } catch {
+        releaseTabIndex();
+    }
 }
 
 async function repaintAcceptedAttributionReview(decision) {
@@ -1874,6 +1988,7 @@ function handleAliasClick(aliasBtn) {
             const aliases = characterColors[key].aliases = characterColors[key].aliases || [];
             if (!aliases.includes(alias)) {
                 aliases.push(alias);
+                inputRow.remove();
                 commit();
                 repaintDomAfterCharacterDataChange(0);
                 focusCharacterControl(key, 'alias');
@@ -1954,6 +2069,7 @@ function handleFontClick(fontBtn) {
         if ((normalizeGoogleFontName(characterColors[key].font)) !== nextFont) {
             characterColors[key].font = nextFont;
             if (nextFont) loadGoogleFont(nextFont);
+            inputRow.remove();
             commit();
             repaintDomAfterCharacterDataChange(0);
             focusCharacterControl(key, 'font');
@@ -1988,6 +2104,7 @@ function handleGroupClick(groupBtn) {
         const snapshot = captureEffectiveColorSnapshot(Object.keys(characterColors));
         const result = setCharacterGroup([key], nextGroup);
         if (!result.changedKeys.length) { close(); return; }
+        inputRow.remove();
         applyLiveColorChangesFromSnapshot(snapshot, result.changedKeys, { saveImmediately: true, repaintStyles: true });
         commit();
         focusCharacterControl(key, 'group');
@@ -3637,7 +3754,11 @@ async function deliverStylePack(pack, opener) {
             await navigatorApi.share({ files: [file], title: pack.metadata.name });
             announceStylePack('Style pack shared.');
             toast.success('Style pack shared.');
-        } catch {
+        } catch (error) {
+            if (error?.name === 'AbortError') {
+                announceStylePack('Sharing cancelled.');
+                return;
+            }
             downloadStylePackJson(json, filename);
             announceStylePack('Sharing was unavailable, so the style pack was downloaded.');
             toast.info('Sharing was unavailable, so the style pack was downloaded.');
@@ -4458,6 +4579,7 @@ function bindPanelDisclosurePersistence(panel) {
 // there is space to earn.
 let activeSettingsPageSlug = DEFAULT_SETTINGS_PAGE_SLUG;
 let fullscreenOpener = null;
+let fullscreenModalState = null;
 
 function getSettingsPageTabs() {
     return Array.from(document.querySelectorAll('#dc-page-nav .dc-page-tab'));
@@ -4507,10 +4629,20 @@ export function enterSettingsFullscreen(opener = document.activeElement) {
     const toggle = document.getElementById('dc-fullscreen-toggle');
     if (!panel || panel.classList.contains('dc-fullscreen')) return;
     fullscreenOpener = opener instanceof HTMLElement ? opener : null;
+    const attributes = [
+        ['role', panel.getAttribute('role'), 'dialog'],
+        ['aria-modal', panel.getAttribute('aria-modal'), 'true'],
+        ['aria-label', panel.getAttribute('aria-label'), 'Dialogue Colors settings'],
+    ];
+    const bodyClassOwned = !document.body.classList.contains('dc-fullscreen-open');
+    fullscreenModalState = {
+        panel,
+        attributes,
+        bodyClassOwned,
+        inertElements: claimOutsideInert(panel),
+    };
     panel.classList.add('dc-fullscreen');
-    panel.setAttribute('role', 'dialog');
-    panel.setAttribute('aria-modal', 'true');
-    panel.setAttribute('aria-label', 'Dialogue Colors settings');
+    attributes.forEach(([name, , value]) => panel.setAttribute(name, value));
     document.body.classList.add('dc-fullscreen-open');
     toggle?.setAttribute('aria-pressed', 'true');
     showSettingsPageSection(activeSettingsPageSlug);
@@ -4518,14 +4650,21 @@ export function enterSettingsFullscreen(opener = document.activeElement) {
 }
 
 export function exitSettingsFullscreen() {
-    const panel = document.getElementById('dc-ext');
+    const modalState = fullscreenModalState;
+    const panel = modalState?.panel || document.getElementById('dc-ext');
     const toggle = document.getElementById('dc-fullscreen-toggle');
-    if (!panel || !panel.classList.contains('dc-fullscreen')) return;
+    if (!panel || (!modalState && !panel.classList.contains('dc-fullscreen'))) return;
+    fullscreenModalState = null;
     panel.classList.remove('dc-fullscreen');
-    panel.removeAttribute('role');
-    panel.removeAttribute('aria-modal');
-    panel.removeAttribute('aria-label');
-    document.body.classList.remove('dc-fullscreen-open');
+    if (modalState) {
+        modalState.attributes.forEach(([name, previous, applied]) => {
+            if (panel.getAttribute(name) !== applied) return;
+            if (previous === null) panel.removeAttribute(name);
+            else panel.setAttribute(name, previous);
+        });
+        releaseOwnedInert(modalState.inertElements);
+        if (modalState.bodyClassOwned) document.body.classList.remove('dc-fullscreen-open');
+    }
     toggle?.setAttribute('aria-pressed', 'false');
     // Reveal every section again before focus moves, so the accordion list is
     // whole the moment the panel is back in the tab, then hand the sections
@@ -4708,6 +4847,7 @@ function bindSettingsPanelControls($) {
         synchronizeEnabledLifecycle();
         saveData();
         syncProcessControlState();
+        updateLegend();
     };
     $('dc-highlight').onchange = e => {
         applyThemeOrBrightnessChange(() => { settings.highlightMode = e.target.checked; }, { saveImmediately: true });

@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
+import { ACTIVE_SETTING_KEYS, PORTABLE_SETTING_KEYS, TOGGLE_SETTING_DEFAULTS } from '../src/state.js';
+
 const [main, prompts, colorBlocks, ui] = await Promise.all([
     readFile(new URL('../src/main.js', import.meta.url), 'utf8'),
     readFile(new URL('../src/prompts.js', import.meta.url), 'utf8'),
@@ -33,15 +35,23 @@ test('disabled lifecycle stops before automatic storage and host work', () => {
     assert.ok(init.indexOf('createUI()') < init.indexOf('if (settings.enabled)'));
 
     const stop = functionSection(main, 'stopAutomaticRuntime');
-    for (const call of ['clearAutoAttributionVerificationQueue(', 'undecorateAllMessages()', 'destroyGradientAnimationController()', 'flushPromptInjection()']) {
+    for (const call of ['clearAutoAttributionVerificationQueue(', 'undecorateAllMessages()', 'destroyGradientAnimationController()', 'flushPromptInjection()', 'updateLegend()']) {
         assert.match(stop, new RegExp(call.replace(/[()]/g, '\\$&')));
     }
+});
+
+test('enabled remains a local lifecycle setting, not portable state', () => {
+    assert.equal(TOGGLE_SETTING_DEFAULTS.enabled, true);
+    assert.equal(PORTABLE_SETTING_KEYS.includes('enabled'), false);
+    assert.equal(ACTIVE_SETTING_KEYS.includes('enabled'), true);
 });
 
 test('enablement synchronously resumes the current context before saving', () => {
     const sync = functionSection(main, 'syncAutomaticRuntime');
     assert.ok(sync.indexOf('startAutomaticRuntime()') < sync.indexOf('handleChatChanged()'));
     assert.ok(sync.indexOf('handleChatChanged()') < sync.indexOf('setupContextMenu()'));
+    assert.ok(sync.indexOf('scheduleRegexScriptInstall()') < sync.indexOf('if (!activated) return false'));
+    assert.ok(sync.indexOf('registerDialogueColorsMacro()') < sync.indexOf('if (!activated) return false'));
 
     const enabledStart = ui.indexOf("$('dc-enabled').onchange = e => {");
     const enabledEnd = ui.indexOf("$('dc-highlight').onchange", enabledStart);
@@ -68,11 +78,15 @@ test('host event wiring deduplicates aliases, flushes prompts, and reconciles de
     assert.match(register, /new Set\(\[event_types\.STREAM_TOKEN_RECEIVED, event_types\.SMOOTH_STREAM_TOKEN_RECEIVED\]\.filter\(Boolean\)\)/);
     assert.match(register, /generationAfterCommands:[\s\S]*?flushPromptInjection\(\)/);
     assert.match(register, /event_types\.MESSAGE_DELETED[\s\S]*?eventHandlers\.messageDeleted/);
+    assert.match(register, /event_types\.GENERATION_STOPPED/);
 
     const deleted = functionSection(main, 'handleMessageDeleted');
     assert.match(deleted, /reconcileMessageQuoteOverridesAfterDeletion\(\)/);
-    assert.match(deleted, /refreshDomDialogueCounts\(\)/);
-    assert.match(deleted, /recountDialogueCountsFromChat\(\)/);
+    assert.match(deleted, /refreshDomDialogueCounts\(chat\)/);
+    assert.match(deleted, /recountDialogueCountsFromChat\(chat\)/);
+    const rendered = functionSection(main, 'handleCharacterMessageRendered');
+    assert.match(rendered, /scheduleMessageDomRepair\(index/);
+    assert.match(rendered, /onNewMessage\(index, message, chat\)/);
     assert.match(main, /DialogueColorsInterceptor[\s\S]*?flushPromptInjection\(\)/);
 });
 
@@ -87,7 +101,7 @@ test('prompt UI updates stay debounced while generation can flush synchronously'
 
 test('color-block scans share host-system eligibility and match uppercase style tags', () => {
     assert.match(colorBlocks, /import \{ isHostSystemOrToolMessage \} from '\.\/attribution-store\.js'/);
-    assert.match(functionSection(colorBlocks, 'scanAllMessages'), /if \(isHostSystemOrToolMessage\(msg\)\) continue/);
-    assert.match(functionSection(colorBlocks, 'refreshTransientNarratorCount'), /if \(isHostSystemOrToolMessage\(msg\)\) continue/);
+    assert.match(functionSection(colorBlocks, 'scanAllMessages'), /if \([^\n]*isHostSystemOrToolMessage\(msg\)[^\n]*\) continue/);
+    assert.match(functionSection(colorBlocks, 'refreshTransientNarratorCount'), /if \([^\n]*isHostSystemOrToolMessage\(msg\)[^\n]*\) continue/);
     assert.match(functionSection(colorBlocks, 'buildDialogueRegex'), /new RegExp\([\s\S]*, 'gi'\)/);
 });

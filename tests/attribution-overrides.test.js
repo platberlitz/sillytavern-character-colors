@@ -2,11 +2,31 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+    MAX_PENDING_ATTRIBUTION_REVIEWS,
+    MAX_RAW_PENDING_ATTRIBUTION_REVIEWS,
+    createAttributionReviewStore,
     createMessageFingerprint,
     hashAttributionMessageText,
     isLegacyAttributionOverrideEntry,
     setAttributionOverrideRecord,
 } from '../src/attribution-store.js';
+
+test('review normalization stops at the raw persisted cap', () => {
+    const pending = Array.from({ length: MAX_RAW_PENDING_ATTRIBUTION_REVIEWS }, (_, index) => ({
+        id: `review-${index}`,
+        messageFingerprint: `message-${index}`,
+        segmentFingerprint: `segment-${index}`,
+        proposedSpeaker: 'Alice',
+        status: 'pending',
+    }));
+    Object.defineProperty(pending, MAX_RAW_PENDING_ATTRIBUTION_REVIEWS, {
+        configurable: true,
+        get() { throw new Error('raw review cap was crossed'); },
+    });
+    pending.length = MAX_RAW_PENDING_ATTRIBUTION_REVIEWS + 1;
+    const store = createAttributionReviewStore({ pending }, { now: 1 });
+    assert.equal(store.pending.length, MAX_PENDING_ATTRIBUTION_REVIEWS);
+});
 
 function reviewFor(message, overrides = {}) {
     return {

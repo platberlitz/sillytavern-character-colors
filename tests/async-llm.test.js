@@ -40,8 +40,8 @@ async function loadLlmModule(generateQuietPrompt, overrides = {}) {
             `const { generateQuietPrompt, getContext } = globalThis[${JSON.stringify(key)}];`,
         )
         .replace(
-            "import { settings } from './state.js';",
-            `const { settings } = globalThis[${JSON.stringify(key)}];`,
+            "import { MODULE_NAME, settings } from './state.js';",
+            `const { settings } = globalThis[${JSON.stringify(key)}]; const MODULE_NAME = 'dialogue-colors';`,
         );
     try {
         return await import(`data:text/javascript;base64,${Buffer.from(transformed).toString('base64')}#${moduleSequence}`);
@@ -148,6 +148,60 @@ test('cancelled queued main-AI turns are skipped without allowing paid overlap',
     assert.doesNotMatch(calls[1], /cancelled/);
     thirdHost.resolve('third result');
     assert.equal(await third, 'third result');
+});
+
+test('main-AI requests use the host role-isolated raw API when available', async () => {
+    let rawOptions = null;
+    let quietCalls = 0;
+    const context = {
+        generateRaw: async options => {
+            rawOptions = options;
+            return 'raw result';
+        },
+    };
+    const llm = await loadLlmModule(async () => { quietCalls++; return 'quiet result'; }, {
+        getContext: () => context,
+    });
+
+    assert.equal(await llm.callLLMWithProfile('untrusted data', {
+        systemInstruction: 'trusted instruction',
+        maxTokens: 321,
+        timeoutMs: 500,
+    }), 'raw result');
+    assert.equal(quietCalls, 0);
+    assert.equal(rawOptions.prompt, 'untrusted data');
+    assert.equal(rawOptions.systemPrompt, 'trusted instruction');
+    assert.equal(rawOptions.responseLength, 321);
+});
+
+test('main-AI requests reject untrusted macro delimiters before calling the host', async () => {
+    let calls = 0;
+    const llm = await loadLlmModule(async () => { calls++; return ''; }, {
+        getContext: () => ({ generateRaw: async () => { calls++; return ''; } }),
+    });
+
+    await assert.rejects(
+        llm.callLLMWithProfile('literal {{char}} macro', { timeoutMs: 100 }),
+        /reject macro delimiters/i,
+    );
+    assert.equal(calls, 0);
+});
+
+test('quiet fallback suppresses and restores this extension prompt even on failure', async () => {
+    const prompt = { value: 'ambient colors', position: 1, depth: 2, scan: false, role: 0, filter: null };
+    const context = {
+        extensionPrompts: { 'dialogue-colors': prompt },
+        setExtensionPrompt(key, value, position, depth, scan, role, filter) {
+            this.extensionPrompts[key] = { value, position, depth, scan, role, filter };
+        },
+    };
+    const llm = await loadLlmModule(async () => {
+        assert.equal(context.extensionPrompts['dialogue-colors'].value, '');
+        throw new Error('provider failed');
+    }, { getContext: () => context });
+
+    await assert.rejects(llm.callLLMWithProfile('safe data', { timeoutMs: 100 }), /provider failed/);
+    assert.deepEqual(context.extensionPrompts['dialogue-colors'], prompt);
 });
 
 test('LLM request error classification stops permanent provider failures', async () => {

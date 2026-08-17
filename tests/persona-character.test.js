@@ -105,7 +105,7 @@ const hooks = registerHooks({
 
 const stApi = await import(stApiUrl);
 const { setTestContext } = stApi;
-const { addCharacter, createCanvasGradientFill, ensurePersonaCharacter, exportLegendPng, isPersonaEntry, isPinnedPersonaEntry, renameCharacter, renamePersonaCharacter, updateLegend } = await import('../src/ui.js');
+const { addCharacter, createCanvasGradientFill, ensurePersonaCharacter, exportLegendPng, extractAvatarColor, isPersonaEntry, isPinnedPersonaEntry, renameCharacter, renamePersonaCharacter, updateLegend } = await import('../src/ui.js');
 const { isColorableMessage, isTrackedPersonaMessage } = await import('../src/live-colors.js');
 const { getPersonaName } = await import('../src/palettes.js');
 const {
@@ -202,6 +202,29 @@ test('force-bold invalidates and redraws floating legend typography', () => {
     }
 });
 
+test('floating legend stays hidden while the extension is disabled', () => {
+    const previousColors = structuredClone(registry());
+    const previousEnabled = settings.enabled;
+    const previousShowLegend = settings.showLegend;
+    try {
+        state.setCharacterColors({ Alice: { name: 'Alice', color: '#112233', baseColor: '#112233' } });
+        settings.showLegend = true;
+        settings.enabled = false;
+        updateLegend();
+        const legend = stubElements.get('dc-legend-float');
+        assert.equal(legend.style.display, 'none');
+
+        settings.enabled = true;
+        updateLegend();
+        assert.equal(legend.style.display, 'block');
+    } finally {
+        settings.enabled = previousEnabled;
+        settings.showLegend = previousShowLegend;
+        state.setCharacterColors(previousColors);
+        updateLegend();
+    }
+});
+
 test('PNG legend waits for the remote stylesheet and font face before measuring', async () => {
     const previousColors = structuredClone(registry());
     const previousSettings = structuredClone(settings);
@@ -220,17 +243,18 @@ test('PNG legend waits for the remote stylesheet and font face before measuring'
         measureText() { events.push('measure'); return { width: 40 }; },
     };
     const createLink = () => {
-        const listeners = { load: [], error: [] };
+        const listeners = { load: new Set(), error: new Set() };
         return {
             dataset: {},
             disabled: false,
-            addEventListener(type, listener) { listeners[type]?.push(listener); },
+            addEventListener(type, listener) { listeners[type]?.add(listener); },
+            removeEventListener(type, listener) { listeners[type]?.delete(listener); },
             hasAttribute() { return false; },
             remove() {},
             dispatch(type) {
                 const handler = this[`on${type}`];
                 handler?.();
-                listeners[type]?.forEach(listener => listener());
+                [...(listeners[type] || [])].forEach(listener => listener());
             },
         };
     };
@@ -287,6 +311,177 @@ test('PNG legend waits for the remote stylesheet and font face before measuring'
         else document.fonts = previousFonts;
         Object.assign(settings, previousSettings);
         state.setCharacterColors(previousColors);
+    }
+});
+
+test('PNG legend bounds stalled stylesheet and font-face waits and removes listeners', async () => {
+    const previousColors = structuredClone(registry());
+    const previousSettings = structuredClone(settings);
+    const previousCreateElement = document.createElement;
+    const previousQuerySelectorAll = document.querySelectorAll;
+    const previousHead = document.head;
+    const previousFonts = document.fonts;
+    const previousSetTimeout = globalThis.setTimeout;
+    const previousClearTimeout = globalThis.clearTimeout;
+    const links = [];
+    let downloaded = false;
+    const context = {
+        beginPath() {},
+        arc() {},
+        fill() {},
+        fillRect() {},
+        fillText() {},
+        measureText() { return { width: 40 }; },
+    };
+    const createLink = () => {
+        const listeners = { load: new Set(), error: new Set() };
+        return {
+            dataset: {},
+            disabled: false,
+            addEventListener(type, listener) { listeners[type]?.add(listener); },
+            removeEventListener(type, listener) { listeners[type]?.delete(listener); },
+            hasAttribute() { return false; },
+            remove() {},
+            listenerCount() { return listeners.load.size + listeners.error.size; },
+        };
+    };
+    try {
+        state.setCharacterColors({ Alice: {
+            name: 'Alice',
+            color: '#112233',
+            baseColor: '#112233',
+            font: 'Never Loads Font',
+        } });
+        settings.allowRemoteFonts = true;
+        settings.themeMode = 'light';
+        settings.colorVisionPreviewMode = 'none';
+        settings.narratorStyle = { ...settings.narratorStyle, enabled: false };
+        document.querySelectorAll = selector => selector.includes('data-dc-google-font') ? links : [];
+        document.head = { appendChild(link) { links.push(link); } };
+        document.fonts = { load: () => new Promise(() => {}) };
+        globalThis.setTimeout = callback => { queueMicrotask(callback); return 1; };
+        globalThis.clearTimeout = () => {};
+        document.createElement = tag => {
+            if (tag === 'link') return createLink();
+            if (tag === 'canvas') return {
+                getContext: () => context,
+                toDataURL: () => 'data:image/png;base64,test',
+            };
+            if (tag === 'a') return { click() { downloaded = true; } };
+            return previousCreateElement(tag);
+        };
+
+        await exportLegendPng();
+        assert.equal(downloaded, true);
+        assert.equal(links.at(-1).listenerCount(), 0);
+    } finally {
+        document.createElement = previousCreateElement;
+        document.querySelectorAll = previousQuerySelectorAll;
+        if (previousHead === undefined) delete document.head;
+        else document.head = previousHead;
+        if (previousFonts === undefined) delete document.fonts;
+        else document.fonts = previousFonts;
+        globalThis.setTimeout = previousSetTimeout;
+        globalThis.clearTimeout = previousClearTimeout;
+        Object.assign(settings, previousSettings);
+        state.setCharacterColors(previousColors);
+    }
+});
+
+test('PNG legend expands for names, caps width, and ellipsizes overflow', async () => {
+    const previousColors = structuredClone(registry());
+    const previousSettings = structuredClone(settings);
+    const previousCreateElement = document.createElement;
+    const previousFonts = document.fonts;
+    const drawn = [];
+    const canvas = {
+        width: 0,
+        height: 0,
+        getContext: () => context,
+        toDataURL: () => 'data:image/png;base64,test',
+    };
+    const context = {
+        beginPath() {},
+        arc() {},
+        fill() {},
+        fillRect() {},
+        fillText(text) { drawn.push(text); },
+        measureText(text) { return { width: Array.from(text).length * 10 }; },
+    };
+    try {
+        state.setCharacterColors({ Long: {
+            name: 'W'.repeat(120),
+            color: '#112233',
+            baseColor: '#112233',
+        } });
+        settings.allowRemoteFonts = false;
+        settings.themeMode = 'light';
+        settings.colorVisionPreviewMode = 'none';
+        settings.narratorStyle = { ...settings.narratorStyle, enabled: false };
+        delete document.fonts;
+        document.createElement = tag => {
+            if (tag === 'canvas') return canvas;
+            if (tag === 'a') return { click() {} };
+            return previousCreateElement(tag);
+        };
+
+        await exportLegendPng();
+        assert.equal(canvas.width, 1200);
+        assert.match(drawn[0], /…$/);
+        assert.ok(context.measureText(drawn[0]).width <= canvas.width - 50);
+    } finally {
+        document.createElement = previousCreateElement;
+        if (previousFonts === undefined) delete document.fonts;
+        else document.fonts = previousFonts;
+        Object.assign(settings, previousSettings);
+        state.setCharacterColors(previousColors);
+    }
+});
+
+test('avatar extraction returns null on canvas errors and clears image handlers', async () => {
+    const previousImage = globalThis.Image;
+    const previousCreateElement = document.createElement;
+    let image;
+    try {
+        globalThis.Image = class {
+            constructor() { image = this; }
+            set src(_value) { queueMicrotask(() => this.onload?.()); }
+        };
+        document.createElement = tag => tag === 'canvas'
+            ? { getContext() { throw new Error('canvas unavailable'); } }
+            : previousCreateElement(tag);
+
+        assert.equal(await extractAvatarColor('/avatar.png'), null);
+        assert.equal(image.onload, null);
+        assert.equal(image.onerror, null);
+    } finally {
+        if (previousImage === undefined) delete globalThis.Image;
+        else globalThis.Image = previousImage;
+        document.createElement = previousCreateElement;
+    }
+});
+
+test('avatar extraction times out and clears a stalled image', async () => {
+    const previousImage = globalThis.Image;
+    const previousSetTimeout = globalThis.setTimeout;
+    const previousClearTimeout = globalThis.clearTimeout;
+    let image;
+    try {
+        globalThis.Image = class {
+            constructor() { image = this; }
+            set src(_value) {}
+        };
+        globalThis.setTimeout = callback => { queueMicrotask(callback); return 1; };
+        globalThis.clearTimeout = () => {};
+
+        assert.equal(await extractAvatarColor('/stalled-avatar.png'), null);
+        assert.equal(image.onload, null);
+        assert.equal(image.onerror, null);
+    } finally {
+        if (previousImage === undefined) delete globalThis.Image;
+        else globalThis.Image = previousImage;
+        globalThis.setTimeout = previousSetTimeout;
+        globalThis.clearTimeout = previousClearTimeout;
     }
 });
 
@@ -809,43 +1004,24 @@ test('color imports validate global canonical and alias ownership', async () => 
     }
 });
 
-test('portable enabled imports invoke lifecycle synchronization after applying state', async () => {
-    const previousRecord = structuredClone(stApi.extension_settings[state.MODULE_NAME]);
-    const previousSettings = structuredClone(settings);
-    const previousFetch = globalThis.fetch;
+test('portable enabled imports cannot change the local lifecycle', async () => {
+    const previousEnabled = settings.enabled;
     let lifecycleCalls = 0;
     try {
-        setTestContext({ chat: [], chatMetadata: {}, characterId: 0, characters: [{ avatar: 'card.png' }] });
         settings.enabled = true;
-        stApi.extension_settings[state.MODULE_NAME] = buildAutoSyncRecord({
-            ...getAutoSyncRecord(true),
-            globalSettings: buildPortableSettingsSnapshot(),
-            legacyLocalStorageMigrated: true,
-        });
-        loadData({ persistPrevious: false, persistMigrations: false, allowMetadataPersistence: false });
         state.setEnabledLifecycleSynchronizer(() => { lifecycleCalls++; });
-        globalThis.fetch = async () => ({
-            ok: true,
-            status: 200,
-            json: async () => ({ settings: JSON.stringify({ extension_settings: stApi.extension_settings }) }),
-        });
 
         const analysis = await analyzeSettingsImport(JSON.stringify({
             version: state.COLOR_SCHEMA_VERSION,
             settings: { enabled: false },
         }));
-        assert.equal(analysis.ok, true);
-        const result = await applySettingsImport(analysis.payload, { mode: 'merge', applyScope: false });
-        assert.equal(result.ok, true);
-        assert.equal(settings.enabled, false);
-        assert.equal(lifecycleCalls, 1);
+        assert.equal(analysis.ok, false);
+        assert.equal(analysis.error, 'unrecognized_payload');
+        assert.equal(settings.enabled, true);
+        assert.equal(lifecycleCalls, 0);
     } finally {
         state.setEnabledLifecycleSynchronizer(null);
-        globalThis.fetch = previousFetch;
-        if (previousRecord === undefined) delete stApi.extension_settings[state.MODULE_NAME];
-        else stApi.extension_settings[state.MODULE_NAME] = previousRecord;
-        Object.assign(settings, previousSettings);
-        setTestContext({ chat: [], chatMetadata: {} });
+        settings.enabled = previousEnabled;
     }
 });
 

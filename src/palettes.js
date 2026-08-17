@@ -42,6 +42,7 @@ export let cachedThemeBackground = null;
 let cachedThemeCheckedAt = 0;
 let cachedContrastSurface = null;
 let cachedContrastSurfaceCheckedAt = 0;
+let cssColorCanvasContext = null;
 let closeActiveHarmonyPopup = null;
 
 function compareCodePoints(left, right) {
@@ -1129,37 +1130,40 @@ export function showHarmonyPopup(key, anchorEl) {
     popup.setAttribute('role', 'dialog');
     popup.setAttribute('aria-modal', 'false');
     popup.setAttribute('aria-label', `Color harmony suggestions for ${char.name}`);
-    const rect = anchorEl.getBoundingClientRect();
     popup.style.left = '0px';
     popup.style.top = '0px';
     popup.innerHTML = suggestions.map(s => `<button type="button" class="dc-harmony-swatch" data-color="${s.color}" aria-label="Use ${s.label} color ${s.color}" title="${s.label}: ${s.color}" style="--dc-harmony-color:${s.color};"><span>${s.label}</span></button>`).join('');
     const popupHost = anchorEl.closest('#dc-ext') || document.body;
     popupHost.appendChild(popup);
-    const originRect = popup.getBoundingClientRect();
-    popup.style.left = `${rect.left - originRect.left}px`;
-    popup.style.top = `${rect.bottom + 4 - originRect.top}px`;
-    const popupRect = popup.getBoundingClientRect();
-    const vpWidth = window.visualViewport?.width || window.innerWidth;
-    const vpHeight = window.visualViewport?.height || window.innerHeight;
-    if (popupRect.right > vpWidth - 8) {
-        popup.style.left = `${parseFloat(popup.style.left) - (popupRect.right - vpWidth + 8)}px`;
-    }
-    if (popupRect.bottom > vpHeight - 8) {
-        popup.style.top = `${parseFloat(popup.style.top) - (popupRect.bottom - vpHeight + 8)}px`;
-    }
-    const finalRect = popup.getBoundingClientRect();
-    if (finalRect.left < 8) {
-        popup.style.left = `${parseFloat(popup.style.left) + (8 - finalRect.left)}px`;
-    }
-    if (finalRect.top < 8) {
-        popup.style.top = `${parseFloat(popup.style.top) + (8 - finalRect.top)}px`;
-    }
     let closed = false;
+    let listenerTimer = null;
+    const positionPopup = () => {
+        if (closed) return;
+        const anchorRect = anchorEl.getBoundingClientRect();
+        popup.style.left = '0px';
+        popup.style.top = '0px';
+        const originRect = popup.getBoundingClientRect();
+        const viewport = window.visualViewport;
+        const leftEdge = viewport?.offsetLeft || 0;
+        const topEdge = viewport?.offsetTop || 0;
+        const rightEdge = leftEdge + (viewport?.width || window.innerWidth);
+        const bottomEdge = topEdge + (viewport?.height || window.innerHeight);
+        const left = Math.max(leftEdge + 8, Math.min(anchorRect.left, rightEdge - originRect.width - 8));
+        const top = Math.max(topEdge + 8, Math.min(anchorRect.bottom + 4, bottomEdge - originRect.height - 8));
+        popup.style.left = `${left - originRect.left}px`;
+        popup.style.top = `${top - originRect.top}px`;
+    };
+    positionPopup();
     const close = ({ restoreFocus = true } = {}) => {
         if (closed) return;
         closed = true;
+        clearTimeout(listenerTimer);
         document.removeEventListener('pointerdown', onOutsidePointer, true);
         document.removeEventListener('keydown', onKeyDown, true);
+        window.removeEventListener('resize', positionPopup);
+        window.removeEventListener('scroll', positionPopup, true);
+        window.visualViewport?.removeEventListener('resize', positionPopup);
+        window.visualViewport?.removeEventListener('scroll', positionPopup);
         popup.remove();
         if (closeActiveHarmonyPopup === close) closeActiveHarmonyPopup = null;
         if (restoreFocus && anchorEl?.isConnected) anchorEl.focus({ preventScroll: true });
@@ -1204,7 +1208,12 @@ export function showHarmonyPopup(key, anchorEl) {
             }
         };
     });
-    setTimeout(() => {
+    window.addEventListener('resize', positionPopup);
+    window.addEventListener('scroll', positionPopup, true);
+    window.visualViewport?.addEventListener('resize', positionPopup);
+    window.visualViewport?.addEventListener('scroll', positionPopup);
+    listenerTimer = setTimeout(() => {
+        if (closed) return;
         document.addEventListener('pointerdown', onOutsidePointer, true);
         document.addEventListener('keydown', onKeyDown, true);
     }, 0);
@@ -1260,14 +1269,43 @@ function parseCssColor(value) {
         };
     }
     const match = String(value || '').match(/^rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:\s*[,/]\s*([\d.]+%?))?\s*\)$/i);
-    if (!match) return null;
-    const alpha = match[4]?.endsWith('%') ? Number(match[4].slice(0, -1)) / 100 : Number(match[4] ?? 1);
-    return {
-        r: Math.max(0, Math.min(255, Number(match[1]))),
-        g: Math.max(0, Math.min(255, Number(match[2]))),
-        b: Math.max(0, Math.min(255, Number(match[3]))),
-        a: Number.isFinite(alpha) ? Math.max(0, Math.min(1, alpha)) : 1,
-    };
+    if (match) {
+        const alpha = match[4]?.endsWith('%') ? Number(match[4].slice(0, -1)) / 100 : Number(match[4] ?? 1);
+        return {
+            r: Math.max(0, Math.min(255, Number(match[1]))),
+            g: Math.max(0, Math.min(255, Number(match[2]))),
+            b: Math.max(0, Math.min(255, Number(match[3]))),
+            a: Number.isFinite(alpha) ? Math.max(0, Math.min(1, alpha)) : 1,
+        };
+    }
+
+    const input = String(value || '').trim();
+    if (!input || typeof document === 'undefined' || typeof document.createElement !== 'function') return null;
+    try {
+        if (!cssColorCanvasContext) {
+            const canvas = document.createElement('canvas');
+            canvas.width = 1;
+            canvas.height = 1;
+            cssColorCanvasContext = canvas.getContext?.('2d', { willReadFrequently: true }) || null;
+        }
+        const context = cssColorCanvasContext;
+        if (!context?.getImageData || !context.fillRect || !context.clearRect) return null;
+        // Invalid fillStyle assignments retain the prior value; two sentinels
+        // distinguish that from a valid color equal to either sentinel.
+        context.fillStyle = '#010203';
+        context.fillStyle = input;
+        const firstParse = context.fillStyle;
+        context.fillStyle = '#040506';
+        context.fillStyle = input;
+        if (context.fillStyle !== firstParse) return null;
+        context.clearRect(0, 0, 1, 1);
+        context.fillRect(0, 0, 1, 1);
+        const [r, g, b, a] = context.getImageData(0, 0, 1, 1).data;
+        return { r, g, b, a: a / 255 };
+    } catch {
+        cssColorCanvasContext = null;
+        return null;
+    }
 }
 
 function rgbToHex({ r, g, b }) {

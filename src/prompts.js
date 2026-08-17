@@ -1,5 +1,6 @@
 // prompts.js - extracted from index.js (mechanical split)
 import { resolveCharacterKeyByNameOrAlias } from './color-blocks.js';
+import { normalizeRegistryIdentityName } from './group-profiles.js';
 import { applyThemeReadabilityAndBrightness, getBrightnessOffset, getBrightnessTargetLightnessRange, getCustomPaletteMeta, getCustomPalettes, getEntryEffectiveColor, getThemeLightnessBounds } from './palettes.js';
 import { getNarratorVisual } from './narrator-style.js';
 import { escapeHtml, extension_prompt_roles, extension_prompt_types, extension_settings, getContext, power_user, setExtensionPrompt } from './st-api.js';
@@ -89,7 +90,7 @@ export function buildThoughtSymbolColorPromptRule(thoughtSymbols) {
 }
 
 export function formatColorBlockName(entry) {
-    const name = String(entry?.name ?? '').trim();
+    const name = normalizeRegistryIdentityName(entry?.name);
     if (!name) return '';
     // A name containing block delimiters cannot round-trip through ingest;
     // skip it rather than emit a corrupt [COLORS:] block.
@@ -105,7 +106,7 @@ export function formatColorBlockPair(name, color) {
     const normalizedColor = normalizeHexColor(color, null);
     if (!normalizedColor) return '';
     const key = resolveCharacterKeyByNameOrAlias(name);
-    const blockName = key ? formatColorBlockName(characterColors[key]) : String(name ?? '').trim();
+    const blockName = formatColorBlockName(key ? characterColors[key] : { name });
     return blockName ? `${blockName}=${normalizedColor}` : '';
 }
 

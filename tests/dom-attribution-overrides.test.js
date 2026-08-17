@@ -51,6 +51,7 @@ const stApi = await import(stApiUrl);
 const { buildDialogueRegex, DIALOGUE_SKIP_GROUP } = await import('../src/color-blocks.js');
 const { attributeDialogueSegments } = await import('../src/attribution.js');
 const {
+    MAX_PERSISTED_ATTRIBUTION_OVERRIDE_MESSAGES,
     acceptAttributionReview,
     deleteMessageQuoteOverride,
     getMessageQuoteOverrideOptions,
@@ -62,6 +63,7 @@ const {
     resolveDomSegmentIndexForElement,
     setMessageQuoteOverride,
     setStreamingAttributionOverride,
+    snapshotChatMetadataScope,
     stopDomHealthCheck,
     upsertAttributionReview,
 } = await import('../src/dom-engine.js');
@@ -290,7 +292,7 @@ test('frozen siblings are recorded separately and dropped with the last real ove
             assert.equal(entry.sources['2'], ATTRIBUTION_SOURCE.FROZEN);
 
             assert.equal(deleteMessageQuoteOverride(0, message, 0), true);
-            assert.deepEqual(metadata.dialogue_colors_overrides['0'].segments, {});
+            assert.equal(metadata.dialogue_colors_overrides['0'], undefined);
             assert.deepEqual(speakersFor(0, message), ['Bob', 'Bob', 'Bob']);
         });
     });
@@ -336,7 +338,7 @@ test('reassigning after deleting the last override rebuilds the frozen snapshot'
         withChat([message], metadata => {
             assert.equal(setMessageQuoteOverride(0, message, 0, 'Alice', { freezeSegments: {} }), true);
             assert.equal(deleteMessageQuoteOverride(0, message, 0), true);
-            assert.deepEqual(metadata.dialogue_colors_overrides['0'].segments, {});
+            assert.equal(metadata.dialogue_colors_overrides['0'], undefined);
             assert.equal(setMessageQuoteOverride(0, message, 2, 'Alice', { freezeSegments: {} }), true);
             assert.equal(metadata.dialogue_colors_overrides['0'].sources['0'], ATTRIBUTION_SOURCE.FROZEN);
             assert.equal(metadata.dialogue_colors_overrides['0'].sources['1'], ATTRIBUTION_SOURCE.FROZEN);
@@ -468,8 +470,87 @@ test('message deletion uniquely reconciles a legacy hash-only override', () => {
 
             stApi.setTestContext({ chat: [messages[1]], chatMetadata: metadata });
             assert.equal(reconcileMessageQuoteOverridesAfterDeletion(), true);
-            assert.equal(metadata.dialogue_colors_overrides['0'], legacy);
+            assert.deepEqual(metadata.dialogue_colors_overrides['0'], legacy);
             assert.equal(metadata.dialogue_colors_overrides['0'].segments['0'], 'Alice');
+        });
+    });
+});
+
+test('swipes at one message index retain independent overrides', () => {
+    withCharacters(['Alice', 'Bob', 'Carol'], () => {
+        const message = { id: 'm-1', swipe_id: 0, name: 'Bob', mes: 'Alice said "First."' };
+        withChat([message], metadata => {
+            assert.equal(setMessageQuoteOverride(0, message, 0, 'Alice'), true);
+            message.swipe_id = 1;
+            message.mes = 'Carol said "Second."';
+            assert.equal(setMessageQuoteOverride(0, message, 0, 'Carol'), true);
+            assert.equal(metadata.dialogue_colors_overrides['0'].segments['0'], 'Carol');
+            assert.equal(Object.keys(metadata.dialogue_colors_overrides['0'].variants).length, 1);
+
+            message.swipe_id = 0;
+            message.mes = 'Alice said "First."';
+            assert.equal(getMessageQuoteOverrideOptions(0, message).overrides['0'], 'Alice');
+            message.swipe_id = 1;
+            message.mes = 'Carol said "Second."';
+            assert.equal(getMessageQuoteOverrideOptions(0, message).overrides['0'], 'Carol');
+        });
+    });
+});
+
+test('deletion moves unique records while preserving an ambiguous record inert', () => {
+    withCharacters(['Alice', 'Bob'], () => {
+        const duplicate = () => ({ name: 'Bob', mes: '"Same"' });
+        const unique = { id: 'unique', name: 'Bob', mes: '"Unique"' };
+        const oldChat = [{ id: 'deleted', name: 'Bob', mes: 'gone' }, duplicate(), duplicate(), unique];
+        withChat(oldChat, metadata => {
+            assert.equal(setMessageQuoteOverride(2, oldChat[2], 0, 'Alice'), true);
+            assert.equal(setMessageQuoteOverride(3, unique, 0, 'Alice'), true);
+            const currentChat = [duplicate(), duplicate(), unique];
+            stApi.setTestContext({ chat: currentChat, chatMetadata: metadata });
+
+            assert.equal(reconcileMessageQuoteOverridesAfterDeletion(), true);
+            const active = metadata.dialogue_colors_overrides['2'];
+            assert.equal(active.messageId, 'unique');
+            assert.equal(active.segments['0'], 'Alice');
+            assert.equal(Object.keys(active.variants).length, 1);
+        });
+    });
+});
+
+test('activation reconciliation repairs a deletion that happened while disabled', () => {
+    withCharacters(['Alice', 'Bob'], () => {
+        const messages = [
+            { id: 'a', name: 'Bob', mes: '"A"' },
+            { id: 'b', name: 'Bob', mes: '"B"' },
+        ];
+        withChat(messages, metadata => {
+            assert.equal(setMessageQuoteOverride(1, messages[1], 0, 'Alice'), true);
+            stApi.setTestContext({ chat: [messages[1]], chatMetadata: metadata });
+            assert.equal(reconcileMessageQuoteOverridesAfterDeletion(undefined, { deletion: false }), true);
+            assert.equal(metadata.dialogue_colors_overrides['0'].messageId, 'b');
+        });
+    });
+});
+
+test('override snapshots stop before an over-cap raw entry', () => {
+    const overrides = {};
+    for (let index = 0; index < MAX_PERSISTED_ATTRIBUTION_OVERRIDE_MESSAGES; index++) {
+        overrides[String(index)] = { hash: String(index), segments: {} };
+    }
+    Object.defineProperty(overrides, 'overflow', {
+        enumerable: true,
+        get() { throw new Error('raw override cap was crossed'); },
+    });
+    assert.doesNotThrow(() => snapshotChatMetadataScope({ dialogue_colors_overrides: overrides }));
+});
+
+test('read-only segment mapping does not register an unknown message speaker', () => {
+    withCharacters([], () => {
+        const message = { id: 'm-1', name: 'Unseen Speaker', mes: '"Hello"' };
+        withChat([message], () => {
+            const mesText = createFakeMesText(['"Hello"']);
+            assert.equal(resolveDomSegmentIndexForElement(mesText.elements[0], 0, message), 0);
+            assert.equal(characterColors['unseen speaker'], undefined);
         });
     });
 });

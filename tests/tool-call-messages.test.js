@@ -129,6 +129,13 @@ function toolMessage(mes = TOOL_MES) {
     };
 }
 
+const HISTORICAL_TOOL_COLOR = '#a1b2c3';
+
+function historicallyColorizedToolText(name = 'SillyTavern System') {
+    return TOOL_MES.replace('"name"', `<font color="${HISTORICAL_TOOL_COLOR}">"name"</font>`)
+        + `\n[COLORS:${name}=${HISTORICAL_TOOL_COLOR}]`;
+}
+
 test('a tool-call message is recognised the way SillyTavern recognises it', () => {
     assert.equal(isToolCallMessage(toolMessage()), true);
     assert.equal(isToolCallMessage(null), false);
@@ -179,17 +186,12 @@ test('actual host system and tool messages share the non-dialogue gate', () => {
     assert.equal(isMessageEligibleForAttributionVerification(toolMessage()), false);
 });
 
-test('colorizing a tool-call payload is reversed byte for byte', () => {
+test('a historically colorized tool-call payload is reversed byte for byte', () => {
     withCleanRegistry(() => {
         ensureCharacterEntry('Emily');
-        // Guards the fixture: if buildDialogueRegex ever stops matching JSON string
-        // literals, this assertion fails and the repair below stops being meaningful.
-        const damaged = colorizeMessageText(TOOL_MES, 'SillyTavern System', { autoAddMessageSpeaker: true });
-        assert.equal(damaged.changed, true);
-        assert.match(damaged.updatedText, /<font color="#[0-9a-f]{6}">/i);
-        assert.match(damaged.updatedText, /\n\[COLORS:[^\]]*\]$/i);
+        const damaged = historicallyColorizedToolText();
 
-        const chat = [toolMessage(damaged.updatedText)];
+        const chat = [toolMessage(damaged)];
         const report = repairColorizedToolCallMessages(chat);
         assert.deepEqual(report.repairedIndices, [0]);
         assert.equal(chat[0].mes, TOOL_MES);
@@ -210,6 +212,17 @@ test('markup this extension did not write is declined rather than guessed at', (
     assert.equal(chat[1].mes, unbalanced);
 });
 
+test('canonical font markup without matching generated metadata is never auto-repaired', () => {
+    const legitimate = '<font color="#a1b2c3">"tool result"</font>';
+    const mismatched = `${legitimate}\n[COLORS:Alice=#112233]`;
+    const chat = [toolMessage(legitimate), toolMessage(mismatched)];
+
+    assert.equal(restoreColorizedToolCallText(legitimate), null);
+    assert.equal(restoreColorizedToolCallText(mismatched), null);
+    assert.deepEqual(repairColorizedToolCallMessages(chat).repairedIndices, []);
+    assert.deepEqual(chat.map(message => message.mes), [legitimate, mismatched]);
+});
+
 test('an undamaged tool-call message is left alone and the repair is idempotent', () => {
     const chat = [toolMessage()];
     assert.deepEqual(repairColorizedToolCallMessages(chat).repairedIndices, []);
@@ -217,8 +230,7 @@ test('an undamaged tool-call message is left alone and the repair is idempotent'
 
     withCleanRegistry(() => {
         ensureCharacterEntry('Emily');
-        const damaged = colorizeMessageText(TOOL_MES, 'SillyTavern System', { autoAddMessageSpeaker: true });
-        const repeat = [toolMessage(damaged.updatedText)];
+        const repeat = [toolMessage(historicallyColorizedToolText())];
         assert.equal(repairColorizedToolCallMessages(repeat).repairedIndices.length, 1);
         assert.deepEqual(repairColorizedToolCallMessages(repeat).repairedIndices, []);
         assert.equal(repeat[0].mes, TOOL_MES);
@@ -248,16 +260,16 @@ test('colored ordinary messages are never touched by the repair', () => {
 test('the bogus system character is removed while real speakers survive', () => {
     withCleanRegistry(() => {
         ensureCharacterEntry('Emily');
-        const damaged = colorizeMessageText(TOOL_MES, 'SillyTavern System', { autoAddMessageSpeaker: true });
+        const damaged = historicallyColorizedToolText();
         // Register the entries the way the bug registered them: by ingesting the block, which
         // creates them locked when autoLockDetected is on.
-        processColorBlocksInText(damaged.updatedText);
+        processColorBlocksInText(damaged);
         assert.ok(registry()['sillytavern system'], 'the bug must have created the system entry');
 
         const emilyColor = registry().emily.color;
         const chat = [
             { name: 'Emily', is_user: false, extra: {}, mes: `<font color="${emilyColor}">"Still here."</font>\n[COLORS:Emily=${emilyColor}]` },
-            toolMessage(damaged.updatedText),
+            toolMessage(damaged),
         ];
         const report = repairColorizedToolCallMessages(chat);
 
@@ -271,11 +283,11 @@ test('the bogus system character is removed while real speakers survive', () => 
 test('an entry the user marked Keep survives the cleanup', () => {
     withCleanRegistry(() => {
         ensureCharacterEntry('Emily');
-        const damaged = colorizeMessageText(TOOL_MES, 'SillyTavern System', { autoAddMessageSpeaker: true });
-        processColorBlocksInText(damaged.updatedText);
+        const damaged = historicallyColorizedToolText();
+        processColorBlocksInText(damaged);
         registry()['sillytavern system'].keep = true;
 
-        const chat = [toolMessage(damaged.updatedText)];
+        const chat = [toolMessage(damaged)];
         const report = repairColorizedToolCallMessages(chat);
 
         assert.deepEqual(report.repairedIndices, [0]);
@@ -287,13 +299,13 @@ test('an entry the user marked Keep survives the cleanup', () => {
 test('a candidate whose color is still used elsewhere is kept', () => {
     withCleanRegistry(() => {
         ensureCharacterEntry('Emily');
-        const damaged = colorizeMessageText(TOOL_MES, 'SillyTavern System', { autoAddMessageSpeaker: true });
-        processColorBlocksInText(damaged.updatedText);
+        const damaged = historicallyColorizedToolText();
+        processColorBlocksInText(damaged);
         const systemColor = registry()['sillytavern system'].color;
 
         const chat = [
             { name: 'Emily', is_user: false, extra: {}, mes: `<font color="${systemColor}">"Wearing that color."</font>` },
-            toolMessage(damaged.updatedText),
+            toolMessage(damaged),
         ];
         const report = repairColorizedToolCallMessages(chat);
 

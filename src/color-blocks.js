@@ -14,6 +14,123 @@ function hasOwn(value, key) {
     return Object.prototype.hasOwnProperty.call(value || {}, key);
 }
 
+function isInsideMarkdownCode(source, position) {
+    let fence = null;
+    let inlineTicks = 0;
+    let lineStart = 0;
+    while (lineStart < position) {
+        let lineEnd = source.indexOf('\n', lineStart);
+        if (lineEnd === -1 || lineEnd > position) lineEnd = position;
+        const line = source.slice(lineStart, lineEnd).replace(/\r$/, '');
+        if (fence) {
+            const close = line.match(/^ {0,3}(`+|~+)[ \t]*$/);
+            if (close && close[1][0] === fence.char && close[1].length >= fence.length) fence = null;
+        } else if (!inlineTicks) {
+            const open = line.match(/^ {0,3}(`{3,}|~{3,})/);
+            if (open) {
+                fence = { char: open[1][0], length: open[1].length };
+            } else {
+                for (let i = 0; i < line.length;) {
+                    if (line[i] !== '`') { i++; continue; }
+                    let end = i + 1;
+                    while (line[end] === '`') end++;
+                    const run = end - i;
+                    if (!inlineTicks) inlineTicks = run;
+                    else if (run === inlineTicks) inlineTicks = 0;
+                    i = end;
+                }
+            }
+        } else {
+            for (let i = 0; i < line.length;) {
+                if (line[i] !== '`') { i++; continue; }
+                let end = i + 1;
+                while (line[end] === '`') end++;
+                if (end - i === inlineTicks) inlineTicks = 0;
+                i = end;
+            }
+        }
+        lineStart = lineEnd + 1;
+    }
+    return !!fence || !!inlineTicks;
+}
+
+/** Parse the one metadata form this extension owns: a final standalone line outside code. */
+export function parseTrailingColorMetadata(text) {
+    const source = String(text ?? '');
+    const match = /(^|\r\n?|\n)([ \t]*)\[(COLORS?):([^\]\r\n]*)\][ \t]*((?:\r\n?|\n)?[ \t]*)$/i.exec(source);
+    if (!match) return null;
+    const start = match.index + match[1].length + match[2].length;
+    if (/\t| {4}/.test(match[2]) || isInsideMarkdownCode(source, start)) return null;
+    const pairsStart = start + match[0].slice(match[1].length + match[2].length).indexOf(':') + 1;
+    return {
+        source,
+        label: match[3].toUpperCase(),
+        pairs: match[4],
+        start,
+        end: pairsStart + match[4].length + 1,
+        pairsStart,
+        pairsEnd: pairsStart + match[4].length,
+        removeStart: match.index,
+        removeEnd: source.length,
+    };
+}
+
+export function stripTrailingColorMetadata(text) {
+    const source = String(text ?? '');
+    const block = parseTrailingColorMetadata(source);
+    return block ? source.slice(0, block.removeStart) : source;
+}
+
+function isUserMessageElement(element) {
+    return element?.closest?.('.mes')?.getAttribute?.('is_user') === 'true';
+}
+
+function collectElementColorMetadata(element) {
+    const documentRef = element?.ownerDocument || globalThis.document;
+    const nodeFilter = documentRef?.defaultView?.NodeFilter || globalThis.NodeFilter;
+    if (!element || !nodeFilter || typeof documentRef?.createTreeWalker !== 'function') return null;
+    const walker = documentRef.createTreeWalker(element, nodeFilter.SHOW_TEXT);
+    const nodes = [];
+    let combined = '';
+    let searchable = '';
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        const value = String(node.nodeValue ?? '');
+        nodes.push({ node, start: combined.length });
+        combined += value;
+        let parent = node.parentElement;
+        let inCode = false;
+        while (parent) {
+            if (parent.tagName === 'CODE' || parent.tagName === 'PRE') { inCode = true; break; }
+            parent = parent.parentElement;
+        }
+        searchable += inCode ? value.replace(/[^\r\n]/g, '\ufffc') : value;
+    }
+    const block = parseTrailingColorMetadata(searchable);
+    if (!block) return null;
+    return {
+        nodes,
+        block: {
+            ...block,
+            source: combined,
+            pairs: combined.slice(block.pairsStart, block.pairsEnd),
+        },
+    };
+}
+
+function removeElementColorMetadata(metadata) {
+    let changed = false;
+    const { nodes, block } = metadata;
+    for (const { node, start } of nodes) {
+        const end = start + node.nodeValue.length;
+        if (block.removeEnd <= start || block.removeStart >= end) continue;
+        const from = Math.max(block.removeStart, start) - start;
+        const to = Math.min(block.removeEnd, end) - start;
+        node.nodeValue = node.nodeValue.slice(0, from) + node.nodeValue.slice(to);
+        changed = true;
+    }
+    return changed;
+}
+
 export function resolveCharacterKeyByNameOrAlias(rawName) {
     const lookupName = normalizeRegistryIdentity(rawName);
     if (!lookupName) return '';
@@ -107,22 +224,38 @@ export function pruneReducibleCompositeEntries(rawColors) {
 
 // Phase 1A: Shared color-pair processing — deduplicates parseColorBlock, scanAllMessages, onNewMessage
 // Also fixes auto-lock inconsistency (2A) and adds group field (6B)
+export function parseColorMetadataPairs(pairsString) {
+    if (typeof pairsString !== 'string') return [];
+    const assignments = [];
+    for (const pair of pairsString.split(',')) {
+        const eqIdx = pair.indexOf('=');
+        if (eqIdx < 1) continue;
+        const rawName = pair.slice(0, eqIdx).trim();
+        const expression = rawName.match(/^([^()]+)((?:\([^()]+\))*)$/);
+        const name = expression && normalizeRegistryIdentityName(expression[1]);
+        const color = normalizeHexColor(pair.slice(eqIdx + 1).trim(), null);
+        if (!name || !color || /[\[\]=,()]/.test(name)) continue;
+        const aliases = [];
+        let valid = true;
+        for (const match of expression[2].matchAll(/\(([^()]+)\)/g)) {
+            const alias = normalizeRegistryIdentityName(match[1]);
+            if (!alias || /[\[\]=,()]/.test(alias)) { valid = false; break; }
+            aliases.push(alias);
+        }
+        if (valid) assignments.push({ name, aliases: normalizeAliases(aliases), color });
+    }
+    return assignments;
+}
+
 export function processColorPairs(pairsString) {
     let foundNew = false;
     let hadRemapping = false;
     const remappedAssignments = [];
     const countedKeys = new Set();
     let narratorSeen = false;
-    const colorPairs = pairsString.split(',');
-    for (const pair of colorPairs) {
-        const eqIdx = pair.indexOf('=');
-        if (eqIdx === -1) continue;
-        const rawName = pair.substring(0, eqIdx).trim();
-        const { name, nicknames } = parseNameWithNicknames(rawName);
-        const rawColor = pair.substring(eqIdx + 1).trim();
+    for (const { name, aliases, color: assignedColor } of parseColorMetadataPairs(pairsString)) {
         const nameKey = normalizeRegistryIdentity(name);
-        if (!nameKey || !rawColor || !/^#[a-fA-F0-9]{6}$/i.test(rawColor)) continue;
-        const assignedColor = normalizeHexColor(rawColor);
+        if (!nameKey) continue;
         if (nameKey === 'narrator') {
             narratorSeen = true;
             continue;
@@ -131,7 +264,7 @@ export function processColorPairs(pairsString) {
         const key = existingKey || nameKey;
         const canonicalName = existingKey ? characterColors[existingKey].name : name;
         if (hasOwn(characterColors, key) && characterColors[key]) {
-            characterColors[key].dialogueCount = (characterColors[key].dialogueCount || 0) + 1;
+            if (!countedKeys.has(key)) characterColors[key].dialogueCount = (characterColors[key].dialogueCount || 0) + 1;
             if (!normalizeHexColor(characterColors[key].color, null)) {
                 setEntryFromEffectiveColor(characterColors[key], assignedColor);
             }
@@ -155,25 +288,24 @@ export function processColorPairs(pairsString) {
             }
         }
         countedKeys.add(key);
-        if (nicknames.length) {
-            characterColors[key].aliases = normalizeAliases([...(characterColors[key].aliases || []), ...nicknames]);
+        if (aliases.length) {
+            characterColors[key].aliases = normalizeAliases([...(characterColors[key].aliases || []), ...aliases]);
         }
     }
     return { foundNew, hadRemapping, remappedAssignments, countedKeys: Array.from(countedKeys), narratorSeen };
 }
 
 export function processColorBlocksInText(text) {
-    const colorBlockRegex = /\[COLORS?:([^\]]*)\]/gi;
+    const block = parseTrailingColorMetadata(text);
     const countedKeys = new Set();
-    let match;
     let foundColorBlock = false;
     let foundNew = false;
     let hadRemapping = false;
     let narratorSeen = false;
     const remappedAssignments = [];
 
-    while ((match = colorBlockRegex.exec(text || '')) !== null) {
-        const result = processColorPairs(match[1]);
+    if (block) {
+        const result = processColorPairs(block.pairs);
         foundColorBlock = true;
         if (result.foundNew) foundNew = true;
         if (result.hadRemapping) hadRemapping = true;
@@ -221,14 +353,15 @@ export function countFontColorStatsFromKnownColors(text, countedKeys = new Set()
     let count = 0;
     const existingKeys = countedKeys instanceof Set ? countedKeys : new Set(countedKeys || []);
 
-    for (const color of collectFontColorsFromText(text)) {
+    for (const [color, occurrences] of countFontColorOccurrencesFromText(text)) {
         const assignment = colorLookup.get(normalizeHexColor(color, null));
-        if (!assignment?.key || existingKeys.has(assignment.key)) continue;
+        if (!assignment?.key) continue;
         const entry = hasOwn(characterColors, assignment.key) ? characterColors[assignment.key] : null;
         if (!entry) continue;
-        entry.dialogueCount = (entry.dialogueCount || 0) + 1;
+        const increment = Math.max(0, occurrences - (existingKeys.has(assignment.key) ? 1 : 0));
+        entry.dialogueCount = (entry.dialogueCount || 0) + increment;
         existingKeys.add(assignment.key);
-        count++;
+        count += increment;
     }
 
     return count;
@@ -236,61 +369,22 @@ export function countFontColorStatsFromKnownColors(text, countedKeys = new Set()
 
 export function parseColorBlock(element) {
     const mesText = element.querySelector?.('.mes_text') || element;
-    if (!mesText) return false;
-    const colorBlockRegex = /\[COLORS?:([^\]]*)\]/gi;
-    let match, foundNew = false;
-    // Parse from textContent for data extraction
-    while ((match = colorBlockRegex.exec(mesText.textContent)) !== null) {
-        const result = processColorPairs(match[1]);
-        if (result.foundNew) foundNew = true;
-    }
-    stripColorBlockFromElement(mesText);
+    if (!mesText || isUserMessageElement(mesText)) return false;
+    const metadata = collectElementColorMetadata(mesText);
+    if (!metadata) return false;
+    const foundNew = processColorPairs(metadata.block.pairs).foundNew;
+    removeElementColorMetadata(metadata);
     return foundNew;
 }
 
 export function stripColorBlockFromElement(element) {
     const mesText = element?.querySelector?.('.mes_text') || element;
-    if (!mesText) return false;
-    const documentRef = mesText.ownerDocument || document;
-    const nodeFilter = documentRef?.defaultView?.NodeFilter || globalThis.NodeFilter;
-    if (!nodeFilter || typeof documentRef?.createTreeWalker !== 'function') return false;
-    const walker = documentRef.createTreeWalker(mesText, nodeFilter.SHOW_TEXT);
+    if (!mesText || isUserMessageElement(mesText)) return false;
     // Text nodes are edited in place instead of rewriting innerHTML: serialized
     // markup lets a `[COLOR:` run match across tag boundaries and delete elements,
     // and reassigning innerHTML discards listeners and open <details> state.
-    const nodes = [];
-    let combined = '';
-    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-        nodes.push({ node, start: combined.length });
-        combined += node.nodeValue;
-    }
-    if (!nodes.length) return false;
-
-    // Matching runs over the concatenated text so a block interrupted by inline
-    // markup is still removed, mirroring what parseColorBlock reads via textContent.
-    const removals = [];
-    const blockRegex = /\[COLORS?:[^\]]*\]/gi;
-    for (let match = blockRegex.exec(combined); match; match = blockRegex.exec(combined)) {
-        removals.push([match.index, match.index + match[0].length]);
-    }
-    if (!removals.length) return false;
-
-    let changed = false;
-    for (const { node, start } of nodes) {
-        const end = start + node.nodeValue.length;
-        let value = node.nodeValue;
-        for (let i = removals.length - 1; i >= 0; i--) {
-            const [removeStart, removeEnd] = removals[i];
-            if (removeEnd <= start || removeStart >= end) continue;
-            const from = Math.max(removeStart, start) - start;
-            const to = Math.min(removeEnd, end) - start;
-            value = value.slice(0, from) + value.slice(to);
-        }
-        if (value === node.nodeValue) continue;
-        node.nodeValue = value;
-        changed = true;
-    }
-    return changed;
+    const metadata = collectElementColorMetadata(mesText);
+    return metadata ? removeElementColorMetadata(metadata) : false;
 }
 
 export function stripColorBlocksFromDisplay() {
@@ -307,20 +401,20 @@ export function recountDialogueCountsFromChat(chat = getContext()?.chat || []) {
     const colorLookup = buildUniqueKnownColorStatsLookup();
 
     for (const msg of messages) {
-        if (isHostSystemOrToolMessage(msg)) continue;
+        if (msg?.is_user || isHostSystemOrToolMessage(msg)) continue;
         const text = msg?.mes || '';
         const countedKeys = new Set();
         for (const assignment of parseNamedColorAssignmentsFromText(text)) {
             if (normalizeRegistryIdentity(assignment.name) === 'narrator') continue;
             const key = resolveCharacterKeyByNameOrAlias(assignment.name);
-            if (!key || !characterColors[key]) continue;
+            if (!key || countedKeys.has(key) || !characterColors[key]) continue;
             counts.set(key, (counts.get(key) || 0) + 1);
             countedKeys.add(key);
         }
-        for (const color of collectFontColorsFromText(text)) {
+        for (const [color, occurrences] of countFontColorOccurrencesFromText(text)) {
             const key = colorLookup.get(color)?.key;
-            if (!key || countedKeys.has(key) || !characterColors[key]) continue;
-            counts.set(key, (counts.get(key) || 0) + 1);
+            if (!key || !characterColors[key]) continue;
+            counts.set(key, (counts.get(key) || 0) + Math.max(0, occurrences - (countedKeys.has(key) ? 1 : 0)));
             countedKeys.add(key);
         }
     }
@@ -343,7 +437,7 @@ export function scanAllMessages() {
     const processedMessages = [];
 
     for (const msg of chat) {
-        if (isHostSystemOrToolMessage(msg)) continue;
+        if (msg?.is_user || isHostSystemOrToolMessage(msg)) continue;
         const text = msg?.mes || '';
         const result = processColorBlocksInText(text);
         processedMessages.push({ text, countedKeys: result.countedKeys });
@@ -371,16 +465,10 @@ export function scanAllMessages() {
 export function parseColorAssignmentsFromText(text) {
     const latestByColor = {};
     const namesByColor = {};
-    const colorBlockRegex = /\[COLORS?:([^\]]*)\]/gi;
-    let blockMatch;
-    while ((blockMatch = colorBlockRegex.exec(text || '')) !== null) {
-        for (const pair of blockMatch[1].split(',')) {
-            const eqIdx = pair.indexOf('=');
-            if (eqIdx === -1) continue;
-            const { name } = parseNameWithNicknames(pair.substring(0, eqIdx).trim());
-            const rawColor = pair.substring(eqIdx + 1).trim();
-            if (!name || !/^#[0-9a-fA-F]{6}$/.test(rawColor)) continue;
-            const colorKey = rawColor.toLowerCase();
+    const block = parseTrailingColorMetadata(text);
+    if (block) {
+        for (const { name, color } of parseColorMetadataPairs(block.pairs)) {
+            const colorKey = color;
             const nameKey = normalizeRegistryIdentity(name);
             if (!nameKey) continue;
             latestByColor[colorKey] = nameKey;
@@ -402,21 +490,8 @@ export function collectFontColorsFromText(text) {
 }
 
 export function parseNamedColorAssignmentsFromText(text) {
-    const assignments = [];
-    const colorBlockRegex = /\[COLORS?:([^\]]*)\]/gi;
-    let blockMatch;
-    while ((blockMatch = colorBlockRegex.exec(text || '')) !== null) {
-        for (const pair of blockMatch[1].split(',')) {
-            const eqIdx = pair.indexOf('=');
-            if (eqIdx === -1) continue;
-            const rawName = pair.substring(0, eqIdx).trim();
-            const { name, nicknames } = parseNameWithNicknames(rawName);
-            const color = normalizeHexColor(pair.substring(eqIdx + 1).trim(), null);
-            if (!name || !color) continue;
-            assignments.push({ name, aliases: nicknames, color });
-        }
-    }
-    return assignments;
+    const block = parseTrailingColorMetadata(text);
+    return block ? parseColorMetadataPairs(block.pairs) : [];
 }
 
 export function countNarratorFontTagsFromText(text) {
@@ -447,7 +522,7 @@ export function refreshTransientNarratorCount(chat = getContext()?.chat || []) {
     let total = 0;
     let present = false;
     for (const msg of chat) {
-        if (isHostSystemOrToolMessage(msg)) continue;
+        if (msg?.is_user || isHostSystemOrToolMessage(msg)) continue;
         const result = countNarratorFontTagsFromText(msg?.mes || '');
         if (!result.present) continue;
         present = true;
