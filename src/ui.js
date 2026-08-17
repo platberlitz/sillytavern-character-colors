@@ -1540,9 +1540,13 @@ function buildGradientEditorHtml(key, entry) {
     const safeKey = escapeAttr(key);
     const safeName = escapeAttr(entry.name);
     const gradient = normalizeGradient(entry.gradient);
+    // presentation can be null while gradient data still exists: readability
+    // flattening rewrites stops to the primary color, the user can pick identical
+    // stop colors, and an active color-vision preview can collapse the sampled ramp.
+    // The editor must still render in those states so the stops stay editable.
     const presentation = getGradientPresentation(entry);
-    const previewClasses = presentation ? ` ${presentation.classes}` : '';
-    const previewAttributes = presentation ? ` ${presentation.dataAttributes}` : '';
+    const presentationClasses = presentation ? ` ${presentation.classes}` : '';
+    const presentationAttributes = presentation ? ` ${presentation.dataAttributes}` : '';
     const presetOptions = buildGradientPresetOptionsHtml();
     const generator = normalizeEntryGradientGenerator(entry.gradientGenerator, gradient);
     const generatorStatus = generator
@@ -1603,7 +1607,7 @@ function buildGradientEditorHtml(key, entry) {
             </div>`;
     const customPresetOptions = buildGradientPresetOptionsHtml({ customOnly: true });
     return `
-        <section class="dc-gradient-editor ${presentation.classes}" data-key="${safeKey}" data-gradient-enabled="true" ${presentation.dataAttributes}>
+        <section class="dc-gradient-editor${presentationClasses}" data-key="${safeKey}" data-gradient-enabled="true"${presentationAttributes}>
             <div class="dc-gradient-compact">
                 <button type="button" class="dc-gradient-toggle menu_button dc-danger-button" data-key="${safeKey}" data-focus-id="gradient-toggle">Remove Gradient</button>
                 <div class="dc-gradient-compact-colors">
@@ -1619,7 +1623,7 @@ function buildGradientEditorHtml(key, entry) {
                 </label>
                 ${gradient.type === 'linear' ? `<label>Direction <select class="dc-gradient-direction text_pole" data-key="${safeKey}" aria-label="Linear gradient direction for ${safeName}">${buildGradientDirectionOptions(gradient.angle)}</select></label>` : ''}
                 <label class="checkbox_label dc-gradient-animation-toggle"><input type="checkbox" class="dc-gradient-animation-enabled" data-key="${safeKey}"${gradient.animation.enabled ? ' checked' : ''}><span>Drift colors</span><span class="dc-gradient-motion-paused">Paused by Reduce Motion</span></label>
-                <div class="dc-gradient-preview dc-gradient-surface${previewClasses}" role="img" aria-label="Live gradient preview for ${safeName}"${previewAttributes} style="${escapeAttr(buildGradientSurfaceStyle(entry))}"></div>
+                <div class="dc-gradient-preview dc-gradient-surface${presentationClasses}" role="img" aria-label="Live gradient preview for ${safeName}"${presentationAttributes} style="${escapeAttr(buildGradientSurfaceStyle(entry))}"></div>
                 ${presetControls}
             </div>
             <details class="dc-gradient-advanced" data-key="${safeKey}"${expandedGradientAdvancedRows.has(key) ? ' open' : ''}>
