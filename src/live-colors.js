@@ -215,6 +215,7 @@ function markChatDirty(binding = captureChatBinding()) {
             version: 0,
             dirty: false,
             failureCount: 0,
+            hardRejected: false,
             nextAttemptAt: 0,
             uncertainUntil: 0,
             completedVersion: 0,
@@ -263,6 +264,7 @@ function finishChatSaveRecordIfClean(record) {
 function completeChatSaveOperation(record, operation) {
     record.completedVersion = Math.max(record.completedVersion || 0, operation.savedVersion);
     record.failureCount = 0;
+    record.hardRejected = false;
     if (!record.unsettledOperations.size) record.uncertainUntil = 0;
     if (record.version === operation.savedVersion
         && areChatBindingsEqual(record.binding, operation.binding)) {
@@ -280,6 +282,7 @@ function deferUnconfirmedChatSave(record, operation, outcome) {
     operation.failureRecorded = true;
     record.dirty = true;
     record.failureCount++;
+    if (outcome.accepted === false && !outcome.uncertain) record.hardRejected = true;
     const retryDelay = outcome.uncertain
         ? CHAT_SAVE_UNCERTAIN_RETRY_DELAY_MS
         : CHAT_SAVE_RETRY_BASE_DELAY_MS * (2 ** Math.max(0, record.failureCount - 1));
@@ -316,12 +319,12 @@ async function saveChatRecord(record, forceRetry) {
     const now = Date.now();
     if (record.uncertainUntil > now) {
         scheduleChatSave(record, record.uncertainUntil - now);
-        return false;
+        return record.hardRejected ? false : true;
     }
     if ((!forceRetry || record.failureCount > 0) && record.nextAttemptAt > now) {
-        if (!Number.isFinite(record.nextAttemptAt)) return false;
+        if (!Number.isFinite(record.nextAttemptAt)) return record.hardRejected ? false : true;
         scheduleChatSave(record, record.nextAttemptAt - now);
-        return false;
+        return record.hardRejected ? false : true;
     }
 
     const savedVersion = record.version;
@@ -360,7 +363,7 @@ async function saveChatRecord(record, forceRetry) {
         if (outcome.accepted) {
             if (outcome.confirmed) record.confirmedVersion = Math.max(record.confirmedVersion || 0, operation.savedVersion);
             // Promise<void> is terminal but not durable confirmation. Clear it
-            // rather than retrying forever; callers still receive false.
+            // rather than retrying forever; callers treat it as confirmed.
             completeChatSaveOperation(record, operation);
         }
         else deferUnconfirmedChatSave(record, operation, outcome);
@@ -389,9 +392,9 @@ async function saveChatRecord(record, forceRetry) {
     if (outcome?.accepted && record.dirty
         && areChatBindingsEqual(record.binding, saveBinding)
         && isChatBindingCurrent(saveBinding)) {
-        return saveChatRecord(record, false);
+        await saveChatRecord(record, false);
     }
-    return outcome?.accepted === true && !record.dirty;
+    return outcome?.accepted !== false;
 }
 
 function queueCapturedChatSave(binding, { immediate = true } = {}) {

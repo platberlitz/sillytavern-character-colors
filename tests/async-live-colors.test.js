@@ -240,6 +240,40 @@ test('a fulfilled void host save is accepted and never warned as failed', async 
     assert.equal(saves, 1, 'void settlement must not trigger an endless confirmation retry');
 });
 
+test('a host save that resolves no usable verdict is treated as confirmed for toasts', async () => {
+    let saves = 0;
+    const chat = [{ mes: 'changed' }];
+    const live = await loadLiveColorsModule({
+        getContext: () => chatContext('chat-a', chat, () => { saves++; }),
+    });
+    const originalWarn = console.warn;
+    console.warn = () => {};
+    try {
+        live.queueChatSave();
+        assert.equal(await live.flushChatSave(), true, 'an uncertain save must not warn the user');
+    } finally {
+        console.warn = originalWarn;
+    }
+    assert.ok(saves >= 1, 'the uncertain save is retried by the background queue');
+});
+
+test('a hard host rejection still surfaces as an unconfirmed save', async () => {
+    let saves = 0;
+    const chat = [{ mes: 'changed' }];
+    const live = await loadLiveColorsModule({
+        getContext: () => chatContext('chat-a', chat, () => { saves++; return false; }),
+    });
+    const originalError = console.error;
+    console.error = () => {};
+    try {
+        live.queueChatSave();
+        assert.equal(await live.flushChatSave(), false);
+    } finally {
+        console.error = originalError;
+    }
+    assert.ok(saves >= 1);
+});
+
 test('unchanged no-font LLM output is valid but not completed colorization', async () => {
     const live = await loadLiveColorsModule({ getContext: () => ({ chat: [] }) });
     const dialogue = 'Alice said, "Hello."';
