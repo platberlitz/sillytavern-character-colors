@@ -1883,7 +1883,7 @@ export function onNewMessage(indexArg = null, messageArg = null, chatArg = null)
     if (!settings.enabled || !settings.autoScanNewMessages) return;
     const scheduledContext = getContext();
     const scheduledChat = chatArg ?? scheduledContext?.chat;
-    const scheduledIndex = Number.isInteger(Number(indexArg)) && Number(indexArg) >= 0 ? Number(indexArg) : null;
+    const scheduledIndex = Number.isInteger(indexArg) && indexArg >= 0 ? indexArg : null;
     const scheduledMessage = messageArg
         ?? (Array.isArray(scheduledChat) && scheduledIndex !== null ? scheduledChat[scheduledIndex] : null);
     const scheduledStorageKey = getStorageKey();
