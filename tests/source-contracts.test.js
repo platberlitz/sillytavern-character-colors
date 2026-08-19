@@ -6,6 +6,7 @@ import { settings } from '../src/state.js';
 
 const sourceNames = [
     'attribution-store.js',
+    'color-blocks.js',
     'dom-engine.js',
     'fonts.js',
     'live-colors.js',
@@ -625,6 +626,43 @@ test('assigned colors are kept apart perceptually, not just by hue and lightness
     // the widest separation found rather than an unchecked draw.
     assert.match(resolve, /widestApart/);
     assert.match(resolve, /separation > widestApart\.separation/);
+});
+
+test('one function per engine owns the dialogue tally', () => {
+    // Ingest used to add to dialogueCount while local completion kept adding font tags to the
+    // same message afterwards, so the number sat below the truth until the next recount made it
+    // jump. Counting is recomputation now: only these functions may write the field.
+    const owners = [
+        functionSection(sources['color-blocks.js'], 'recountDialogueCountsFromChat'),
+        functionSection(sources['dom-engine.js'], 'refreshDomDialogueCounts'),
+        functionSection(sources['main.js'], 'resetDialogueCountsForNewChat'),
+        functionSection(sources['utils.js'], 'normalizeCharacterColors'),
+    ];
+    for (const [name, source] of Object.entries(sources)) {
+        for (const line of source.split('\n')) {
+            if (!/\.dialogueCount\s*=[^=]/.test(line)) continue;
+            assert.ok(
+                owners.some(owner => owner.includes(line)),
+                `${name} assigns dialogueCount outside the recount: ${line.trim()}`,
+            );
+        }
+    }
+
+    // The ingest still registers speakers, it just stops counting them.
+    assert.doesNotMatch(functionSection(sources['color-blocks.js'], 'processColorPairs'), /dialogueCount/);
+    // Both engines answer the same question, so every caller asks the same function.
+    const sync = functionSection(sources['color-blocks.js'], 'syncDialogueCounts');
+    assert.match(sync, /isDomEngine\(\)[\s\S]*?refreshDomDialogueCounts\(chat\)/);
+    assert.match(sync, /return recountDialogueCountsFromChat\(chat\)/);
+
+    // The tally is taken after every rewrite of the message, not once on arrival.
+    const newMessage = functionSection(sources['live-colors.js'], 'onNewMessage');
+    const rewrites = newMessage.split('\n').filter(line => /lastMsg\.mes = /.test(line)).length;
+    assert.ok(rewrites >= 2, 'onNewMessage still rewrites the message after ingest');
+    assert.ok(
+        newMessage.split('syncDialogueCounts(').length - 1 >= rewrites + 1,
+        'every message rewrite in onNewMessage must be followed by a recount',
+    );
 });
 
 test('the LLM engine never edits or registers a tool-call message', () => {

@@ -42,7 +42,6 @@ const stApi = await import(stApiUrl);
 const { normalizeRegistryIdentityName } = await import('../src/group-profiles.js');
 const { buildCurrentColorPairsList, formatColorBlockName, formatColorBlockPair } = await import('../src/prompts.js');
 const {
-    countFontColorStatsFromKnownColors,
     parseNamedColorAssignmentsFromText,
     parseTrailingColorMetadata,
     processColorBlocksInText,
@@ -134,8 +133,9 @@ test('LLM dialogue counts use font occurrences without counting trailing metadat
         const entry = { name: 'Alice', color: '#112233', baseColor: '#112233', aliases: [], dialogueCount: 0 };
         state.characterColors.alice = entry;
         const text = '<font color="#112233">"One"</font><font color="#112233">"Two"</font>\n[COLORS:Alice=#112233]';
-        const ingested = processColorBlocksInText(text);
-        countFontColorStatsFromKnownColors(text, ingested.countedKeys);
+        processColorBlocksInText(text);
+        assert.equal(entry.dialogueCount, 0, 'ingest registers speakers without adding to the tally');
+        recountDialogueCountsFromChat([{ name: 'Alice', is_user: false, mes: text }]);
         assert.equal(entry.dialogueCount, 2);
 
         entry.dialogueCount = 99;

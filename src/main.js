@@ -1,16 +1,16 @@
 // main.js - extracted from index.js (mechanical split)
 import { clearDomCache } from './attribution.js';
 import { destroyGradientAnimationController } from './animation-controller.js';
-import { recountDialogueCountsFromChat, refreshTransientNarratorCount, scanAllMessages, stripColorBlocksFromDisplay } from './color-blocks.js';
+import { scanAllMessages, stripColorBlocksFromDisplay, syncDialogueCounts } from './color-blocks.js';
 import { deleteCharacterKeys } from './character-operations.js';
 import { setupContextMenu } from './context-menu.js';
-import { DOM_RETRY_REFRESH_DELAYS, POST_MUTATION_DOM_REPAIR_DELAY_MS, clearDecoratedWatchers, clearDialogueCountCache, clearSessionAttributionVerifications, decorateAllMessages, reconcileMessageQuoteOverridesAfterDeletion, refreshDomDialogueCounts, scheduleDomRefreshSeries, scheduleDomSettleRefresh, scheduleMessageDomRepair, setupChatObserver, setupChatRootObserver, startDomHealthCheck, stopDomHealthCheck, undecorateAllMessages } from './dom-engine.js';
+import { DOM_RETRY_REFRESH_DELAYS, POST_MUTATION_DOM_REPAIR_DELAY_MS, clearDecoratedWatchers, clearDialogueCountCache, clearSessionAttributionVerifications, decorateAllMessages, reconcileMessageQuoteOverridesAfterDeletion, scheduleDomRefreshSeries, scheduleDomSettleRefresh, scheduleMessageDomRepair, setupChatObserver, setupChatRootObserver, startDomHealthCheck, stopDomHealthCheck, undecorateAllMessages } from './dom-engine.js';
 import { scheduleCustomFontRefresh } from './fonts.js';
 import { redo, undo } from './history.js';
 import { applyHtmlBreakingSpanRepair, applyToolCallMessageRepair, commit, onNewMessage, repaintDomAfterCharacterDataChange, resumePendingChatSave } from './live-colors.js';
 import { consumeMainAiQuietGenerationEnd, populateProfileDropdown } from './llm.js';
 import { detectTheme, getReadableSurfaceSignature, invalidateThemeCache } from './palettes.js';
-import { buildMinimalPromptInstruction, flushPromptInjection, injectPrompt } from './prompts.js';
+import { buildMinimalPromptInstruction, flushPromptInjection, getEffectivePromptMode, injectPrompt } from './prompts.js';
 import { eventSource, event_types, getContext } from './st-api.js';
 import { attributionChatGeneration, autoSyncPendingRecord, characterColors, expandedCharacterRows, groupProfiles, isDomEngine, isStreamingGenerationActive, lastCharKey, lastProcessedMessageSignature, pendingAttributionVerifications, runtimeState, selectedCharacterKeys, setAttributionChatGeneration, setEnabledLifecycleSynchronizer, setIsStreamingGenerationActive, setLastCharKey, setLastProcessedMessageSignature, setPendingAttributionVerifications, setSwapMode, settings, swapMode } from './state.js';
 import { beginStreamingPaint, endStreamingPaint } from './streaming-paint.js';
@@ -223,8 +223,7 @@ export function handleChatChanged() {
         .catch(error => console.error('[Dialogue Colors] HTML markup repair failed:', error));
     if (settings.autoPersonaCharacter === true) ensurePersonaCharacter({ silent: true });
     const chat = getContext()?.chat || [];
-    if (!isDomEngine()) recountDialogueCountsFromChat(chat);
-    else refreshTransientNarratorCount(chat);
+    syncDialogueCounts(chat);
     updateCharList();
     injectPrompt();
     stripColorBlocksFromDisplay();
@@ -278,15 +277,7 @@ function scheduleExactDialogueRecount(chat) {
     runtimeState.dialogueRecountTimer = setTimeout(() => {
         runtimeState.dialogueRecountTimer = null;
         if (!settings.enabled || !automaticRuntimeActive || getContext()?.chat !== chat) return;
-        let countsChanged;
-        if (isDomEngine()) {
-            const result = refreshDomDialogueCounts(chat);
-            countsChanged = result.changed || result.countsChanged;
-            refreshTransientNarratorCount(chat);
-        } else {
-            countsChanged = recountDialogueCountsFromChat(chat);
-        }
-        if (countsChanged) updateCharList();
+        if (syncDialogueCounts(chat)) updateCharList();
         updateLegend();
     }, 100);
 }
@@ -353,15 +344,7 @@ export function handleMessageDeleted() {
     reconcileMessageQuoteOverridesAfterDeletion();
     clearDialogueCountCache();
     const chat = getContext()?.chat || [];
-    let countsChanged;
-    if (isDomEngine()) {
-        const result = refreshDomDialogueCounts(chat);
-        countsChanged = result.changed || result.countsChanged;
-        refreshTransientNarratorCount(chat);
-    } else {
-        countsChanged = recountDialogueCountsFromChat(chat);
-    }
-    if (countsChanged) updateCharList();
+    if (syncDialogueCounts(chat)) updateCharList();
     updateLegend();
     scheduleDomRefreshSeries(0);
     scheduleCustomFontRefresh(0);
@@ -483,7 +466,9 @@ export function registerDialogueColorsMacro() {
     try {
         const context = getContext();
         const macroCallback = () => {
-            if (!settings.enabled || isDomEngine()) return '';
+            // Profile mode colors in a second request, so the macro delivers nothing:
+            // a leftover {{dialoguecolors}} in a preset must not reach the reply model.
+            if (!settings.enabled || isDomEngine() || getEffectivePromptMode() === 'profile') return '';
             return buildMinimalPromptInstruction();
         };
 

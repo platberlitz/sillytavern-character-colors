@@ -82,8 +82,7 @@ test('host event wiring deduplicates aliases, flushes prompts, and reconciles de
 
     const deleted = functionSection(main, 'handleMessageDeleted');
     assert.match(deleted, /reconcileMessageQuoteOverridesAfterDeletion\(\)/);
-    assert.match(deleted, /refreshDomDialogueCounts\(chat\)/);
-    assert.match(deleted, /recountDialogueCountsFromChat\(chat\)/);
+    assert.match(deleted, /syncDialogueCounts\(chat\)/);
     const rendered = functionSection(main, 'handleCharacterMessageRendered');
     assert.match(rendered, /scheduleMessageDomRepair\(index/);
     assert.match(rendered, /onNewMessage\(index, message, chat\)/);

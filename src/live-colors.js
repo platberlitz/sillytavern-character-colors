@@ -1,7 +1,7 @@
 // live-colors.js - extracted from index.js (mechanical split)
 import { attributeDialogueSegments, clearSpeakerRegexCache, colorizeMessageText, ensureCharacterEntry } from './attribution.js';
 import { isHostSystemOrToolMessage } from './attribution-store.js';
-import { collectFontColorsFromText, countFontColorStatsFromKnownColors, parseColorAssignmentsFromText, parseColorMetadataPairs, parseNamedColorAssignmentsFromText, parseTrailingColorMetadata, processColorBlocksInText, refreshTransientNarratorCount, resolveCharacterKeyByNameOrAlias, stripColorBlockFromElement, stripTrailingColorMetadata } from './color-blocks.js';
+import { collectFontColorsFromText, parseColorAssignmentsFromText, parseColorMetadataPairs, parseNamedColorAssignmentsFromText, parseTrailingColorMetadata, processColorBlocksInText, refreshTransientNarratorCount, resolveCharacterKeyByNameOrAlias, stripColorBlockFromElement, stripTrailingColorMetadata, syncDialogueCounts } from './color-blocks.js';
 import { DOM_RETRY_REFRESH_DELAYS, decorateAllMessages, refreshMessageDom, scheduleDomRefreshSeries, scheduleDomSettleRefresh } from './dom-engine.js';
 import { scheduleCustomFontRefresh } from './fonts.js';
 import { normalizeRegistryIdentityName } from './group-profiles.js';
@@ -9,7 +9,7 @@ import { saveHistory } from './history.js';
 import { callLLMWithProfile, classifyLlmRequestError } from './llm.js';
 import { getNarratorVisual } from './narrator-style.js';
 import { applyThemeReadabilityAndBrightness, getBaseColor, getEntryEffectiveColor, invalidateThemeCache, syncAllEffectiveColors } from './palettes.js';
-import { buildColorMetadataPromptLines, buildLLMColorizeRules, buildThoughtSymbolColorPromptRule, formatColorBlockPair, getThoughtDelimiterSymbols, injectPrompt } from './prompts.js';
+import { buildColorMetadataPromptLines, buildLLMColorizeRules, buildThoughtSymbolColorPromptRule, formatColorBlockPair, getEffectivePromptMode, getThoughtDelimiterSymbols, injectPrompt } from './prompts.js';
 import { generateQuietPrompt, getContext } from './st-api.js';
 import { COLOR_STATE_SAVE_DELAY_MS, LIVE_CHAT_SAVE_DELAY_MS, attributionChatGeneration, characterColors, colorStateSaveTimer, isAutoColorizing, isColorizing, isDomEngine, isRecoloring, lastProcessedMessageSignature, liveChatSaveTimer, pendingColorStateHistory, pendingColorStateInjectPrompt, pendingColorStateSaveData, pendingColorStateUpdateList, setColorStateSaveTimer, setIsAutoColorizing, setIsColorizing, setIsRecoloring, setLastProcessedMessageSignature, setLiveChatSaveTimer, setPendingColorStateHistory, setPendingColorStateInjectPrompt, setPendingColorStateSaveData, setPendingColorStateUpdateList, setPendingLiveChatSave, settings } from './state.js';
 import { getStorageKey, saveData } from './storage.js';
@@ -1912,7 +1912,10 @@ export function onNewMessage(indexArg = null, messageArg = null, chatArg = null)
             scheduleDomRefreshSeries();
             return;
         }
-        if (settings.autoColorize && isColorableMessage(lastMsg) && isAutoColorizing && !parseTrailingColorMetadata(text)) {
+        // Profile mode delivers no instruction to the reply model, so every reply
+        // arrives uncolored and the colorize pass below is the only thing that colors it.
+        const shouldAutoColorize = settings.autoColorize === true || getEffectivePromptMode() === 'profile';
+        if (shouldAutoColorize && isColorableMessage(lastMsg) && isAutoColorizing && !parseTrailingColorMetadata(text)) {
             pendingAutoColorizeRetry = true;
             setLastProcessedMessageSignature('');
             return;
@@ -1920,8 +1923,10 @@ export function onNewMessage(indexArg = null, messageArg = null, chatArg = null)
         setLastProcessedMessageSignature(signature);
         const registryBeforeIngest = getPersistentRegistryFingerprint();
         const colorStats = processColorBlocksInText(text);
-        countFontColorStatsFromKnownColors(text, colorStats.countedKeys);
-        refreshTransientNarratorCount(chat);
+        // The tally is recomputed from the chat rather than added to: this pass is
+        // followed by local completion and auto-colorize, both of which add more
+        // font tags to the same message, and an added-up total would miss them.
+        syncDialogueCounts(chat);
         const foundColorBlock = colorStats.foundColorBlock;
         const hadRemapping = colorStats.hadRemapping;
         const remappedAssignments = colorStats.remappedAssignments;
@@ -1961,6 +1966,7 @@ export function onNewMessage(indexArg = null, messageArg = null, chatArg = null)
                     void queueCapturedChatSave(chatBinding);
                 }
                 updateVisibleMessageColors(index, remapReplacements);
+                if (syncDialogueCounts(chat)) updateCharList();
             }
         }
         stripColorBlockFromElement(getMessageElementByIndex(index)?.querySelector('.mes_text'));
@@ -2003,6 +2009,7 @@ export function onNewMessage(indexArg = null, messageArg = null, chatArg = null)
                     && isColorizeMessageCurrent(chat, completionEntry)) {
                     lastMsg.mes = completion.updatedText;
                     setLastProcessedMessageSignature(`${chat.length}|${sigId}|${lastMsg.mes}`);
+                    syncDialogueCounts(chat);
                     await queueCapturedChatSave(chatBinding, { immediate: true });
                     if (isCapturedChatBindingCurrent(chatBinding)
                         && isColorizeMessageCurrent(chat, completionEntry, completion.updatedText)) {
@@ -2014,12 +2021,12 @@ export function onNewMessage(indexArg = null, messageArg = null, chatArg = null)
         }
 
         // Auto-colorize fallback: if model produced no color output at all
-        if (!foundColorBlock && settings.autoColorize && isColorableMessage(lastMsg) && isAutoColorizing) {
+        if (!foundColorBlock && shouldAutoColorize && isColorableMessage(lastMsg) && isAutoColorizing) {
             pendingAutoColorizeRetry = true;
             setLastProcessedMessageSignature('');
             return;
         }
-        if (!foundColorBlock && settings.autoColorize && isColorableMessage(lastMsg)) {
+        if (!foundColorBlock && shouldAutoColorize && isColorableMessage(lastMsg)) {
             const hasExistingColors = collectFontColorsFromText(text).size > 0;
             if (!hasExistingColors) {
                 setIsAutoColorizing(true);
@@ -2089,6 +2096,7 @@ export function onNewMessage(indexArg = null, messageArg = null, chatArg = null)
                         if (!isAutoColorizeTargetCurrent()) return;
                         lastMsg.mes = result.updatedText;
                         setLastProcessedMessageSignature(`${capturedChat.length}|${sigId}|${lastMsg.mes}`);
+                        if (syncDialogueCounts(capturedChat)) updateCharList();
                         const saveConfirmed = await queueCapturedChatSave(autoColorizeBinding, { immediate: true });
                         if (!isAutoColorizeTargetCurrent(result.updatedText)) return;
                         await refreshMessageDom(mesIndex, lastMsg);

@@ -450,3 +450,110 @@ test('a chat of only tool-call messages is never saved', async () => {
     await delay(40);
     assert.equal(saves, 0);
 });
+
+// Reported from SillyBunny: the tracked line counts sat at the right-looking number until an
+// in-chat agent touched the message, then jumped by four or five. The agent only emitted
+// MESSAGE_UPDATED; what jumped was the first honest recount after ingest had counted the
+// model's raw reply and local completion had quietly added more font tags to it.
+function completionStubs(chat, onSync) {
+    const entry = { name: 'Alice', color: '#123456', aliases: [] };
+    const context = chatContext('chat-a', chat);
+    return {
+        getContext: () => context,
+        settings: {
+            enabled: true,
+            coloringEngine: 'llm',
+            autoScanNewMessages: true,
+            completePartialColorize: true,
+            autoColorize: false,
+        },
+        characterColors: { alice: entry },
+        isDomEngine: () => false,
+        getStorageKey: () => 'chat:chat-a',
+        isHostSystemOrToolMessage: () => false,
+        processColorBlocksInText: () => ({
+            foundColorBlock: true,
+            foundNew: false,
+            hadRemapping: false,
+            remappedAssignments: [],
+            narratorSeen: false,
+        }),
+        syncDialogueCounts: syncedChat => { onSync(syncedChat[0].mes); return false; },
+        collectFontColorsFromText: text => new Set((String(text).match(/#123456/g) || [])),
+        attributeDialogueSegments: text => ({
+            segments: ['"One."', '"Two."'].flatMap(quote => {
+                const start = text.indexOf(quote);
+                return start < 0 ? [] : [{ start, end: start + quote.length, assignment: { key: 'alice', name: 'Alice', color: '#123456' } }];
+            }),
+            createdCharacters: false,
+        }),
+        getNarratorVisual: () => null,
+        getEntryEffectiveColor: value => value.color,
+        ensureCharacterEntry: () => ({ created: false, entry }),
+        isCompositeSpeakerLabel: () => false,
+        hashMessageText: value => String(value),
+        getMessageElementByIndex: () => null,
+        stripColorBlockFromElement: () => false,
+        getEffectivePromptMode: () => 'inject',
+        setLastProcessedMessageSignature() {},
+        refreshMessageDom: async () => {},
+        scheduleDomRefreshSeries() {},
+        updateCharList() {},
+        injectPrompt() {},
+        saveHistory() {},
+        toast: { info() {}, warning() {} },
+    };
+}
+
+test('the dialogue tally is taken after local completion rewrites the message, not before', async () => {
+    const message = { name: 'Alice', is_user: false, extra: {}, mes: '<font color="#123456">"One."</font> He paused. "Two."' };
+    const chat = [message];
+    const synced = [];
+    const live = await loadLiveColorsModule(completionStubs(chat, text => synced.push(text)));
+
+    live.onNewMessage(0, message, chat);
+    await waitFor(() => message.mes.split('<font').length - 1 === 2, 2000);
+    await waitFor(() => synced.at(-1) === message.mes, 2000);
+
+    assert.ok(synced.length >= 2, 'ingest and completion each ask for a recount');
+    assert.equal(synced.at(-1), message.mes);
+    assert.equal(synced.at(-1).split('<font').length - 1, 2, 'the locally completed line is counted too');
+});
+
+test('profile prompt mode colorizes each reply through the colorize profile', async () => {
+    const message = { name: 'Alice', is_user: false, extra: {}, mes: 'Alice said "Hello."' };
+    const chat = [message];
+    const requests = [];
+    const stubs = completionStubs(chat, () => {});
+    Object.assign(stubs, {
+        settings: { ...stubs.settings, autoColorize: false, completePartialColorize: false },
+        // Inject mode would have had the reply model color as it wrote; in profile mode nothing
+        // is asked of it, so the reply arrives plain and this second request is the only coloring.
+        getEffectivePromptMode: () => 'profile',
+        processColorBlocksInText: () => ({
+            foundColorBlock: false,
+            foundNew: false,
+            hadRemapping: false,
+            remappedAssignments: [],
+            narratorSeen: false,
+        }),
+        collectFontColorsFromText: () => new Set(),
+        generateQuietPrompt: async () => '',
+        callLLMWithProfile: async instruction => { requests.push(instruction); return ''; },
+        setIsAutoColorizing() {},
+        showAutoColorizeIndicator() {},
+        hideAutoColorizeIndicator() {},
+        clearAutoColorizeIndicators() {},
+        syncAllEffectiveColors() {},
+        buildLLMColorizeRules: () => [],
+        buildColorMetadataPromptLines: () => [],
+        getThoughtDelimiterSymbols: () => [],
+        formatColorBlockPair: (name, color) => `${name}=${color}`,
+        colorizeMessageText: rawText => ({ updatedText: rawText, changed: false, createdCharacters: false, hadDialogueMatches: false, hadResolvableSpeaker: false }),
+    });
+    const live = await loadLiveColorsModule(stubs);
+
+    live.onNewMessage(0, message, chat);
+    await waitFor(() => requests.length === 1, 2000);
+    assert.equal(requests.length, 1);
+});

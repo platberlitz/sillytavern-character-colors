@@ -1,6 +1,6 @@
 // color-blocks.js - extracted from index.js (mechanical split)
 import { isHostSystemOrToolMessage } from './attribution-store.js';
-import { DOM_RETRY_REFRESH_DELAYS, decorateAllMessages, scheduleDomSettleRefresh } from './dom-engine.js';
+import { DOM_RETRY_REFRESH_DELAYS, decorateAllMessages, refreshDomDialogueCounts, scheduleDomSettleRefresh } from './dom-engine.js';
 import { normalizeRegistryIdentity, normalizeRegistryIdentityName } from './group-profiles.js';
 import { commit, repaintDomAfterCharacterDataChange } from './live-colors.js';
 import { applyThemeReadabilityAndBrightness, buildCharacterEntry, checkColorConflicts, deriveBaseColorFromEffectiveColor, getEntryEffectiveColor, setEntryFromEffectiveColor } from './palettes.js';
@@ -251,7 +251,6 @@ export function processColorPairs(pairsString) {
     let foundNew = false;
     let hadRemapping = false;
     const remappedAssignments = [];
-    const countedKeys = new Set();
     let narratorSeen = false;
     for (const { name, aliases, color: assignedColor } of parseColorMetadataPairs(pairsString)) {
         const nameKey = normalizeRegistryIdentity(name);
@@ -264,7 +263,6 @@ export function processColorPairs(pairsString) {
         const key = existingKey || nameKey;
         const canonicalName = existingKey ? characterColors[existingKey].name : name;
         if (hasOwn(characterColors, key) && characterColors[key]) {
-            if (!countedKeys.has(key)) characterColors[key].dialogueCount = (characterColors[key].dialogueCount || 0) + 1;
             if (!normalizeHexColor(characterColors[key].color, null)) {
                 setEntryFromEffectiveColor(characterColors[key], assignedColor);
             }
@@ -273,8 +271,7 @@ export function processColorPairs(pairsString) {
             const built = buildCharacterEntry(canonicalName, {
                 color: assignedColor,
                 colorMode: 'effective',
-                locked: settings.autoLockDetected !== false,
-                dialogueCount: 1
+                locked: settings.autoLockDetected !== false
             });
             if (!built.entry) continue;
             characterColors[key] = built.entry;
@@ -287,17 +284,15 @@ export function processColorPairs(pairsString) {
                 }
             }
         }
-        countedKeys.add(key);
         if (aliases.length) {
             characterColors[key].aliases = normalizeAliases([...(characterColors[key].aliases || []), ...aliases]);
         }
     }
-    return { foundNew, hadRemapping, remappedAssignments, countedKeys: Array.from(countedKeys), narratorSeen };
+    return { foundNew, hadRemapping, remappedAssignments, narratorSeen };
 }
 
 export function processColorBlocksInText(text) {
     const block = parseTrailingColorMetadata(text);
-    const countedKeys = new Set();
     let foundColorBlock = false;
     let foundNew = false;
     let hadRemapping = false;
@@ -311,10 +306,9 @@ export function processColorBlocksInText(text) {
         if (result.hadRemapping) hadRemapping = true;
         if (result.narratorSeen) narratorSeen = true;
         if (Array.isArray(result.remappedAssignments)) remappedAssignments.push(...result.remappedAssignments);
-        if (Array.isArray(result.countedKeys)) result.countedKeys.forEach(key => countedKeys.add(key));
     }
 
-    return { foundColorBlock, foundNew, hadRemapping, remappedAssignments, countedKeys, narratorSeen };
+    return { foundColorBlock, foundNew, hadRemapping, remappedAssignments, narratorSeen };
 }
 
 export function buildUniqueKnownColorStatsLookup() {
@@ -347,24 +341,6 @@ export function countFontColorOccurrencesFromText(text) {
         counts.set(color, (counts.get(color) || 0) + 1);
     }
     return counts;
-}
-
-export function countFontColorStatsFromKnownColors(text, countedKeys = new Set(), colorLookup = buildUniqueKnownColorStatsLookup()) {
-    let count = 0;
-    const existingKeys = countedKeys instanceof Set ? countedKeys : new Set(countedKeys || []);
-
-    for (const [color, occurrences] of countFontColorOccurrencesFromText(text)) {
-        const assignment = colorLookup.get(normalizeHexColor(color, null));
-        if (!assignment?.key) continue;
-        const entry = hasOwn(characterColors, assignment.key) ? characterColors[assignment.key] : null;
-        if (!entry) continue;
-        const increment = Math.max(0, occurrences - (existingKeys.has(assignment.key) ? 1 : 0));
-        entry.dialogueCount = (entry.dialogueCount || 0) + increment;
-        existingKeys.add(assignment.key);
-        count += increment;
-    }
-
-    return count;
 }
 
 export function parseColorBlock(element) {
@@ -430,24 +406,30 @@ export function recountDialogueCountsFromChat(chat = getContext()?.chat || []) {
     return changed;
 }
 
+// The one place any caller asks for dialogueCount to be brought up to date. Both
+// engines recompute the tally from the chat, so a recount can never disagree with
+// what a message ingest happened to add: a re-render, a swipe or an extension that
+// rewrites a message cannot move the numbers on its own.
+export function syncDialogueCounts(chat = getContext()?.chat || []) {
+    if (isDomEngine()) {
+        const result = refreshDomDialogueCounts(chat);
+        refreshTransientNarratorCount(chat);
+        return result.changed || result.countsChanged;
+    }
+    return recountDialogueCountsFromChat(chat);
+}
+
 export function scanAllMessages() {
-    Object.values(characterColors).forEach(c => c.dialogueCount = 0);
     const ctx = getContext();
     const chat = ctx?.chat || [];
-    const processedMessages = [];
 
     for (const msg of chat) {
         if (msg?.is_user || isHostSystemOrToolMessage(msg)) continue;
-        const text = msg?.mes || '';
-        const result = processColorBlocksInText(text);
-        processedMessages.push({ text, countedKeys: result.countedKeys });
+        processColorBlocksInText(msg?.mes || '');
     }
-
-    const colorLookup = buildUniqueKnownColorStatsLookup();
-    for (const { text, countedKeys } of processedMessages) {
-        countFontColorStatsFromKnownColors(text, countedKeys, colorLookup);
-    }
-    refreshTransientNarratorCount(chat);
+    // Ingest registers speakers; the tally is computed from the chat afterwards so
+    // this scan cannot disagree with the recount that every other path runs.
+    recountDialogueCountsFromChat(chat);
 
     commit();
     stripColorBlocksFromDisplay();

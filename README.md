@@ -167,10 +167,13 @@ Reset unlocked colors and Lock/Unlock All are reviewed state changes rather than
 
 ## Prompt Configuration
 
-LLM mode supports prompt depth, system/user role, and two delivery modes:
+LLM mode supports prompt depth, system/user role, and three delivery modes:
 
 - **Inject automatically**: add instructions on each generation.
 - **Use macro manually**: expose `{{dialoguecolors}}` for placement in your own prompt.
+- **Use the colorize profile**: send nothing to the model that writes the reply, and color each reply afterwards in a separate request on the **Colorize profile**. Pick a profile first; without one the second request goes to the main chat AI.
+
+The two connection profiles cover different requests. **Colorize profile** is used by the Colorize button, automatic colorizing, palette generation, and the delivery mode above; **Verify profile** is used only by attribution verification. In Inject and Macro delivery the reply model colors as it writes, so neither profile is called for that.
 
 **Switch to macro when detected** is on by default. It scans your chat completion preset prompts, system prompt, story string, and author's note for `{{dialoguecolors}}`, and delivers through the macro whenever it finds one, so placing the macro yourself does not also inject a second copy of the instructions. Only preset prompts enabled in the current prompt order count, and a mention inside a `{{// }}` comment is ignored, since neither reaches the model. It does not read World Info or character cards. Turn it off to always inject.
 
@@ -193,6 +196,7 @@ LLM mode supports prompt depth, system/user role, and two delivery modes:
 - **Prose feels worse in LLM mode**: use a system prompt role, increase prompt depth, use the manual macro, or switch to Local mode.
 - **The model ignores color tags**: confirm the engine is LLM and the extension is enabled. Try a different prompt role or use Colorize missing.
 - **LLM mode never colors on its own, and the read-only Macro text box is showing while the dropdown says Inject automatically**: the extension believes `{{dialoguecolors}}` is already in your prompt and stops injecting. Versions before 5.12.1 counted any mention in the preset, including one inside a `{{// }}` comment or in a disabled prompt, so a preset README that merely talks about the macro silenced the injection while delivering nothing. Only enabled prompts outside comments count now; if a preset you did not write still triggers it, turn off **Switch to macro when detected**.
+- **The tracked line counts jump after something touches a message**: fixed in 6.0.3. The counts used to be added up as each message arrived, before local completion had finished adding its own tags, so they sat below the truth until the next full recount - which anything that edits a message triggers, in-chat agents included. Both engines recompute the counts from the chat now, so they only move when the chat does.
 - **Local colors disappear on refresh**: Local mode is render-only. Use LLM mode for persisted solid tags.
 - **Auto-colorize does not run**: it only triggers when the latest colorable message contains no color block or existing font tags. Your own messages are only colorable once your persona is in the character list.
 - **My persona has no color in LLM mode**: add the active persona under Characters, or enable **Add my persona automatically**. Once the tracked entry has a color, LLM mode renders matching user messages locally without editing their text or making an LLM call. **Keep my persona entry** only controls Keep; it does not add a persona or assign a color.

@@ -709,7 +709,7 @@ export function normalizeStoredSettings(source) {
         normalized.promptDepth = Number.isFinite(value) ? Math.max(0, Math.min(99, Math.round(value))) : 1;
     }
     if (hasOwn(source, 'promptRole')) normalized.promptRole = ['system', 'user'].includes(source.promptRole) ? source.promptRole : 'system';
-    if (hasOwn(source, 'promptMode')) normalized.promptMode = ['inject', 'macro'].includes(source.promptMode) ? source.promptMode : 'inject';
+    if (hasOwn(source, 'promptMode')) normalized.promptMode = ['inject', 'macro', 'profile'].includes(source.promptMode) ? source.promptMode : 'inject';
     if (hasOwn(source, 'coloringEngine')) normalized.coloringEngine = source.coloringEngine === 'dom' ? 'dom' : 'llm';
     if (hasOwn(source, 'gradientRandomMasterSeed')) {
         normalized.gradientRandomMasterSeed = typeof source.gradientRandomMasterSeed === 'string'

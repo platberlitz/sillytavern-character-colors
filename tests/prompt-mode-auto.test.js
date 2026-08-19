@@ -112,6 +112,21 @@ test('detection only overrides inject mode, and only while the option is on', ()
     assert.equal(getEffectivePromptMode(), 'macro');
 });
 
+test('the colorize profile mode sends nothing to the reply model', () => {
+    reset({ promptMode: 'profile' });
+    assert.equal(getEffectivePromptMode(), 'profile');
+    assert.equal(flushPromptInjection(), '');
+    assert.equal(stApi.extensionPromptCalls.at(-1)[1], '', 'an injection left over from inject mode is cleared');
+
+    // The reply model is not doing the coloring in this mode, so a macro sitting in a preset
+    // must not deliver the instruction behind its back.
+    reset({ promptMode: 'profile' });
+    stApi.power_user.sysprompt = { content: '{{dialoguecolors}}' };
+    assert.equal(promptHasDialogueColorsMacro(), true);
+    assert.equal(getEffectivePromptMode(), 'profile');
+    assert.equal(flushPromptInjection(), '');
+});
+
 test('the DOM engine ignores prompt modes entirely', () => {
     reset();
     settings.coloringEngine = 'dom';

@@ -302,6 +302,11 @@ export function buildDomStealthColorsInstruction() {
 
 export function buildColoredPromptPreview() {
     if (!settings.enabled) return '<span style="opacity:0.5">(disabled)</span>';
+    if (!isDomEngine() && getEffectivePromptMode() === 'profile') {
+        return settings.llmConnectionProfile
+            ? '<span style="opacity:0.5">(colorize profile colors each reply: nothing is sent to the reply model)</span>'
+            : '<span style="opacity:0.5">(no colorize profile selected: the main chat AI colors each reply in a second request)</span>';
+    }
     if (isDomEngine()) {
         if (settings.domStealthColors) return '<span style="opacity:0.5">(local DOM engine + stealth colors block)</span>';
         return '<span style="opacity:0.5">(local DOM engine: no prompt injected)</span>';
@@ -388,7 +393,10 @@ export function promptHasDialogueColorsMacro() {
 
 // The dropdown is the manual choice; auto-detection can upgrade 'inject' to
 // 'macro' so the instruction is not delivered twice when the macro is present.
+// 'profile' outranks the detection: the reply model is not asked to color at all,
+// so a macro sitting in a preset must not deliver the instruction behind its back.
 export function getEffectivePromptMode() {
+    if (settings.promptMode === 'profile') return 'profile';
     if (settings.promptMode === 'macro') return 'macro';
     if (settings.autoPromptMode !== false && promptHasDialogueColorsMacro()) return 'macro';
     return 'inject';
@@ -403,7 +411,7 @@ export function flushPromptInjection() {
     }
 
     let promptText = '';
-    if (settings.enabled && !isDomEngine() && getEffectivePromptMode() !== 'macro') {
+    if (settings.enabled && !isDomEngine() && getEffectivePromptMode() === 'inject') {
         promptText = buildMinimalPromptInstruction();
     } else if (settings.enabled && isDomEngine() && settings.domStealthColors) {
         promptText = buildDomStealthColorsInstruction();
@@ -427,7 +435,20 @@ export function injectPrompt() {
 
 // Phase 3A: Legend with event listener cleanup
 
+// The colorize profile is only reachable from profile mode, and profile mode without
+// a profile quietly falls back to the main chat AI. Both are worth saying out loud.
+function updatePromptModeNote() {
+    const note = document.getElementById('dc-prompt-mode-note');
+    if (!note) return;
+    const profileMode = settings.enabled && !isDomEngine() && getEffectivePromptMode() === 'profile';
+    if (!profileMode) note.textContent = '';
+    else if (settings.llmConnectionProfile) note.textContent = 'The reply model is not asked to color. Each reply is colored afterwards by a request on the colorize profile.';
+    else note.textContent = 'No colorize profile is selected, so each reply is colored by a second request to the main chat AI.';
+    note.style.display = note.textContent ? 'block' : 'none';
+}
+
 export function updateSystemPromptDisplay() {
+    updatePromptModeNote();
     const container = document.getElementById('dc-system-prompt-container');
     if (!container) return;
 
