@@ -9,7 +9,7 @@ import { saveHistory } from './history.js';
 import { callLLMWithProfile, classifyLlmRequestError } from './llm.js';
 import { getNarratorVisual } from './narrator-style.js';
 import { applyThemeReadabilityAndBrightness, getBaseColor, getEntryEffectiveColor, invalidateThemeCache, syncAllEffectiveColors } from './palettes.js';
-import { buildColorMetadataPromptLines, buildLLMColorizeRules, buildThoughtSymbolColorPromptRule, formatColorBlockPair, getEffectivePromptMode, getThoughtDelimiterSymbols, injectPrompt } from './prompts.js';
+import { buildColorMetadataPromptLines, buildLLMColorizeRules, buildThoughtSymbolColorPromptRule, filterPromptCharacterEntries, formatColorBlockPair, getEffectivePromptMode, getThoughtDelimiterSymbols, injectPrompt } from './prompts.js';
 import { generateQuietPrompt, getContext } from './st-api.js';
 import { COLOR_STATE_SAVE_DELAY_MS, LIVE_CHAT_SAVE_DELAY_MS, attributionChatGeneration, characterColors, colorStateSaveTimer, isAutoColorizing, isColorizing, isDomEngine, isRecoloring, lastProcessedMessageSignature, liveChatSaveTimer, pendingColorStateHistory, pendingColorStateInjectPrompt, pendingColorStateSaveData, pendingColorStateUpdateList, setColorStateSaveTimer, setIsAutoColorizing, setIsColorizing, setIsRecoloring, setLastProcessedMessageSignature, setLiveChatSaveTimer, setPendingColorStateHistory, setPendingColorStateInjectPrompt, setPendingColorStateSaveData, setPendingColorStateUpdateList, setPendingLiveChatSave, settings } from './state.js';
 import { getStorageKey, saveData } from './storage.js';
@@ -1266,13 +1266,15 @@ export async function colorizeMessageWithLLM(rawText, messageSpeakerName = '') {
     const charList = [];
     const trimmedSpeaker = String(messageSpeakerName ?? '').trim();
     let defaultSpeakerColor = null;
-    for (const entry of Object.values(characterColors)) {
+    let defaultSpeakerEntry = null;
+    for (const entry of filterPromptCharacterEntries(Object.values(characterColors))) {
         const color = getEntryEffectiveColor(entry);
-        const pair = formatColorBlockPair(entry.name, color);
+        const pair = formatColorBlockPair(entry.name, color, entry);
         if (pair) charList.push(pair);
         const safeEntryName = normalizeRegistryIdentityName(entry.name);
         if (safeEntryName && safeEntryName.toLowerCase() === trimmedSpeaker.toLowerCase()) {
             defaultSpeakerColor = color;
+            defaultSpeakerEntry = entry;
         }
     }
     const narratorColor = getNarratorVisual(settings, applyThemeReadabilityAndBrightness)?.color || null;
@@ -1291,7 +1293,9 @@ export async function colorizeMessageWithLLM(rawText, messageSpeakerName = '') {
     lines.push(...buildColorMetadataPromptLines());
     if (thoughtSymbols.length) lines.push(`- ${buildThoughtSymbolColorPromptRule(thoughtSymbols)}`);
     if (narratorColor) lines.push(`- Narrator text: <font color="${narratorColor}">...</font>.`);
-    const defaultSpeakerPair = formatColorBlockPair(trimmedSpeaker, defaultSpeakerColor);
+    const defaultSpeakerPair = defaultSpeakerEntry
+        ? formatColorBlockPair(defaultSpeakerEntry.name, defaultSpeakerColor, defaultSpeakerEntry)
+        : formatColorBlockPair(trimmedSpeaker, defaultSpeakerColor);
     if (defaultSpeakerPair) lines.push(`- Default speaker (message author): ${defaultSpeakerPair}.`);
     lines.push('');
     lines.push(rawText);
@@ -1362,9 +1366,9 @@ export async function colorizeMultipleMessagesWithLLM(messageBatch) {
 
     // Build character-color list
     const charList = [];
-    for (const entry of Object.values(characterColors)) {
+    for (const entry of filterPromptCharacterEntries(Object.values(characterColors))) {
         const color = getEntryEffectiveColor(entry);
-        const pair = formatColorBlockPair(entry.name, color);
+        const pair = formatColorBlockPair(entry.name, color, entry);
         if (pair) charList.push(pair);
     }
     const narratorColor = getNarratorVisual(settings, applyThemeReadabilityAndBrightness)?.color || null;

@@ -1,7 +1,7 @@
 // prompts.js - extracted from index.js (mechanical split)
 import { resolveCharacterKeyByNameOrAlias } from './color-blocks.js';
-import { normalizeRegistryIdentityName } from './group-profiles.js';
-import { applyThemeReadabilityAndBrightness, getBrightnessOffset, getBrightnessTargetLightnessRange, getCustomPaletteMeta, getCustomPalettes, getEntryEffectiveColor, getThemeLightnessBounds } from './palettes.js';
+import { normalizeRegistryIdentity, normalizeRegistryIdentityName } from './group-profiles.js';
+import { applyThemeReadabilityAndBrightness, getBrightnessOffset, getBrightnessTargetLightnessRange, getCustomPaletteMeta, getCustomPalettes, getEntryEffectiveColor, getPersonaName, getThemeLightnessBounds } from './palettes.js';
 import { getNarratorVisual } from './narrator-style.js';
 import { escapeHtml, extension_prompt_roles, extension_prompt_types, extension_settings, getContext, power_user, setExtensionPrompt } from './st-api.js';
 import { MODULE_NAME, characterColors, isDomEngine, settings } from './state.js';
@@ -102,17 +102,61 @@ export function formatColorBlockName(entry) {
     return `${name}${aliases.map(alias => `(${alias})`).join('')}`;
 }
 
-export function formatColorBlockPair(name, color) {
+export function formatColorBlockPair(name, color, sourceEntry = null) {
     const normalizedColor = normalizeHexColor(color, null);
     if (!normalizedColor) return '';
-    const key = resolveCharacterKeyByNameOrAlias(name);
-    const blockName = formatColorBlockName(key ? characterColors[key] : { name });
+    const key = sourceEntry ? '' : resolveCharacterKeyByNameOrAlias(name);
+    const blockName = formatColorBlockName(sourceEntry || (key ? characterColors[key] : { name }));
     return blockName ? `${blockName}=${normalizedColor}` : '';
 }
 
+function getPromptPersonaIdentities() {
+    try {
+        const personas = power_user?.personas;
+        if (!personas || typeof personas !== 'object') return null;
+        const identities = new Set(Object.values(personas)
+            .filter(value => typeof value === 'string')
+            .map(value => normalizeRegistryIdentity(value))
+            .filter(Boolean));
+        const activeIdentity = normalizeRegistryIdentity(getPersonaName());
+        const inactiveIdentities = new Set(identities);
+        inactiveIdentities.delete(activeIdentity);
+        const chat = getContext()?.chat;
+        if (Array.isArray(chat)) {
+            const chatUserIdentities = new Set(chat
+                .filter(message => message?.is_user)
+                .map(message => normalizeRegistryIdentity(message?.name))
+                .filter(Boolean));
+            for (const identity of inactiveIdentities) {
+                if (!chatUserIdentities.has(identity)) inactiveIdentities.delete(identity);
+            }
+        }
+        return { activeIdentity, inactiveIdentities };
+    } catch {
+        return null;
+    }
+}
+
+export function filterPromptCharacterEntries(entries = Object.values(characterColors)) {
+    const personaState = getPromptPersonaIdentities();
+    if (!personaState?.inactiveIdentities.size) return entries;
+
+    return entries.flatMap(entry => {
+        if (!entry || typeof entry !== 'object') return [entry];
+        const identities = [entry.name, ...(Array.isArray(entry.aliases) ? entry.aliases : [])]
+            .map(identity => normalizeRegistryIdentity(identity))
+            .filter(Boolean);
+        const isActivePersona = personaState.activeIdentity && identities.includes(personaState.activeIdentity);
+        if (personaState.inactiveIdentities.has(normalizeRegistryIdentity(entry.name)) && !isActivePersona) return [];
+        if (!Array.isArray(entry.aliases)) return [entry];
+        const aliases = entry.aliases.filter(alias => !personaState.inactiveIdentities.has(normalizeRegistryIdentity(alias)));
+        return aliases.length === entry.aliases.length ? [entry] : [{ ...entry, aliases }];
+    });
+}
+
 export function buildCurrentColorPairsList() {
-    const pairs = Object.values(characterColors)
-        .map(entry => formatColorBlockPair(entry?.name, getEntryEffectiveColor(entry)))
+    const pairs = filterPromptCharacterEntries(Object.values(characterColors))
+        .map(entry => formatColorBlockPair(entry?.name, getEntryEffectiveColor(entry), entry))
         .filter(Boolean);
     const narrator = getNarratorVisual(settings, applyThemeReadabilityAndBrightness);
     if (narrator) pairs.push(formatColorBlockPair('Narrator', narrator.color));
@@ -311,11 +355,11 @@ export function buildColoredPromptPreview() {
         if (settings.domStealthColors) return '<span style="opacity:0.5">(local DOM engine + stealth colors block)</span>';
         return '<span style="opacity:0.5">(local DOM engine: no prompt injected)</span>';
     }
-    const entries = Object.entries(characterColors);
+    const entries = filterPromptCharacterEntries(Object.values(characterColors));
     const narrator = getNarratorVisual(settings, applyThemeReadabilityAndBrightness);
     if (!entries.length && !narrator) return '<span style="opacity:0.5">(no characters)</span>';
     return [
-        ...entries.map(([, v]) => `<span style="color:${getEntryEffectiveColor(v)}">${escapeHtml(v.name)}</span>`),
+        ...entries.map(v => `<span style="color:${getEntryEffectiveColor(v)}">${escapeHtml(v.name)}</span>`),
         ...(narrator ? [`<span style="color:${narrator.color}">Narration</span>`] : []),
     ].join(', ');
 }

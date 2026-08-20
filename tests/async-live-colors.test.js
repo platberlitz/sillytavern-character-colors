@@ -84,6 +84,7 @@ async function loadLiveColorsModule(overrides = {}) {
             return match ? source.slice(0, match.index) : source;
         },
         getEntryEffectiveColor: entry => entry?.color,
+        filterPromptCharacterEntries: entries => entries,
         classifyLlmRequestError: error => ({ category: 'unknown', retryable: false, status: error?.status ?? null }),
         // Mirrors the real predicate rather than stubbing it out, so the write paths under test
         // skip tool-call messages here exactly as they do in the host.
@@ -357,6 +358,36 @@ test('LLM colorization skips tracked persona user messages without changing text
     await live.colorizeMessages('all');
     assert.equal(requests, 0);
     assert.equal(message.mes, original);
+});
+
+test('individual and batch LLM colorization use the filtered speaker table', async () => {
+    const requests = [];
+    const stubs = bulkColorizeStubs([], async instruction => {
+        requests.push(instruction);
+        return instruction.includes('[MSG:0]')
+            ? '[MSG:0]\n<font color="#123456">"Hello."</font>'
+            : '<font color="#123456">"Hello."</font>';
+    });
+    Object.assign(stubs, {
+        generateQuietPrompt() {},
+        characterColors: {
+            active: { name: 'Active', color: '#123456', aliases: [] },
+            retired: { name: 'Retired', color: '#654321', aliases: ['Old'] },
+        },
+        filterPromptCharacterEntries: entries => entries
+            .filter(entry => entry.name !== 'Retired')
+            .map(entry => entry.name === 'Active' ? { ...entry, aliases: [] } : entry),
+    });
+    const live = await loadLiveColorsModule(stubs);
+
+    await live.colorizeMessageWithLLM('"Hello."', 'Active');
+    await live.colorizeMultipleMessagesWithLLM([{ rawText: '"Hello."', speakerName: 'Active', msgIndex: 0 }]);
+
+    assert.equal(requests.length, 2);
+    for (const request of requests) {
+        assert.match(request, /Active=#123456/);
+        assert.doesNotMatch(request, /Retired|Old/);
+    }
 });
 
 test('bulk colorization rechecks tool eligibility after the provider await', async () => {

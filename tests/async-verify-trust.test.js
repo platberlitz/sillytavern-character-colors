@@ -19,7 +19,7 @@ async function waitFor(predicate) {
     throw new Error('Timed out waiting for verifier request.');
 }
 
-async function loadVerifier() {
+async function loadVerifier(overrides = {}) {
     const importPattern = /^import\s+\{([^}]+)\}\s+from\s+['"][^'"]+['"];\s*$/gm;
     const names = new Set();
     for (const match of source.matchAll(importPattern)) {
@@ -136,6 +136,8 @@ async function loadVerifier() {
         setLastStreamingAttributionVerifyKey() {},
         setStreamingAttributionGeneration() {},
         setStreamingAttributionVerifyTimer() {},
+        filterPromptCharacterEntries: entries => entries,
+        ...overrides,
     };
     const transformed = `const { ${[...names].join(', ')} } = globalThis[${JSON.stringify(key)}];\n${source.replace(importPattern, '')}`;
     try {
@@ -157,6 +159,26 @@ async function loadVerifier() {
 }
 
 globalThis.document ??= { querySelector: () => null, querySelectorAll: () => [] };
+
+test('attribution verifier uses the filtered known-speaker table', async () => {
+    const fixture = await loadVerifier({
+        characterColors: {
+            active: { name: 'Active', color: '#123456', aliases: [] },
+            retired: { name: 'Retired', color: '#654321', aliases: ['Old'] },
+        },
+        filterPromptCharacterEntries: entries => entries
+            .filter(entry => entry.name !== 'Retired')
+            .map(entry => entry.name === 'Active' ? { ...entry, aliases: [] } : entry),
+    });
+    const prompt = fixture.verify.buildAttributionVerifierPrompt(
+        fixture.target,
+        1,
+        [{ index: 0, start: 0, end: 8, text: '"Hello."', delimiter: '"', assignment: { name: 'Active' } }],
+        new Map(),
+    );
+    assert.match(prompt, /Active/);
+    assert.doesNotMatch(prompt, /Retired|Old/);
+});
 
 test('verifier performs no post-await writes when submitted context or target provenance becomes stale', async () => {
     const mutations = [

@@ -7,7 +7,7 @@ import { normalizeRegistryIdentityName } from './group-profiles.js';
 import { callLLMWithProfile, classifyLlmRequestError } from './llm.js';
 import { hasAttributionVerifierBallotQuorum, isSpeakerNamePresentInText, normalizeAttributionVerifyPasses, reduceAttributionVerifierBallots } from './verify-consensus.js';
 import { commit, repaintDomAfterCharacterDataChange } from './live-colors.js';
-import { formatPromptLiteralSymbol, getThoughtDelimiterSymbols } from './prompts.js';
+import { filterPromptCharacterEntries, formatPromptLiteralSymbol, getThoughtDelimiterSymbols } from './prompts.js';
 import { getContext } from './st-api.js';
 import { AUTO_ATTRIBUTION_VERIFY_DELAY_MS, AUTO_ATTRIBUTION_VERIFY_RENDERED_LIMIT, AUTO_ATTRIBUTION_VERIFY_RETRY_DELAY_MS, AUTO_ATTRIBUTION_VERIFY_STABLE_RETRY_DELAY_MS, MAX_PENDING_AUTO_ATTRIBUTION_VERIFICATIONS, STREAMING_ATTRIBUTION_VERIFY_DELAY_MS, attributionChatGeneration, attributionVerificationEpoch, autoAttributionVerifyTimer, autoAttributionVerifyTimerDue, characterColors, isDomEngine, isStreamingGenerationActive, isVerifyingAttribution, lastStreamingAttributionVerifyKey, pendingAttributionVerifications, pendingAutoAttributionVerifyIndices, recentAutoAttributionVerifyAttempts, setAttributionVerificationEpoch, setAutoAttributionVerifyTimer, setAutoAttributionVerifyTimerDue, setIsVerifyingAttribution, setLastStreamingAttributionVerifyKey, setStreamingAttributionGeneration, setStreamingAttributionVerifyTimer, settings, streamingAttributionGeneration, streamingAttributionVerifyTimer } from './state.js';
 import { setVerifyAttributionButtonBusy } from './ui.js';
@@ -718,7 +718,7 @@ function buildAttributionVerifierRequest(msg, mesIndex, segments, lookup, captur
         knownNames.push(trimmed);
         knownNamesChars += encodedLength;
     };
-    for (const entry of Object.values(characterColors)) {
+    for (const entry of filterPromptCharacterEntries(Object.values(characterColors))) {
         if (!entry) continue;
         addKnownName(entry.name);
         for (const alias of entry.aliases || []) addKnownName(alias);

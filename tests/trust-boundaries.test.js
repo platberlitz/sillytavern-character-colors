@@ -89,6 +89,33 @@ test('unsafe identities are rejected at ingress and omitted from every color ser
     });
 });
 
+test('prompt colors keep the equipped persona and ordinary collisions but hide an inactive persona', () => {
+    const previousPersonas = stApi.power_user.personas;
+    stApi.power_user.personas = { 'active.png': 'Marisol', 'inactive.png': 'Diego' };
+    try {
+        withCleanRegistry(() => {
+            state.characterColors.diego = { name: 'Diego', color: '#112233', aliases: [] };
+            stApi.setTestContext({ chat: [], chatMetadata: {}, name1: 'Marisol', userAvatar: 'active.png' });
+            assert.equal(buildCurrentColorPairsList(), 'Diego=#112233');
+        });
+
+        withCleanRegistry(() => {
+            state.characterColors.mari = { name: 'Mari', color: '#112233', aliases: ['Marisol', 'Diego'] };
+            state.characterColors.diego = { name: 'Diego', color: '#445566', aliases: [] };
+            stApi.setTestContext({
+                chat: [{ is_user: true, name: 'Diego' }],
+                chatMetadata: {},
+                name1: 'Marisol',
+                userAvatar: 'active.png',
+            });
+            assert.equal(buildCurrentColorPairsList(), 'Mari(Marisol)=#112233');
+            assert.deepEqual(state.characterColors.mari.aliases, ['Marisol', 'Diego']);
+        });
+    } finally {
+        stApi.power_user.personas = previousPersonas;
+    }
+});
+
 test('only one trailing standalone metadata line outside code is parsed or stripped', () => {
     const block = 'Reply\n[COLORS:Alice=#112233]\n';
     assert.equal(parseTrailingColorMetadata(block)?.pairs, 'Alice=#112233');
