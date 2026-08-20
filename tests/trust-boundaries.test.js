@@ -89,17 +89,23 @@ test('unsafe identities are rejected at ingress and omitted from every color ser
     });
 });
 
-test('prompt colors keep the equipped persona and ordinary collisions but hide an inactive persona', () => {
+test('prompt colors keep the equipped persona and hide inactive personas regardless of chat history', () => {
     const previousPersonas = stApi.power_user.personas;
-    stApi.power_user.personas = { 'active.png': 'Marisol', 'inactive.png': 'Diego' };
+    stApi.power_user.personas = { 'dawn.png': 'Dawn', 'kris.png': 'Kris' };
     try {
-        withCleanRegistry(() => {
-            state.characterColors.diego = { name: 'Diego', color: '#112233', aliases: [] };
-            stApi.setTestContext({ chat: [], chatMetadata: {}, name1: 'Marisol', userAvatar: 'active.png' });
-            assert.equal(buildCurrentColorPairsList(), 'Diego=#112233');
-        });
+        for (const chat of [[], [{ is_user: true, name: 'Kris' }]]) {
+            withCleanRegistry(() => {
+                state.characterColors.dawn = { name: 'Dawn', color: '#112233', aliases: ['Sunrise', 'Kris'] };
+                state.characterColors.kris = { name: 'Kris', color: '#445566', aliases: [] };
+                const before = structuredClone(Object.entries(state.characterColors));
+                stApi.setTestContext({ chat, chatMetadata: {}, name1: 'Dawn', userAvatar: 'dawn.png' });
+                assert.equal(buildCurrentColorPairsList(), 'Dawn(Sunrise)=#112233');
+                assert.deepEqual(Object.entries(state.characterColors), before);
+            });
+        }
 
         withCleanRegistry(() => {
+            stApi.power_user.personas = { 'active.png': 'Marisol', 'inactive.png': 'Diego' };
             state.characterColors.mari = { name: 'Mari', color: '#112233', aliases: ['Marisol', 'Diego'] };
             state.characterColors.diego = { name: 'Diego', color: '#445566', aliases: [] };
             stApi.setTestContext({

@@ -3,7 +3,7 @@ import { attributeDialogueSegments, clearSpeakerRegexCache, ensureCharacterEntry
 import { ATTRIBUTION_SOURCE, ATTRIBUTION_VERIFICATION_STATUS, isHostSystemOrToolMessage, normalizeAttributionConfidence } from './attribution-store.js';
 import { buildNameColorLookup, collectFontColorsFromText, parseNamedColorAssignmentsFromText, resolveCharacterKeyByNameOrAlias } from './color-blocks.js';
 import { cancelMessageDomFollowupRepairs, clearMessageDomRepairTimer, clearStreamingAttributionOverrides, decorateMessageDomFromCurrentRender, decorateObservedMessages, getMessageAttributionFreezeSegments, getMessageQuoteOverrideEntry, getMessageQuoteOverrideOptions, isMessageAttributionVerified, markMessageAttributionVerified, refreshAndDecorateMessageDom, scheduleMessageDomFollowupRepair, setMessageQuoteOverride, setStreamingAttributionOverride, suspendMessageDomWorkForEdit, upsertAttributionReview } from './dom-engine.js';
-import { normalizeRegistryIdentityName } from './group-profiles.js';
+import { normalizeRegistryIdentity, normalizeRegistryIdentityName } from './group-profiles.js';
 import { callLLMWithProfile, classifyLlmRequestError } from './llm.js';
 import { hasAttributionVerifierBallotQuorum, isSpeakerNamePresentInText, normalizeAttributionVerifyPasses, reduceAttributionVerifierBallots } from './verify-consensus.js';
 import { commit, repaintDomAfterCharacterDataChange } from './live-colors.js';
@@ -718,13 +718,21 @@ function buildAttributionVerifierRequest(msg, mesIndex, segments, lookup, captur
         knownNames.push(trimmed);
         knownNamesChars += encodedLength;
     };
-    for (const entry of filterPromptCharacterEntries(Object.values(characterColors))) {
+    const promptEntries = filterPromptCharacterEntries(Object.values(characterColors));
+    const promptRegistryIdentities = new Set(promptEntries
+        .map(entry => normalizeRegistryIdentity(entry?.name))
+        .filter(Boolean));
+    for (const entry of promptEntries) {
         if (!entry) continue;
         addKnownName(entry.name);
         for (const alias of entry.aliases || []) addKnownName(alias);
     }
     if (lookup instanceof Map) {
-        for (const assignment of lookup.values()) addKnownName(assignment?.name);
+        for (const assignment of lookup.values()) {
+            const registryEntry = characterColors[assignment?.key];
+            if (registryEntry && !promptRegistryIdentities.has(normalizeRegistryIdentity(registryEntry.name))) continue;
+            addKnownName(assignment?.name);
+        }
     }
     addKnownName(msg?.name);
 

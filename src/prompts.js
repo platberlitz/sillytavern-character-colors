@@ -121,16 +121,6 @@ function getPromptPersonaIdentities() {
         const activeIdentity = normalizeRegistryIdentity(getPersonaName());
         const inactiveIdentities = new Set(identities);
         inactiveIdentities.delete(activeIdentity);
-        const chat = getContext()?.chat;
-        if (Array.isArray(chat)) {
-            const chatUserIdentities = new Set(chat
-                .filter(message => message?.is_user)
-                .map(message => normalizeRegistryIdentity(message?.name))
-                .filter(Boolean));
-            for (const identity of inactiveIdentities) {
-                if (!chatUserIdentities.has(identity)) inactiveIdentities.delete(identity);
-            }
-        }
         return { activeIdentity, inactiveIdentities };
     } catch {
         return null;
@@ -169,35 +159,13 @@ export function buildColorMetadataPromptLines(options = {}) {
     const coloredContent = getNarratorVisual(settings, applyThemeReadabilityAndBrightness)
         ? 'dialogue/thought/narration'
         : 'dialogue/thought';
-    if (usageBlockMode === 'new') {
-        if (!currentPairs) {
-            return [
-                'After the reply, add one final line: [COLORS:Name=#RRGGBB,...] for every new speaker.',
-                'If there are no new speakers, omit the [COLORS:] line.',
-            ];
-        }
-        return [
-            `Known colors: ${currentPairs}`,
-            'Reuse those exact names and colors. Do not rename, re-color, or split aliases from their canonical name.',
-            'After the reply, add one final [COLORS:Name=#RRGGBB,...] line only for speakers not already listed.',
-            'If there are no new speakers, omit the [COLORS:] line.',
-        ];
-    }
-
-    if (!currentPairs) {
-        return [
-            `When any ${coloredContent} is colored, end with exactly one final line: [COLORS:Name=#RRGGBB,...].`,
-            `Include every speaker whose ${coloredContent} you colored in this reply. Omit only if no ${coloredContent} was colored.`,
-            'The [COLORS:] line must be the final output line, after the reply text.',
-        ];
-    }
-    return [
-        `Known colors: ${currentPairs}`,
-        'Reuse those exact names and colors. Do not rename, re-color, or split aliases from their canonical name.',
-        `When any ${coloredContent} is colored, end with exactly one final line: [COLORS:Name=#RRGGBB,...].`,
-        `Include every speaker whose ${coloredContent} you colored in this reply, including already-known speakers. Omit only if no ${coloredContent} was colored.`,
-        'The [COLORS:] line must be the final output line, after the reply text.',
-    ];
+    const lines = currentPairs
+        ? [`Known colors (reuse exact names/colors; keep aliases with their canonical name): ${currentPairs}`]
+        : [];
+    lines.push(usageBlockMode === 'new'
+        ? 'Append one final [COLORS:Name=#RRGGBB,...] line only for speakers not already listed in Known colors; omit it if none.'
+        : `If any ${coloredContent} is colored, append one final [COLORS:Name=#RRGGBB,...] line listing every colored speaker, including known speakers; otherwise omit it.`);
+    return lines;
 }
 
 export function buildLLMColorizeRules(extraRule = '') {

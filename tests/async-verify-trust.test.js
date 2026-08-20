@@ -88,6 +88,7 @@ async function loadVerifier(overrides = {}) {
         setStreamingAttributionOverride: () => false,
         suspendMessageDomWorkForEdit: () => false,
         upsertAttributionReview: () => null,
+        normalizeRegistryIdentity: value => typeof value === 'string' ? value.replace(/\s+/g, ' ').trim().toLowerCase() : '',
         normalizeRegistryIdentityName(value, maximum = 120) {
             const name = typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
             return name && name.length <= maximum && !/[<>{}]/.test(name) ? name : '';
@@ -174,7 +175,7 @@ test('attribution verifier uses the filtered known-speaker table', async () => {
         fixture.target,
         1,
         [{ index: 0, start: 0, end: 8, text: '"Hello."', delimiter: '"', assignment: { name: 'Active' } }],
-        new Map(),
+        new Map([['retired', { key: 'retired', name: 'Retired', color: '#654321' }]]),
     );
     assert.match(prompt, /Active/);
     assert.doesNotMatch(prompt, /Retired|Old/);

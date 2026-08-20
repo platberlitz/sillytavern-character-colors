@@ -151,7 +151,6 @@ function bulkColorizeStubs(chat, callLLMWithProfile, onLocalFallback = () => {})
         getThoughtDelimiterSymbols: () => [],
         attributeDialogueSegments: () => ({ segments: [], createdCharacters: false }),
         buildLLMColorizeRules: () => [],
-        buildColorMetadataPromptLines: () => [],
         formatColorBlockPair: (name, color) => `${name}=${color}`,
         hashMessageText: value => String(value),
         colorizeMessageText(rawText) {
@@ -360,7 +359,7 @@ test('LLM colorization skips tracked persona user messages without changing text
     assert.equal(message.mes, original);
 });
 
-test('individual and batch LLM colorization use the filtered speaker table', async () => {
+test('individual and batch LLM colorization use one filtered speaker table', async () => {
     const requests = [];
     const stubs = bulkColorizeStubs([], async instruction => {
         requests.push(instruction);
@@ -371,22 +370,24 @@ test('individual and batch LLM colorization use the filtered speaker table', asy
     Object.assign(stubs, {
         generateQuietPrompt() {},
         characterColors: {
-            active: { name: 'Active', color: '#123456', aliases: [] },
-            retired: { name: 'Retired', color: '#654321', aliases: ['Old'] },
+            dawn: { name: 'Dawn', color: '#123456', aliases: [] },
+            kris: { name: 'Kris', color: '#654321', aliases: ['Old'] },
         },
         filterPromptCharacterEntries: entries => entries
-            .filter(entry => entry.name !== 'Retired')
-            .map(entry => entry.name === 'Active' ? { ...entry, aliases: [] } : entry),
+            .filter(entry => entry.name !== 'Kris')
+            .map(entry => entry.name === 'Dawn' ? { ...entry, aliases: [] } : entry),
     });
     const live = await loadLiveColorsModule(stubs);
 
-    await live.colorizeMessageWithLLM('"Hello."', 'Active');
-    await live.colorizeMultipleMessagesWithLLM([{ rawText: '"Hello."', speakerName: 'Active', msgIndex: 0 }]);
+    await live.colorizeMessageWithLLM('"Hello."', 'Dawn');
+    await live.colorizeMultipleMessagesWithLLM([{ rawText: '"Hello."', speakerName: 'Dawn', msgIndex: 0 }]);
 
     assert.equal(requests.length, 2);
     for (const request of requests) {
-        assert.match(request, /Active=#123456/);
-        assert.doesNotMatch(request, /Retired|Old/);
+        assert.match(request, /Known speakers and colors: Dawn=#123456/);
+        assert.equal((request.match(/Known speakers and colors:/g) || []).length, 1);
+        assert.equal((request.match(/Known colors:/g) || []).length, 0);
+        assert.doesNotMatch(request, /Kris|Old/);
     }
 });
 
@@ -577,7 +578,6 @@ test('profile prompt mode colorizes each reply through the colorize profile', as
         clearAutoColorizeIndicators() {},
         syncAllEffectiveColors() {},
         buildLLMColorizeRules: () => [],
-        buildColorMetadataPromptLines: () => [],
         getThoughtDelimiterSymbols: () => [],
         formatColorBlockPair: (name, color) => `${name}=${color}`,
         colorizeMessageText: rawText => ({ updatedText: rawText, changed: false, createdCharacters: false, hadDialogueMatches: false, hadResolvableSpeaker: false }),

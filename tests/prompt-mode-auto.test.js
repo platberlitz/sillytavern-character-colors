@@ -47,8 +47,8 @@ const hooks = registerHooks({
     },
 });
 
-const { flushPromptInjection, getEffectivePromptMode, promptHasDialogueColorsMacro, stripMacroComments } = await import('../src/prompts.js');
-const { settings } = await import('../src/state.js');
+const { buildColoredPromptPreview, buildDomStealthColorsInstruction, buildMinimalPromptInstruction, flushPromptInjection, getEffectivePromptMode, promptHasDialogueColorsMacro, stripMacroComments } = await import('../src/prompts.js');
+const { characterColors, settings } = await import('../src/state.js');
 const stApi = await import(stApiUrl);
 
 hooks.deregister();
@@ -133,6 +133,40 @@ test('the DOM engine ignores prompt modes entirely', () => {
     settings.domStealthColors = false;
     stApi.power_user.sysprompt = { content: '{{dialoguecolors}}' };
     assert.equal(flushPromptInjection(), '');
+});
+
+test('dialogue color metadata instructions stay compact and singular', () => {
+    const previousColors = { ...characterColors };
+    const previousPersonas = stApi.power_user.personas;
+    try {
+        reset();
+        for (const key of Object.keys(characterColors)) delete characterColors[key];
+        characterColors.dawn = { name: 'Dawn', color: '#112233', aliases: ['Sunrise'] };
+        characterColors.kris = { name: 'Kris', color: '#445566', aliases: [] };
+        stApi.power_user.personas = { 'dawn.png': 'Dawn', 'kris.png': 'Kris' };
+        stApi.setTestContext({ chat: [], chatMetadata: {}, name1: 'Dawn', userAvatar: 'dawn.png' });
+
+        const prompts = [
+            { text: buildMinimalPromptInstruction(), wording: /including known speakers/ },
+            { text: buildDomStealthColorsInstruction(), wording: /not already listed in Known colors/ },
+        ];
+        for (const { text: prompt, wording } of prompts) {
+            assert.match(prompt, /Dawn\(Sunrise\)=#112233/);
+            assert.doesNotMatch(prompt, /Kris/);
+            assert.match(prompt, wording);
+            assert.equal(prompt.split('\n').filter(line => line.includes('[COLORS:')).length, 1);
+            assert.equal(prompt.split('\n').filter(line => line.includes('final')).length, 1);
+            assert.doesNotMatch(prompt, /Reuse those exact names|If there are no new speakers|The \[COLORS:/);
+        }
+        assert.match(buildColoredPromptPreview(), /Dawn/);
+        assert.doesNotMatch(buildColoredPromptPreview(), /Kris/);
+    } finally {
+        for (const key of Object.keys(characterColors)) delete characterColors[key];
+        Object.assign(characterColors, previousColors);
+        if (previousPersonas === undefined) delete stApi.power_user.personas;
+        else stApi.power_user.personas = previousPersonas;
+        stApi.setTestContext({ chat: [], chatMetadata: {} });
+    }
 });
 
 // SillyBunny ships a preset whose README prompt says "added `{{dialoguecolors}}`"

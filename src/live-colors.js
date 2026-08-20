@@ -9,7 +9,7 @@ import { saveHistory } from './history.js';
 import { callLLMWithProfile, classifyLlmRequestError } from './llm.js';
 import { getNarratorVisual } from './narrator-style.js';
 import { applyThemeReadabilityAndBrightness, getBaseColor, getEntryEffectiveColor, invalidateThemeCache, syncAllEffectiveColors } from './palettes.js';
-import { buildColorMetadataPromptLines, buildLLMColorizeRules, buildThoughtSymbolColorPromptRule, filterPromptCharacterEntries, formatColorBlockPair, getEffectivePromptMode, getThoughtDelimiterSymbols, injectPrompt } from './prompts.js';
+import { buildLLMColorizeRules, buildThoughtSymbolColorPromptRule, filterPromptCharacterEntries, formatColorBlockPair, getEffectivePromptMode, getThoughtDelimiterSymbols, injectPrompt } from './prompts.js';
 import { generateQuietPrompt, getContext } from './st-api.js';
 import { COLOR_STATE_SAVE_DELAY_MS, LIVE_CHAT_SAVE_DELAY_MS, attributionChatGeneration, characterColors, colorStateSaveTimer, isAutoColorizing, isColorizing, isDomEngine, isRecoloring, lastProcessedMessageSignature, liveChatSaveTimer, pendingColorStateHistory, pendingColorStateInjectPrompt, pendingColorStateSaveData, pendingColorStateUpdateList, setColorStateSaveTimer, setIsAutoColorizing, setIsColorizing, setIsRecoloring, setLastProcessedMessageSignature, setLiveChatSaveTimer, setPendingColorStateHistory, setPendingColorStateInjectPrompt, setPendingColorStateSaveData, setPendingColorStateUpdateList, setPendingLiveChatSave, settings } from './state.js';
 import { getStorageKey, saveData } from './storage.js';
@@ -1290,7 +1290,6 @@ export async function colorizeMessageWithLLM(rawText, messageSpeakerName = '') {
     lines.push(...buildLLMColorizeRules('- Return the complete message with color tags added. No commentary.'));
     lines.push('');
     lines.push(`Known speakers and colors: ${charList.join(', ')}`);
-    lines.push(...buildColorMetadataPromptLines());
     if (thoughtSymbols.length) lines.push(`- ${buildThoughtSymbolColorPromptRule(thoughtSymbols)}`);
     if (narratorColor) lines.push(`- Narrator text: <font color="${narratorColor}">...</font>.`);
     const defaultSpeakerPair = defaultSpeakerEntry
@@ -1385,7 +1384,6 @@ export async function colorizeMultipleMessagesWithLLM(messageBatch) {
     lines.push(...buildLLMColorizeRules('- Preserve every [MSG:N] marker and return all messages in order. Do not combine messages.'));
     lines.push('');
     lines.push(`Known speakers and colors: ${charList.join(', ')}`);
-    lines.push(...buildColorMetadataPromptLines());
     if (thoughtSymbols.length) lines.push(`- ${buildThoughtSymbolColorPromptRule(thoughtSymbols)}`);
     if (narratorColor) lines.push(`- Narrator text: <font color="${narratorColor}">...</font>.`);
     lines.push('');
