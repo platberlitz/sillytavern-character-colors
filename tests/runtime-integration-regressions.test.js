@@ -54,6 +54,7 @@ export const registerMacro = () => {};
 export const getRequestHeaders = () => ({});
 export const saveMetadata = () => {};
 export const saveMetadataDebounced = () => {};
+export const promptManager = null;
 `;
 
 const documentListeners = new Map();

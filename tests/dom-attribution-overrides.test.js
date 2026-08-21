@@ -33,6 +33,7 @@ export const registerMacro = () => {};
 export const getRequestHeaders = () => ({});
 export const saveMetadata = () => {};
 export const saveMetadataDebounced = () => {};
+export const promptManager = null;
 `;
 
 // Theme detection reads the page background to pick readability bounds.

@@ -3,7 +3,7 @@ import { resolveCharacterKeyByNameOrAlias } from './color-blocks.js';
 import { normalizeRegistryIdentity, normalizeRegistryIdentityName } from './group-profiles.js';
 import { applyThemeReadabilityAndBrightness, getBrightnessOffset, getBrightnessTargetLightnessRange, getCustomPaletteMeta, getCustomPalettes, getEntryEffectiveColor, getPersonaName, getThemeLightnessBounds } from './palettes.js';
 import { getNarratorVisual } from './narrator-style.js';
-import { escapeHtml, extension_prompt_roles, extension_prompt_types, extension_settings, getContext, power_user, setExtensionPrompt } from './st-api.js';
+import { escapeHtml, extension_prompt_roles, extension_prompt_types, extension_settings, getContext, power_user, promptManager, setExtensionPrompt } from './st-api.js';
 import { MODULE_NAME, characterColors, isDomEngine, settings } from './state.js';
 import { normalizeAliases, normalizeHexColor } from './utils.js';
 
@@ -365,9 +365,12 @@ export function stripMacroComments(text) {
 // Places a user can realistically type {{dialoguecolors}} by hand: the chat
 // completion preset prompts, the text completion system prompt and story
 // string, and the author's note (chat override first, global default second).
-// Only preset prompts enabled in the active prompt order are sent, so only
-// those count; a disabled one holding the macro would otherwise silence the
-// injection while delivering nothing.
+// Only prompts enabled in the active prompt order are sent, so only those
+// count; a disabled one holding the macro would otherwise silence the
+// injection while delivering nothing. The live prompt manager lives in
+// SillyTavern's OpenAI module, not on the context, so it is imported through
+// st-api.js. When the manager is missing, uninitialized, or throws, fail open:
+// keep the injection instead of trusting prompts whose delivery is unknown.
 // ponytail: text scan only. It does not read World Info or character cards,
 // which load asynchronously, and it does not check which API is active.
 function collectUserPromptSources() {
@@ -384,15 +387,13 @@ function collectUserPromptSources() {
         extension_settings?.note?.default,
     ];
     let presetPrompts = null;
-    const manager = context?.promptManager;
     try {
-        if (manager?.activeCharacter && typeof manager.getPromptsForCharacter === 'function') {
-            presetPrompts = manager.getPromptsForCharacter(manager.activeCharacter, true);
+        if (promptManager?.activeCharacter && typeof promptManager.getPromptsForCharacter === 'function') {
+            presetPrompts = promptManager.getPromptsForCharacter(promptManager.activeCharacter, true);
         }
     } catch {
         presetPrompts = null;
     }
-    if (!Array.isArray(presetPrompts)) presetPrompts = context?.chatCompletionSettings?.prompts;
     if (Array.isArray(presetPrompts)) {
         for (const prompt of presetPrompts) sources.push(prompt?.content);
     }

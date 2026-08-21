@@ -35,6 +35,7 @@ export const registerMacro = () => {};
 export const getRequestHeaders = () => ({});
 export const saveMetadata = () => {};
 export const saveMetadataDebounced = () => {};
+export const promptManager = null;
 `;
 
 // Adding a character repaints the floating legend, so the DOM stub has to be just

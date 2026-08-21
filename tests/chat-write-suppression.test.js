@@ -38,6 +38,7 @@ export const saveMetadata = (...args) => {
     return context.saveMetadataDebounced?.(...args);
 };
 export const saveMetadataDebounced = (...args) => context.saveMetadataDebounced?.(...args);
+export const promptManager = null;
 `;
 
 globalThis.document ??= { body: {}, getElementById: () => null, querySelector: () => null, querySelectorAll: () => [] };

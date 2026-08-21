@@ -36,6 +36,7 @@ export const registerMacro = () => {};
 export const getRequestHeaders = () => ({});
 export const saveMetadata = async () => {};
 export const saveMetadataDebounced = () => {};
+export const promptManager = null;
 `;
 
 globalThis.document ??= {};

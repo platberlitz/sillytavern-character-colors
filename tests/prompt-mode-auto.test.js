@@ -34,6 +34,8 @@ export const registerMacro = () => {};
 export const getRequestHeaders = () => ({});
 export const saveMetadata = () => {};
 export const saveMetadataDebounced = () => {};
+export let promptManager = null;
+export const setTestPromptManager = value => { promptManager = value; };
 `;
 
 globalThis.document ??= { body: {}, querySelector: () => null, querySelectorAll: () => [], getElementById: () => null };
@@ -62,6 +64,7 @@ function reset({ promptMode = 'inject', autoPromptMode = true } = {}) {
     stApi.power_user.context = { story_string: '' };
     delete stApi.extension_settings.note;
     stApi.setTestContext({ chat: [], chatMetadata: {} });
+    stApi.setTestPromptManager(null);
     stApi.extensionPromptCalls.length = 0;
 }
 
@@ -78,10 +81,9 @@ test('the macro is detected in every scanned prompt source', () => {
         () => { stApi.power_user.context = { story_string: '{{dialoguecolors}}\n{{description}}' }; },
         () => stApi.setTestContext({ chat: [], chatMetadata: { note_prompt: 'Remember: {{dialoguecolors}}' } }),
         () => { stApi.extension_settings.note = { default: '{{dialoguecolors}}' }; },
-        () => stApi.setTestContext({
-            chat: [],
-            chatMetadata: {},
-            chatCompletionSettings: { prompts: [{ content: 'Main prompt.' }, { content: 'Colors: {{ DialogueColors }}' }] },
+        () => stApi.setTestPromptManager({
+            activeCharacter: { id: 1 },
+            getPromptsForCharacter: (character, onlyEnabled) => onlyEnabled ? [{ content: 'Main prompt.' }, { content: 'Colors: {{ DialogueColors }}' }] : [],
         }),
     ]) {
         reset();
@@ -175,7 +177,10 @@ const README_COMMENT = '{{// README\n- Formatting: added `{{dialoguecolors}}`. R
 
 test('a macro mentioned inside a {{// }} comment does not switch to macro mode', () => {
     for (const seed of [
-        () => stApi.setTestContext({ chat: [], chatMetadata: {}, chatCompletionSettings: { prompts: [{ content: README_COMMENT }, { content: 'Formatting rules.' }] } }),
+        () => stApi.setTestPromptManager({
+            activeCharacter: { id: 1 },
+            getPromptsForCharacter: () => [{ content: README_COMMENT }, { content: 'Formatting rules.' }],
+        }),
         () => { stApi.power_user.sysprompt = { content: `Be helpful. ${README_COMMENT}` }; },
         () => stApi.setTestContext({ chat: [], chatMetadata: { note_prompt: README_COMMENT } }),
     ]) {
@@ -189,10 +194,9 @@ test('a macro mentioned inside a {{// }} comment does not switch to macro mode',
 
 test('a live macro next to a commented mention still counts', () => {
     reset();
-    stApi.setTestContext({
-        chat: [],
-        chatMetadata: {},
-        chatCompletionSettings: { prompts: [{ content: README_COMMENT }, { content: 'Formatting:\n- {{getvar::length}}\n- {{dialoguecolors}}' }] },
+    stApi.setTestPromptManager({
+        activeCharacter: { id: 1 },
+        getPromptsForCharacter: () => [{ content: README_COMMENT }, { content: 'Formatting:\n- {{getvar::length}}\n- {{dialoguecolors}}' }],
     });
     assert.equal(promptHasDialogueColorsMacro(), true);
     assert.equal(getEffectivePromptMode(), 'macro');
@@ -218,7 +222,7 @@ test('only preset prompts enabled in the active prompt order are scanned', () =>
         getPromptsForCharacter: (character, onlyEnabled) => onlyEnabled ? prompts.filter(p => enabled.has(p.identifier)) : prompts,
     };
     reset();
-    stApi.setTestContext({ chat: [], chatMetadata: {}, promptManager, chatCompletionSettings: { prompts } });
+    stApi.setTestPromptManager(promptManager);
     assert.equal(promptHasDialogueColorsMacro(), false);
     assert.equal(getEffectivePromptMode(), 'inject');
 
@@ -226,11 +230,17 @@ test('only preset prompts enabled in the active prompt order are scanned', () =>
     assert.equal(promptHasDialogueColorsMacro(), true);
     assert.equal(getEffectivePromptMode(), 'macro');
 
-    // Without a usable prompt manager the full preset list is scanned as before.
+    // Without a usable prompt manager the raw preset list is NOT scanned: a
+    // disabled prompt's macro must not silence the injection.
     reset();
-    stApi.setTestContext({ chat: [], chatMetadata: {}, promptManager: { activeCharacter: null }, chatCompletionSettings: { prompts } });
-    assert.equal(promptHasDialogueColorsMacro(), true);
+    stApi.setTestPromptManager({ activeCharacter: null });
+    assert.equal(promptHasDialogueColorsMacro(), false);
+    assert.equal(getEffectivePromptMode(), 'inject');
+    assert.match(flushPromptInjection(), /Dialogue Colors/);
+
     reset();
-    stApi.setTestContext({ chat: [], chatMetadata: {}, promptManager: { activeCharacter: { id: 1 }, getPromptsForCharacter: () => { throw new Error('boom'); } }, chatCompletionSettings: { prompts } });
-    assert.equal(promptHasDialogueColorsMacro(), true);
+    stApi.setTestPromptManager({ activeCharacter: { id: 1 }, getPromptsForCharacter: () => { throw new Error('boom'); } });
+    assert.equal(promptHasDialogueColorsMacro(), false);
+    assert.equal(getEffectivePromptMode(), 'inject');
+    assert.match(flushPromptInjection(), /Dialogue Colors/);
 });

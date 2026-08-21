@@ -3,6 +3,7 @@
 // in exactly one file (src/ is one level deeper than the old index.js).
 import { converter } from '../../../../../script.js';
 import { power_user } from '/scripts/power-user.js';
+import { promptManager } from '/scripts/openai.js';
 import { escapeHtml, escapeRegex } from '/scripts/utils.js';
 
 const { extension_settings, getContext } = await import('../../../../extensions.js');
@@ -40,6 +41,7 @@ function saveMetadataDebounced(...args) {
 export {
     converter,
     power_user,
+    promptManager,
     escapeHtml,
     escapeRegex,
     extension_settings,
