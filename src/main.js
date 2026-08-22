@@ -15,7 +15,7 @@ import { eventSource, event_types, getContext } from './st-api.js';
 import { attributionChatGeneration, autoSyncPendingRecord, characterColors, expandedCharacterRows, groupProfiles, isDomEngine, isStreamingGenerationActive, lastCharKey, lastProcessedMessageSignature, pendingAttributionVerifications, runtimeState, selectedCharacterKeys, setAttributionChatGeneration, setEnabledLifecycleSynchronizer, setIsStreamingGenerationActive, setLastCharKey, setLastProcessedMessageSignature, setPendingAttributionVerifications, setSwapMode, settings, swapMode } from './state.js';
 import { beginStreamingPaint, endStreamingPaint } from './streaming-paint.js';
 import { confirmAutoSyncRecord, doAutoSyncMarkersMatch, ensureRegexScript, getAutoSyncRecord, getCharKey, getStorageKey, initAutoSync, loadData, markCurrentPersonaKept, migrateLegacyLocalStorageIfNeeded, migrateRenamedCharacterStorage, saveData, stopAutoSyncPolling, syncAutoSyncPolling, tryLoadFromCard, updateAutoSyncUI } from './storage.js';
-import { applyRestoredPersonaColor, applyThemeOrBrightnessChange, clearAutoColorizeIndicators, createUI, ensurePersonaCharacter, renamePersonaCharacter, syncUIWithSettings, updateCharList, updateLegend } from './ui.js';
+import { applyRestoredPersonaColor, applyThemeOrBrightnessChange, clearAutoColorizeIndicators, createUI, ensurePersonaCharacter, mountWandMenuItem, renamePersonaCharacter, syncUIWithSettings, updateCharList, updateLegend } from './ui.js';
 import { cancelStreamingAttributionVerification, captureLoadedAttributionMessageBaseline, clearAutoAttributionVerificationQueue, queueAutoAttributionVerificationForRenderedMessages, scheduleStreamingAttributionVerification } from './verify.js';
 
 let lastAppliedAutoTheme = null;
@@ -458,6 +458,9 @@ export function registerEventHandlers() {
     if (event_types.PERSONA_RENAMED) eventSource.on(event_types.PERSONA_RENAMED, runtimeState.eventHandlers.personaRenamed);
     eventSource.on(event_types.SETTINGS_UPDATED, runtimeState.eventHandlers.settingsUpdated);
     eventSource.on(event_types.CHAT_CHANGED, () => populateProfileDropdown());
+    // ponytail: the host builds #extensionsMenu on its own schedule; mounting is idempotent,
+    // so whichever of init() or APP_READY runs second does nothing.
+    if (event_types.APP_READY) eventSource.on(event_types.APP_READY, mountWandMenuItem);
     runtimeState.eventsRegistered = true;
 }
 
@@ -506,6 +509,7 @@ export function init() {
         if (document.getElementById('extensions_settings')) {
             clearInterval(waitUI);
             createUI();
+            mountWandMenuItem();
             registerKeyboardShortcuts();
             updateAutoSyncUI();
             populateProfileDropdown();

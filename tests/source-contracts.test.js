@@ -314,6 +314,37 @@ test('the settings panel stays in the extensions tab and flows freely', async ()
     assert.doesNotMatch(declarations, /max-height|overflow-y/);
 });
 
+test('the wand item drives the panel button for the active engine', () => {
+    const mount = functionSection(sources['ui.js'], 'mountWandMenuItem');
+    const refresh = functionSection(sources['ui.js'], 'refreshWandMenuItem');
+    const action = functionSection(sources['ui.js'], 'getWandMenuAction');
+    const engineVisibility = functionSection(sources['ui.js'], 'updateEngineVisibility');
+    const init = functionSection(sources['main.js'], 'init');
+    const register = functionSection(sources['main.js'], 'registerEventHandlers');
+
+    // The host owns #extensionsMenu and builds it on its own schedule, so both
+    // mount points must survive a missing menu and never add a second item.
+    assert.match(mount, /getElementById\('extensionsMenu'\)/);
+    assert.match(mount, /if \(!menu \|\| document\.getElementById\(WAND_MENU_ITEM_ID\)\) return;/);
+    assert.match(mount, /class="list-group-item flex-container flexGap5 interactable"/);
+    assert.match(mount, /extensionsMenuExtensionButton/);
+    assert.match(init, /createUI\(\);\s*\n\s*mountWandMenuItem\(\);/);
+    assert.match(register, /event_types\.APP_READY, mountWandMenuItem/);
+
+    // One action, chosen by engine, and it clicks the real button: the panel's
+    // target dropdown, confirmation and busy state stay authoritative.
+    assert.match(action, /isDomEngine\(\)/);
+    assert.match(action, /'dc-verify-attr'/);
+    assert.match(action, /'dc-colorize'/);
+    assert.match(mount, /if \(button\.disabled\)/);
+    assert.match(mount, /button\.click\(\)/);
+    assert.doesNotMatch(mount, /colorizeMessages|runAttributionVerification/);
+
+    // The item lives outside #dc-ext, so engine switches must relabel it explicitly.
+    assert.match(engineVisibility, /refreshWandMenuItem\(\)/);
+    assert.match(refresh, /dc-wand-label/);
+});
+
 test('fullscreen is opt-in and reversible', () => {
     const source = sources['ui.js'];
     const enter = functionSection(source, 'enterSettingsFullscreen');

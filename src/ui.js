@@ -3422,6 +3422,7 @@ export function updateEngineVisibility() {
         recolorButton.textContent = label;
         recolorButton.dataset.defaultLabel = label;
     }
+    refreshWandMenuItem();
     updateSystemPromptDisplay();
 }
 
@@ -5652,6 +5653,52 @@ function bindConnectionProfileRefresh() {
     ].filter(Boolean))) {
         eventSource.on(type, refresh);
     }
+}
+
+const WAND_MENU_ITEM_ID = 'dc-wand-item';
+
+// ponytail: the wand item is a remote control for the panel button, not a second
+// implementation, so target dropdowns, confirmations, busy state and toasts keep working.
+function getWandMenuAction() {
+    return isDomEngine()
+        ? { buttonId: 'dc-verify-attr', icon: 'fa-user-check', label: 'Verify speakers' }
+        : { buttonId: 'dc-colorize', icon: 'fa-palette', label: 'Colorize dialogue' };
+}
+
+export function refreshWandMenuItem() {
+    const item = document.getElementById(WAND_MENU_ITEM_ID);
+    if (!item) return;
+    const { icon, label } = getWandMenuAction();
+    const iconElement = item.querySelector('.extensionsMenuExtensionButton');
+    if (iconElement) iconElement.className = `fa-solid ${icon} extensionsMenuExtensionButton`;
+    const labelElement = item.querySelector('.dc-wand-label');
+    if (labelElement) labelElement.textContent = label;
+    item.title = `Dialogue Colors: ${label.toLowerCase()} using the settings panel target.`;
+}
+
+export function mountWandMenuItem() {
+    const menu = document.getElementById('extensionsMenu');
+    if (!menu || document.getElementById(WAND_MENU_ITEM_ID)) return;
+    menu.insertAdjacentHTML('beforeend', `<div id="${WAND_MENU_ITEM_ID}" class="list-group-item flex-container flexGap5 interactable" tabindex="0"><div class="fa-solid fa-palette extensionsMenuExtensionButton" aria-hidden="true"></div><span class="dc-wand-label">Colorize dialogue</span></div>`);
+    const item = document.getElementById(WAND_MENU_ITEM_ID);
+    if (!item) return;
+    item.onclick = () => {
+        if (!settings.enabled) {
+            toast.info('Dialogue Colors is turned off.');
+            return;
+        }
+        const button = document.getElementById(getWandMenuAction().buttonId);
+        if (!button) {
+            toast.info('Open the Dialogue Colors settings panel once, then try again.');
+            return;
+        }
+        if (button.disabled) {
+            toast.info('Dialogue Colors is already working on this chat.');
+            return;
+        }
+        button.click();
+    };
+    refreshWandMenuItem();
 }
 
 export function createUI() {

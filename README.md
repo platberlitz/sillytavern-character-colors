@@ -113,6 +113,8 @@ Adding an existing canonical name or alias reveals its current row instead of si
 - **Statistics**: review attributed dialogue segments. Counts can differ between engines because attribution methods differ.
 - **Clear unpinned**: review and remove every entry not protected by Keep.
 
+The wand menu (the magic wand next to the chat bar) carries one Dialogue Colors item that runs the primary action for the active engine: **Colorize dialogue** in LLM, **Verify speakers** in Local. It uses whatever target the matching dropdown above is set to.
+
 ## Appearance and Automation
 
 - Choose the color brightness — Auto (match theme), Bright (for dark themes), or Dark (for light themes) — and a palette for newly generated colors. Auto reads the composited chat surface; forcing a mode overrides both the palette's lightness range and the readability target, so it is the escape hatch when a theme painted only by a background image is detected wrong.
