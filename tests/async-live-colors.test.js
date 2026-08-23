@@ -103,6 +103,11 @@ async function loadLiveColorsModule(overrides = {}) {
         },
         splitsHtmlTag: (start, end, ranges) => (ranges || []).some(range => (start > range.start && start < range.end)
             || (end > range.start && end < range.end)),
+        // Same reason again: these three decide where a color span is allowed to end, and a
+        // stub that never finds dialogue would hide the re-scoping the finalizer is meant to do.
+        DIALOGUE_SKIP_GROUP: 'dcSkip',
+        buildDialogueRegex: () => /(?<dcSkip>```[\s\S]*?```)|("[^"\n\r]*")/g,
+        maskHtmlTagQuotes: text => String(text ?? '').replace(/<[^>]+>/g, tag => tag.replace(/["']/g, '\u0000')),
         ...overrides,
     };
     const importedNames = [...names].join(', ');

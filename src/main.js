@@ -7,7 +7,7 @@ import { setupContextMenu } from './context-menu.js';
 import { DOM_RETRY_REFRESH_DELAYS, POST_MUTATION_DOM_REPAIR_DELAY_MS, clearDecoratedWatchers, clearDialogueCountCache, clearSessionAttributionVerifications, decorateAllMessages, reconcileMessageQuoteOverridesAfterDeletion, scheduleDomRefreshSeries, scheduleDomSettleRefresh, scheduleMessageDomRepair, setupChatObserver, setupChatRootObserver, startDomHealthCheck, stopDomHealthCheck, undecorateAllMessages } from './dom-engine.js';
 import { scheduleCustomFontRefresh } from './fonts.js';
 import { redo, undo } from './history.js';
-import { applyHtmlBreakingSpanRepair, applyToolCallMessageRepair, commit, onNewMessage, repaintDomAfterCharacterDataChange, resumePendingChatSave } from './live-colors.js';
+import { applyHtmlBreakingSpanRepair, applyOverreachingSpanRepair, applyToolCallMessageRepair, commit, onNewMessage, repaintDomAfterCharacterDataChange, resumePendingChatSave } from './live-colors.js';
 import { consumeMainAiQuietGenerationEnd, populateProfileDropdown } from './llm.js';
 import { detectTheme, getReadableSurfaceSignature, invalidateThemeCache } from './palettes.js';
 import { buildMinimalPromptInstruction, flushPromptInjection, getEffectivePromptMode, injectPrompt } from './prompts.js';
@@ -221,6 +221,10 @@ export function handleChatChanged() {
     // before the display strip and the deferred rescan read the message text.
     void applyHtmlBreakingSpanRepair({ silent: true })
         .catch(error => console.error('[Dialogue Colors] HTML markup repair failed:', error));
+    // And pull back the spans a model closed at the end of the sentence instead of after the
+    // closing delimiter, which paints the speech tag in the speaker's color.
+    void applyOverreachingSpanRepair({ silent: true })
+        .catch(error => console.error('[Dialogue Colors] Color span trim failed:', error));
     if (settings.autoPersonaCharacter === true) ensurePersonaCharacter({ silent: true });
     const chat = getContext()?.chat || [];
     syncDialogueCounts(chat);

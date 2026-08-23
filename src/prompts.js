@@ -69,11 +69,19 @@ export function buildThoughtSymbolColorPromptExample(thoughtSymbols) {
 }
 
 export function buildColorPromptExample(thoughtSymbols) {
+    // Narration sits between the spans on purpose: an example of two adjacent
+    // spans teaches nothing about where </font> goes, and the model then
+    // swallows the speech tag into the span it just opened.
     const thoughtExample = buildThoughtSymbolColorPromptExample(thoughtSymbols);
     return thoughtExample
-        ? `<font color="#aabbcc">"Hello."</font> and ${thoughtExample}`
-        : '<font color="#aabbcc">"Hello."</font>';
+        ? `<font color="#aabbcc">"Hello."</font> he said. ${thoughtExample}`
+        : '<font color="#aabbcc">"Hello."</font> he said.';
 }
+
+// The one failure the delimiter rule above does not cover: markup that is
+// well formed and balanced, but closes at the end of the sentence instead of
+// at the closing delimiter, painting the speech tag in the speaker's color.
+export const SPAN_BOUNDARY_PROMPT_RULE = 'Span boundary HARD RULE: <font> opens immediately before the opening delimiter and </font> closes immediately after the closing delimiter, never at the end of the sentence or paragraph. Speech tags and narration stay outside the tag. Correct: <font color="#aabbcc">"Hello."</font>, he said, turning away. Wrong: <font color="#aabbcc">"Hello.", he said, turning away.</font>';
 
 export function buildThoughtSymbolTrackingPrompt(thoughtSymbols) {
     const patterns = getPromptThoughtDelimiterPairs(thoughtSymbols).map(formatThoughtDelimiterPattern).join(', ');
@@ -170,8 +178,8 @@ export function buildColorMetadataPromptLines(options = {}) {
 
 export function buildLLMColorizeRules(extraRule = '') {
     const rules = [
-        '- Wrap every complete dialogue and inner-thought span in <font color="#RRGGBB">...</font>.',
-        '- For delimiter spans, the opening and closing delimiters must be inside the same <font> tag.',
+        '- Wrap every complete dialogue and inner-thought span in <font color="#RRGGBB">...</font>, opening immediately before the opening delimiter and closing immediately after the closing delimiter.',
+        `- ${SPAN_BOUNDARY_PROMPT_RULE}`,
         '- Do not change, add, or remove any text; only insert color tags.',
         '- Do not escape or alter quotes or delimiters.',
         '- Never place a color tag inside an HTML tag: attribute values such as class="row" are markup, not dialogue.',
@@ -237,6 +245,7 @@ export function buildMinimalPromptInstruction() {
         'Only add <font color="#RRGGBB">...</font> tags to dialogue/thought spans.',
         `- Delimiters: ${delimiterList}`,
         `- Example: ${buildColorPromptExample(thoughtSymbols)}`,
+        `- ${SPAN_BOUNDARY_PROMPT_RULE}`,
     ];
     if (thoughtSymbols.length) {
         parts.push(`- ${buildThoughtSymbolColorPromptRule(thoughtSymbols)}`);

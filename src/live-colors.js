@@ -1,7 +1,7 @@
 // live-colors.js - extracted from index.js (mechanical split)
 import { attributeDialogueSegments, clearSpeakerRegexCache, colorizeMessageText, ensureCharacterEntry } from './attribution.js';
 import { isHostSystemOrToolMessage } from './attribution-store.js';
-import { collectFontColorsFromText, parseColorAssignmentsFromText, parseColorMetadataPairs, parseNamedColorAssignmentsFromText, parseTrailingColorMetadata, processColorBlocksInText, refreshTransientNarratorCount, resolveCharacterKeyByNameOrAlias, stripColorBlockFromElement, stripTrailingColorMetadata, syncDialogueCounts } from './color-blocks.js';
+import { DIALOGUE_SKIP_GROUP, buildDialogueRegex, collectFontColorsFromText, parseColorAssignmentsFromText, parseColorMetadataPairs, parseNamedColorAssignmentsFromText, parseTrailingColorMetadata, processColorBlocksInText, refreshTransientNarratorCount, resolveCharacterKeyByNameOrAlias, stripColorBlockFromElement, stripTrailingColorMetadata, syncDialogueCounts } from './color-blocks.js';
 import { DOM_RETRY_REFRESH_DELAYS, decorateAllMessages, refreshMessageDom, scheduleDomRefreshSeries, scheduleDomSettleRefresh } from './dom-engine.js';
 import { scheduleCustomFontRefresh } from './fonts.js';
 import { normalizeRegistryIdentityName } from './group-profiles.js';
@@ -14,7 +14,7 @@ import { generateQuietPrompt, getContext } from './st-api.js';
 import { COLOR_STATE_SAVE_DELAY_MS, LIVE_CHAT_SAVE_DELAY_MS, attributionChatGeneration, characterColors, colorStateSaveTimer, isAutoColorizing, isColorizing, isDomEngine, isRecoloring, lastProcessedMessageSignature, liveChatSaveTimer, pendingColorStateHistory, pendingColorStateInjectPrompt, pendingColorStateSaveData, pendingColorStateUpdateList, setColorStateSaveTimer, setIsAutoColorizing, setIsColorizing, setIsRecoloring, setLastProcessedMessageSignature, setLiveChatSaveTimer, setPendingColorStateHistory, setPendingColorStateInjectPrompt, setPendingColorStateSaveData, setPendingColorStateUpdateList, setPendingLiveChatSave, settings } from './state.js';
 import { getStorageKey, saveData } from './storage.js';
 import { clearAutoColorizeIndicators, hideAutoColorizeIndicator, setColorizeButtonBusy, setRecolorButtonBusy, showAutoColorizeIndicator, updateCharList, updateLegend, updateStorageScopeStatus } from './ui.js';
-import { findHtmlTagRanges, getMessageElementByIndex, hashMessageText, isCompositeSpeakerLabel, isToolCallMessage, normalizeHexColor, normalizeSegmentText, splitsHtmlTag, toast } from './utils.js';
+import { findHtmlTagRanges, getMessageElementByIndex, hashMessageText, isCompositeSpeakerLabel, isToolCallMessage, maskHtmlTagQuotes, normalizeHexColor, normalizeSegmentText, splitsHtmlTag, toast } from './utils.js';
 
 let pendingAutoColorizeRetry = false;
 let chatSaveInFlight = null;
@@ -936,6 +936,112 @@ function withoutHtmlBreakingSpans(parsed, options = {}) {
     };
 }
 
+// The other way a model gets the markup wrong while keeping it well formed: it opens the tag
+// on the dialogue and closes it at the end of the sentence, emitting
+// <font color="#aabbcc">"Text", he says, walking off.</font>. Tags balance and the projection
+// still matches byte for byte, so neither the parser nor the drift check can see it -- but the
+// speech tag is now painted in the speaker's color.
+//
+// Those spans are re-scoped onto the dialogue they opened on, never dropped: a span is left
+// exactly as it is unless the fix is provable, so nothing that was colored loses its color.
+function withoutOverreachingSpans(parsed, narratorColor = null, options = {}) {
+    const dialogueRegex = buildDialogueRegex();
+    if (!dialogueRegex || !parsed.spans.length) return parsed;
+
+    // Scanned masked, sliced unmasked: maskHtmlTagQuotes is length preserving, so an attribute
+    // value never reads as dialogue while every offset still addresses the same projection byte.
+    const scanned = maskHtmlTagQuotes(parsed.projection);
+    const matches = [];
+    let match;
+    dialogueRegex.lastIndex = 0;
+    while ((match = dialogueRegex.exec(scanned)) !== null) {
+        if (match.groups?.[DIALOGUE_SKIP_GROUP] === undefined) {
+            matches.push({ start: match.index, end: match.index + match[0].length });
+        }
+    }
+    if (!matches.length) return parsed;
+
+    const tagRanges = findHtmlTagRanges(parsed.projection);
+    const nextSpans = [];
+    let rescopedCount = 0;
+    for (const span of parsed.spans) {
+        // A narrator span is meant to cover narration, so quoted words inside it are not overreach.
+        const inner = narratorColor && span.color === narratorColor
+            ? []
+            : matches.filter(m => m.start >= span.start && m.end <= span.end);
+        // Opening on narration means the span was never scoped to the dialogue in the first
+        // place: a narrator line that quotes a word, or <font><b>"Hi."</b></font> whose span
+        // starts on the element. Guessing at those would cost a color, so they stay.
+        const opensOnDialogue = inner.length && !parsed.projection.slice(span.start, inner[0].start).trim();
+        if (!opensOnDialogue) {
+            nextSpans.push(span);
+            continue;
+        }
+        let uncovered = parsed.projection.slice(inner[inner.length - 1].end, span.end);
+        for (let i = 0; i < inner.length; i++) {
+            uncovered += parsed.projection.slice(i ? inner[i - 1].end : span.start, inner[i].start);
+        }
+        // Whitespace-only leftovers are invisible; re-scoping those would only churn the chat.
+        if (!uncovered.trim()) {
+            nextSpans.push(span);
+            continue;
+        }
+
+        const parts = inner.map(m => ({
+            start: m.start,
+            end: m.end,
+            color: span.color,
+            text: parsed.projection.slice(m.start, m.end),
+        }));
+        if (parts.some(part => splitsHtmlTag(part.start, part.end, tagRanges))) {
+            nextSpans.push(span);
+            continue;
+        }
+        nextSpans.push(...parts);
+        rescopedCount++;
+    }
+    if (!rescopedCount) return parsed;
+    if (!options.silent) {
+        console.warn(`[Dialogue Colors] Re-scoped ${rescopedCount} color span(s) that ran past the dialogue they opened on.`);
+    }
+
+    // Same provable rebuild withoutHtmlBreakingSpans does: the spans go back into the
+    // projection, so the text bytes are the ones the parser read and only tags move.
+    let canonicalText = parsed.projection;
+    for (let i = nextSpans.length - 1; i >= 0; i--) {
+        const { start, end, color } = nextSpans[i];
+        canonicalText = `${canonicalText.slice(0, start)}<font color="${color}">${canonicalText.slice(start, end)}</font>${canonicalText.slice(end)}`;
+    }
+    return {
+        ...parsed,
+        canonicalText,
+        spans: nextSpans,
+        colors: nextSpans.map(span => span.color),
+    };
+}
+
+// Text-in, text-out wrapper for the paths that never reach finalizeLLMColorizedText: in inject
+// mode the reply model writes the tags itself and the message goes straight to chat.
+export function trimOverreachingColorSpans(rawText, options = {}) {
+    const unchanged = { updatedText: rawText, changed: false };
+    const withoutMetadata = stripLLMColorMetadata(rawText);
+    if (!/<\/font\s*>/i.test(withoutMetadata)) return unchanged;
+    const parsed = parseCanonicalFontMarkup(withoutMetadata);
+    if (!parsed || !parsed.sawFont) return unchanged;
+
+    const narratorColor = getNarratorVisual(settings, applyThemeReadabilityAndBrightness)?.color || null;
+    const rescoped = withoutOverreachingSpans(parsed, narratorColor, options);
+    if (rescoped === parsed) return unchanged;
+
+    // Carried over untouched: re-scoping moves tags, it never removes a color, so every name
+    // the block lists is still in use.
+    const block = parseTrailingColorMetadata(rawText);
+    const metadata = block?.pairs.split(',').every(isSafeColorMetadataPair)
+        ? rawText.slice(block.removeStart)
+        : '';
+    return { updatedText: `${rescoped.canonicalText}${metadata}`, changed: true };
+}
+
 export function extractUsedAssignmentsFromColorizedText(text, narratorColor = null) {
     const parsed = parseCanonicalFontMarkup(stripLLMColorMetadata(text));
     return parsed ? getValidatedAssignmentsForColors(parsed.colors, narratorColor) : [];
@@ -972,7 +1078,12 @@ export function finalizeLLMColorizedText(rawText, responseText, narratorColor = 
         return { updatedText: rawText, changed: false, colorized: false, usedAssignments: [] };
     }
 
-    const candidate = withoutHtmlBreakingSpans(parsedCandidate, options);
+    // Opt-in: a manual recolor addresses one span by ordinal, so re-scoping under it would
+    // both move a boundary the user drew and renumber the list its bookkeeping assumes.
+    const rescoped = options.trimOverreach
+        ? withoutOverreachingSpans(parsedCandidate, narratorColor, options)
+        : parsedCandidate;
+    const candidate = withoutHtmlBreakingSpans(rescoped, options);
     if (!candidate.sawFont) return { updatedText: rawText, changed: false, colorized: false, usedAssignments: [] };
 
     const usedAssignments = getValidatedAssignmentsForColors(
@@ -1254,6 +1365,40 @@ export async function applyHtmlBreakingSpanRepair(options = {}) {
     return report;
 }
 
+// Chat-load sweep for the spans a reply model closed at the end of the sentence. Unlike the
+// HTML repair above this is not a one-shot migration: inject mode hands the tags to whatever
+// model is writing the reply, so a fresh chat can pick the mistake up at any time.
+export function repairOverreachingColorSpans(chat = getContext()?.chat) {
+    const report = { repairedIndices: [] };
+    if (!Array.isArray(chat) || !chat.length) return report;
+
+    for (let i = 0; i < chat.length; i++) {
+        const msg = chat[i];
+        if (isHostSystemOrToolMessage(msg)) continue;
+        const trimmed = trimOverreachingColorSpans(msg?.mes || '', { silent: true });
+        if (!trimmed.changed) continue;
+        msg.mes = trimmed.updatedText;
+        report.repairedIndices.push(i);
+    }
+    return report;
+}
+
+export async function applyOverreachingSpanRepair(options = {}) {
+    const chat = getContext()?.chat;
+    const report = repairOverreachingColorSpans(chat);
+    const count = report.repairedIndices.length;
+    if (!count) return report;
+
+    commit();
+    queueChatSave();
+    console.info('[Dialogue Colors] Re-scoped color spans that ran past the dialogue they opened on.', report);
+    if (!options.silent) {
+        toast.info(`Trimmed color spans in ${count} message${count === 1 ? '' : 's'}.`);
+    }
+    for (const index of report.repairedIndices) await refreshMessageDom(index, chat[index]);
+    return report;
+}
+
 export function shouldUseLocalColorizeFallback(llmResult) {
     return !llmResult || llmResult.colorized !== true;
 }
@@ -1315,7 +1460,7 @@ export async function colorizeMessageWithLLM(rawText, messageSpeakerName = '') {
         return null;
     }
 
-    return finalizeLLMColorizedText(rawText, response, narratorColor);
+    return finalizeLLMColorizedText(rawText, response, narratorColor, { trimOverreach: true });
 }
 
 function finalizeBatchColorizedBlock(rawText, blockText, narratorColor) {
@@ -1334,7 +1479,7 @@ function finalizeBatchColorizedBlock(rawText, blockText, narratorColor) {
         }
     }
     for (const candidate of candidates) {
-        const finalized = finalizeLLMColorizedText(rawText, candidate, narratorColor, { silent: true });
+        const finalized = finalizeLLMColorizedText(rawText, candidate, narratorColor, { silent: true, trimOverreach: true });
         if (finalized) return finalized;
     }
     return null;
@@ -1987,10 +2132,10 @@ export function onNewMessage(indexArg = null, messageArg = null, chatArg = null)
             await queueCapturedChatSave(chatBinding, { immediate: true });
         }
 
-        // The model colored some dialogue but not all of it: finish the message
-        // locally. Mutually exclusive with the auto-colorize fallback below, which
-        // only ever runs on messages carrying no font colors at all.
-        if (settings.completePartialColorize && !isAutoColorizing && isColorableMessage(lastMsg)) {
+        // The model colored some dialogue but not all of it, or ran a span past the dialogue
+        // it opened on: finish the message locally. Mutually exclusive with the auto-colorize
+        // fallback below, which only ever runs on messages carrying no font colors at all.
+        if (!isAutoColorizing && isColorableMessage(lastMsg)) {
             const completionInput = lastMsg.mes || text;
             if (collectFontColorsFromText(completionInput).size > 0) {
                 const completionEntry = {
@@ -2004,9 +2149,17 @@ export function onNewMessage(indexArg = null, messageArg = null, chatArg = null)
                     swipeId: lastMsg.swipe_id ?? null,
                     chatGeneration: attributionChatGeneration,
                 };
-                const completion = fillUncoloredDialogueGaps(completionInput, lastMsg.name, { autoAddMessageSpeaker: true });
+                // Trimmed before the fill, not after: the fill counts a segment overlapping an
+                // existing span as covered, so narration swallowed into a span would read as
+                // already colored and its own gap would never be filled. Not gated on
+                // completePartialColorize -- that setting is about adding colors, and markup
+                // painting a speech tag in the speaker's color is wrong either way.
+                const trimmed = trimOverreachingColorSpans(completionInput, { silent: true });
+                const completion = settings.completePartialColorize
+                    ? fillUncoloredDialogueGaps(trimmed.updatedText, lastMsg.name, { autoAddMessageSpeaker: true })
+                    : { updatedText: trimmed.updatedText, changed: false, createdCharacters: false };
                 if (completion.createdCharacters) commit();
-                if (completion.changed
+                if ((completion.changed || trimmed.changed)
                     && isCapturedChatBindingCurrent(chatBinding)
                     && isColorizeMessageCurrent(chat, completionEntry)) {
                     lastMsg.mes = completion.updatedText;
