@@ -101,6 +101,7 @@ test('prompt UI updates stay debounced while generation can flush synchronously'
 test('color-block scans share host-system eligibility and match uppercase style tags', () => {
     assert.match(colorBlocks, /import \{ isHostSystemOrToolMessage \} from '\.\/attribution-store\.js'/);
     assert.match(functionSection(colorBlocks, 'scanAllMessages'), /if \([^\n]*isHostSystemOrToolMessage\(msg\)[^\n]*\) continue/);
+    assert.match(functionSection(colorBlocks, 'scanAllMessages'), /if \(scannedAny\) toast\.info\(`Found \$\{Object\.keys\(characterColors\)\.length\} characters`\)/);
     assert.match(functionSection(colorBlocks, 'refreshTransientNarratorCount'), /if \([^\n]*isHostSystemOrToolMessage\(msg\)[^\n]*\) continue/);
     assert.match(functionSection(colorBlocks, 'buildDialogueRegex'), /new RegExp\([\s\S]*, 'gi'\)/);
 });

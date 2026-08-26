@@ -423,8 +423,10 @@ export function scanAllMessages() {
     const ctx = getContext();
     const chat = ctx?.chat || [];
 
+    let scannedAny = false;
     for (const msg of chat) {
         if (msg?.is_user || isHostSystemOrToolMessage(msg)) continue;
+        scannedAny = true;
         processColorBlocksInText(msg?.mes || '');
     }
     // Ingest registers speakers; the tally is computed from the chat afterwards so
@@ -441,7 +443,7 @@ export function scanAllMessages() {
     }
     const conflicts = checkColorConflicts();
     if (conflicts.length) toast.warning(`Similar: ${conflicts.slice(0, 3).map(c => c.map(escapeHtml).join(' & ')).join(', ')}`);
-    toast.info(`Found ${Object.keys(characterColors).length} characters`);
+    if (scannedAny) toast.info(`Found ${Object.keys(characterColors).length} characters`);
 }
 
 export function parseColorAssignmentsFromText(text) {
